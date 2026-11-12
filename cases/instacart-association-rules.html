@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>购物篮关联规则</title>
+<meta name="description" content="Kaggle 案例拆解：在 Instacart 3200 万条订单记录上，用 Python 生成器和 Apriori 思路挖出“经常一起买”的商品对，并用支持度、置信度、提升度评价规则。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">订单记录 · 关联规则挖掘 · 购物篮分析</div>
+  <h1>Instacart 购物篮：在 3200 万条记录里找“总是一起买”的商品</h1>
+  <p class="en">Association Rules Mining / Market Basket Analysis（Association Rules Mining Using Python Generators to Handle Large Datasets）</p>
+  <div class="tags">
+    <span class="tag dm">数据挖掘</span>
+    <span class="tag method">Python 生成器</span><span class="tag method">Apriori 剪枝</span><span class="tag method">支持度</span>
+    <span class="tag method">置信度</span><span class="tag method">提升度</span><span class="tag method">关联规则</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>datatheque</b></span>
+    <span>Kaggle 点赞 <b>888</b>（2026-11 抓取）</span>
+    <span>数据 <b>Instacart Online Grocery Shopping Dataset 2017</b></span>
+    <span><a href="https://www.kaggle.com/code/datatheque/association-rules-mining-market-basket-analysis" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">网上超市的历史订单明细</div><p>每一行是“某个订单里有某件商品”。作者说共 3200 万行、320 万个订单、约 5 万种商品，文件 1 GB 多。<span data-cell="1">出处</span></p></div>
+    <div class="card panel"><h3>要找什么</h3><div class="big">哪两件商品经常出现在同一个购物篮</div><p>形如 {A} → {B} 的规则：“买了 A 的人，也常买 B”。这里<b>没有标准答案</b>可供学习，是从数据里把规律“挖”出来。</p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">Apriori 剪枝 + 生成器逐对计数</div><p>先砍掉买的人太少的商品和只有 1 件商品的订单，再用生成器一对一对地数商品对，最后算支持度、置信度、提升度。<span data-cell="21">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">8 GB 内存的电脑也能跑完</div><p>作者结论：排在最前面的规则多是“同一种商品的不同口味”，比如不同口味的农家干酪、不同口味的猫粮。<span data-cell="26">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">Instacart 是美国的一家网上生鲜超市，2017 年公开了一批匿名的历史订单。作者用到其中两个文件：订单明细 <code>order_products__prior.csv</code> 和商品表 <code>products.csv</code>。规模数字来自作者第 1 格的文字。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">订单明细（行）</div><div class="v">3200 万</div></div>
+        <div class="stat-tile"><div class="k">不同的订单</div><div class="v">320 万</div></div>
+        <div class="stat-tile"><div class="k">不同的商品</div><div class="v">约 5 万</div></div>
+        <div class="stat-tile"><div class="k">文件大小</div><div class="v">1 GB 多</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">以上数字见作者第 1 格 <span data-cell="1">出处</span>。作者的电脑内存是 8 GB，换成交叉表的写法时只处理到约 1800 种商品就崩溃了。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">用到的字段</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>文件 · 列名</th><th>白话含义</th><th>类型</th></tr>
+        <tr><td><code>order_products__prior</code> · <code>order_id</code></td><td>订单编号，同一个编号的几行属于同一个购物篮</td><td>整数</td></tr>
+        <tr><td><code>order_products__prior</code> · <code>product_id</code></td><td>商品编号，作者改名为 <code>item_id</code></td><td>整数</td></tr>
+        <tr><td><code>products</code> · <code>product_id</code></td><td>商品编号（用来对上名字）</td><td>整数</td></tr>
+        <tr><td><code>products</code> · <code>product_name</code></td><td>商品名，作者改名为 <code>item_name</code></td><td>文本</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">字段来自第 12、14、24 格的代码 <span data-cell="24">出处</span>。文件里其他列本 notebook 没用到，这里不列。这份数据<b>没有“答案列”</b>：关联规则挖掘不需要标签。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="6">
+    <h3>实验 A · 三把尺子：支持度、置信度、提升度 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="21">
+    <h3>实验 B · 迷你 Apriori：最小支持度定多少 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>交叉表、全组合的写法在 8 GB 内存上只能处理约 1800 种商品；换成生成器后可以跑完整份数据</td><td><span data-cell="1">第 1 格</span></td></tr>
+        <tr><td>生成器每次只产生一对商品，计数后就丢掉，内存占用很小</td><td><span data-cell="4">第 4 格</span></td></tr>
+        <tr><td>最小支持度设为 0.01%（作者认为商品种类成千上万时这样设是合理的）</td><td><span data-cell="23">第 23 格</span>、<span data-cell="6">第 6 格</span></td></tr>
+        <tr><td>提升度最高的规则“并不意外”：多是同一商品家族的不同口味，如草莓奇亚籽农家干酪和蓝莓巴西莓农家干酪、鸡肉猫粮和火鸡猫粮</td><td><span data-cell="26">第 26 格</span></td></tr>
+        <tr><td>这些规则可用于推荐：买了 A 的顾客推荐 B</td><td><span data-cell="26">第 26 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">规则表的具体数字（每条规则的支持度、提升度、运行时间）在作者的运行输出里，Kaggle 下载的源码不带输出，作者文字里也没写，所以这里不列。</p>
+      <p class="callout">读代码时发现的问题（不影响排序，但影响数值的解释）：第 21 格里支持度都乘了 100 变成百分数，再用 <code>supportAB / (supportA × supportB)</code> 算提升度，结果比真正的提升度<b>小了 100 倍</b>。所以表里的“lift”不能再拿 1 当分界线；排序不受影响。另外第 3 格的示例函数没有用自己的参数 <code>order_item</code>，而是直接用了外面的 <code>orders</code>；第 19 格的 <code>as_matrix()</code> 在新版 pandas 里已经删除，要换成 <code>to_numpy()</code>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能发现：</b>“经常一起出现”的东西，以及这种一起出现是不是比碰巧更频繁（提升度）。</li>
+        <li><b>同类问题：</b>超市货架摆放、外卖“凑单推荐”、视频网站“看了又看”、医院里经常一起开的药、网站上经常连着访问的页面。</li>
+        <li><b>可迁移的套路：</b>先按最小支持度砍掉冷门项 → 只保留有 2 件以上的篮子 → 流式地数组合 → 用支持度保证“够常见”、置信度看“方向”、提升度排除“碰巧”。</li>
+        <li><b>大数据小内存：</b>生成器、分块读取、先过滤再组合，这三招在任何“数据比内存大”的场合都管用。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>生成器 + Counter 数商品对 <span data-cell="3">第 3 格</span></li>
+        <li>Apriori 剪枝（只扩展常见商品）<span data-cell="5">第 5 格</span></li>
+        <li>支持度 / 置信度 / 提升度定义 <span data-cell="6">第 6 格</span></li>
+        <li>辅助函数：频次、订单数、商品对生成器、合并统计量 <span data-cell="19">第 19 格</span></li>
+        <li>主函数 association_rules <span data-cell="21">第 21 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>排在最前面的规则都是“同一种东西的不同口味”。这种规则对超市有用吗？什么样的规则才算“有意思”？</li>
+      <li>置信度是有方向的：买鸡蛋的人 100% 买了苹果，买苹果的人只有 75% 买了鸡蛋。在推荐系统里应该看哪个方向？</li>
+      <li>最小支持度设成 0.01%，在 320 万个订单里大约意味着至少出现多少次？设得太高或太低分别会发生什么？</li>
+      <li>作者的提升度比真实值小了 100 倍，排序却没变。如果有人拿“lift &gt; 1 才算正相关”来筛规则，会出什么问题？</li>
+      <li>关联规则只说明“一起出现”，不说明“谁导致谁”。你能举一个“一起买但没有因果关系”的例子吗？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 datatheque，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：“The Instacart Online Grocery Shopping Dataset 2017”。
+</footer>
+</main>
+
+<script src="nb/instacart-association-rules.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const fade = (els, t) => els.forEach((e) => (e.style.opacity = t));
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+
+  const steps = [
+    {
+      at: 0, title: "动机：内存装不下的购物篮", kicker: "第 0–1 格 · 问题从哪来",
+      html: `<p>作者想在 Python 里跑 Apriori 关联规则，却发现常用的机器学习库里没有现成的，而网上能找到的实现都扛不住大数据：他的订单表有 <b>3200 万行、320 万个订单、约 5 万种商品</b>。</p><p>用交叉表把“每个订单 × 每种商品”摊开，或者一次性列出所有组合，8 GB 内存只撑到约 1800 种商品就崩溃了。动画里的数字是按 5 万种商品算出的“两两配对”数量，可见为什么一次性列出来不现实。</p>`,
+      cells: [1], highlight: ["32 million records", "1800 items"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 36, "font-size": 14, "font-weight": 700 }, "一次性把所有商品对都列出来？");
+        K.node(svg, 30, 60, 190, 60, "约 5 万种商品\n（作者第 1 格）", { bold: true });
+        K.arrow(svg, 222, 90, 290, 90);
+        const big = K.svg(svg, "text", { x: 300, y: 84, "font-size": 26, "font-weight": 700, fill: "var(--warn)" }, "0");
+        K.svg(svg, "text", { x: 300, y: 108, "font-size": 12, class: "muted" }, "种可能的两两组合（50000×49999÷2，计算值）");
+        K.svg(svg, "text", { x: 30, y: 180, "font-size": 13 }, "内存 8 GB");
+        K.svg(svg, "rect", { x: 30, y: 192, width: 640, height: 34, rx: 6, fill: "var(--panel-2)", stroke: "var(--line)" });
+        const bar = K.svg(svg, "rect", { x: 30, y: 192, width: 0, height: 34, rx: 6, fill: "var(--c1)" });
+        const lab = K.svg(svg, "text", { x: 30, y: 252, "font-size": 13, class: "muted" }, "");
+        const crash = K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 18, "font-weight": 700, fill: "var(--bad)" }, "✗ 内核崩溃（作者：约 1800 种商品时）");
+        crash.style.opacity = 0;
+        const total = 50000 * 49999 / 2;
+        ctx.tween(2200, (t) => {
+          big.textContent = Math.round(total * t).toLocaleString();
+          K.set(bar, { width: 640 * Math.min(1, t * 1.25), fill: t > 0.7 ? "var(--bad)" : "var(--c1)" });
+          lab.textContent = "已处理商品数 ≈ " + Math.round(Math.min(1800, t * 2400));
+        }).then((ok) => ok && ctx.tween(500, (t) => (crash.style.opacity = t)));
+      },
+    },
+    {
+      at: 2, title: "生成器：一次只拿一对", kicker: "第 2–4 格 · 省内存的关键",
+      html: `<p><b>生成器</b>是一种特殊的函数：它不一次把所有结果交出来，而是<b>要一个、给一个</b>（关键字 <code>yield</code>）。作者用它对每个订单列出商品对，一对一对地交给 <code>Counter</code> 计数，数完就扔。</p><p>作者在第 3 格用两个小订单演示：订单 1 有苹果、鸡蛋、牛奶，订单 2 有鸡蛋、牛奶，最后 {鸡蛋, 牛奶} 计 2 次，其余各 1 次。</p>`,
+      cells: [3], highlight: ["yield item_pair", "Counter(get_item_pairs(orders))"],
+      notes: { 3: "小细节：函数参数叫 order_item，循环里用的却是外面的变量 orders。这个示例里两者是同一个东西，所以结果没错。" },
+      draw(svg, ctx) {
+        const orders = [["苹果", "鸡蛋", "牛奶"], ["鸡蛋", "牛奶"]];
+        K.node(svg, 20, 40, 170, 50, "订单 1：苹果 鸡蛋 牛奶");
+        K.node(svg, 20, 110, 170, 50, "订单 2：鸡蛋 牛奶");
+        K.svg(svg, "text", { x: 270, y: 30, "text-anchor": "middle", "font-size": 12, class: "muted" }, "生成器 yield");
+        K.svg(svg, "rect", { x: 220, y: 40, width: 100, height: 120, rx: 10, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        K.svg(svg, "text", { x: 270, y: 104, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "一次一对");
+        K.svg(svg, "text", { x: 570, y: 30, "text-anchor": "middle", "font-size": 12, class: "muted" }, "Counter 计数板");
+        K.svg(svg, "rect", { x: 450, y: 40, width: 240, height: 150, rx: 10, fill: "var(--panel-2)", stroke: "var(--line)" });
+        const keys = ["苹果, 鸡蛋", "苹果, 牛奶", "鸡蛋, 牛奶"], cnt = [0, 0, 0];
+        const rows = keys.map((k, i) => K.svg(svg, "text", { x: 470, y: 80 + i * 40, "font-size": 15 }, `{${k}} : 0`));
+        const chip = K.svg(svg, "g");
+        const chipR = K.svg(chip, "rect", { x: 0, y: 0, width: 110, height: 30, rx: 15, fill: "var(--c2)" });
+        const chipT = K.svg(chip, "text", { x: 55, y: 20, "text-anchor": "middle", "font-size": 13, fill: "#fff" }, "");
+        chip.style.opacity = 0;
+        const mem = K.svg(svg, "text", { x: 20, y: 250, "font-size": 13 }, "内存里同时只有 1 对商品");
+        const memN = K.svg(svg, "text", { x: 20, y: 280, "font-size": 13, class: "muted" }, "（如果先把所有对都存进列表，就要同时存下全部）");
+        const pairs = [];
+        orders.forEach((o) => { for (let i = 0; i < o.length; i++) for (let j = i + 1; j < o.length; j++) pairs.push(o[i] + ", " + o[j]); });
+        (async () => {
+          for (const p of pairs) {
+            chipT.textContent = p; chip.style.opacity = 1;
+            if (!(await ctx.tween(700, (t) => chip.setAttribute("transform", `translate(${K.lerp(215, 470, t)},${K.lerp(85, 60 + keys.indexOf(p) * 40, t)})`)))) return;
+            cnt[keys.indexOf(p)]++;
+            rows[keys.indexOf(p)].textContent = `{${p}} : ${cnt[keys.indexOf(p)]}`;
+            K.set(rows[keys.indexOf(p)], { fill: "var(--c2)", "font-weight": 700 });
+            chip.style.opacity = 0;
+            if (!(await ctx.wait(250))) return;
+            K.set(rows[keys.indexOf(p)], { fill: "var(--ink)", "font-weight": 400 });
+          }
+        })();
+      },
+    },
+    {
+      title: "Apriori：先把冷门商品砍掉", kicker: "第 5 格 · 剪枝思想",
+      html: `<p><b>Apriori</b> 的核心一句话：<b>一个组合要常见，组合里的每一件都得先常见</b>。所以先数单件商品，低于门槛的直接淘汰，再只用剩下的商品去拼两件的组合。</p><p>作者的例子：5 个订单、门槛 3 次。苹果 4 次、鸡蛋 3 次留下；牛奶、胡萝卜各 2 次被淘汰。第二轮只剩 {苹果, 鸡蛋}，出现 3 次，算法结束。本案例只找两件商品的组合，做到第二轮就够了。</p>`,
+      cells: [5], highlight: ["minimum occurence threshold of 3"],
+      draw(svg, ctx) {
+        const orders = [["苹果", "鸡蛋", "牛奶"], ["胡萝卜", "牛奶"], ["苹果", "鸡蛋", "胡萝卜"], ["苹果", "鸡蛋"], ["苹果", "胡萝卜"]];
+        orders.forEach((o, i) => K.svg(svg, "text", { x: 20, y: 50 + i * 26, "font-size": 13 }, `订单 ${i + 1}：${o.join("、")}`));
+        K.svg(svg, "text", { x: 20, y: 26, "font-size": 12, class: "muted" }, "作者第 5 格的 5 个订单");
+        const items = [["苹果", 4], ["鸡蛋", 3], ["牛奶", 2], ["胡萝卜", 2]];
+        const ax = K.axes(svg, { x: 300, y: 30, w: 380, h: 170 }, [0, 4], [0, 5], { xticks: 0, yticks: 5, ylabel: "出现次数" });
+        const bars = items.map((d, i) => {
+          const x = ax.sx(i) + 15;
+          K.svg(svg, "text", { x: x + 30, y: 218, "text-anchor": "middle", "font-size": 13 }, d[0]);
+          return { r: K.svg(svg, "rect", { x, y: ax.sy(0), width: 60, height: 0, rx: 3, fill: "var(--c1)" }), d };
+        });
+        const th = K.svg(svg, "line", { x1: 300, x2: 680, y1: ax.sy(3), y2: ax.sy(3), stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        const thT = K.svg(svg, "text", { x: 684, y: ax.sy(3) + 4, "font-size": 12, fill: "var(--warn)", "text-anchor": "end" }, "");
+        th.style.opacity = 0;
+        const r2 = K.node(svg, 300, 250, 380, 60, "第二轮：只用苹果、鸡蛋拼组合\n{苹果, 鸡蛋} 出现 3 次 ✓", { fill: "color-mix(in srgb, var(--good) 14%, var(--panel))", stroke: "var(--good)" });
+        r2.style.opacity = 0;
+        ctx.tween(1200, (t) => bars.forEach((b) => { const h = ax.sy(0) - ax.sy(b.d[1] * t); K.set(b.r, { y: ax.sy(0) - h, height: h }); }))
+          .then((ok) => ok && ctx.tween(500, (t) => { th.style.opacity = t; thT.textContent = "门槛 = 3"; }))
+          .then((ok) => ok && ctx.tween(700, (t) => bars.forEach((b) => { if (b.d[1] < 3) b.r.style.opacity = 1 - 0.8 * t; })))
+          .then((ok) => ok && ctx.tween(600, (t) => (r2.style.opacity = t)));
+      },
+    },
+    {
+      title: "三把尺子：支持度、置信度、提升度", kicker: "第 6 格 · 规则怎么打分",
+      html: `<ul class="tight"><li><b>支持度</b>：含这组商品的订单占多少。{苹果, 鸡蛋} 在 5 单里出现 3 单 → 60%。</li><li><b>置信度</b>（有方向）：买了 A 的订单里，有几成也买了 B。苹果→鸡蛋 = 60% ÷ 80% = 75%；鸡蛋→苹果 = 60% ÷ 60% = 100%。</li><li><b>提升度</b>（无方向）：实际一起出现的比例 ÷ “假如互不相干，碰巧一起出现”的比例。60% ÷ (80% × 60%) = 1.25，大于 1 说明比碰巧更常一起买。</li></ul><p>以上数字都是作者第 6 格里的例子。</p>`,
+      cells: [6], highlight: ["support{apple,egg} = 3/5", "= 1.25"],
+      draw(svg, ctx) {
+        const orders = [["苹果", "鸡蛋", "牛奶"], ["胡萝卜", "牛奶"], ["苹果", "鸡蛋", "胡萝卜"], ["苹果", "鸡蛋"], ["苹果", "胡萝卜"]];
+        const cells = orders.map((o, i) => {
+          const hasA = o.includes("苹果"), hasE = o.includes("鸡蛋");
+          const r = K.svg(svg, "rect", { x: 20 + i * 70, y: 40, width: 60, height: 60, rx: 8, fill: "var(--panel-2)", stroke: "var(--line)" });
+          K.svg(svg, "text", { x: 50 + i * 70, y: 66, "text-anchor": "middle", "font-size": 12 }, "订单" + (i + 1));
+          K.svg(svg, "text", { x: 50 + i * 70, y: 86, "text-anchor": "middle", "font-size": 11, class: "muted" }, (hasA ? "苹" : "") + (hasE ? "蛋" : "") || "—");
+          return { r, hasA, hasE };
+        });
+        const L = [
+          { y: 150, t: "支持度{苹果,鸡蛋} = 3 / 5 = 60%", f: (c) => c.hasA && c.hasE, col: "var(--c3)" },
+          { y: 185, t: "置信度 苹果→鸡蛋 = 60% ÷ 80% = 75%", f: (c) => c.hasA, col: "var(--c1)" },
+          { y: 220, t: "置信度 鸡蛋→苹果 = 60% ÷ 60% = 100%", f: (c) => c.hasE, col: "var(--c2)" },
+        ];
+        const texts = L.map((d) => { const e = K.svg(svg, "text", { x: 20, y: d.y, "font-size": 15, "font-weight": 700, fill: d.col }, d.t); e.style.opacity = 0; return e; });
+        K.svg(svg, "text", { x: 400, y: 36, "font-size": 13, "font-weight": 700 }, "提升度：实际 vs 碰巧");
+        const ax = K.axes(svg, { x: 420, y: 60, w: 260, h: 180 }, [0, 2], [0, 0.7], { xticks: 0, yticks: 0 });
+        const bE = K.svg(svg, "rect", { x: ax.sx(0.2), y: ax.sy(0), width: 80, height: 0, fill: "var(--ink-3)", rx: 3 });
+        const bA = K.svg(svg, "rect", { x: ax.sx(1.15), y: ax.sy(0), width: 80, height: 0, fill: "var(--c3)", rx: 3 });
+        K.svg(svg, "text", { x: ax.sx(0.2) + 40, y: 258, "text-anchor": "middle", "font-size": 12 }, "碰巧 80%×60%=48%");
+        K.svg(svg, "text", { x: ax.sx(1.15) + 40, y: 258, "text-anchor": "middle", "font-size": 12 }, "实际 60%");
+        const lift = K.svg(svg, "text", { x: 550, y: 300, "text-anchor": "middle", "font-size": 18, "font-weight": 700, fill: "var(--good)" }, "提升度 = 60 ÷ 48 = 1.25");
+        lift.style.opacity = 0;
+        (async () => {
+          for (let k = 0; k < L.length; k++) {
+            cells.forEach((c) => K.set(c.r, { stroke: L[k].f(c) ? L[k].col : "var(--line)", "stroke-width": L[k].f(c) ? 3 : 1 }));
+            if (!(await ctx.tween(700, (t) => (texts[k].style.opacity = t)))) return;
+            if (!(await ctx.wait(500))) return;
+          }
+          if (!(await ctx.tween(900, (t) => { K.set(bE, { y: ax.sy(0.48 * t), height: ax.sy(0) - ax.sy(0.48 * t) }); K.set(bA, { y: ax.sy(0.6 * t), height: ax.sy(0) - ax.sy(0.6 * t) }); }))) return;
+          await ctx.tween(500, (t) => (lift.style.opacity = t));
+        })();
+      },
+    },
+    {
+      at: 7, title: "读入 Instacart 订单明细", kicker: "第 7–12 格 · 准备数据",
+      html: `<p>作者导入 pandas、<code>itertools</code> 里的 <code>combinations</code>（列组合）和 <code>groupby</code>（按订单分组），以及 <code>Counter</code>（计数器）。第 9 格写了个小函数，随时打印一个对象占多少 MB，方便盯着内存。</p><p>第 12 格读入订单明细：每一行就是“订单号 + 商品号”。动画里的行是示意，不是真实数据。</p>`,
+      cells: [8, 9, 12], highlight: ["order_products__prior.csv", "def size"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "order_products__prior.csv（示意行）");
+        const hdr = ["order_id", "product_id"];
+        hdr.forEach((h, j) => K.node(svg, 30 + j * 150, 40, 145, 30, h, { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" }));
+        const sample = [[1, "A"], [1, "B"], [1, "C"], [2, "B"], [2, "D"], [3, "A"], [3, "C"]];
+        const rows = sample.map((r, i) => {
+          const g = K.svg(svg, "g");
+          K.node(g, 30, 74 + i * 32, 145, 28, "订单 " + r[0]);
+          K.node(g, 180, 74 + i * 32, 145, 28, "商品 " + r[1]);
+          g.style.opacity = 0; return g;
+        });
+        K.svg(svg, "text", { x: 400, y: 100, "font-size": 14 }, "同一个订单号的几行 = 一个购物篮");
+        const mem = K.svg(svg, "text", { x: 400, y: 150, "font-size": 22, "font-weight": 700, fill: "var(--c1)" }, "size(orders) = …");
+        K.svg(svg, "text", { x: 400, y: 176, "font-size": 12, class: "muted" }, "作者用 size() 随时检查内存占用");
+        (async () => {
+          for (const g of rows) if (!(await ctx.tween(220, (t) => (g.style.opacity = t)))) return;
+          await ctx.tween(800, (t) => (mem.textContent = "size(orders) = " + (t * 100).toFixed(0) + "% 已读入"));
+        })();
+      },
+    },
+    {
+      at: 13, title: "变形：订单号做索引的商品序列", kicker: "第 13–16 格 · 数据格式",
+      html: `<p>主函数要的输入是一条 <b>Series</b>：索引是订单号，值是商品号（改名为 <code>item_id</code>）。两列的表变成了“一列 + 标签”，更省内存，也方便按订单分组。</p><p>第 16 格打印出总行数、占用内存、不同订单数、不同商品数，就是第 1 格里说的 3200 万、320 万、约 5 万这几个量级。</p>`,
+      cells: [14, 16], highlight: ["set_index('order_id')['product_id'].rename('item_id')"],
+      draw(svg, ctx) {
+        const sample = [[1, "A"], [1, "B"], [1, "C"], [2, "B"], [2, "D"]];
+        K.svg(svg, "text", { x: 40, y: 30, "font-size": 13, class: "muted" }, "DataFrame（两列）");
+        K.svg(svg, "text", { x: 420, y: 30, "font-size": 13, class: "muted" }, "Series：索引 order_id → 值 item_id");
+        const L = sample.map((r, i) => {
+          const a = K.node(svg, 40, 44 + i * 40, 110, 32, "order " + r[0]);
+          const b = K.node(svg, 155, 44 + i * 40, 110, 32, "product " + r[1]);
+          return { a, b, i };
+        });
+        const R = sample.map((r, i) => {
+          const g = K.svg(svg, "g");
+          K.svg(g, "text", { x: 470, y: 66 + i * 40, "font-size": 14, "font-weight": 700, fill: "var(--c1)", "text-anchor": "end" }, String(r[0]));
+          K.node(g, 480, 46 + i * 40, 150, 30, "item_id " + r[1], { fill: "color-mix(in srgb, var(--c2) 14%, var(--panel))", stroke: "var(--c2)" });
+          g.style.opacity = 0; return g;
+        });
+        const arr = K.arrow(svg, 280, 140, 400, 140, { color: "var(--accent)" }); arr.style.opacity = 0;
+        const sum = K.svg(svg, "text", { x: 40, y: 300, "font-size": 13 }, "");
+        ctx.wait(400).then((ok) => ok && ctx.tween(500, (t) => (arr.style.opacity = t)))
+          .then((ok) => ok && ctx.tween(1200, (t) => R.forEach((g, i) => (g.style.opacity = K.clamp(t * 5 - i, 0, 1)))))
+          .then((ok) => { if (ok) sum.textContent = "第 16 格：dimensions / size / unique_orders / unique_items"; });
+      },
+    },
+    {
+      at: 17, title: "四个小帮手", kicker: "第 17–19 格 · 辅助函数",
+      html: `<ul class="tight"><li><code>freq</code>：数频次（单件商品或商品对出现了多少次）</li><li><code>order_count</code>：一共多少个不同的订单</li><li><code>get_item_pairs</code>：生成器，按订单分组后一对一对地吐出商品对</li><li><code>merge_item_stats</code> / <code>merge_item_name</code>：把 A、B 各自的频次和支持度、商品名拼到商品对旁边</li></ul><p>动画演示“拼表”：一行商品对，左边接上 A 的统计，右边接上 B 的统计，这样才能算置信度和提升度。</p>`,
+      cells: [19], highlight: ["def get_item_pairs", "def merge_item_stats", "as_matrix()"],
+      notes: { 19: "注意：get_item_pairs 用 groupby 分组，要求同一订单的行挨在一起（原数据按订单排好了序）。as_matrix() 在 pandas 1.0 以后被删除，新版要写 to_numpy()。" },
+      draw(svg, ctx) {
+        const pair = K.node(svg, 260, 40, 200, 50, "商品对 (A, B)\nfreqAB, supportAB", { bold: true });
+        const sa = K.node(svg, 30, 150, 200, 50, "A 的统计\nfreqA, supportA", { fill: "color-mix(in srgb, var(--c1) 14%, var(--panel))", stroke: "var(--c1)" });
+        const sb = K.node(svg, 490, 150, 200, 50, "B 的统计\nfreqB, supportB", { fill: "color-mix(in srgb, var(--c2) 14%, var(--panel))", stroke: "var(--c2)" });
+        const out = K.node(svg, 60, 260, 600, 50, "itemA · itemB · freqAB · supportAB · freqA · supportA · freqB · supportB", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const a1 = K.arrow(svg, 130, 202, 250, 256), a2 = K.arrow(svg, 590, 202, 470, 256), a3 = K.arrow(svg, 360, 92, 360, 256);
+        hide([sa, sb, out, a1, a2, a3]);
+        ctx.wait(300).then((ok) => ok && ctx.tween(600, (t) => fade([sa, sb], t)))
+          .then((ok) => ok && ctx.tween(600, (t) => fade([a1, a2, a3], t)))
+          .then((ok) => ok && ctx.tween(600, (t) => fade([out], t)));
+      },
+    },
+    {
+      at: 20, title: "主函数：先过滤，再配对", kicker: "第 20–21 格 · association_rules",
+      html: `<p>主函数按这个顺序干活（动画里是一个越来越窄的漏斗，宽度只是示意）：</p><ol class="tight"><li>算每件商品的支持度，<b>砍掉低于最小支持度的商品</b>（Apriori 剪枝）</li><li><b>砍掉只剩 1 件商品的订单</b>，它们凑不出商品对</li><li>在剩下的数据上重新算单品支持度</li><li>用生成器数所有商品对，<b>砍掉低于最小支持度的商品对</b></li><li>拼上 A、B 的统计，算置信度（两个方向）和提升度，按提升度从高到低排序</li></ol>`,
+      cells: [21], highlight: ["qualifying_items", "order_size[order_size >= 2]", "item_pairs['lift']"],
+      draw(svg, ctx) {
+        const stages = ["全部订单明细", "去掉冷门商品", "去掉单件订单", "全部商品对", "去掉冷门商品对", "规则表（按提升度排序）"];
+        const ws = [640, 470, 420, 560, 260, 200];
+        const els = stages.map((s, i) => {
+          const g = K.svg(svg, "g");
+          const r = K.svg(g, "rect", { x: 360 - ws[i] / 2, y: 20 + i * 52, width: ws[i], height: 40, rx: 8, fill: i === 3 ? "color-mix(in srgb, var(--c2) 20%, var(--panel))" : "color-mix(in srgb, var(--c1) " + (12 + i * 6) + "%, var(--panel))", stroke: i === 5 ? "var(--good)" : "var(--line)" });
+          K.svg(g, "text", { x: 360, y: 45 + i * 52, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, s);
+          g.style.opacity = 0; return g;
+        });
+        K.svg(svg, "text", { x: 700, y: 196, "text-anchor": "end", "font-size": 11, class: "muted" }, "两两配对会让数量先变多");
+        (async () => { for (const g of els) if (!(await ctx.tween(450, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      at: 22, title: "跑起来：最小支持度 0.01%", kicker: "第 22–24 格 · 运行与读结果",
+      html: `<p>作者调用 <code>association_rules(orders, 0.01)</code>。注意这里的 0.01 是<b>百分数</b>，也就是 0.01%：在几百万个订单里，一对商品只要出现几百次就算“常见”。然后读入商品表，把编号换成商品名，按提升度排序显示。</p><p>⚠ 读代码发现：支持度都乘了 100，提升度公式 <code>supportAB / (supportA × supportB)</code> 里分母多乘了一个 100，所以表里的 lift 是真实提升度的 <b>1/100</b>。排名不变，但不能再用“大于 1”判断正相关。</p>`,
+      cells: [23, 24], highlight: ["association_rules(orders, 0.01)"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 14, "font-weight": 700 }, "同一条规则，两种算法（示意数字）");
+        const lines = [
+          ["真实支持度：sA = 0.02，sB = 0.03，sAB = 0.006", "var(--ink)"],
+          ["正确的提升度 = 0.006 ÷ (0.02 × 0.03) = 10", "var(--good)"],
+          ["作者先 ×100：sA = 2，sB = 3，sAB = 0.6", "var(--ink)"],
+          ["代码算出的 lift = 0.6 ÷ (2 × 3) = 0.1", "var(--bad)"],
+        ];
+        const els = lines.map((d, i) => { const e = K.svg(svg, "text", { x: 30, y: 74 + i * 36, "font-size": 15, fill: d[1], "font-weight": i % 2 ? 700 : 400 }, d[0]); e.style.opacity = 0; return e; });
+        const note = K.node(svg, 30, 240, 660, 60, "差了 100 倍，但每条规则都差 100 倍 → 排名不变\n“lift 大于 1 才算正相关”这条线就不能直接用了", { fill: "color-mix(in srgb, var(--warn) 14%, var(--panel))", stroke: "var(--warn)" });
+        note.style.opacity = 0;
+        (async () => {
+          for (const e of els) if (!(await ctx.tween(500, (t) => (e.style.opacity = t)))) return;
+          await ctx.tween(600, (t) => (note.style.opacity = t));
+        })();
+      },
+    },
+    {
+      at: 25, title: "结论：同一家族的不同口味", kicker: "第 25–26 格 · 结论与应用",
+      html: `<p>作者看完规则表的结论：排在最前面的组合“并不意外”，多是<b>同一种商品的不同口味</b>，例如草莓奇亚籽农家干酪和蓝莓巴西莓农家干酪、鸡肉猫粮和火鸡猫粮。</p><p>这些规则可以直接用于推荐：顾客把 A 放进购物车，就推荐 B，希望顺便让顾客发现以前没想到要买的东西。</p>`,
+      cells: [26], highlight: ["Strawberry Chia Cottage Cheese", "Chicken Cat Food"],
+      draw(svg, ctx) {
+        const pairs = [["草莓奇亚籽农家干酪", "蓝莓巴西莓农家干酪"], ["鸡肉猫粮", "火鸡猫粮"]];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "作者在第 26 格举的两组例子（商品名为中文意译）");
+        pairs.forEach((p, i) => {
+          const y = 60 + i * 130;
+          const cart = K.node(svg, 30, y, 230, 60, "🛒 购物车：" + p[0], { bold: true });
+          const ar = K.arrow(svg, 262, y + 30, 420, y + 30, { color: "var(--good)", sw: 2.5 });
+          const rec = K.node(svg, 425, y, 260, 60, "推荐你也看看：" + p[1], { fill: "color-mix(in srgb, var(--good) 14%, var(--panel))", stroke: "var(--good)" });
+          const lab = K.svg(svg, "text", { x: 340, y: y + 22, "text-anchor": "middle", "font-size": 12, fill: "var(--good)" }, "高提升度规则");
+          hide([ar, rec, lab]);
+          ctx.wait(400 + i * 900).then((ok) => ok && ctx.tween(600, (t) => fade([ar, lab], t))).then((ok) => ok && ctx.tween(500, (t) => (rec.style.opacity = t)));
+        });
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+  if (/[?&]fold/.test(location.search)) setTimeout(() => document.querySelectorAll("#pipe .ch-cells > :not(.inline-lab)").forEach((e) => (e.style.display = "none")), 50);  // 自查用：网址带 ?fold 时只隐藏代码格
+
+  /* ---------- 实验 A：三把尺子 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "pa", label: "商品 A 出现在多少订单里", min: 0.05, max: 0.8, step: 0.01, value: 0.4, fmt: (v) => Math.round(v * 100) + "%" },
+      { id: "pb", label: "商品 B 出现在多少订单里（不看 A 时）", min: 0.05, max: 0.8, step: 0.01, value: 0.3, fmt: (v) => Math.round(v * 100) + "%" },
+      { id: "k", label: "买了 A 之后，买 B 的倾向", min: -1, max: 1, step: 0.05, value: 0.4, fmt: (v) => (v > 0 ? "更想买 +" : v < 0 ? "更不想买 " : "毫无关系 ") + v.toFixed(2) },
+      { id: "seed", label: "重新生成 500 个订单", button: true },
+    ],
+    note: "浏览器现场生成 500 个订单，再按作者第 6 格的公式数数、计算。把“倾向”拖到 0：提升度会在 1 附近晃动；往右拖，提升度变大；往左拖，小于 1。",
+    render(svg, v) {
+      const r = K.rng(31 + v.seed * 7), N = 500;
+      const pBA = v.k >= 0 ? v.pb + v.k * (1 - v.pb) : v.pb * (1 + v.k);
+      let nA = 0, nB = 0, nAB = 0;
+      const cells = [];
+      for (let i = 0; i < N; i++) {
+        const a = r() < v.pa, b = r() < (a ? pBA : v.pb);
+        nA += a; nB += b; nAB += a && b; cells.push(a && b ? 3 : a ? 1 : b ? 2 : 0);
+      }
+      const col = ["var(--panel-2)", "var(--c1)", "var(--c2)", "var(--c3)"];
+      cells.forEach((c, i) => K.svg(svg, "rect", { x: 20 + (i % 25) * 14, y: 20 + Math.floor(i / 25) * 14, width: 12, height: 12, rx: 2, fill: col[c], stroke: c ? "none" : "var(--line)" }));
+      [["只买 A", 1], ["只买 B", 2], ["A、B 都买", 3], ["都没买", 0]].forEach((d, i) => {
+        K.svg(svg, "rect", { x: 390, y: 30 + i * 26, width: 14, height: 14, rx: 2, fill: col[d[1]], stroke: "var(--line)" });
+        K.svg(svg, "text", { x: 412, y: 42 + i * 26, "font-size": 13 }, d[0]);
+      });
+      const sA = nA / N, sB = nB / N, sAB = nAB / N;
+      const lift = sA && sB ? sAB / (sA * sB) : 0;
+      K.svg(svg, "text", { x: 390, y: 160, "font-size": 13 }, `含 A：${nA} 单　含 B：${nB} 单`);
+      K.svg(svg, "text", { x: 390, y: 182, "font-size": 13 }, `A、B 同时：${nAB} 单`);
+      K.svg(svg, "text", { x: 390, y: 214, "font-size": 12, class: "muted" }, "假如互不相干，碰巧同时出现：");
+      K.svg(svg, "text", { x: 390, y: 234, "font-size": 13 }, `${(sA * 100).toFixed(1)}% × ${(sB * 100).toFixed(1)}% = ${(sA * sB * 100).toFixed(1)}%`);
+      K.svg(svg, "text", { x: 390, y: 256, "font-size": 13 }, `实际同时出现：${(sAB * 100).toFixed(1)}%`);
+      K.svg(svg, "text", { x: 390, y: 300, "font-size": 18, "font-weight": 700, fill: lift > 1.1 ? "var(--good)" : lift < 0.9 ? "var(--bad)" : "var(--ink-3)" }, lift > 1.1 ? "比碰巧更常一起买" : lift < 0.9 ? "比碰巧更少一起买" : "和碰巧差不多");
+      return { readout: [
+        { k: "支持度{A,B}", v: (sAB * 100).toFixed(1) + "%" },
+        { k: "置信度 A→B", v: nA ? ((nAB / nA) * 100).toFixed(1) + "%" : "—" },
+        { k: "置信度 B→A", v: nB ? ((nAB / nB) * 100).toFixed(1) + "%" : "—" },
+        { k: "提升度", v: lift.toFixed(2), color: lift > 1.1 ? "var(--good)" : lift < 0.9 ? "var(--bad)" : null },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：迷你 Apriori（照作者第 21 格的步骤） ---------- */
+  const ITEMS = ["香蕉", "牛奶", "面包", "鸡蛋", "草莓酸奶", "蓝莓酸奶", "鸡肉猫粮", "火鸡猫粮", "薯片", "可乐", "番茄", "黄瓜", "咖啡豆", "燕麦"];
+  const POP = [0.35, 0.25, 0.2, 0.18, 0.06, 0.05, 0.03, 0.025, 0.1, 0.08, 0.12, 0.09, 0.04, 0.05];
+  function makeBaskets(seed, n) {
+    const r = K.rng(seed), B = [];
+    for (let i = 0; i < n; i++) {
+      const s = new Set();
+      POP.forEach((p, j) => { if (r() < p) s.add(j); });
+      if (s.has(4) && r() < 0.6) s.add(5);           // 两种口味的酸奶常一起买（模拟设定）
+      if (s.has(6) && r() < 0.7) s.add(7);           // 两种口味的猫粮（模拟设定）
+      if (s.has(8) && r() < 0.5) s.add(9);           // 薯片 + 可乐（模拟设定）
+      if (s.has(10) && r() < 0.4) s.add(11);         // 番茄 + 黄瓜（模拟设定）
+      B.push([...s].sort((a, b) => a - b));
+    }
+    return B;
+  }
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 400,
+    controls: [
+      { id: "ms", label: "最小支持度（百分数，作者用 0.01）", min: 0.5, max: 15, step: 0.5, value: 2, fmt: (v) => v.toFixed(1) + "%" },
+      { id: "lf", label: "提升度怎么算", value: "ok", options: [["ok", "正确：支持度用小数"], ["nb", "原 notebook 写法：支持度用百分数"]] },
+      { id: "seed", label: "重新生成 400 个购物篮", button: true },
+    ],
+    note: "400 个模拟购物篮、14 种商品，里面故意藏了 4 对“常一起买”的组合。按作者第 21 格的顺序：砍冷门商品 → 砍单件订单 → 重算支持度 → 数商品对 → 砍冷门商品对 → 算置信度、提升度并排序。",
+    render(svg, v) {
+      const B = makeBaskets(77 + v.seed * 13, 400), ms = v.ms;
+      const n0 = B.reduce((s, b) => s + b.length, 0);
+      const cnt = new Array(ITEMS.length).fill(0);
+      B.forEach((b) => b.forEach((j) => cnt[j]++));
+      const keep = new Set(cnt.map((c, j) => ((c / B.length) * 100 >= ms ? j : -1)).filter((j) => j >= 0));
+      let B2 = B.map((b) => b.filter((j) => keep.has(j)));
+      const n1 = B2.reduce((s, b) => s + b.length, 0);
+      B2 = B2.filter((b) => b.length >= 2);
+      const nOrd = B2.length, n2 = B2.reduce((s, b) => s + b.length, 0);
+      const c2 = new Array(ITEMS.length).fill(0);
+      B2.forEach((b) => b.forEach((j) => c2[j]++));
+      const pc = {};
+      B2.forEach((b) => { for (let i = 0; i < b.length; i++) for (let k = i + 1; k < b.length; k++) { const key = b[i] + "-" + b[k]; pc[key] = (pc[key] || 0) + 1; } });
+      const nPairs = Object.keys(pc).length;
+      const scale = v.lf === "nb" ? 100 : 1;
+      const rules = Object.entries(pc).map(([key, f]) => {
+        const [a, b] = key.split("-").map(Number);
+        const sAB = (f / nOrd) * scale, sA = (c2[a] / nOrd) * scale, sB = (c2[b] / nOrd) * scale;
+        return { a, b, f, sAB, cAB: sAB / sA, cBA: sAB / sB, lift: sAB / (sA * sB) };
+      }).filter((d) => (d.sAB / scale) * 100 >= ms).sort((x, y) => y.lift - x.lift);
+      // 漏斗
+      const fun = [["订单明细行", n0], ["去冷门商品后", n1], ["去单件订单后", n2], ["商品对种类", nPairs], ["达标的商品对", rules.length]];
+      const mx = Math.max(...fun.map((d) => d[1]), 1);
+      fun.forEach((d, i) => {
+        K.svg(svg, "text", { x: 110, y: 30 + i * 30, "text-anchor": "end", "font-size": 12 }, d[0]);
+        K.svg(svg, "rect", { x: 118, y: 18 + i * 30, width: Math.max(2, (200 * d[1]) / mx), height: 18, rx: 3, fill: i === 4 ? "var(--good)" : "var(--c1)" });
+        K.svg(svg, "text", { x: 124 + (200 * d[1]) / mx, y: 31 + i * 30, "font-size": 12, class: "muted" }, String(d[1]));
+      });
+      K.svg(svg, "text", { x: 360, y: 30, "font-size": 12, class: "muted" }, "留下的商品（支持度 ≥ 门槛）：");
+      const kept = [...keep].map((j) => ITEMS[j]);
+      for (let i = 0; i < kept.length; i += 5) K.svg(svg, "text", { x: 360, y: 50 + (i / 5) * 18, "font-size": 12 }, kept.slice(i, i + 5).join("、"));
+      if (!kept.length) K.svg(svg, "text", { x: 360, y: 50, "font-size": 12, fill: "var(--bad)" }, "一件都没留下，门槛太高了");
+      // 规则表
+      const y0 = 180;
+      const hd = ["规则 A → B", "次数", "支持度", "置信度A→B", "提升度"], xs = [20, 250, 320, 410, 520];
+      hd.forEach((h, i) => K.svg(svg, "text", { x: xs[i], y: y0, "font-size": 12, "font-weight": 700 }, h));
+      K.svg(svg, "line", { x1: 20, x2: 620, y1: y0 + 6, y2: y0 + 6, stroke: "var(--line)" });
+      const fmtS = (s) => (v.lf === "nb" ? s.toFixed(2) : (s * 100).toFixed(1) + "%");
+      rules.slice(0, 7).forEach((d, i) => {
+        const y = y0 + 26 + i * 24;
+        K.svg(svg, "text", { x: xs[0], y, "font-size": 13 }, `${ITEMS[d.a]} → ${ITEMS[d.b]}`);
+        K.svg(svg, "text", { x: xs[1], y, "font-size": 13 }, String(d.f));
+        K.svg(svg, "text", { x: xs[2], y, "font-size": 13 }, fmtS(d.sAB));
+        K.svg(svg, "text", { x: xs[3], y, "font-size": 13 }, (d.cAB * 100).toFixed(0) + "%");
+        K.svg(svg, "text", { x: xs[4], y, "font-size": 13, "font-weight": 700, fill: v.lf === "nb" ? "var(--warn)" : d.lift > 1 ? "var(--good)" : "var(--bad)" }, d.lift.toFixed(v.lf === "nb" ? 4 : 2));
+      });
+      if (!rules.length) K.svg(svg, "text", { x: 20, y: y0 + 30, "font-size": 13, fill: "var(--bad)" }, "没有商品对达到最小支持度");
+      if (v.lf === "nb") K.svg(svg, "text", { x: 20, y: 392, "font-size": 12, fill: "var(--warn)" }, "原写法：提升度整体缩小 100 倍，排序和正确写法一样，但“大于 1”的分界失效");
+      return { readout: [
+        { k: "留下的商品", v: keep.size + " / " + ITEMS.length },
+        { k: "2 件以上的订单", v: nOrd + " / " + B.length },
+        { k: "达标商品对", v: String(rules.length) },
+        { k: "第 1 名提升度", v: rules.length ? rules[0].lift.toFixed(v.lf === "nb" ? 4 : 2) : "—" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>变分自编码器</title>
+<meta name="description" content="Kaggle 案例拆解：用卷积变分自编码器（VAE）把 MNIST 手写数字压成 2 个数，看数字在潜空间里自动聚类，再从潜空间网格里“画”出新数字。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">图像 · 生成模型 · 降维可视化</div>
+  <h1>把一个手写数字压成两个数：变分自编码器 VAE</h1>
+  <p class="en">Visualizing MNIST with a Deep Variational Autoencoder</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">变分自编码器 VAE</span><span class="tag method">卷积编码器</span><span class="tag method">重参数化采样</span>
+    <span class="tag method">KL 散度</span><span class="tag method">转置卷积解码器</span><span class="tag method">潜空间可视化</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Rebecca Vislay Wade</b>（rvislaywade）</span>
+    <span>Kaggle 点赞 <b>487</b>（2026-11 抓取）</span>
+    <span>数据 <b>Digit Recognizer 比赛（MNIST）</b></span>
+    <span><a href="https://www.kaggle.com/code/rvislaywade/visualizing-mnist-using-a-variational-autoencoder" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">几万张 28×28 的手写数字</div><p>Kaggle 入门比赛 Digit Recognizer 的 MNIST 数据，每张图是 784 个灰度值。作者把带标签的训练集和不带标签的测试集合在一起用。<span data-cell="8">出处</span></p></div>
+    <div class="card panel"><h3>要做什么</h3><div class="big">不是分类，而是“压缩再还原”</div><p>让网络学会把一张图压成 <b>2 个数</b>，再从这 2 个数画回原图。训练时根本不用标签。<span data-cell="17">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">卷积变分自编码器（VAE）</div><p>编码器输出一个“分布”（均值和方差），从中随机抽一个点，解码器再还原成图；损失 = 重建误差 + KL 散度。<span data-cell="23">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">数字自动聚成团，网格上能“画”新数字</div><p>没给标签，同一个数字也在 2 维平面里聚在一起；在平面上均匀取点解码，得到一张数字之间平滑渐变的“地图”。<span data-cell="28">出处</span> <span data-cell="33">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据来自 Kaggle 入门比赛 <b>Digit Recognizer</b>，即经典的 MNIST 手写数字。行数和列数来自比赛的数据说明页，留出 5000 张验证来自作者代码。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">train.csv（有标签）</div><div class="v">42,000 张</div></div>
+        <div class="stat-tile"><div class="k">test.csv（无标签）</div><div class="v">28,000 张</div></div>
+        <div class="stat-tile"><div class="k">每张图</div><div class="v">28×28 = 784 像素</div></div>
+        <div class="stat-tile"><div class="k">作者留出的验证集</div><div class="v" style="color:var(--c3)">5,000 张</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">作者把两份表拼在一起训练，测试集的图片暂时标成“11”（意思是“没有标签”）<span data-cell="6">第 6 格</span>，再随机抽 5000 张做验证 <span data-cell="11">第 11 格</span>。像素值 0–255，除以 255 变成 0–1 <span data-cell="13">第 13 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>label</code></td><td>这张图写的是 0–9 哪个数字（测试集没有这一列，作者补成 11）。<b>VAE 训练时不用它</b>，只在最后画图时用来上色</td><td>类别</td></tr>
+        <tr><td><code>pixel0</code> … <code>pixel783</code></td><td>28×28 图片按行展开后的 784 个格子，每格是 0（黑）到 255（白）的亮度</td><td>整数</td></tr>
+      </table></div>
+      <p class="note">这里的“答案”不是标签，而是图片自己：网络的任务是把输入原样还原出来。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="19">
+    <h3>动手试试 A · 重参数化采样与 KL 惩罚 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="34">
+    <h3>动手试试 B · 在浏览器里现场训练一个迷你 VAE <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>把验证集图片用编码器映射到 2 维潜空间，按真实数字上色后，同一数字聚在一起</td><td><span data-cell="28">第 28 格</span></td></tr>
+        <tr><td>原测试集（没有标签）的图片画成灰点，可以看到它们落在哪些已知数字的团里</td><td><span data-cell="31">第 31 格</span></td></tr>
+        <tr><td>在潜空间里按网格取点解码，得到“一个数字平滑地变成另一个数字”的连续空间</td><td><span data-cell="33">第 33 格</span></td></tr>
+        <tr><td>VAE 学的是数据分布的参数，因此可以从分布中抽样生成新数据，也能用来聚类</td><td><span data-cell="1">第 1 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">这份 notebook 没有给出任何数字型的分数（如损失值）。训练损失写在运行输出里，Kaggle 下载的源码不带输出，这里不列数字。</p>
+      <p class="callout">读代码发现的问题：编码器第二个输出叫 <code>z_log_sigma</code>。采样时用 <code>exp(z_log_sigma)</code> 当标准差 σ <span data-cell="19">第 19 格</span>，而 KL 公式 <code>1 + z_log_sigma − μ² − exp(z_log_sigma)</code> 却把它当成 log σ²（对数方差）<span data-cell="23">第 23 格</span>。两处含义不一致（这段代码沿用自 Chollet 书中的例子）。另外 KL 项乘了很小的系数 5e-4，几乎只靠重建误差在训练。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>把高维数据（图片、光谱、问卷）压到 2–3 维画出来看结构；从潜空间抽样生成新样本；在两张图之间做平滑插值。</li>
+        <li><b>同类问题：</b>人脸属性编辑、分子结构生成、异常检测（重建误差大的就是“没见过的样子”）、给半监督分类提供特征。</li>
+        <li><b>可迁移的套路：</b>编码器输出均值和方差 → 重参数化采样 → 解码器还原 → 重建误差 + KL 一起优化 → 用潜空间做可视化和生成。</li>
+        <li><b>和普通自编码器的区别：</b>普通自编码器把每张图压成一个点；VAE 压成一小团“雾”，还要求所有雾靠近标准正态分布，所以潜空间连续、空白处也能解码出像样的图。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>数据：合并 train/test、留出 5000 验证、归一化到 0–1 <span data-cell="8">第 8 格</span> <span data-cell="13">第 13 格</span></li>
+        <li>编码器：4 层 Conv2D + Dense(32) → μ、log σ 各 2 维 <span data-cell="17">第 17 格</span></li>
+        <li>采样：z = μ + exp(log σ)·ε，用 Lambda 层包装 <span data-cell="19">第 19 格</span></li>
+        <li>解码器：Dense → Reshape → Conv2DTranspose → Conv2D(sigmoid) <span data-cell="21">第 21 格</span></li>
+        <li>损失：二元交叉熵 + 5e-4 × KL，自定义层加进模型 <span data-cell="23">第 23 格</span></li>
+        <li>训练：RMSprop，7 轮，batch 16 <span data-cell="25">第 25 格</span> <span data-cell="27">第 27 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者训练时完全没用标签，为什么画出来的潜空间里同一个数字还是聚在一起？是谁“告诉”网络 3 和 8 不一样的？</li>
+      <li>潜空间只有 2 维，好处是能直接画在纸上。如果改成 32 维，重建会变好还是变差？还能画图吗？</li>
+      <li>KL 项的系数只有 5e-4。在实验 B 里把 KL 权重调成 0 和调大，潜空间分别变成什么样？哪种更适合“随便抽一个点画新数字”？</li>
+      <li>代码里 <code>z_log_sigma</code> 在采样和 KL 里含义不一致。你觉得这会让模型完全学不会，还是只是“规则没按说明书来”？怎么改才统一？</li>
+      <li>VAE 生成的数字往往比较模糊，而 GAN 生成的更清晰。从两者的“考核标准”（损失函数）想一想，为什么会这样？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Rebecca Vislay Wade（Kaggle：rvislaywade），代码大量借鉴 François Chollet《Deep Learning with Python》中的 VAE 示例。版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Kaggle Digit Recognizer（MNIST）。
+</footer>
+</main>
+
+<script src="nb/vae-mnist-latent-space.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 小工具：程序生成的“手写”笔画图 ---------- */
+  // 在 n×n 网格上画一个形状，返回 0–1 数组。cls: 0=圆圈 1=竖线 2=横线 3=斜线
+  function shape(cls, n, r) {
+    const a = new Float64Array(n * n);
+    const jx = (r() - 0.5) * 0.18, jy = (r() - 0.5) * 0.18, th = 0.09 + r() * 0.05, sl = (r() - 0.5) * 0.5, sc = 0.85 + r() * 0.3;
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+      const x = (j + 0.5) / n - 0.5 - jx, y = (i + 0.5) / n - 0.5 - jy;
+      let d;
+      if (cls === 0) d = Math.abs(Math.hypot(x / (0.8 * sc), y / sc) - 0.3);
+      else if (cls === 1) d = Math.abs(x - sl * y) + Math.max(0, Math.abs(y) - 0.36 * sc);
+      else if (cls === 2) d = Math.abs(y - sl * 0.4 * x) + Math.max(0, Math.abs(x) - 0.34 * sc);
+      else d = Math.abs(x + y * (0.9 + sl)) / 1.35 + Math.max(0, Math.abs(y) - 0.34 * sc);
+      a[i * n + j] = K.clamp(1 - (d - th) / 0.07, 0, 1);
+    }
+    return a;
+  }
+  // 把 0–1 数组画成像素块
+  function pix(svg, x, y, size, arr, n, opt) {
+    opt = opt || {};
+    const s = size / n, g = K.svg(svg, "g");
+    K.svg(g, "rect", { x, y, width: size, height: size, fill: "var(--panel-2)", stroke: opt.stroke || "var(--line)" });
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+      const v = arr[i * n + j];
+      if (v > 0.04) K.svg(g, "rect", { x: x + j * s, y: y + i * s, width: s + 0.3, height: s + 0.3, fill: opt.color || "var(--ink)", "fill-opacity": v });
+    }
+    return g;
+  }
+  const COLORS = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c6)"];
+  const NAMES = ["圆圈（像 0）", "竖线（像 1）", "横线（像 −）", "斜线（像 /）"];
+
+  const steps = [
+    {
+      at: 0, title: "自编码器：先压缩，再还原", kicker: "第 0–2 格 · 作者的介绍",
+      html: `<p>作者先讲了三个概念：<b>自编码</b>是输入和“答案”相同的学习，网络自己学怎么压缩、怎么解压；<b>自编码器</b>由编码器、解码器和衡量“还原得像不像”的损失组成；<b>变分</b>自编码器不是把图压成一个点，而是学出一个<b>概率分布</b>的参数，所以还能从分布里抽样生成新图。<span data-cell="1">第 1 格</span></p><p>动画：一张 28×28 的图（784 个数）穿过漏斗，变成 2 个数，再穿过反向漏斗还原成图。</p>`,
+      cells: [0, 1],
+      draw(svg, ctx) {
+        const r = K.rng(4), img = shape(0, 14, r);
+        pix(svg, 30, 100, 130, img, 14);
+        K.svg(svg, "text", { x: 95, y: 254, "text-anchor": "middle", "font-size": 12 }, "输入：784 个数");
+        const enc = K.svg(svg, "path", { d: "M190,90 L320,150 L320,190 L190,250 Z", fill: "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: "var(--c1)" });
+        const dec = K.svg(svg, "path", { d: "M400,150 L530,90 L530,250 L400,190 Z", fill: "color-mix(in srgb, var(--c2) 18%, var(--panel))", stroke: "var(--c2)" });
+        K.svg(svg, "text", { x: 255, y: 80, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--c1)" }, "编码器");
+        K.svg(svg, "text", { x: 465, y: 80, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--c2)" }, "解码器");
+        const zb = K.node(svg, 326, 140, 68, 60, "z\n2 个数", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const out = pix(svg, 560, 100, 130, img.map((v) => v * 0.8), 14, { color: "var(--c2)" });
+        K.svg(svg, "text", { x: 625, y: 254, "text-anchor": "middle", "font-size": 12 }, "还原：784 个数");
+        K.svg(svg, "text", { x: 360, y: 310, "text-anchor": "middle", "font-size": 12, class: "muted" }, "损失 = 还原得像不像（重建误差）+ 压缩后的“雾团”离标准正态分布多远（KL）");
+        const dot = K.svg(svg, "circle", { cx: 160, cy: 170, r: 6, fill: "var(--accent)" });
+        [enc, zb, dec, out].forEach((e) => (e.style.opacity = 0.15));
+        (async () => {
+          for (const e of [enc, zb, dec, out]) {
+            if (!(await ctx.tween(500, (t) => (e.style.opacity = 0.15 + 0.85 * t)))) return;
+          }
+          for (let k = 0; k < 3; k++) if (!(await ctx.tween(1600, (t) => K.set(dot, { cx: K.lerp(160, 560, t) })))) return;
+        })();
+      },
+    },
+    {
+      title: "读入数据：每张图是一行 784 个数", kicker: "第 3–5 格 · 导入与读数据",
+      html: `<p>作者用 pandas 读入 <code>train.csv</code> 和 <code>test.csv</code>。表里每一行是一张图：第一列是标签，后面 784 列是像素。</p><p>动画演示“展开”：28×28 的方格按行一条一条接起来，就变成一行 784 个数。神经网络里再用 <code>reshape</code> 把它折回方格。</p>`,
+      cells: [3, 4], highlight: ["read_csv"],
+      draw(svg, ctx) {
+        const n = 8, r = K.rng(9), img = shape(1, n, r), s = 18;
+        const cells = [];
+        for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+          const v = img[i * n + j];
+          cells.push({ i, j, el: K.svg(svg, "rect", { x: 40 + j * s, y: 60 + i * s, width: s - 1, height: s - 1, fill: v > 0.05 ? "var(--ink)" : "var(--panel-2)", "fill-opacity": v > 0.05 ? v : 1, stroke: "var(--line)" }) });
+        }
+        K.svg(svg, "text", { x: 112, y: 40, "text-anchor": "middle", "font-size": 13 }, "一张图（示意 8×8，真实是 28×28）");
+        K.svg(svg, "text", { x: 40, y: 290, "font-size": 13, class: "muted" }, "表格里的一行：label, pixel0, pixel1, …, pixel783");
+        const w = 640 / (n * n);
+        ctx.wait(700).then((ok) => ok && ctx.tween(2400, (t) => cells.forEach((c) => {
+          const k = c.i * n + c.j, tt = K.clamp(t * 1.6 - c.i * 0.08, 0, 1);
+          K.set(c.el, { x: K.lerp(40 + c.j * s, 40 + k * w, tt), y: K.lerp(60 + c.i * s, 230, tt), width: K.lerp(s - 1, w - 0.5, tt), height: K.lerp(s - 1, 34, tt) });
+        })));
+      },
+    },
+    {
+      title: "测试集也拿来训练：标签先写成 11", kicker: "第 6–10 格 · 合并数据",
+      html: `<p>VAE 训练不需要标签，所以作者把没有答案的测试集也拿来一起训练：先给测试集补一列 <code>label = 11</code>（作者开玩笑说“这台音箱能开到 11 档”），再和训练集上下拼起来 <span data-cell="6">第 6 格</span> <span data-cell="8">第 8 格</span>。</p><p>这在分类任务里是禁忌，但这里只是让网络多看图、学怎么画图，没有偷看任何答案。</p>`,
+      cells: [6, 8], highlight: ["= 11", "pd.concat"],
+      draw(svg, ctx) {
+        const A = K.node(svg, 60, 60, 200, 110, "train.csv\n42,000 张\nlabel = 0–9", { fill: "color-mix(in srgb, var(--c1) 15%, var(--panel))", stroke: "var(--c1)" });
+        const B = K.node(svg, 60, 190, 200, 110, "test.csv\n28,000 张\nlabel = 11（未知）", { fill: "color-mix(in srgb, var(--ink-3) 15%, var(--panel))", stroke: "var(--ink-3)" });
+        const C = K.node(svg, 440, 110, 220, 140, "combined\n全部用来训练 VAE\n（不看标签）", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        C.style.opacity = 0;
+        ctx.wait(500).then((ok) => ok && ctx.tween(1400, (t) => {
+          A.setAttribute("transform", `translate(${t * 380},${t * 50}) scale(${1 - t * 0.4})`);
+          B.setAttribute("transform", `translate(${t * 380},${-t * 30}) scale(${1 - t * 0.4})`);
+          A.style.opacity = B.style.opacity = 1 - t; C.style.opacity = t;
+        }));
+      },
+    },
+    {
+      title: "留出 5000 张验证，像素缩到 0–1", kicker: "第 11–16 格 · 切分与归一化",
+      html: `<p>随机抽 5000 张做验证集，剩下的做训练集 <span data-cell="11">第 11 格</span>。验证集用来在每轮训练后看看损失，判断模型对没见过的图是否也画得好。</p><p>然后把像素除以 255 缩到 0–1，并折回 28×28×1 的形状 <span data-cell="13">第 13 格</span>。缩到 0–1 有个额外好处：解码器最后一层用 sigmoid 输出 0–1，正好能和输入逐格比较。</p>`,
+      cells: [11, 13], highlight: ["n = 5000", "/ 255."],
+      draw(svg, ctx) {
+        const r = K.rng(2), bars = [];
+        for (let i = 0; i < 40; i++) bars.push(r() < 0.6 ? 0 : Math.round(60 + r() * 195));
+        const ax = K.axes(svg, { x: 60, y: 40, w: 600, h: 200 }, [0, 40], [0, 255], { xticks: 0, yticks: 5, ylabel: "像素亮度" });
+        const els = bars.map((v, i) => K.svg(svg, "rect", { x: ax.sx(i) + 2, y: ax.sy(v), width: 11, height: ax.sy(0) - ax.sy(v), fill: "var(--c1)" }));
+        const lab = K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 15, "font-weight": 700 }, "0 – 255");
+        const tag = K.svg(svg, "text", { x: 668, y: 50, "text-anchor": "end", "font-size": 13, fill: "var(--c3)", "font-weight": 700 }, "");
+        ctx.wait(700).then((ok) => ok && ctx.tween(1600, (t) => {
+          lab.textContent = t < 1 ? "每格 ÷ 255 …" : "变成 0 – 1：柱子的相对高低不变，只是换了刻度";
+          tag.textContent = t > 0.5 ? "最亮 = 1.0" : "";
+          els.forEach((e) => K.set(e, { fill: t > 0.5 ? "var(--c3)" : "var(--c1)" }));
+        }));
+      },
+    },
+    {
+      title: "编码器：卷积一路压缩，输出 μ 和 log σ", kicker: "第 17–18 格 · 模型结构",
+      html: `<p>编码器是 4 层卷积：32 → 64（步长 2，图缩小一半）→ 64 → 64，展平后接一个 32 个神经元的全连接层。最特别的是结尾<b>有两个输出</b>：<code>z_mu</code>（均值 μ）和 <code>z_log_sigma</code>，各 2 个数 <span data-cell="17">第 17 格</span>。</p><p>普通自编码器只输出一个点；VAE 输出的是“这张图大概在潜空间的哪里（μ），以及有多不确定（σ）”。潜空间维度 <code>latent_dim = 2</code>，是为了能直接画在平面上。</p>`,
+      cells: [17], highlight: ["latent_dim = 2", "z_mu", "z_log_sigma"],
+      draw(svg, ctx) {
+        const L = [["输入\n28×28×1", 90, 90], ["Conv 32\n28×28", 80, 80], ["Conv 64 /2\n14×14", 60, 60], ["Conv 64\n14×14", 60, 60], ["Conv 64\n14×14", 60, 60], ["Dense\n32", 20, 70]];
+        const xs = [30, 140, 245, 335, 425, 515];
+        const g = L.map((l, i) => { const e = K.node(svg, xs[i], 170 - l[2] / 2 - 20, l[1], l[2] + 40, l[0], { fill: i ? "color-mix(in srgb, var(--c1) 14%, var(--panel))" : "var(--panel-2)", stroke: "var(--c1)" }); e.style.opacity = 0; return e; });
+        const mu = K.node(svg, 600, 90, 100, 56, "z_mu\n2 个数", { bold: true, fill: "color-mix(in srgb, var(--c3) 18%, var(--panel))", stroke: "var(--c3)" });
+        const sg = K.node(svg, 600, 196, 100, 56, "z_log_sigma\n2 个数", { bold: true, fill: "color-mix(in srgb, var(--warn) 18%, var(--panel))", stroke: "var(--warn)" });
+        const a1 = K.arrow(svg, 540, 170, 598, 120), a2 = K.arrow(svg, 540, 170, 598, 222);
+        [mu, sg, a1, a2].forEach((e) => (e.style.opacity = 0));
+        K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 12, class: "muted" }, "一张图 → “它大概在哪（μ）” + “有多拿不准（σ）”");
+        (async () => {
+          for (const e of g) if (!(await ctx.tween(300, (t) => (e.style.opacity = t)))) return;
+          await ctx.tween(500, (t) => [mu, sg, a1, a2].forEach((e) => (e.style.opacity = t)));
+        })();
+      },
+    },
+    {
+      title: "采样：z = μ + σ × ε（重参数化）", kicker: "第 19–20 格 · VAE 的关键一步",
+      html: `<p>有了 μ 和 σ，作者从这个分布里随机抽一个点 z：先抽一个标准正态随机数 ε，再算 <code>z = μ + exp(z_log_sigma) × ε</code> <span data-cell="19">第 19 格</span>。</p><p>为什么不直接“随机抽”？因为随机抽这个动作没法求导，网络就没法学。把随机性单独放进 ε，μ 和 σ 就成了普通的加法和乘法，可以反向传播。这个小把戏叫<b>重参数化技巧</b>。Keras 要求每一步都是“层”，所以用 <code>Lambda</code> 包了一下。</p>`,
+      cells: [19], highlight: ["z_mu + K.exp(z_log_sigma) * epsilon", "Lambda"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 360, h: 270 }, [-3, 3], [-3, 3], { xticks: 6, yticks: 6 });
+        const mu = [1.2, 0.6], sg = [0.5, 0.35];
+        for (let k = 3; k >= 1; k--) K.svg(svg, "ellipse", { cx: ax.sx(mu[0]), cy: ax.sy(mu[1]), rx: (ax.sx(sg[0] * k) - ax.sx(0)), ry: (ax.sy(0) - ax.sy(sg[1] * k)), fill: "var(--c3)", "fill-opacity": 0.08, stroke: "var(--c3)", "stroke-opacity": 0.4 });
+        K.svg(svg, "circle", { cx: ax.sx(mu[0]), cy: ax.sy(mu[1]), r: 5, fill: "var(--c3)" });
+        K.svg(svg, "text", { x: ax.sx(mu[0]) + 8, y: ax.sy(mu[1]) - 8, "font-size": 12, fill: "var(--c3)" }, "μ");
+        const txt = K.svg(svg, "text", { x: 450, y: 80, "font-size": 15, "font-family": "var(--mono)" }, "");
+        const txt2 = K.svg(svg, "text", { x: 450, y: 110, "font-size": 15, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 450, y: 160, "font-size": 13 }, "ε ~ 标准正态（掷骰子）");
+        K.svg(svg, "text", { x: 450, y: 184, "font-size": 13 }, "μ、σ 由编码器算出（可学习）");
+        K.svg(svg, "text", { x: 450, y: 240, "font-size": 12, class: "muted" }, "同一张图每次抽到的 z 略有不同");
+        const r = K.rng(5);
+        (async () => {
+          for (let k = 0; k < 24; k++) {
+            const e = [K.randn(r), K.randn(r)], z = [mu[0] + sg[0] * e[0], mu[1] + sg[1] * e[1]];
+            txt.textContent = `ε = (${e[0].toFixed(2)}, ${e[1].toFixed(2)})`;
+            txt2.textContent = `z = (${z[0].toFixed(2)}, ${z[1].toFixed(2)})`;
+            const d = K.svg(svg, "circle", { cx: ax.sx(mu[0]), cy: ax.sy(mu[1]), r: 4, fill: "var(--accent)" });
+            if (!(await ctx.tween(320, (t) => K.set(d, { cx: K.lerp(ax.sx(mu[0]), ax.sx(z[0]), t), cy: K.lerp(ax.sy(mu[1]), ax.sy(z[1]), t) })))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "解码器：把 2 个数画回一张图", kicker: "第 21–22 格 · 模型结构",
+      html: `<p>作者说“解码器基本就是反过来的编码器” <span data-cell="20">第 20 格</span>：先用全连接层把 2 个数扩成 14×14×64，再 <code>Reshape</code> 成方块，用<b>转置卷积</b>（Conv2DTranspose，步长 2）放大回 28×28，最后一层卷积 + sigmoid 输出 0–1 的像素 <span data-cell="21">第 21 格</span>。</p><p>注意解码器是单独建的一个 <code>Model</code>，训练完可以单独拿出来：随便喂两个数，它就画一张图。这就是“生成”的入口。</p>`,
+      cells: [21], highlight: ["Conv2DTranspose", "decoder = Model"],
+      draw(svg, ctx) {
+        const n = 14, r = K.rng(11), img = shape(3, n, r);
+        K.node(svg, 30, 140, 70, 60, "z\n2 个数", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const st = [[150, "Dense\n→14×14×64", 70], [300, "转置卷积 /2\n→28×28×32", 110], [480, "Conv + sigmoid\n28×28×1", 140]];
+        st.forEach((s, i) => { K.arrow(svg, i ? st[i - 1][0] + st[i - 1][2] + 6 : 104, 170, s[0] - 4, 170); K.svg(svg, "text", { x: s[0] + s[2] / 2, y: 320, "text-anchor": "middle", "font-size": 12 }, s[1].replace("\n", " ")); });
+        const g1 = K.svg(svg, "g"), g2 = K.svg(svg, "g"), g3 = K.svg(svg, "g");
+        // 逐级变清晰：低分辨率 → 高分辨率
+        const coarse = (m) => { const a = new Float64Array(n * n); for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) { const bi = Math.floor(i / m) * m, bj = Math.floor(j / m) * m; let s = 0, c = 0; for (let u = bi; u < Math.min(n, bi + m); u++) for (let v = bj; v < Math.min(n, bj + m); v++) { s += img[u * n + v]; c++; } a[i * n + j] = s / c; } return a; };
+        pix(g1, 150, 135, 70, coarse(7), n, { color: "var(--c2)" });
+        pix(g2, 300, 115, 110, coarse(2), n, { color: "var(--c2)" });
+        pix(g3, 480, 100, 140, img, n, { color: "var(--c2)" });
+        [g1, g2, g3].forEach((g) => (g.style.opacity = 0));
+        (async () => { for (const g of [g1, g2, g3]) if (!(await ctx.tween(600, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "损失 = 重建误差 + KL 散度", kicker: "第 23–24 格 · VAE 的考核标准",
+      html: `<p>VAE 的损失有两部分 <span data-cell="22">第 22 格</span>：</p><ul class="tight"><li><b>重建误差</b>：还原的图和原图逐像素比，用二元交叉熵。管的是“画得像不像”。</li><li><b>KL 散度</b>：每张图的“雾团”(μ, σ) 离标准正态分布 N(0,1) 有多远。管的是“所有雾团都别跑太远、别缩成一个点”，这样潜空间才连续、没有空洞。</li></ul><p>作者把 KL 乘了一个很小的系数 <code>-5e-4</code>（负号和公式里的负号抵消）<span data-cell="23">第 23 格</span>。细心看：这里把 <code>z_log_sigma</code> 当成了对数<b>方差</b>，而上一步采样时把它当成对数<b>标准差</b>，两处不一致。</p>`,
+      cells: [23], highlight: ["binary_crossentropy", "kl_loss = -5e-4"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 30, w: 380, h: 250 }, [-4, 4], [-4, 4], { xticks: 4, yticks: 4 });
+        K.svg(svg, "circle", { cx: ax.sx(0), cy: ax.sy(0), r: ax.sx(1) - ax.sx(0), fill: "none", stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+        K.svg(svg, "text", { x: ax.sx(0), y: ax.sy(1) - 6, "text-anchor": "middle", "font-size": 11, class: "muted" }, "N(0,1)");
+        const r = K.rng(8), blobs = [];
+        for (let k = 0; k < 10; k++) blobs.push({ x: (r() - 0.5) * 6.5, y: (r() - 0.5) * 6.5, s: 0.08 + r() * 0.12, c: k % 4 });
+        const els = blobs.map((b) => K.svg(svg, "circle", { cx: ax.sx(b.x), cy: ax.sy(b.y), r: (ax.sx(b.s) - ax.sx(0)), fill: COLORS[b.c], "fill-opacity": 0.35, stroke: COLORS[b.c] }));
+        const kl = K.svg(svg, "text", { x: 460, y: 90, "font-size": 15, "font-weight": 700, fill: "var(--warn)" }, "");
+        K.svg(svg, "text", { x: 460, y: 140, "font-size": 13 }, "KL 把雾团往中间拉、");
+        K.svg(svg, "text", { x: 460, y: 160, "font-size": 13 }, "并把太小的雾团撑大");
+        K.svg(svg, "text", { x: 460, y: 200, "font-size": 13 }, "重建误差又要求不同的图");
+        K.svg(svg, "text", { x: 460, y: 220, "font-size": 13 }, "别挤成一团、要分得开");
+        K.svg(svg, "text", { x: 460, y: 270, "font-size": 12, class: "muted" }, "（示意，不是真实训练结果）");
+        const klv = (t) => blobs.reduce((s, b) => { const x = b.x * (1 - 0.55 * t), y = b.y * (1 - 0.55 * t), sg = K.lerp(b.s, 0.55, t); return s + 0.5 * (x * x + y * y + 2 * sg * sg - 2 - 4 * Math.log(sg)); }, 0) / blobs.length;
+        kl.textContent = "平均 KL ≈ " + klv(0).toFixed(2);
+        ctx.wait(600).then((ok) => ok && ctx.tween(2200, (t) => {
+          blobs.forEach((b, i) => K.set(els[i], { cx: ax.sx(b.x * (1 - 0.55 * t)), cy: ax.sy(b.y * (1 - 0.55 * t)), r: ax.sx(K.lerp(b.s, 0.55, t)) - ax.sx(0) }));
+          kl.textContent = "平均 KL ≈ " + klv(t).toFixed(2);
+        }));
+      },
+    },
+    {
+      title: "组装并训练 7 轮", kicker: "第 25–28 格 · 训练",
+      html: `<p>把编码器、采样层、解码器和损失层串成一个模型 <code>vae</code>，优化器用 RMSprop，<code>loss=None</code>（因为损失已经在自定义层里加进去了）<span data-cell="25">第 25 格</span>。</p><p>训练时 <code>y=None</code>：没有任何标签，输入本身就是答案。每批 16 张图，训练 7 轮，每轮结束用验证集算一次损失 <span data-cell="27">第 27 格</span>。</p>`,
+      cells: [25, 27], highlight: ["y=None", "epochs=7"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [0, 7], [0, 1], { xticks: 7, yticks: 0, xlabel: "训练轮数（epoch）", ylabel: "损失（示意）" });
+        const f = (e) => 0.18 + 0.75 * Math.exp(-e * 1.1);
+        let d = "";
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const n = 14, r = K.rng(3), imgs = [];
+        for (let k = 0; k < 7; k++) imgs.push(K.svg(svg, "g"));
+        ctx.tween(2600, (t) => {
+          d = "";
+          for (let e = 0; e <= 7 * t; e += 0.05) d += (d ? "L" : "M") + ax.sx(e) + "," + ax.sy(f(e));
+          path.setAttribute("d", d);
+          const k = Math.floor(7 * t - 0.001);
+          if (k >= 0 && !imgs[k].firstChild) { const base = shape(0, n, K.rng(21)); const q = Math.min(1, (k + 1) / 5); pix(imgs[k], ax.sx(k + 0.5) - 22, 50 + (k % 2) * 6, 44, base.map((v, i) => K.clamp(v * q + (1 - q) * 0.5 * r(), 0, 1)), n, { color: "var(--c2)" }); }
+        });
+        K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 12, class: "muted" }, "随着训练，解码器还原的图从一片噪声变得越来越像（示意）");
+      },
+    },
+    {
+      title: "潜空间里，数字自己聚成团", kicker: "第 29–31 格 · 结果 A",
+      html: `<p>训练好后，作者把编码器单独拿出来（输出 μ），把验证集里<b>有标签</b>的图映射到 2 维平面，再按真实数字上色 <span data-cell="30">第 30 格</span>。</p><p>作者的结论：同一个数字聚在一起 <span data-cell="28">第 28 格</span>。要强调的是，训练时网络从没见过标签，它只是发现“把长得像的图放得近一点，还原起来更容易”。</p><p>动画是示意：点从随机位置移动到各自的团。</p>`,
+      cells: [29, 30], highlight: ["encoder = Model(input_img, z_mu)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 20, w: 420, h: 290 }, [-3.5, 3.5], [-3.5, 3.5], { xticks: 0, yticks: 0 });
+        const r = K.rng(12), P = [], cen = [];
+        for (let c = 0; c < 10; c++) { const a = (c / 10) * Math.PI * 2; cen.push([Math.cos(a) * 2.1, Math.sin(a) * 2.1 * 0.85]); }
+        for (let i = 0; i < 300; i++) { const c = i % 10; P.push({ c, x0: K.randn(r) * 1.6, y0: K.randn(r) * 1.6, x1: cen[c][0] + K.randn(r) * 0.38, y1: cen[c][1] + K.randn(r) * 0.38 }); }
+        const pal = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c5)", "var(--c6)", "var(--accent)", "var(--warn)", "var(--good)", "var(--ink-3)"];
+        const els = P.map((p) => K.svg(svg, "circle", { cx: ax.sx(p.x0), cy: ax.sy(p.y0), r: 3.2, fill: pal[p.c], opacity: 0.75 }));
+        for (let c = 0; c < 10; c++) { K.svg(svg, "circle", { cx: 520, cy: 40 + c * 27, r: 6, fill: pal[c] }); K.svg(svg, "text", { x: 534, y: 45 + c * 27, "font-size": 13 }, "数字 " + c); }
+        K.svg(svg, "text", { x: 600, y: 40, "font-size": 11, class: "muted" }, "（示意）");
+        ctx.wait(500).then((ok) => ok && ctx.tween(2400, (t) => P.forEach((p, i) => K.set(els[i], { cx: ax.sx(K.lerp(p.x0, p.x1, t)), cy: ax.sy(K.lerp(p.y0, p.y1, t)) }))));
+      },
+    },
+    {
+      title: "没有标签的测试图落在哪里", kicker: "第 32–33 格 · 结果 B",
+      html: `<p>作者再把整个验证集（包括原来测试集里没有标签的图，标签是 11）都映射到潜空间，标签 11 的点画成灰色 <span data-cell="32">第 32 格</span>。</p><p>灰点散落在各个彩色团里，说明这些“未知”的图也被放到了和它长得像的已知数字旁边。这其实就提示了一种思路：用潜空间里“离哪个团近”来猜它的数字。</p>`,
+      cells: [32], highlight: ["set_over('gray')"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 20, w: 420, h: 290 }, [-3.5, 3.5], [-3.5, 3.5], { xticks: 0, yticks: 0 });
+        const r = K.rng(13), cen = [];
+        for (let c = 0; c < 10; c++) { const a = (c / 10) * Math.PI * 2; cen.push([Math.cos(a) * 2.1, Math.sin(a) * 2.1 * 0.85]); }
+        const pal = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c5)", "var(--c6)", "var(--accent)", "var(--warn)", "var(--good)", "var(--ink-3)"];
+        for (let i = 0; i < 220; i++) { const c = i % 10; K.svg(svg, "circle", { cx: ax.sx(cen[c][0] + K.randn(r) * 0.38), cy: ax.sy(cen[c][1] + K.randn(r) * 0.38), r: 3, fill: pal[c], opacity: 0.55 }); }
+        const grays = [];
+        for (let i = 0; i < 120; i++) { const c = Math.floor(r() * 10); grays.push(K.svg(svg, "circle", { cx: ax.sx(cen[c][0] + K.randn(r) * 0.4), cy: ax.sy(cen[c][1] + K.randn(r) * 0.4), r: 0, fill: "var(--panel)", stroke: "var(--ink)", "stroke-width": 1.2 })); }
+        K.svg(svg, "text", { x: 510, y: 120, "font-size": 13 }, "彩色：有标签的图");
+        K.svg(svg, "text", { x: 510, y: 146, "font-size": 13 }, "空心：原测试集（label=11）");
+        K.svg(svg, "text", { x: 510, y: 172, "font-size": 11, class: "muted" }, "（示意）");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1600, (t) => grays.forEach((g, i) => K.set(g, { r: 3.2 * K.clamp(t * 2 - i / 120, 0, 1) }))));
+      },
+    },
+    {
+      title: "在潜空间网格上解码：数字地图", kicker: "第 34–35 格 · 结果 C · 生成",
+      html: `<p>最好玩的一步：作者在潜空间里按 20×20 网格取点，每个点交给解码器画一张图，拼成一张大图 <span data-cell="34">第 34 格</span>。网格坐标用 <code>norm.ppf(linspace(0.05, 0.95))</code> 生成：在标准正态分布的 5% 到 95% 分位之间均匀取，中间密、两边疏。</p><p>结果是一张“数字地图”：沿着某个方向走，一个数字会慢慢变成另一个 <span data-cell="33">第 33 格</span>。地图上的很多格子对应的点，训练时根本没有任何图片，解码器画出的是<b>全新的数字</b>。</p>`,
+      cells: [34], highlight: ["norm.ppf", "decoder.predict"],
+      draw(svg, ctx) {
+        // 示意：在四个形状模板之间做双线性插值
+        const n = 12, T = [0, 1, 2, 3].map((c) => shape(c, n, K.rng(30 + c)));
+        const G = 7, S = 40, x0 = 40, y0 = 30;
+        const cellsG = [];
+        for (let i = 0; i < G; i++) for (let j = 0; j < G; j++) {
+          const u = j / (G - 1), v = i / (G - 1);
+          const a = T[0].map((_, k) => (1 - u) * (1 - v) * T[0][k] + u * (1 - v) * T[1][k] + (1 - u) * v * T[2][k] + u * v * T[3][k]);
+          const g = K.svg(svg, "g"); pix(g, x0 + j * S, y0 + i * S, S - 3, a, n, { color: "var(--c2)" }); g.style.opacity = 0; cellsG.push(g);
+        }
+        K.svg(svg, "text", { x: 360, y: 60, "font-size": 13 }, "每个格子 = 潜空间里的一个点 (z₁, z₂)");
+        K.svg(svg, "text", { x: 360, y: 86, "font-size": 13 }, "交给解码器画出来的图");
+        K.svg(svg, "text", { x: 360, y: 130, "font-size": 13 }, "相邻格子很像 → 潜空间是连续的");
+        K.svg(svg, "text", { x: 360, y: 156, "font-size": 13 }, "四个角之间平滑过渡");
+        K.svg(svg, "text", { x: 360, y: 200, "font-size": 12, class: "muted" }, "示意：这里用四个程序画的形状做插值，");
+        K.svg(svg, "text", { x: 360, y: 220, "font-size": 12, class: "muted" }, "不是作者模型的输出；实验 B 里是真训练");
+        ctx.tween(2000, (t) => cellsG.forEach((g, k) => (g.style.opacity = K.clamp(t * 2.2 - k / cellsG.length, 0, 1))));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：重参数化 + KL ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "m1", label: "编码器输出的均值 μ₁", min: -3, max: 3, step: 0.1, value: 1.5, fmt: (v) => v.toFixed(1) },
+      { id: "m2", label: "编码器输出的均值 μ₂", min: -3, max: 3, step: 0.1, value: -0.8, fmt: (v) => v.toFixed(1) },
+      { id: "s", label: "标准差 σ（两维相同）", min: 0.05, max: 2, step: 0.05, value: 0.3, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "重新掷一次 ε", button: true },
+    ],
+    note: "每次按 z = μ + σ·ε 抽 200 个点（ε 来自标准正态）。右边实时算 KL = ½Σ(μ² + σ² − 1 − ln σ²)。试试：μ 拉回 0、σ 拉到 1，KL 变成 0；σ 缩到很小，KL 又会变大。",
+    render(svg, v) {
+      const ax = K.axes(svg, { x: 50, y: 20, w: 320, h: 310 }, [-4, 4], [-4, 4], { xticks: 4, yticks: 4 });
+      K.svg(svg, "circle", { cx: ax.sx(0), cy: ax.sy(0), r: ax.sx(1) - ax.sx(0), fill: "none", stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+      K.svg(svg, "circle", { cx: ax.sx(0), cy: ax.sy(0), r: ax.sx(2) - ax.sx(0), fill: "none", stroke: "var(--line)", "stroke-dasharray": "2 4" });
+      const r = K.rng(77 + v.seed * 13);
+      let mx = 0, my = 0;
+      for (let i = 0; i < 200; i++) {
+        const z1 = v.m1 + v.s * K.randn(r), z2 = v.m2 + v.s * K.randn(r);
+        mx += z1 / 200; my += z2 / 200;
+        if (Math.abs(z1) < 4 && Math.abs(z2) < 4) K.svg(svg, "circle", { cx: ax.sx(z1), cy: ax.sy(z2), r: 2.6, fill: "var(--accent)", opacity: 0.6 });
+      }
+      K.svg(svg, "circle", { cx: ax.sx(v.m1), cy: ax.sy(v.m2), r: 6, fill: "var(--c3)", stroke: "var(--panel)", "stroke-width": 2 });
+      const kl1 = 0.5 * (v.m1 * v.m1 + v.s * v.s - 1 - Math.log(v.s * v.s)), kl2 = 0.5 * (v.m2 * v.m2 + v.s * v.s - 1 - Math.log(v.s * v.s));
+      const kl = kl1 + kl2;
+      // KL 组成条
+      const parts = [["μ 偏离 0", 0.5 * (v.m1 * v.m1 + v.m2 * v.m2), "var(--c3)"], ["σ 偏离 1", kl - 0.5 * (v.m1 * v.m1 + v.m2 * v.m2), "var(--warn)"]];
+      K.svg(svg, "text", { x: 400, y: 40, "font-size": 13, "font-weight": 700 }, "KL 由两部分组成");
+      const mxv = 10;
+      parts.forEach((p, i) => {
+        K.svg(svg, "text", { x: 400, y: 76 + i * 46, "font-size": 12 }, p[0]);
+        K.svg(svg, "rect", { x: 400, y: 82 + i * 46, width: Math.min(220, (220 * Math.max(0, p[1])) / mxv), height: 16, rx: 3, fill: p[2] });
+        K.svg(svg, "text", { x: 404 + Math.min(220, (220 * Math.max(0, p[1])) / mxv), y: 95 + i * 46, "font-size": 12, class: "muted" }, p[1].toFixed(2));
+      });
+      K.svg(svg, "text", { x: 400, y: 200, "font-size": 12, class: "muted" }, "虚线圆：标准正态的 1σ、2σ 范围");
+      K.svg(svg, "text", { x: 400, y: 222, "font-size": 12, class: "muted" }, "绿点 = μ，橙点 = 抽到的 z");
+      return { readout: [
+        { k: "KL 散度", v: kl.toFixed(3), color: kl > 3 ? "var(--bad)" : "var(--good)" },
+        { k: "抽样均值（应≈μ）", v: `(${mx.toFixed(2)}, ${my.toFixed(2)})` },
+        { k: "作者的 KL 权重", v: "5e-4", color: "var(--ink-3)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：浏览器内训练迷你 VAE ---------- */
+  const N8 = 8, D = N8 * N8, H = 16, Z = 2;
+  function makeSet(seed, m) {
+    const r = K.rng(seed), X = [], y = [];
+    for (let i = 0; i < m; i++) { const c = i % 4; X.push(shape(c, N8, r)); y.push(c); }
+    return { X, y };
+  }
+  function param(r, a, b) { const w = new Float64Array(a * b); const s = 1 / Math.sqrt(b); for (let i = 0; i < w.length; i++) w[i] = K.randn(r) * s; return w; }
+  function trainVAE(beta, epochs, seed) {
+    const r = K.rng(seed), data = makeSet(seed + 1, 200);
+    const P = { W1: param(r, H, D), b1: new Float64Array(H), Wm: param(r, Z, H), bm: new Float64Array(Z), Wv: param(r, Z, H), bv: new Float64Array(Z), W2: param(r, H, Z), b2: new Float64Array(H), W3: param(r, D, H), b3: new Float64Array(D) };
+    const G = {}, M = {}, V = {};
+    for (const k in P) { G[k] = new Float64Array(P[k].length); M[k] = new Float64Array(P[k].length); V[k] = new Float64Array(P[k].length); }
+    const h = new Float64Array(H), d = new Float64Array(H), xh = new Float64Array(D), dl3 = new Float64Array(D), dd = new Float64Array(H), dh = new Float64Array(H);
+    let step = 0, lastRec = 0, lastKL = 0;
+    const lr = 0.01, B = 20;
+    for (let ep = 0; ep < epochs; ep++) {
+      let recS = 0, klS = 0;
+      for (let b0 = 0; b0 < data.X.length; b0 += B) {
+        for (const k in G) G[k].fill(0);
+        for (let s = b0; s < b0 + B; s++) {
+          const x = data.X[s];
+          for (let i = 0; i < H; i++) { let a = P.b1[i]; for (let j = 0; j < D; j++) a += P.W1[i * D + j] * x[j]; h[i] = Math.tanh(a); }
+          const mu = [0, 0], lv = [0, 0], eps = [K.randn(r), K.randn(r)], z = [0, 0];
+          for (let q = 0; q < Z; q++) { let a = P.bm[q], c = P.bv[q]; for (let i = 0; i < H; i++) { a += P.Wm[q * H + i] * h[i]; c += P.Wv[q * H + i] * h[i]; } mu[q] = a; lv[q] = K.clamp(c, -8, 4); z[q] = mu[q] + Math.exp(0.5 * lv[q]) * eps[q]; }
+          for (let i = 0; i < H; i++) { let a = P.b2[i]; for (let q = 0; q < Z; q++) a += P.W2[i * Z + q] * z[q]; d[i] = Math.tanh(a); }
+          let rec = 0;
+          for (let j = 0; j < D; j++) { let a = P.b3[j]; for (let i = 0; i < H; i++) a += P.W3[j * H + i] * d[i]; const p = K.sigmoid(a); xh[j] = p; rec -= x[j] * Math.log(p + 1e-7) + (1 - x[j]) * Math.log(1 - p + 1e-7); dl3[j] = p - x[j]; }
+          let kl = 0; for (let q = 0; q < Z; q++) kl += 0.5 * (mu[q] * mu[q] + Math.exp(lv[q]) - 1 - lv[q]);
+          recS += rec; klS += kl;
+          dd.fill(0);
+          for (let j = 0; j < D; j++) { G.b3[j] += dl3[j]; for (let i = 0; i < H; i++) { G.W3[j * H + i] += dl3[j] * d[i]; dd[i] += P.W3[j * H + i] * dl3[j]; } }
+          const dz = [0, 0];
+          for (let i = 0; i < H; i++) { const g = dd[i] * (1 - d[i] * d[i]); G.b2[i] += g; for (let q = 0; q < Z; q++) { G.W2[i * Z + q] += g * z[q]; dz[q] += P.W2[i * Z + q] * g; } }
+          dh.fill(0);
+          for (let q = 0; q < Z; q++) {
+            const sd = Math.exp(0.5 * lv[q]);
+            const gm = dz[q] + beta * mu[q], gv = dz[q] * eps[q] * 0.5 * sd + beta * 0.5 * (Math.exp(lv[q]) - 1);
+            G.bm[q] += gm; G.bv[q] += gv;
+            for (let i = 0; i < H; i++) { G.Wm[q * H + i] += gm * h[i]; G.Wv[q * H + i] += gv * h[i]; dh[i] += P.Wm[q * H + i] * gm + P.Wv[q * H + i] * gv; }
+          }
+          for (let i = 0; i < H; i++) { const g = dh[i] * (1 - h[i] * h[i]); G.b1[i] += g; for (let j = 0; j < D; j++) G.W1[i * D + j] += g * x[j]; }
+        }
+        step++;
+        const c1 = 1 - Math.pow(0.9, step), c2 = 1 - Math.pow(0.999, step);
+        for (const k in P) { const p = P[k], g = G[k], m = M[k], v = V[k]; for (let i = 0; i < p.length; i++) { const gg = g[i] / B; m[i] = 0.9 * m[i] + 0.1 * gg; v[i] = 0.999 * v[i] + 0.001 * gg * gg; p[i] -= (lr * m[i] / c1) / (Math.sqrt(v[i] / c2) + 1e-8); } }
+      }
+      lastRec = recS / data.X.length; lastKL = klS / data.X.length;
+    }
+    const enc = (x) => { for (let i = 0; i < H; i++) { let a = P.b1[i]; for (let j = 0; j < D; j++) a += P.W1[i * D + j] * x[j]; h[i] = Math.tanh(a); } const mu = [0, 0]; for (let q = 0; q < Z; q++) { let a = P.bm[q]; for (let i = 0; i < H; i++) a += P.Wm[q * H + i] * h[i]; mu[q] = a; } return mu; };
+    const dec = (z) => { const o = new Float64Array(D); for (let i = 0; i < H; i++) { let a = P.b2[i]; for (let q = 0; q < Z; q++) a += P.W2[i * Z + q] * z[q]; d[i] = Math.tanh(a); } for (let j = 0; j < D; j++) { let a = P.b3[j]; for (let i = 0; i < H; i++) a += P.W3[j * H + i] * d[i]; o[j] = K.sigmoid(a); } return o; };
+    return { enc, dec, data, rec: lastRec, kl: lastKL };
+  }
+  K.lab(document.getElementById("lab2"), {
+    width: 660, height: 380,
+    controls: [
+      { id: "beta", label: "KL 权重 β（作者用的是很小的 5e-4）", value: "0.5", options: [["0", "0（只管还原，普通自编码器）"], ["0.0005", "0.0005（和作者一样小）"], ["0.5", "0.5"], ["1", "1（标准 VAE）"], ["4", "4（KL 很重）"]] },
+      { id: "ep", label: "训练轮数", value: "60", options: [["5", "5 轮"], ["20", "20 轮"], ["60", "60 轮"], ["150", "150 轮"]] },
+      { id: "seed", label: "换一组随机初始化", button: true },
+    ],
+    note: "训练数据：程序生成的 200 张 8×8 小图，4 种笔画（圆圈、竖线、横线、斜线），每张位置、粗细、倾斜随机。网络：64 → 16 → (μ, log σ²) 各 2 维 → 16 → 64，Adam 优化，全部在你的浏览器里现场计算。左图：每张训练图编码后的 μ（颜色 = 笔画种类，训练时没给网络看）；右图：在潜空间 [−2.5, 2.5] 网格上取点解码。",
+    render(svg, v) {
+      const t0 = performance.now();
+      const m = trainVAE(+v.beta, +v.ep, 500 + v.seed * 31);
+      const ms = performance.now() - t0;
+      const ax = K.axes(svg, { x: 40, y: 20, w: 280, h: 280 }, [-3, 3], [-3, 3], { xticks: 6, yticks: 6 });
+      K.svg(svg, "circle", { cx: ax.sx(0), cy: ax.sy(0), r: ax.sx(1) - ax.sx(0), fill: "none", stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+      m.data.X.forEach((x, i) => { const mu = m.enc(x); K.svg(svg, "circle", { cx: ax.sx(K.clamp(mu[0], -3, 3)), cy: ax.sy(K.clamp(mu[1], -3, 3)), r: 3, fill: COLORS[m.data.y[i]], opacity: 0.75 }); });
+      NAMES.forEach((nm, i) => { K.svg(svg, "circle", { cx: 48 + i * 75, cy: 350, r: 5, fill: COLORS[i] }); K.svg(svg, "text", { x: 56 + i * 75, y: 354, "font-size": 10 }, nm.split("（")[0]); });
+      K.svg(svg, "text", { x: 40, y: 374, "font-size": 11, class: "muted" }, "潜空间（每张训练图的 μ）");
+      const G = 7, S = 40, gx = 350, gy = 20;
+      for (let i = 0; i < G; i++) for (let j = 0; j < G; j++) {
+        const z = [-2.5 + (5 * j) / (G - 1), 2.5 - (5 * i) / (G - 1)];
+        pix(svg, gx + j * S, gy + i * S, S - 2, m.dec(z), N8, { color: "var(--c2)" });
+      }
+      K.svg(svg, "text", { x: gx, y: 310, "font-size": 11, class: "muted" }, "解码器画的 7×7 网格（z₁ 从左到右，z₂ 从下到上）");
+      return { readout: [
+        { k: "重建误差（每张图）", v: m.rec.toFixed(1) },
+        { k: "KL（每张图）", v: m.kl.toFixed(2), color: "var(--warn)" },
+        { k: "训练用时", v: Math.round(ms) + " ms", color: "var(--ink-3)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

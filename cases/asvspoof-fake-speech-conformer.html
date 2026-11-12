@@ -1,0 +1,796 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>伪造语音检测</title>
+<meta name="description" content="Kaggle 案例拆解：用 ASVspoof 2019 数据和 Conformer 编码器判断一段语音是真人说的还是机器合成的——梅尔频谱、TFRecord 流水线、SpecAugment、MixUp/CutMix、借语音识别模型做迁移学习。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">音频 · 二分类 · 伪造语音检测（防御）</div>
+  <h1>这句话是真人说的吗？用 Conformer 识破合成语音</h1>
+  <p class="en">Fake Speech Detection: Conformer [TF]</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">梅尔频谱</span><span class="tag method">Conformer 编码器</span><span class="tag method">语音识别预训练迁移</span>
+    <span class="tag method">SpecAugment</span><span class="tag method">MixUp / CutMix</span><span class="tag method">TFRecord + tf.data</span><span class="tag method">F1 / 混淆矩阵</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Awsaf</b></span>
+    <span>Kaggle 点赞 <b>277</b>（2026-11 抓取）</span>
+    <span>数据 <b>awsaf49/asvpoof-2019-dataset</b>（ASVspoof 2019 LA）</span>
+    <span><a href="https://www.kaggle.com/code/awsaf49/fake-speech-detection-conformer-tf" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">真人录音 + 机器合成 / 转换的假语音</div><p>ASVspoof 2019 的 LA（逻辑访问）部分：真语音标 bonafide，假语音标 spoof，并记下是哪个伪造系统生成的。<span data-cell="15">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">真（0）还是假（1）</div><p><code>target</code> = 1 表示假语音，0 表示真语音。<span data-cell="16">出处</span> 这是一个<b>防御</b>任务：在声纹验证、电话核身之前先把伪造的声音挡住。</p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">梅尔频谱 + Conformer 编码器</div><p>把 3.5 秒声音变成 256×128 的梅尔频谱，送进在语音识别上预训练过的 Conformer 编码器，最后接一个 sigmoid 输出“假的概率”。<span data-cell="9">出处</span> <span data-cell="49">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">在独立的验证集和测试集上报告 F1 等指标</div><p>分数在运行输出和作者的 W&amp;B 看板里，源码不带，这里不列。<span data-cell="57">出处</span> <span data-cell="59">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集是语音反欺骗挑战赛 <b>ASVspoof 2019</b> 的 LA 部分，由作者整理上传到 Kaggle，并另做了一份 TFRecord 版本。官方自带训练、验证（dev）、测试（eval）三份。下面只写 notebook 文字和代码里出现的信息。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">采样率</div><div class="v">16,000 Hz</div></div>
+        <div class="stat-tile"><div class="k">每条截取</div><div class="v">3.5 秒</div></div>
+        <div class="stat-tile"><div class="k">频谱尺寸</div><div class="v">256 × 128</div></div>
+        <div class="stat-tile"><div class="k">伪造系统编号</div><div class="v">A01–A19</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">采样率、时长、频谱尺寸见第 9 格 <span data-cell="9">出处</span>；系统编号见第 15 格 <span data-cell="15">出处</span>。作者说数据很大，只用了“平衡的一部分”；第 16 格演示时每类抽 2500 条 <span data-cell="16">出处</span>。各份数据的条数在运行输出里，源码不带。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>speaker_id</code></td><td>说话人编号 LA_****</td><td>文本</td></tr>
+        <tr><td><code>filename</code></td><td>音频文件名</td><td>文本</td></tr>
+        <tr><td><code>system_id</code></td><td>生成假语音的系统（A01–A19）；真语音为 “-”</td><td>类别</td></tr>
+        <tr><td><code>class_name</code></td><td>bonafide（真）/ spoof（假）</td><td>类别</td></tr>
+        <tr><td><code>target</code></td><td><b>要预测的答案</b>：1 = 假，0 = 真</td><td>0/1</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">列说明见第 15 格 <span data-cell="15">出处</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="27">
+    <h3>动手试试 A · MixUp 和 CutMix：把两张频谱拼在一起 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="29">
+    <h3>动手试试 B · 真声音和“太完美”的合成声音差在哪 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="42">
+    <h3>动手试试 C · 阈值、精确率、召回率和 F1 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+  <div data-at="49">
+    <h3>动手试试 D · 卷积看邻居，注意力看全场 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab4"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论与做法</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>频谱当图片用，但不能用翻转、旋转这类图像增强，会破坏频谱和声音的对应关系</td><td><span data-cell="20">第 20 格</span></td></tr>
+        <tr><td>ImageNet 预训练模型擅长图片特征，不懂声音；从<b>语音识别模型</b>迁移更“对口”</td><td><span data-cell="46">第 46 格</span></td></tr>
+        <tr><td>语音识别模型是编码器-解码器，只取编码器当特征提取器即可做分类</td><td><span data-cell="46">第 46 格</span></td></tr>
+        <tr><td>Conformer 结合卷积（局部）和 Transformer（全局），参数利用效率高</td><td><span data-cell="47">第 47 格</span></td></tr>
+        <tr><td>用验证集保存最好的模型（按 val F1），最后在测试集上报告指标并画归一化混淆矩阵</td><td><span data-cell="55">第 55 格</span> <span data-cell="59">第 59 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">准确率、精确率、召回率、F1 的具体数值都在运行输出和作者的 W&amp;B 看板里，Kaggle 下载的源码不带，作者文字里也没写，所以这里不列分数。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li>第 15 格先说假语音来自“19 个系统，编号 A10 到 A19”，同一格又说 system_id 是 A01–A19，前后不一致（A10–A19 只有 10 个）。<span data-cell="15">第 15 格</span></li>
+        <li>配置里写着 <code>augment = False</code>、各种增强概率都是 0，实验备注也写 “no_aug”：前面花了很多篇幅介绍的增强，这次训练其实<b>都没用上</b>。<span data-cell="9">第 9 格</span></li>
+        <li>实验备注写 “Conformer-128x80”，实际频谱尺寸是 256×128；预训练编码器默认输入是 128×80。<span data-cell="9">第 9 格</span> <span data-cell="49">第 49 格</span></li>
+        <li><code>CFG.lr = 1e-4</code> 会被学习率回调覆盖（回调从 5e-5 预热到 5e-4）；第 45 格画图用 30 轮，实际训练只有 12 轮。<span data-cell="44">第 44 格</span> <span data-cell="56">第 56 格</span></li>
+        <li>第 41 格写“不能把 f1_score 或 accuracy 当作 metric”，应为“当作 loss（损失）”。<span data-cell="41">第 41 格</span></li>
+        <li>第 16 格从表格里每类抽 2500 条只用于展示，真正训练读的是 TFRecord 文件。<span data-cell="16">第 16 格</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>给一段 3.5 秒的语音输出“是合成或转换语音的概率”，挡在声纹登录、电话核身之前。</li>
+        <li><b>同类问题：</b>识别 AI 换脸视频、检测电话诈骗里的克隆声音、判断录音证据是否被篡改、音乐 AI 生成检测。</li>
+        <li><b>可迁移的套路：</b>声音 → 梅尔频谱 → 找<b>同领域</b>的预训练模型（语音识别编码器）→ 换分类头微调 → 在<b>没见过的伪造系统</b>上测试。</li>
+        <li><b>局限：</b>新的伪造技术层出不穷，在旧系统上训练的检测器遇到新系统可能失灵，需要持续更新。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>配置 CFG：16 kHz、3.5 秒、256×128 梅尔频谱 <span data-cell="9">第 9 格</span></li>
+        <li>去首尾静音、随机裁剪或补齐 <span data-cell="25">第 25 格</span></li>
+        <li>时间 / 频率遮挡、MixUp、CutMix <span data-cell="27">第 27 格</span></li>
+        <li>STFT → 梅尔刻度 → dB <span data-cell="29">第 29 格</span></li>
+        <li>TFRecord + tf.data 流水线 <span data-cell="32">第 32 格</span> <span data-cell="34">第 34 格</span></li>
+        <li>预热 + 余弦学习率 <span data-cell="44">第 44 格</span></li>
+        <li>预训练 Conformer 编码器 + 全局平均池化 + sigmoid <span data-cell="49">第 49 格</span></li>
+        <li>二分类交叉熵；准确率、精确率、召回率、F1 <span data-cell="42">第 42 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>ASVspoof 的测试集里有训练时没见过的伪造系统。为什么一定要这样测？如果训练和测试用同一批伪造系统，分数会偏高还是偏低？</li>
+      <li>作者说频谱图不能随便旋转、翻转。那左右翻转（时间倒放）和上下翻转（高低音颠倒）分别会改变声音的什么？</li>
+      <li>为什么从“语音识别模型”迁移比从“ImageNet 图片模型”迁移更合适？有没有可能反而不如？</li>
+      <li>银行用声纹登录。把真人误判为假（拒绝客户）和把假判为真（放进骗子），哪个代价更大？阈值该怎么定？</li>
+      <li>声音克隆技术本身也能用来帮失声的人“找回声音”。你觉得这类技术应该怎样被管理？公开发布伪造检测模型，会不会反过来帮造假的人改进？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Awsaf，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。数据集 ASVspoof 2019 由爱丁堡大学等机构发布。本页只讨论伪造语音的<b>检测与防御</b>。动画与实验中的声音、分数和注意力权重都是浏览器里的合成示意，不是数据集录音或作者模型的输出。
+</footer>
+</main>
+
+<script src="nb/asvspoof-fake-speech-conformer.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* ===== 本页专用：浏览器内的小型音频工具（合成示意声音、FFT、频谱图、梅尔滤波、MFCC） ===== */
+  const AK = {};
+  AK.SR = 16000;
+  // 原地基 2 FFT
+  AK.fft = function (re, im) {
+    const n = re.length;
+    for (let i = 1, j = 0; i < n; i++) {
+      let bit = n >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
+    }
+    for (let len = 2; len <= n; len <<= 1) {
+      const ang = (-2 * Math.PI) / len, wr = Math.cos(ang), wi = Math.sin(ang);
+      for (let i = 0; i < n; i += len) {
+        let cr = 1, ci = 0;
+        for (let k = 0; k < len / 2; k++) {
+          const a = i + k, b = a + len / 2;
+          const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
+          re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+          const nr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = nr;
+        }
+      }
+    }
+  };
+  AK.pow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
+  // 短时傅里叶变换：返回 [帧][频点] 的功率谱
+  AK.stft = function (x, win, hop, nfft) {
+    nfft = nfft || AK.pow2(win);
+    const frames = [], w = new Float32Array(win);
+    for (let i = 0; i < win; i++) w[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (win - 1));
+    for (let s = 0; s + win <= x.length; s += hop) {
+      const re = new Float32Array(nfft), im = new Float32Array(nfft);
+      for (let i = 0; i < win; i++) re[i] = x[s + i] * w[i];
+      AK.fft(re, im);
+      const p = new Float32Array(nfft / 2 + 1);
+      for (let k = 0; k <= nfft / 2; k++) p[k] = (re[k] * re[k] + im[k] * im[k]) / win;
+      frames.push(p);
+    }
+    return frames;
+  };
+  AK.spectrum = function (x) { // 整段 FFT 幅度（取前一半）
+    const n = AK.pow2(x.length), re = new Float32Array(n), im = new Float32Array(n);
+    re.set(x);
+    AK.fft(re, im);
+    const out = new Float32Array(n / 2);
+    for (let k = 0; k < n / 2; k++) out[k] = (2 / x.length) * Math.hypot(re[k], im[k]);
+    return out;
+  };
+  AK.hz2mel = (f) => 2595 * Math.log10(1 + f / 700);
+  AK.mel2hz = (m) => 700 * (Math.pow(10, m / 2595) - 1);
+  // 三角形梅尔滤波器组：返回 nMels 个 {lo, c, hi, w: Float32Array(nBins)}
+  AK.melFB = function (nMels, nfft, sr, fmin, fmax) {
+    fmin = fmin || 0; fmax = fmax || sr / 2;
+    const nb = nfft / 2 + 1, m0 = AK.hz2mel(fmin), m1 = AK.hz2mel(fmax), pts = [];
+    for (let i = 0; i < nMels + 2; i++) pts.push(AK.mel2hz(m0 + ((m1 - m0) * i) / (nMels + 1)));
+    const fb = [];
+    for (let m = 0; m < nMels; m++) {
+      const lo = pts[m], c = pts[m + 1], hi = pts[m + 2], w = new Float32Array(nb);
+      for (let k = 0; k < nb; k++) {
+        const f = (k * sr) / nfft;
+        w[k] = f < lo || f > hi ? 0 : f <= c ? (f - lo) / (c - lo) : (hi - f) / (hi - c);
+      }
+      fb.push({ lo, c, hi, w });
+    }
+    return fb;
+  };
+  AK.applyFB = function (frames, fb) {
+    return frames.map((p) => Float32Array.from(fb, (f) => { let s = 0; for (let k = 0; k < p.length; k++) s += p[k] * f.w[k]; return s; }));
+  };
+  AK.log = (frames, eps) => frames.map((p) => Float32Array.from(p, (v) => Math.log(v + (eps || 1e-10))));
+  AK.db = (frames) => { let mx = 1e-12; frames.forEach((p) => p.forEach((v) => (mx = Math.max(mx, v)))); return frames.map((p) => Float32Array.from(p, (v) => Math.max(-80, 10 * Math.log10((v + 1e-12) / mx)))); };
+  AK.dct = function (v, n) { // DCT-II，取前 n 个系数
+    const N = v.length, out = new Float32Array(n);
+    for (let k = 0; k < n; k++) { let s = 0; for (let i = 0; i < N; i++) s += v[i] * Math.cos((Math.PI * k * (2 * i + 1)) / (2 * N)); out[k] = s * Math.sqrt((k ? 2 : 1) / N); }
+    return out;
+  };
+  // ---- 合成示意声音 ----
+  const VOW = { a: [730, 1090, 2440], e: [530, 1840, 2480], i: [270, 2290, 3010], o: [570, 840, 2410], u: [300, 870, 2240], n: [250, 1700, 2600], l: [360, 1300, 2700], r: [420, 1300, 1600], w: [300, 700, 2200] };
+  function voiced(out, s0, n, f0, F, amp, sr, f0end) {
+    const nh = Math.floor(3800 / f0);
+    const amps = [];
+    for (let k = 1; k <= nh; k++) { let a = 0; F.forEach((f, j) => (a += Math.exp(-Math.pow((k * f0 - f) / (90 + 40 * j), 2)) / (1 + j * 0.6))); amps.push((a + 0.02) / Math.sqrt(k)); }
+    let ph = 0;
+    for (let i = 0; i < n; i++) {
+      const t = i / n, env = Math.min(1, t * 12, (1 - t) * 10), f = f0 + ((f0end || f0) - f0) * t;
+      ph += (2 * Math.PI * f) / sr;
+      let v = 0;
+      for (let k = 1; k <= amps.length; k++) if (k * f < sr / 2) v += amps[k - 1] * Math.sin(k * ph);
+      out[s0 + i] += amp * env * v * 0.35;
+    }
+  }
+  function noiseBand(out, s0, n, lo, hi, amp, r, sr) {
+    const comps = [];
+    for (let j = 0; j < 70; j++) comps.push([lo + r() * (hi - lo), r() * 6.283]);
+    for (let i = 0; i < n; i++) {
+      const t = i / n, env = Math.min(1, t * 6, (1 - t) * 6);
+      let v = 0;
+      for (const c of comps) v += Math.sin((2 * Math.PI * c[0] * i) / sr + c[1]);
+      out[s0 + i] += (amp * env * v) / 9;
+    }
+  }
+  // 一个音段：[类型, 时长秒, 参数]；类型：v 元音/浊音（参数=VOW 键）, f 擦音（[lo,hi]）, b 爆破（[lo,hi]）, s 静音
+  AK.WORDS = {
+    yes: [["v", 0.07, "i"], ["v", 0.2, "e"], ["f", 0.22, [4200, 7600]]],
+    no: [["v", 0.09, "n"], ["v", 0.32, "o"], ["v", 0.08, "u"]],
+    up: [["v", 0.24, "a"], ["s", 0.06], ["b", 0.03, [600, 3000]]],
+    down: [["b", 0.025, [2500, 5000]], ["v", 0.18, "a"], ["v", 0.12, "u"], ["v", 0.09, "n"]],
+    left: [["v", 0.07, "l"], ["v", 0.17, "e"], ["f", 0.11, [1500, 6500]], ["b", 0.03, [3500, 7000]]],
+    right: [["v", 0.07, "r"], ["v", 0.16, "a"], ["v", 0.1, "i"], ["s", 0.04], ["b", 0.03, [3500, 7000]]],
+    on: [["v", 0.28, "o"], ["v", 0.12, "n"]],
+    off: [["v", 0.26, "o"], ["f", 0.17, [1200, 6500]]],
+    stop: [["f", 0.16, [4200, 7600]], ["b", 0.02, [3500, 7000]], ["v", 0.2, "o"], ["s", 0.05], ["b", 0.03, [600, 3000]]],
+    go: [["b", 0.02, [1200, 3000]], ["v", 0.32, "o"], ["v", 0.08, "u"]],
+  };
+  // 合成一个词：opt {sr, dur, f0, start, noise, seed}；返回 {x, segs:[{name,t0,t1}]}
+  AK.word = function (name, opt) {
+    opt = Object.assign({ sr: AK.SR, dur: 1, f0: 130, start: 0.22, noise: 0.004, seed: 1 }, opt || {});
+    const sr = opt.sr, N = Math.round(sr * opt.dur), x = new Float32Array(N), r = K.rng(opt.seed);
+    let t = opt.start;
+    const segs = [];
+    (AK.WORDS[name] || AK.WORDS.yes).forEach((sg, j) => {
+      const n = Math.round(sg[1] * sr), s0 = Math.round(t * sr);
+      if (s0 + n < N) {
+        if (sg[0] === "v") voiced(x, s0, n, opt.f0 * (1 + 0.04 * Math.sin(j)), VOW[sg[2]], sg[2] === "n" ? 0.5 : 1, sr, opt.f0 * (j % 2 ? 0.93 : 1.02));
+        else if (sg[0] === "f") noiseBand(x, s0, n, sg[2][0], Math.min(sg[2][1], sr / 2 - 100), 0.16, r, sr);
+        else if (sg[0] === "b") noiseBand(x, s0, n, sg[2][0], Math.min(sg[2][1], sr / 2 - 100), 0.35, r, sr);
+      }
+      segs.push({ name: sg[0] === "v" ? sg[2] : sg[0] === "f" ? "擦音" : sg[0] === "b" ? "爆破" : "停顿", t0: t, t1: t + sg[1] });
+      t += sg[1];
+    });
+    for (let i = 0; i < N; i++) x[i] += opt.noise * K.randn(r);
+    return { x, segs, sr };
+  };
+  // 环境声 / 其他示意声音
+  AK.sound = function (kind, opt) {
+    opt = Object.assign({ sr: AK.SR, dur: 1, seed: 1 }, opt || {});
+    const sr = opt.sr, N = Math.round(sr * opt.dur), x = new Float32Array(N), r = K.rng(opt.seed);
+    const add = (f, a, s0, n, decay) => { for (let i = 0; i < n && s0 + i < N; i++) x[s0 + i] += a * Math.sin((2 * Math.PI * f * i) / sr) * (decay ? Math.exp(-i / (decay * sr)) : 1); };
+    if (kind === "siren") { let ph = 0; for (let i = 0; i < N; i++) { const f = 900 + 400 * Math.sin((2 * Math.PI * 1.5 * i) / sr); ph += (2 * Math.PI * f) / sr; x[i] = 0.4 * Math.sin(ph) + 0.15 * Math.sin(2 * ph); } }
+    else if (kind === "dog") { [0.1, 0.45].forEach((t0) => { const s0 = Math.round(t0 * sr), n = Math.round(0.18 * sr); voiced(x, s0, n, 420, [800, 1500, 2600], 1.4, sr, 330); noiseBand(x, s0, Math.round(0.05 * sr), 500, 4000, 0.6, r, sr); }); }
+    else if (kind === "rain") { for (let i = 0; i < N; i++) x[i] = 0.12 * K.randn(r); for (let k = 0; k < 40; k++) { const s0 = Math.floor(r() * N); for (let i = 0; i < 120 && s0 + i < N; i++) x[s0 + i] += 0.5 * K.randn(r) * Math.exp(-i / 25); } }
+    else if (kind === "clock") { for (let t0 = 0.05; t0 < opt.dur; t0 += 0.25) { const s0 = Math.round(t0 * sr); add(3000, 0.6, s0, 400, 0.004); add(5200, 0.4, s0, 300, 0.003); } }
+    else if (kind === "engine") { let ph = 0; for (let i = 0; i < N; i++) { ph += (2 * Math.PI * 55) / sr; let v = 0; for (let k = 1; k < 12; k++) v += Math.sin(k * ph + k) / k; x[i] = 0.25 * v * (1 + 0.3 * Math.sin((2 * Math.PI * 8 * i) / sr)) + 0.03 * K.randn(r); } }
+    else if (kind === "bird") { for (let t0 = 0.08; t0 < opt.dur - 0.15; t0 += 0.3) { const s0 = Math.round(t0 * sr), n = Math.round(0.12 * sr); let ph = 0; for (let i = 0; i < n && s0 + i < N; i++) { const f = 3200 + 1600 * (i / n) + 300 * Math.sin(i / 40); ph += (2 * Math.PI * f) / sr; x[s0 + i] += 0.45 * Math.sin(ph) * Math.sin((Math.PI * i) / n); } } }
+    else if (kind === "crying") { [0, 0.5].forEach((t0) => voiced(x, Math.round((t0 + 0.05) * sr), Math.round(0.4 * sr), 450, [1000, 2500, 3500], 1.2, sr, 380)); }
+    else if (kind === "glass") { const s0 = Math.round(0.2 * sr); noiseBand(x, s0, Math.round(0.04 * sr), 2000, 7500, 1.2, r, sr); [2800, 4100, 5600, 6900].forEach((f, j) => add(f, 0.3, s0, Math.round(0.6 * sr), 0.15 + j * 0.03)); }
+    else if (kind === "noise") { for (let i = 0; i < N; i++) x[i] = 0.2 * K.randn(r); }
+    for (let i = 0; i < N; i++) x[i] += 0.003 * K.randn(r);
+    return { x, sr };
+  };
+  // ---- 画图 ----
+  AK.drawWave = function (svg, box, x, opt) {
+    opt = opt || {};
+    K.svg(svg, "rect", { x: box.x, y: box.y, width: box.w, height: box.h, fill: "var(--panel-2)", rx: 4 });
+    let mx = 1e-9; for (let i = 0; i < x.length; i++) mx = Math.max(mx, Math.abs(x[i]));
+    const cols = Math.min(box.w, 600), step = x.length / cols, mid = box.y + box.h / 2, sc = (box.h / 2 - 3) / (opt.max || mx);
+    let d = "";
+    for (let c = 0; c < cols; c++) {
+      let lo = 0, hi = 0;
+      for (let i = Math.floor(c * step); i < Math.floor((c + 1) * step); i++) { lo = Math.min(lo, x[i]); hi = Math.max(hi, x[i]); }
+      const px = box.x + (c / cols) * box.w;
+      d += `M${px.toFixed(1)},${(mid - hi * sc).toFixed(1)}V${(mid - lo * sc + 0.5).toFixed(1)}`;
+    }
+    return K.svg(svg, "path", { d, stroke: opt.color || "var(--c1)", "stroke-width": Math.max(1, box.w / cols) * 0.9, fill: "none" });
+  };
+  AK.color = function (t) { // 频谱图色带：底色 → 蓝 → 橙
+    t = K.clamp(t, 0, 1);
+    return t < 0.55 ? `color-mix(in srgb, var(--c1) ${Math.round((t / 0.55) * 100)}%, var(--panel-2))` : `color-mix(in srgb, var(--warn) ${Math.round(((t - 0.55) / 0.45) * 100)}%, var(--c1))`;
+  };
+  // frames: [时间][频率]，画成热力图；opt {lo, hi, maxT, maxF, fmax(频点上限)}
+  AK.drawSpec = function (svg, box, frames, opt) {
+    opt = opt || {};
+    const g = K.svg(svg, "g");
+    const T = frames.length, Fall = frames[0].length, F = opt.fmax ? Math.min(Fall, opt.fmax) : Fall;
+    let lo = opt.lo, hi = opt.hi;
+    if (lo == null || hi == null) { const v = []; frames.forEach((p) => { for (let k = 0; k < F; k++) v.push(p[k]); }); v.sort((a, b) => a - b); if (lo == null) lo = v[Math.floor(v.length * 0.05)]; if (hi == null) hi = v[Math.floor(v.length * 0.995)]; }
+    const nt = Math.min(T, opt.maxT || 90), nf = Math.min(F, opt.maxF || 64);
+    const cw = box.w / nt, ch = box.h / nf;
+    for (let a = 0; a < nt; a++) for (let b = 0; b < nf; b++) {
+      const t0 = Math.floor((a * T) / nt), t1 = Math.max(t0 + 1, Math.floor(((a + 1) * T) / nt)), f0 = Math.floor((b * F) / nf), f1 = Math.max(f0 + 1, Math.floor(((b + 1) * F) / nf));
+      let s = -Infinity;
+      for (let t = t0; t < t1; t++) for (let f = f0; f < f1; f++) s = Math.max(s, frames[t][f]);
+      K.svg(g, "rect", { x: (box.x + a * cw).toFixed(1), y: (box.y + box.h - (b + 1) * ch).toFixed(1), width: (cw + 0.6).toFixed(1), height: (ch + 0.6).toFixed(1), fill: AK.color((s - lo) / (hi - lo || 1)) });
+    }
+    return g;
+  };
+  // 用 WebAudio 播放（课堂上可以真的听到合成声音）
+  AK.play = function (x, sr) {
+    try {
+      const C = window.AudioContext || window.webkitAudioContext; if (!C) return;
+      const ac = AK._ac || (AK._ac = new C());
+      let mx = 1e-9; for (let i = 0; i < x.length; i++) mx = Math.max(mx, Math.abs(x[i]));
+      const buf = ac.createBuffer(1, x.length, sr), ch = buf.getChannelData(0);
+      for (let i = 0; i < x.length; i++) ch[i] = (0.8 * x[i]) / mx;
+      const src = ac.createBufferSource(); src.buffer = buf; src.connect(ac.destination); src.start();
+    } catch (e) { /* 没有声卡也不影响页面 */ }
+  };
+  // 在实验面板外加一个“播放”按钮
+  AK.playBtn = function (labEl, label, getter) {
+    const b = K.el("button", { class: "btn ghost", style: "margin-top:8px" }, label || "▶ 播放合成声音");
+    b.onclick = () => { const s = getter(); if (s) AK.play(s.x, s.sr); };
+    const ctrl = labEl.querySelector(".ctrl"); (ctrl || labEl).appendChild(b);
+    return b;
+  };
+  /* ===== 音频工具结束 ===== */
+
+
+  const SR = 16000;
+  // 合成“说话”声：真 = 基频有自然抖动、带气声；假（示意）= 基频过于平稳、高频被截、没有气声
+  function voice(fake, q, seed, dur) {
+    dur = dur || 1.2; q = q == null ? 1 : q;
+    const r = K.rng(seed || 1), N = Math.round(dur * SR), x = new Float32Array(N);
+    const vowels = [[730, 1090, 2440], [270, 2290, 3010], [570, 840, 2410], [530, 1840, 2480]];
+    let ph = 0, f0 = 125, drift = 0;
+    const seg = Math.round(N / 4);
+    const nh = 40;
+    const cut = fake ? K.lerp(8000, 3800, q) : 8000;
+    for (let i = 0; i < N; i++) {
+      const v = vowels[Math.min(3, Math.floor(i / seg))], u = (i % seg) / seg, env = Math.min(1, u * 8, (1 - u) * 8) * 0.9 + 0.1;
+      drift = fake ? drift * 0.999 : 0.995 * drift + 0.6 * K.randn(r) * 0.06;
+      const jit = fake ? 0.06 * (1 - q) * K.randn(r) : 1.2 * drift + 0.5 * K.randn(r) * 0.3;
+      const f = f0 * (1 + 0.08 * Math.sin((2 * Math.PI * 1.3 * i) / SR)) + jit * 6;
+      ph += (2 * Math.PI * f) / SR;
+      let s = 0;
+      for (let k = 1; k <= nh; k++) {
+        const fk = k * f; if (fk > cut || fk > SR / 2 - 200) break;
+        let a = 0; v.forEach((F, j) => (a += Math.exp(-Math.pow((fk - F) / (100 + 40 * j), 2)) / (1 + j * 0.5)));
+        const shim = fake ? 1 : 1 + 0.15 * K.randn(r);
+        s += ((a + 0.015) / Math.sqrt(k)) * Math.sin(k * ph) * shim;
+      }
+      const breath = fake ? 0.004 * (1 - q) : 0.03;
+      x[i] = env * s * 0.3 + breath * K.randn(r) * (cut >= 7900 || !fake ? 1 : 0.3);
+    }
+    return x;
+  }
+  const melDB = (x, nm) => AK.db(AK.applyFB(AK.stft(x, 512, 160, 512), AK.melFB(nm || 64, 512, SR, 20, 8000)));
+
+  const steps = [
+    {
+      at: 0, title: "开场：为什么要识别假声音", kicker: "第 0–3 格 · 背景与方法",
+      html: `<p>作者用电影《终结者》里机器人模仿人声骗人的片段开场：如今几分钟就能克隆一个人的声音，所以<b>检测伪造语音</b>很重要，它是防止诈骗、保护声纹登录的一道关。</p><p>他列出这份 notebook 要演示的内容：用 TensorFlow 做伪造语音检测；用 <code>tf.data</code> 和 TFRecord 处理音频；从原始音频提取频谱；音频增强（含 CutMix、MixUp）；借<b>语音识别（ASR）模型</b>做迁移学习、避开 ImageNet；使用谷歌提出的 <b>Conformer</b> 模型。数据选 ASVspoof 2019，它自带验证集和测试集，方便比较。</p>`,
+      draw(svg, ctx) {
+        const real = voice(false, 1, 3, 1), fake = voice(true, 0.8, 4, 1);
+        K.svg(svg, "text", { x: 30, y: 24, "font-size": 13, "font-weight": 700, fill: "var(--c3)" }, "真人语音（合成示意）");
+        K.svg(svg, "text", { x: 380, y: 24, "font-size": 13, "font-weight": 700, fill: "var(--c6)" }, "伪造语音（合成示意）");
+        AK.drawSpec(svg, { x: 30, y: 34, w: 310, h: 150 }, melDB(real), { maxT: 70, maxF: 48, lo: -70, hi: 0 });
+        AK.drawSpec(svg, { x: 380, y: 34, w: 310, h: 150 }, melDB(fake), { maxT: 70, maxF: 48, lo: -70, hi: 0 });
+        const det = K.node(svg, 230, 220, 260, 60, "检测模型：这是真人吗？", { fill: "var(--accent-soft)", stroke: "var(--accent)", bold: true });
+        det.style.opacity = 0;
+        const ok = K.svg(svg, "text", { x: 185, y: 315, "text-anchor": "middle", "font-size": 15, "font-weight": 700, fill: "var(--good)" }, "✓ 放行"), no = K.svg(svg, "text", { x: 535, y: 315, "text-anchor": "middle", "font-size": 15, "font-weight": 700, fill: "var(--bad)" }, "✗ 拦截");
+        ok.style.opacity = 0; no.style.opacity = 0;
+        ctx.wait(400).then((o) => o && ctx.tween(500, (t) => (det.style.opacity = t))).then((o) => o && ctx.tween(500, (t) => { ok.style.opacity = t; no.style.opacity = t; }));
+        K.svg(svg, "text", { x: 30, y: 200, "font-size": 11, class: "muted" }, "示意：右边高频被截、纹路过于整齐；真实的伪造痕迹通常更隐蔽");
+      },
+    },
+    {
+      at: 4, title: "安装、导入和一份配置表", kicker: "第 4–9 格 · CFG",
+      html: `<p>作者先装好音频处理（tensorflow_io）、概率分布（tensorflow_probability）、额外指标（tensorflow_addons）、自己写的 <code>audio_classification_models</code> 库和实验记录工具 W&amp;B。</p><p>所有超参数都放在 <code>CFG</code> 类里：16 kHz、每条 <b>3.5 秒</b>（56000 个采样点）；频谱 <b>256 帧 × 128 个梅尔带</b>，n_fft 2048，帧移按“音频长度 ÷ 255”算出来正好得到 256 帧；batch 32，训练 12 轮，Adam，余弦学习率，二分类交叉熵。增强开关 <code>augment = False</code>：这一版实验没有用增强。</p>`,
+      cells: [9], highlight: ["duration = 3.5", "spec_freq = 128", "spec_time = 256", "hop_len = audio_len//(spec_time - 1)", "augment = False"],
+      draw(svg, ctx) {
+        const N = 56000;
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13 }, "3.5 秒 × 16000 = 56000 个采样点");
+        K.svg(svg, "rect", { x: 30, y: 40, width: 660, height: 30, fill: "var(--panel-2)", stroke: "var(--line)" });
+        const hop = Math.floor(N / 255);
+        K.svg(svg, "text", { x: 30, y: 100, "font-size": 13 }, `帧移 = 56000 // 255 = ${hop} 个点 → 约 256 帧（多出的部分截掉）`);
+        const ticks = [];
+        for (let i = 0; i < 256; i += 4) ticks.push(K.svg(svg, "line", { x1: 30 + (i * hop / N) * 660, x2: 30 + (i * hop / N) * 660, y1: 40, y2: 70, stroke: "var(--c1)", opacity: 0 }));
+        const grid = K.svg(svg, "g");
+        for (let i = 0; i < 32; i++) for (let j = 0; j < 16; j++) K.svg(grid, "rect", { x: 30 + i * 20.6, y: 130 + j * 9, width: 19.6, height: 8, fill: AK.color(0.3 + 0.4 * Math.sin(i / 3 + j / 4) ** 2) });
+        grid.style.opacity = 0;
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12 }, "→ 一张 256（时间）× 128（梅尔带）的“图片”（每格示意 8×8 个像素）");
+        ctx.tween(1200, (t) => ticks.forEach((l, i) => (l.style.opacity = K.clamp(t * 64 - i, 0, 1)))).then((o) => o && ctx.tween(700, (t) => (grid.style.opacity = t)));
+      },
+    },
+    {
+      at: 10, title: "固定随机种子，自动选设备", kicker: "第 10–14 格 · 可复现与硬件",
+      html: `<p><code>seeding(101)</code> 把 Python、NumPy、TensorFlow 的随机种子都固定，让每次运行结果尽量一样。</p><p><code>configure_device()</code> 先试着连 TPU，连不上就找 GPU，再没有就用 CPU；返回的 <code>strategy</code> 决定模型复制到几个设备上并行训练，<code>REPLICAS</code> 就是设备个数，真正的批大小 = 32 × REPLICAS。</p>`,
+      cells: [11, 13, 14], highlight: ["tf.random.set_seed", "TPUClusterResolver", "MirroredStrategy", "num_replicas_in_sync"],
+      draw(svg, ctx) {
+        const opts = [["TPU？", 60], ["GPU？", 280], ["CPU", 500]];
+        const ns = opts.map((o, i) => K.node(svg, o[1], 120, 160, 70, o[0], { fill: "var(--panel-2)" }));
+        K.arrow(svg, 220, 155, 278, 155); K.arrow(svg, 440, 155, 498, 155);
+        K.svg(svg, "text", { x: 230, y: 145, "font-size": 11, class: "muted" }, "连不上");
+        K.svg(svg, "text", { x: 450, y: 145, "font-size": 11, class: "muted" }, "没有");
+        const lab = K.svg(svg, "text", { x: 60, y: 250, "font-size": 13 }, "");
+        (async () => {
+          for (let i = 0; i < 3; i++) {
+            const rc = ns[i].querySelector("rect");
+            if (!(await ctx.tween(500, (t) => (rc.style.fill = `color-mix(in srgb, var(--warn) ${Math.round(t * 40)}%, var(--panel-2))`)))) return;
+            if (i < 2) rc.style.fill = "var(--panel-2)";
+          }
+          ns[2].querySelector("rect").style.fill = "color-mix(in srgb, var(--c3) 30%, var(--panel))";
+          lab.textContent = "依次尝试，找到能用的设备；同一套代码在三种硬件上都能跑";
+        })();
+      },
+    },
+    {
+      at: 15, title: "数据：ASVspoof 2019 的真与假", kicker: "第 15–19 格 · 元数据与 TFRecord",
+      html: `<p>ASVspoof 2019 LA 的协议文件是一张表：说话人、文件名、伪造系统编号、真假。作者把 spoof 设为 1、bonafide 设为 0，演示时每类抽 2500 条看看。</p><p>真正训练读的是作者另做的 <b>TFRecord</b> 文件（训练 / 验证 / 测试各一组）。在 TPU 上训练，数据必须放在谷歌云存储里，<code>KaggleDatasets().get_gcs_path()</code> 能直接拿到 Kaggle 公开数据集的云路径。每个 .tfrec 文件名里写着它包含多少条样本，<code>count_data_items</code> 就是把这些数字加起来。</p><p>ASVspoof 的测试集用到了训练时<b>没见过的伪造系统</b>，所以测试分数反映的是“遇到新骗术还认不认得出”。</p>`,
+      cells: [16, 19], highlight: ["(train_df.class_name=='spoof')", "sample(2500)", "get_gcs_path"],
+      draw(svg, ctx) {
+        const parts = [["训练 train", 40, "已知伪造系统"], ["验证 dev", 270, "已知伪造系统"], ["测试 eval", 500, "含没见过的系统"]];
+        parts.forEach((p, i) => { K.node(svg, p[1], 60, 180, 60, p[0] + "\n" + p[2], { fill: i === 2 ? "color-mix(in srgb, var(--warn) 18%, var(--panel))" : "var(--panel-2)", stroke: i === 2 ? "var(--warn)" : "var(--line)" }); });
+        const dots = [], r = K.rng(5);
+        for (let i = 0; i < 60; i++) { const part = i % 3, fake = r() < 0.5; dots.push(K.svg(svg, "circle", { cx: parts[part][1] + 20 + r() * 140, cy: 160 + r() * 120, r: 0, fill: fake ? "var(--c6)" : "var(--c3)" })); }
+        K.svg(svg, "text", { x: 40, y: 310, "font-size": 12, class: "muted" }, "绿 = 真 bonafide（0）　红 = 假 spoof（1）　（示意，不代表真实比例）");
+        ctx.tween(1400, (t) => dots.forEach((d, i) => d.setAttribute("r", K.clamp(t * 60 - i, 0, 1) * 5)));
+      },
+    },
+    {
+      at: 20, title: "数据增强（这次训练其实关着）", kicker: "第 20–27 格 · AudioAug 与 SpecAug",
+      html: `<p>作者先提醒：虽然把频谱当图片，但<b>不能用翻转、旋转、错切</b>这类图像增强，旋转后的频谱和任何真实声音都对不上。</p><p>他实现了两类增强：</p><ul class="tight"><li><b>音频层面</b>：去掉首尾静音、随机裁剪或补齐到 3.5 秒、随机平移、加高斯噪声；</li><li><b>频谱层面</b>：随机遮住一段时间 / 一段频率（SpecAugment），<b>MixUp</b>（两张频谱按比例叠加，标签也按比例混合），<b>CutMix</b>（只沿时间轴剪一段贴到另一张上，标签按面积比例混合）。</li></ul><p>不过配置里 <code>augment=False</code>、各种概率都是 0，去静音和裁剪补齐是每条都做的，其余增强这次都没生效。</p>`,
+      cells: [25, 27], highlight: ["def TrimAudio", "def CropOrPad", "def get_mixup", "def get_cutmix"],
+      draw(svg, ctx) {
+        const a = melDB(voice(false, 1, 7)), b = melDB(voice(true, 0.9, 8));
+        const box = (x) => ({ x, y: 40, w: 200, h: 130 });
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 12 }, "A（真，标签 0）");
+        K.svg(svg, "text", { x: 260, y: 30, "font-size": 12 }, "B（假，标签 1）");
+        AK.drawSpec(svg, box(30), a, { maxT: 50, maxF: 32, lo: -70, hi: 0 });
+        AK.drawSpec(svg, box(260), b, { maxT: 50, maxF: 32, lo: -70, hi: 0 });
+        K.svg(svg, "text", { x: 490, y: 30, "font-size": 12 }, "CutMix：沿时间轴剪一段 B 贴进 A");
+        const L = Math.min(a.length, b.length), x1 = Math.floor(L * 0.4), x2 = Math.floor(L * 0.7);
+        const mix = a.slice(0, L).map((p, i) => (i >= x1 && i < x2 ? b[i] : p));
+        const g = AK.drawSpec(svg, box(490), mix, { maxT: 50, maxF: 32, lo: -70, hi: 0 }); g.style.opacity = 0;
+        const fr = K.svg(svg, "rect", { x: 490 + 200 * 0.4, y: 40, width: 200 * 0.3, height: 130, fill: "none", stroke: "var(--warn)", "stroke-width": 2.5 }); fr.style.opacity = 0;
+        const lb = K.svg(svg, "text", { x: 490, y: 195, "font-size": 12 }, "");
+        K.svg(svg, "text", { x: 30, y: 240, "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "✗ 旋转 90°：时间和频率对调，不再是任何真实声音");
+        K.svg(svg, "text", { x: 30, y: 270, "font-size": 13, fill: "var(--good)", "font-weight": 700 }, "✓ 遮挡 / 混合：仍然是“像声音”的频谱");
+        K.svg(svg, "text", { x: 30, y: 310, "font-size": 12, class: "muted" }, "本次训练 augment=False：这些增强写好了但没有启用");
+        ctx.wait(500).then((o) => o && ctx.tween(800, (t) => { g.style.opacity = t; fr.style.opacity = t; })).then((o) => { if (o) lb.textContent = "新标签 = 0.7 × 0 + 0.3 × 1 = 0.3"; });
+      },
+    },
+    {
+      at: 28, title: "特征：把声音画成梅尔频谱", kicker: "第 28–29 格 · Audio2Spec",
+      html: `<p><code>Audio2Spec</code> 三步：① <b>短时傅里叶变换</b>（STFT）：把声音切成一段段、每段算频率成分，得到频谱；② <b>梅尔刻度</b>：按人耳感受把频率分成 128 个带，低频细、高频粗；③ <b>分贝</b>：取对数，最响处为 0 dB，往下最多 80 dB。</p><p>作者特别解释了 STFT 的“时间-频率不确定”：窗口窄 → 时间清楚、频率模糊；窗口宽 → 频率清楚、时间模糊。这里窗口是 2048 点（128 毫秒），偏向频率分辨率，正好适合找合成语音在频率细节上的破绽。</p>`,
+      cells: [29], highlight: ["tfio.audio.spectrogram", "tfio.audio.melscale", "tfio.audio.dbscale(mel_spec, top_db=80)"],
+      draw(svg, ctx) {
+        const x = voice(false, 1, 11, 1.2);
+        AK.drawWave(svg, { x: 30, y: 30, w: 200, h: 120 }, x);
+        K.svg(svg, "text", { x: 30, y: 22, "font-size": 12 }, "① 波形");
+        const lin = AK.log(AK.stft(x, 512, 160, 512));
+        const g2 = AK.drawSpec(svg, { x: 260, y: 30, w: 200, h: 120 }, lin, { maxT: 50, maxF: 60 }); g2.style.opacity = 0;
+        K.svg(svg, "text", { x: 260, y: 22, "font-size": 12 }, "② STFT 频谱（线性频率）");
+        const g3 = AK.drawSpec(svg, { x: 490, y: 30, w: 200, h: 120 }, melDB(x, 64), { maxT: 50, maxF: 64, lo: -80, hi: 0 }); g3.style.opacity = 0;
+        K.svg(svg, "text", { x: 490, y: 22, "font-size": 12 }, "③ 梅尔 + dB（top_db = 80）");
+        K.arrow(svg, 232, 90, 256, 90); K.arrow(svg, 462, 90, 486, 90);
+        K.svg(svg, "text", { x: 30, y: 200, "font-size": 13 }, "窗口窄：");
+        K.svg(svg, "text", { x: 30, y: 260, "font-size": 13 }, "窗口宽：");
+        const nar = AK.log(AK.stft(x.subarray(0, 6000), 64, 32, 64)), wid = AK.log(AK.stft(x.subarray(0, 6000), 1024, 256, 1024));
+        AK.drawSpec(svg, { x: 110, y: 180, w: 300, h: 40 }, nar, { maxT: 120, maxF: 20 });
+        AK.drawSpec(svg, { x: 110, y: 240, w: 300, h: 40 }, wid, { maxT: 20, maxF: 60 });
+        K.svg(svg, "text", { x: 430, y: 205, "font-size": 12, class: "muted" }, "时间格多、频率格少");
+        K.svg(svg, "text", { x: 430, y: 265, "font-size": 12, class: "muted" }, "频率格多、时间格少");
+        ctx.wait(300).then((o) => o && ctx.tween(500, (t) => (g2.style.opacity = t))).then((o) => o && ctx.tween(500, (t) => (g3.style.opacity = t)));
+      },
+    },
+    {
+      at: 30, title: "TFRecord + tf.data 数据流水线", kicker: "第 30–34 格 · 读取与批处理",
+      html: `<p><b>TFRecord</b> 是 TensorFlow 的二进制格式：占地方小、读写快，TPU 训练也要求用它。作者把音频编码成 wav 字节串存进去，连同 id、说话人、系统编号、长度、标签一起。</p><p><code>read_tfrecord</code> 每条样本做：解码 → 标准化（减均值除标准差）→ 去首尾静音 → 裁剪或补齐到 3.5 秒 → （增强）→ 算梅尔频谱 → （频谱增强）→ 变成单通道图片。<code>get_dataset</code> 再把它串成流水线：并行读文件 → 缓存 → 重复 → 打乱 → 并行解析 → 分批 → MixUp/CutMix → 预取下一批。</p>`,
+      cells: [32, 34], highlight: ["tf.io.parse_single_example", "TrimAudio(audio)", "CropOrPad(audio, target_len)", "dataset.prefetch(AUTO)"],
+      draw(svg, ctx) {
+        const st = ["读 .tfrec", "解码 wav", "标准化", "去静音", "裁剪/补齐", "梅尔频谱", "分批", "预取"];
+        const ns = st.map((s, i) => { const g = K.node(svg, 20 + (i % 4) * 172, 60 + Math.floor(i / 4) * 130, 150, 56, s, { fill: "var(--panel-2)" }); return g; });
+        for (let i = 0; i < 7; i++) { if (i === 3) K.arrow(svg, 590, 116, 95, 188, { dash: "4 3" }); else K.arrow(svg, 170 + (i % 4) * 172, 88 + Math.floor(i / 4) * 130, 190 + (i % 4) * 172, 88 + Math.floor(i / 4) * 130); }
+        const ball = K.svg(svg, "circle", { cx: 95, cy: 88, r: 9, fill: "var(--warn)" });
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 12, class: "muted" }, "橙点 = 一条样本；各步用 num_parallel_calls=AUTO 并行，CPU 准备下一批时显卡在算这一批");
+        (async () => {
+          for (let k = 0; k < 2; k++) for (let i = 0; i < 8; i++) {
+            const cx = 95 + (i % 4) * 172, cy = 88 + Math.floor(i / 4) * 130;
+            const rc = ns[i].querySelector("rect");
+            if (!(await ctx.tween(220, (t) => { ball.setAttribute("cx", K.lerp(+ball.getAttribute("cx"), cx, t)); ball.setAttribute("cy", K.lerp(+ball.getAttribute("cy"), cy, t)); rc.style.fill = `color-mix(in srgb, var(--warn) ${Math.round(t * 30)}%, var(--panel-2))`; }))) return;
+            rc.style.fill = "var(--panel-2)";
+          }
+        })();
+      },
+    },
+    {
+      at: 35, title: "画一批出来检查", kicker: "第 35–40 格 · 可视化",
+      html: `<p>在训练前，作者从流水线里取 20 条样本，画成 3×3 的频谱网格，标上真假，分别看“不增强”和“增强后”的样子，确认形状、类型、标签都正确。还准备好了画混淆矩阵和训练曲线的函数。</p><p>这是个好习惯：<b>先看数据再训练</b>，能及早发现频谱全黑、标签错位这类问题。</p>`,
+      cells: [38, 40], highlight: ["display_batch(batch, row=3, col=3)"],
+      draw(svg, ctx) {
+        const cells = [];
+        for (let i = 0; i < 9; i++) {
+          const fake = [1, 3, 4, 8].includes(i), x = 40 + (i % 3) * 220, y = 20 + Math.floor(i / 3) * 105;
+          const g = AK.drawSpec(svg, { x, y, w: 200, h: 80 }, melDB(voice(fake, 0.7, 20 + i, 0.8), 48), { maxT: 40, maxF: 24, lo: -70, hi: 0 });
+          const t = K.svg(svg, "text", { x, y: y + 96, "font-size": 11, fill: fake ? "var(--c6)" : "var(--c3)" }, fake ? "Fake（1）" : "Real（0）");
+          g.style.opacity = 0; t.style.opacity = 0; cells.push([g, t]);
+        }
+        (async () => { for (const [g, t] of cells) if (!(await ctx.tween(150, (q) => { g.style.opacity = q; t.style.opacity = q; }))) return; })();
+      },
+    },
+    {
+      at: 41, title: "损失和指标：以 F1 为主", kicker: "第 41–42 格 · BCE 与 F1",
+      html: `<p>损失用<b>二分类交叉熵</b>；主要看 <b>F1</b>，同时记录精确率、召回率、准确率。作者解释：损失必须可以求导（能告诉模型往哪边改），F1 和准确率不能求导，所以只能当“观察指标”。</p><ul class="tight"><li>精确率 = 判为假的里面真是假的比例（冤枉了几个真人）</li><li>召回率 = 所有假语音里被抓到的比例（漏了几个骗子）</li><li>F1 = 两者的调和平均，一个低就拉低整体</li></ul><p>阈值固定在 0.5。</p>`,
+      cells: [42], highlight: ["tfa.metrics.F1Score(num_classes=1, threshold=0.5"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 280, h: 260 }, [0, 1], [0, 1], { xlabel: "精确率", ylabel: "召回率" });
+        for (let f = 0.2; f < 1; f += 0.2) { let d = ""; for (let p = f / 2 + 0.01; p <= 1; p += 0.01) { const r = (f * p) / (2 * p - f); if (r < 0 || r > 1) continue; d += (d ? "L" : "M") + ax.sx(p) + "," + ax.sy(r); } K.svg(svg, "path", { d, fill: "none", stroke: "var(--c4)", "stroke-width": 1.2, opacity: 0.7 }); K.svg(svg, "text", { x: ax.sx(1) + 4, y: ax.sy(f / (2 - f)) + 4, "font-size": 10, fill: "var(--c4)" }, "F1=" + f.toFixed(1)); }
+        const dot = K.svg(svg, "circle", { cx: ax.sx(0.9), cy: ax.sy(0.3), r: 7, fill: "var(--warn)" });
+        const lab = K.svg(svg, "text", { x: 400, y: 120, "font-size": 14 }, "");
+        K.svg(svg, "text", { x: 400, y: 70, "font-size": 13, "font-weight": 700 }, "F1 = 2PR / (P + R)");
+        ctx.tween(2200, (t) => { const p = K.lerp(0.9, 0.8, t), r = K.lerp(0.3, 0.85, t); dot.setAttribute("cx", ax.sx(p)); dot.setAttribute("cy", ax.sy(r)); lab.textContent = `P=${p.toFixed(2)}  R=${r.toFixed(2)}  F1=${((2 * p * r) / (p + r)).toFixed(2)}`; });
+        K.svg(svg, "text", { x: 400, y: 170, "font-size": 12, class: "muted" }, "精确率高但召回率低时，F1 也上不去");
+      },
+    },
+    {
+      at: 43, title: "学习率：先预热，再按余弦下降", kicker: "第 43–45 格 · 学习率调度",
+      html: `<p>学习率是每一步改模型的“步子大小”。作者的回调（改编自 Chris Deotte 的写法）：前 4 轮从 5e-5 <b>线性预热</b>到 5e-4，然后按<b>余弦曲线</b>慢慢降到 1e-5。也支持阶梯式和指数式下降。</p><p>为什么要预热？加载了预训练权重以后，一开始步子太大可能把学好的东西“踩坏”；先小步试探，再加速，最后又放慢精修。注意：这个回调会覆盖 <code>CFG.lr</code> 里写的 1e-4。</p>`,
+      cells: [44, 45], highlight: ["lr_ramp_ep = 4", "cosine_decay = 0.5 * (1 + math.cos(phase))"],
+      draw(svg, ctx) {
+        const E = 12, f = (e) => { const s = 5e-5, mx = 5e-4, mn = 1e-5, ramp = 4; if (e < ramp) return ((mx - s) / ramp) * e + s; const tot = E - ramp + 3, ph = (Math.PI * (e - ramp)) / tot; return (mx - mn) * 0.5 * (1 + Math.cos(ph)) + mn; };
+        const ax = K.axes(svg, { x: 70, y: 30, w: 600, h: 250 }, [0, E - 1], [0, 5.5e-4], { xlabel: "训练轮次（实际训练 12 轮）", yfmt: (v) => (v * 1e4).toFixed(1) + "e-4" });
+        const pts = []; for (let e = 0; e < E; e++) pts.push(K.svg(svg, "circle", { cx: ax.sx(e), cy: ax.sy(f(e)), r: 0, fill: e < 4 ? "var(--warn)" : "var(--c1)" }));
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: ax.sx(0.3), y: ax.sy(5.3e-4), "font-size": 12, fill: "var(--warn)" }, "预热 4 轮");
+        ctx.tween(1800, (t) => { const k = t * (E - 1); let d = ""; for (let e = 0; e <= k; e++) d += (e ? "L" : "M") + ax.sx(e) + "," + ax.sy(f(e)); path.setAttribute("d", d); pts.forEach((p, i) => p.setAttribute("r", i <= k ? 5 : 0)); });
+      },
+    },
+    {
+      at: 46, title: "不用 ImageNet，借语音识别的“耳朵”", kicker: "第 46–48 格 · 相关的迁移学习",
+      html: `<p>作者自问自答三个问题：</p><ul class="tight"><li><b>既然当图片分类，为什么不用 ImageNet 预训练模型？</b>它们是看照片的专家，不懂声音。从<b>音频</b>数据预训练的模型迁移过来更好。</li><li><b>去哪找在大量音频上预训练的模型？</b>语音识别（ASR）模型，比如在 LibriSpeech 上训练过的。</li><li><b>ASR 是“声音 → 文字”的编码器-解码器，怎么拿来分类？</b>只要编码器：它输出的特征向量已经浓缩了声音的信息，后面接一个分类层就行。</li></ul><p>作者为此写了 <code>audio_classification_models</code> 库，一行就能加载预训练的 Conformer 编码器。</p>`,
+      draw(svg, ctx) {
+        const enc = K.node(svg, 200, 50, 200, 90, "Conformer 编码器\n（语音识别预训练）", { fill: "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: "var(--c1)", bold: true });
+        const dec = K.node(svg, 460, 50, 200, 90, "解码器\n→ 文字", { fill: "var(--panel-2)" });
+        const head = K.node(svg, 460, 200, 200, 90, "平均池化 + 1 个神经元\nsigmoid → 假的概率", { fill: "var(--accent-soft)", stroke: "var(--accent)", bold: true });
+        K.node(svg, 20, 70, 140, 50, "梅尔频谱", { fill: "var(--panel-2)" });
+        K.arrow(svg, 160, 95, 198, 95);
+        const a1 = K.arrow(svg, 400, 95, 458, 95), a2 = K.arrow(svg, 400, 120, 458, 230);
+        head.style.opacity = 0; a2.style.opacity = 0;
+        const x = K.svg(svg, "text", { x: 560, y: 35, "text-anchor": "middle", "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "");
+        ctx.wait(700).then((o) => o && ctx.tween(700, (t) => { dec.style.opacity = 1 - 0.75 * t; a1.style.opacity = 1 - 0.75 * t; })).then((o) => { if (o) x.textContent = "不要解码器"; return o && ctx.tween(700, (t) => { head.style.opacity = t; a2.style.opacity = t; }); });
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 12, class: "muted" }, "迁移学习：保留会“听”的编码器，换掉“写字”的解码器，换上判断真假的小头");
+      },
+    },
+    {
+      at: 49, title: "Conformer：卷积 + Transformer", kicker: "第 49–52 格 · 模型",
+      html: `<p><b>Conformer</b> 是谷歌提出的语音识别结构，名字就是 Convolution（卷积）+ Transformer。每个 Conformer 块里有四种部件：</p><ul class="tight"><li><b>前馈模块</b>：普通的全连接变换（块的开头和结尾各一个“半步”）；</li><li><b>自注意力模块</b>：每一帧都可以看<b>所有</b>帧，抓全局的规律；</li><li><b>卷积模块</b>：逐点卷积 + 一维深度卷积，只看<b>附近</b>几帧，抓局部的细节；</li><li><b>层归一化</b>：把每一层的数值稳定在合适的范围。</li></ul><p>作者的模型：输入 256×128×1 → 预训练 Conformer 编码器 → 在时间方向<b>全局平均池化</b> → 1 个神经元 + sigmoid。优化器 Adam。</p>`,
+      cells: [49, 51, 52], highlight: ["acm.ConformerEncoder()", "load_pretrain", "GlobalAveragePooling1D", "Dense(num_classes, activation=final_activation)"],
+      draw(svg, ctx) {
+        const parts = [["½ 前馈", "var(--c2)"], ["自注意力", "var(--c4)"], ["卷积模块", "var(--c1)"], ["½ 前馈", "var(--c2)"], ["层归一化", "var(--ink-3)"]];
+        const ns = parts.map((p, i) => { const g = K.node(svg, 40 + i * 130, 40, 115, 56, p[0], { fill: `color-mix(in srgb, ${p[1]} 18%, var(--panel))`, stroke: p[1], bold: true }); g.style.opacity = 0; return g; });
+        for (let i = 0; i < 4; i++) K.arrow(svg, 155 + i * 130, 68, 168 + i * 130, 68);
+        const T = 16, y0 = 230, fx = (i) => 60 + i * 38;
+        for (let i = 0; i < T; i++) K.svg(svg, "rect", { x: fx(i) - 12, y: y0, width: 24, height: 24, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" });
+        K.svg(svg, "text", { x: 40, y: y0 + 50, "font-size": 12, class: "muted" }, "下方：16 帧示意。紫线 = 自注意力（第 8 帧看全部帧），蓝框 = 卷积（只看附近几帧）");
+        const q = 8, att = [], conv = K.svg(svg, "rect", { x: fx(q - 2) - 14, y: y0 - 4, width: fx(q + 2) - fx(q - 2) + 28, height: 32, rx: 6, fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        conv.style.opacity = 0;
+        for (let i = 0; i < T; i++) att.push(K.svg(svg, "path", { d: `M${fx(q)},${y0} Q${(fx(q) + fx(i)) / 2},${y0 - 30 - Math.abs(i - q) * 6} ${fx(i)},${y0}`, fill: "none", stroke: "var(--c4)", "stroke-width": 1 + 2 * Math.exp(-Math.abs(i - 3) / 2) + 2 * Math.exp(-Math.abs(i - 12) / 2), opacity: 0 }));
+        (async () => {
+          for (const g of ns) if (!(await ctx.tween(220, (t) => (g.style.opacity = t)))) return;
+          if (!(await ctx.tween(800, (t) => att.forEach((a) => (a.style.opacity = t * 0.7))))) return;
+          await ctx.tween(500, (t) => (conv.style.opacity = t));
+        })();
+      },
+    },
+    {
+      at: 53, title: "训练：W&B 记录，保存最好的一轮", kicker: "第 53–57 格 · 训练",
+      html: `<p>作者用 <b>Weights &amp; Biases</b>（W&amp;B）记录每次实验的配置和曲线，没有密钥时就匿名记录。训练前打印图像尺寸、批大小、轮数、样本数。</p><p>训练 12 轮，每轮步数 = 训练样本数 ÷ 批大小；<b>验证集</b>用来挑最好的模型：<code>ModelCheckpoint</code> 监控 <code>val_f1_score</code>，只保存最高的那一轮的权重。训练曲线放在作者公开的 W&amp;B 看板上（链接在原 notebook 里）。</p>`,
+      cells: [54, 56], highlight: ["monitor=\"val_f1_score\"", "save_best_only=True", "steps_per_epoch=STEPS_PER_EPOCH"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 580, h: 230 }, [1, 12], [0, 1], { xlabel: "轮次", ylabel: "F1（示意曲线）" });
+        const tr = [], va = [];
+        for (let e = 1; e <= 12; e++) { tr.push(0.55 + 0.42 * (1 - Math.exp(-e / 3))); va.push(0.5 + 0.35 * (1 - Math.exp(-e / 2.5)) - (e > 8 ? (e - 8) * 0.015 : 0) + 0.02 * Math.sin(e * 1.7)); }
+        const pa = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c2)", "stroke-width": 2 }), pv = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 80, y: 290, "font-size": 12, fill: "var(--c2)" }, "■ 训练 F1");
+        K.svg(svg, "text", { x: 180, y: 290, "font-size": 12, fill: "var(--c1)" }, "■ 验证 F1");
+        K.svg(svg, "text", { x: 300, y: 290, "font-size": 12, class: "muted" }, "示意曲线，不是作者的训练结果");
+        const best = va.indexOf(Math.max(...va));
+        const star = K.svg(svg, "circle", { cx: ax.sx(best + 1), cy: ax.sy(va[best]), r: 0, fill: "none", stroke: "var(--warn)", "stroke-width": 3 });
+        const sl = K.svg(svg, "text", { x: ax.sx(best + 1), y: ax.sy(va[best]) + 30, "text-anchor": "middle", "font-size": 12, fill: "var(--warn)" }, "");
+        ctx.tween(2000, (t) => { const k = 1 + t * 11; let a = "", b = ""; for (let e = 1; e <= k; e++) { a += (e > 1 ? "L" : "M") + ax.sx(e) + "," + ax.sy(tr[e - 1]); b += (e > 1 ? "L" : "M") + ax.sx(e) + "," + ax.sy(va[e - 1]); } pa.setAttribute("d", a); pv.setAttribute("d", b); })
+          .then((o) => { if (o) { star.setAttribute("r", 10); sl.textContent = "保存这一轮（val F1 最高）"; } });
+      },
+    },
+    {
+      at: 58, title: "评估：验证集、测试集和混淆矩阵", kicker: "第 58–62 格 · 结果",
+      html: `<p>加载最好的权重，分别在<b>验证集</b>和<b>测试集</b>上算准确率、精确率、召回率、F1，记进 W&amp;B。然后对测试集逐条预测，概率四舍五入成 0/1，画<b>按行归一化的混淆矩阵</b>：每一行是真实类别，看真语音有多少被冤枉成假，假语音有多少漏判成真。</p><p>具体数值在运行输出里。最后作者列了参考资料，删掉临时文件夹。</p>`,
+      cells: [59], highlight: ["model.load_weights", "model.evaluate", "confusion_matrix(test_labels, test_preds.reshape(-1).round())", "normalize=True"],
+      draw(svg, ctx) {
+        const L = [["真 → 判真", "var(--c3)"], ["真 → 判假\n（冤枉真人）", "var(--warn)"], ["假 → 判真\n（放过骗子）", "var(--bad)"], ["假 → 判假", "var(--c3)"]];
+        K.svg(svg, "text", { x: 160, y: 30, "font-size": 12 }, "预测：Real　　　　　Fake");
+        K.svg(svg, "text", { x: 30, y: 110, "font-size": 12 }, "真实 Real");
+        K.svg(svg, "text", { x: 30, y: 240, "font-size": 12 }, "真实 Fake");
+        L.forEach((d, i) => { const g = K.node(svg, 130 + (i % 2) * 140, 45 + Math.floor(i / 2) * 130, 130, 120, d[0] + "\n（比例见原输出）", { fill: `color-mix(in srgb, ${d[1]} 18%, var(--panel))`, stroke: d[1], fs: 12 }); g.style.opacity = 0; ctx.wait(200 + i * 300).then((o) => o && ctx.tween(400, (t) => (g.style.opacity = t))); });
+        K.svg(svg, "text", { x: 450, y: 90, "font-size": 13, "font-weight": 700 }, "按行归一化：");
+        K.svg(svg, "text", { x: 450, y: 115, "font-size": 12 }, "每一行加起来 = 100%");
+        K.svg(svg, "text", { x: 450, y: 160, "font-size": 12, fill: "var(--warn)" }, "右上：真人被拒，用户体验差");
+        K.svg(svg, "text", { x: 450, y: 185, "font-size": 12, fill: "var(--bad)" }, "左下：骗子过关，安全事故");
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：MixUp / CutMix ---------- */
+  const SA = melDB(voice(false, 1, 31, 1.2)), SB = melDB(voice(true, 0.9, 32, 1.2));
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 280,
+    controls: [
+      { id: "m", label: "方法", value: "cutmix", options: [["mixup", "MixUp：整张按比例叠加"], ["cutmix", "CutMix：沿时间轴剪一段贴入"]] },
+      { id: "lam", label: "λ（保留 A 的比例）", min: 0, max: 1, step: 0.01, value: 0.7, fmt: (x) => x.toFixed(2) },
+      { id: "pos", label: "CutMix 剪切位置（时间轴中心）", min: 0, max: 1, step: 0.01, value: 0.5, fmt: (x) => (x * 100).toFixed(0) + "%" },
+    ],
+    note: "A 标签 0（真），B 标签 1（假）。MixUp：新频谱 = λ·A + (1−λ)·B，新标签 = λ·0 + (1−λ)·1。CutMix（照第 27 格）：剪切宽度 = 2 × 0.5√(1−λ) × 时长，标签按实际贴入的面积比例算。",
+    render(svg, v) {
+      const L = Math.min(SA.length, SB.length);
+      let out, lab;
+      if (v.m === "mixup") { out = SA.slice(0, L).map((p, i) => p.map((q, k) => v.lam * q + (1 - v.lam) * SB[i][k])); lab = 1 - v.lam; }
+      else {
+        const half = Math.floor(0.5 * Math.sqrt(1 - v.lam) * L), c = Math.floor(v.pos * L);
+        const x1 = K.clamp(c - half, 0, L), x2 = K.clamp(c + half, 0, L);
+        out = SA.slice(0, L).map((p, i) => (i >= x1 && i < x2 ? SB[i] : p));
+        lab = (x2 - x1) / L;
+        K.svg(svg, "rect", { x: 440 + (x1 / L) * 180, y: 30, width: ((x2 - x1) / L) * 180, height: 180, fill: "none", stroke: "var(--warn)", "stroke-width": 2.5 });
+      }
+      [[SA, 20, "A（真，0）"], [SB, 230, "B（假，1）"], [out, 440, "混合结果"]].forEach(([s, x, t]) => { AK.drawSpec(svg, { x, y: 30, w: 180, h: 180 }, s, { maxT: 50, maxF: 40, lo: -70, hi: 0 }); K.svg(svg, "text", { x, y: 22, "font-size": 12 }, t); });
+      K.svg(svg, "text", { x: 20, y: 250, "font-size": 12, class: "muted" }, "混合样本的标签不再是 0 或 1，而是 0 到 1 之间的小数，模型学会“说不太准”。本次训练这两种增强的概率都是 0。");
+      return { readout: [
+        { k: "新标签（假的程度）", v: lab.toFixed(2) },
+        { k: "来自 B 的面积", v: (lab * 100).toFixed(0) + "%" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：真 vs 合成 ---------- */
+  function feats(x) {
+    const fr = AK.stft(x, 1024, 256, 1024), nb = fr[0].length;
+    let hi = 0, tot = 0;
+    fr.forEach((p) => p.forEach((v, k) => { tot += v; if ((k * SR) / 1024 > 4000) hi += v; }));
+    // 基频抖动：每帧在 80–300 Hz 找最强峰，算相邻帧变化
+    const f0 = fr.map((p) => { let b = 0, bk = 0; for (let k = Math.floor((80 * 1024) / SR); k < Math.floor((300 * 1024) / SR); k++) if (p[k] > b) { b = p[k]; bk = k; } const a = p[bk - 1] || 0, c = p[bk + 1] || 0, d = (a - c) / (2 * (a - 2 * p[bk] + c) || 1); return ((bk + K.clamp(d, -0.5, 0.5)) * SR) / 1024; });
+    let jit = 0; for (let i = 1; i < f0.length; i++) jit += Math.abs(f0[i] - f0[i - 1]);
+    // 频谱平坦度（高频段）
+    let fl = 0, n = 0;
+    fr.forEach((p) => { let lg = 0, ar = 0, m = 0; for (let k = Math.floor(nb * 0.6); k < nb; k++) { lg += Math.log(p[k] + 1e-12); ar += p[k]; m++; } fl += Math.exp(lg / m) / (ar / m + 1e-12); n++; });
+    return { hi: hi / tot, jit: jit / (f0.length - 1), flat: fl / n };
+  }
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "q", label: "伪造得有多“偷懒”（0 = 几乎和真的一样）", min: 0, max: 1, step: 0.05, value: 0.6, fmt: (x) => x.toFixed(2) },
+      { id: "seed", label: "换一个说话人", button: true },
+    ],
+    note: "浏览器合成两段“说话”：左边模拟真人（基频自然抖动、带气声、频带完整）；右边模拟偷懒的合成器（基频过于平稳、高频被截、没有气声）。读数是现场算出的三个线索。真实的伪造语音破绽往往很小，所以才需要深度学习模型。",
+    render(svg, v) {
+      const a = voice(false, 1, 50 + v.seed * 3, 1), b = voice(true, v.q, 51 + v.seed * 3, 1);
+      K.svg(svg, "text", { x: 20, y: 18, "font-size": 12, fill: "var(--c3)" }, "真人（示意）");
+      K.svg(svg, "text", { x: 330, y: 18, "font-size": 12, fill: "var(--c6)" }, "合成（示意）");
+      AK.drawSpec(svg, { x: 20, y: 26, w: 290, h: 220 }, melDB(a), { maxT: 60, maxF: 64, lo: -75, hi: 0 });
+      AK.drawSpec(svg, { x: 330, y: 26, w: 290, h: 220 }, melDB(b), { maxT: 60, maxF: 64, lo: -75, hi: 0 });
+      const fa = feats(a), fb = feats(b);
+      K.svg(svg, "text", { x: 20, y: 275, "font-size": 12, class: "muted" }, `真人：高频占比 ${(fa.hi * 100).toFixed(2)}%　基频抖动 ${fa.jit.toFixed(1)} Hz/帧　高频平坦度 ${fa.flat.toFixed(2)}`);
+      K.svg(svg, "text", { x: 20, y: 294, "font-size": 12, class: "muted" }, `合成：高频占比 ${(fb.hi * 100).toFixed(2)}%　基频抖动 ${fb.jit.toFixed(1)} Hz/帧　高频平坦度 ${fb.flat.toFixed(2)}`);
+      return { readout: [
+        { k: "4 kHz 以上能量（真 / 合成）", v: `${(fa.hi * 100).toFixed(1)}% / ${(fb.hi * 100).toFixed(1)}%` },
+        { k: "基频抖动（真 / 合成）", v: `${fa.jit.toFixed(1)} / ${fb.jit.toFixed(1)}` },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：阈值与 F1 ---------- */
+  const PhiN = (x) => 0.5 * (1 + erf(x / Math.SQRT2));
+  function erf(x) { const s = Math.sign(x); x = Math.abs(x); const t = 1 / (1 + 0.3275911 * x); return s * (1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x)); }
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 310,
+    controls: [
+      { id: "th", label: "判为“假”的阈值（作者 0.5）", min: 0.02, max: 0.98, step: 0.01, value: 0.5, fmt: (x) => x.toFixed(2) },
+      { id: "d", label: "模型的区分能力", min: 0.3, max: 4, step: 0.1, value: 2.2, fmt: (x) => x.toFixed(1) },
+      { id: "p", label: "测试集里假语音占比", min: 0.05, max: 0.95, step: 0.05, value: 0.5, fmt: (x) => (x * 100).toFixed(0) + "%" },
+    ],
+    note: "模型输出的“假的概率”：真语音和假语音各自服从一个分布（在 logit 尺度上相距“区分能力”个标准差）。按每 1 万条测试语音计算期望的混淆矩阵和指标。最后一个读数是 ASVspoof 常用的“等错误率”EER（冤枉率 = 漏判率时的错误率），作者没有算，这里作为补充。",
+    render(svg, v) {
+      const N = 10000, P = N * v.p, Nn = N - P, z = Math.log(v.th / (1 - v.th));
+      const m0 = -v.d / 2, m1 = v.d / 2;
+      const FP = Nn * (1 - PhiN(z - m0)), TP = P * (1 - PhiN(z - m1)), FN = P - TP, TN = Nn - FP;
+      const pre = TP / (TP + FP || 1), rec = TP / P, f1 = (2 * pre * rec) / (pre + rec || 1), acc = (TP + TN) / N;
+      const eer = 1 - PhiN(v.d / 2);
+      const ax = K.axes(svg, { x: 50, y: 20, w: 560, h: 200 }, [0, 1], [0, 1], { yticks: 0, xlabel: "模型给出的“假的概率”" });
+      const curve = (m, sc, col) => { let d = ""; for (let i = 1; i < 200; i++) { const p = i / 200, lg = Math.log(p / (1 - p)), dens = Math.exp(-0.5 * (lg - m) ** 2) / (p * (1 - p)); d += (i > 1 ? "L" : "M") + ax.sx(p) + "," + ax.sy(Math.min(1, dens * sc * 0.16)); } K.svg(svg, "path", { d, fill: "none", stroke: col, "stroke-width": 2 }); };
+      curve(m0, 1 - v.p, "var(--c3)"); curve(m1, v.p, "var(--c6)");
+      K.svg(svg, "line", { x1: ax.sx(v.th), x2: ax.sx(v.th), y1: 20, y2: 220, stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+      K.svg(svg, "text", { x: 60, y: 272, "font-size": 12, fill: "var(--c3)" }, "■ 真语音的得分分布");
+      K.svg(svg, "text", { x: 200, y: 272, "font-size": 12, fill: "var(--c6)" }, "■ 假语音的得分分布　（曲线高度按样本数比例）");
+      K.svg(svg, "text", { x: 60, y: 296, "font-size": 12, class: "muted" }, `每 1 万条：冤枉真人 ${Math.round(FP)}，放过骗子 ${Math.round(FN)}，抓到骗子 ${Math.round(TP)}`);
+      return { readout: [
+        { k: "准确率", v: (acc * 100).toFixed(1) + "%" },
+        { k: "精确率", v: (pre * 100).toFixed(1) + "%" },
+        { k: "召回率", v: (rec * 100).toFixed(1) + "%" },
+        { k: "F1", v: f1.toFixed(3), color: "var(--accent)" },
+        { k: "EER（补充）", v: (eer * 100).toFixed(1) + "%" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 D：卷积 vs 自注意力 ---------- */
+  const frames = (() => { const x = voice(false, 1, 61, 1.6); return melDB(x, 32); })();
+  K.lab(document.getElementById("lab4"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "q", label: "选一帧（查询帧）", min: 0, max: 1, step: 0.01, value: 0.3, fmt: (x) => (x * 100).toFixed(0) + "%" },
+      { id: "k", label: "卷积核大小（Conformer 原论文常用 31 帧）", min: 3, max: 41, step: 2, value: 15 },
+      { id: "tmp", label: "注意力温度（越小越集中）", min: 0.5, max: 8, step: 0.5, value: 3, fmt: (x) => x.toFixed(1) },
+    ],
+    note: "浏览器现场计算：把每一帧的 32 维梅尔向量标准化，用“查询帧”和每一帧的点积除以温度，再做 softmax，就是一个没有经过训练的简化自注意力权重（紫色）。蓝框是深度卷积一次能看到的范围。训练后的模型会学到更有用的权重，这里只演示“看多远”的区别。",
+    render(svg, v) {
+      const T = frames.length, D = frames[0].length;
+      const Z = frames.map((p) => { const m = p.reduce((a, b) => a + b) / D; const s = Math.sqrt(p.reduce((a, b) => a + (b - m) ** 2, 0) / D) || 1; return Array.from(p, (x) => (x - m) / s); });
+      const qi = Math.min(T - 1, Math.round(v.q * (T - 1)));
+      const sc = Z.map((z) => z.reduce((s, x, j) => s + x * Z[qi][j], 0) / D / (v.tmp / 10));
+      const mx = Math.max(...sc), ex = sc.map((s) => Math.exp(s - mx)), Zs = ex.reduce((a, b) => a + b), w = ex.map((e) => e / Zs);
+      AK.drawSpec(svg, { x: 40, y: 20, w: 580, h: 130 }, frames, { maxT: 120, maxF: 32, lo: -75, hi: 0 });
+      const fx = (i) => 40 + ((i + 0.5) / T) * 580;
+      const half = (v.k - 1) / 2;
+      K.svg(svg, "rect", { x: fx(Math.max(0, qi - half)) - 2, y: 18, width: fx(Math.min(T - 1, qi + half)) - fx(Math.max(0, qi - half)) + 4, height: 134, fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+      K.svg(svg, "line", { x1: fx(qi), x2: fx(qi), y1: 18, y2: 152, stroke: "var(--warn)", "stroke-width": 2 });
+      const wm = Math.max(...w);
+      w.forEach((a, i) => K.svg(svg, "rect", { x: fx(i) - 290 / T, y: 260 - (a / wm) * 90, width: 580 / T, height: (a / wm) * 90, fill: "var(--c4)", opacity: 0.85 }));
+      K.svg(svg, "text", { x: 40, y: 285, "font-size": 12, class: "muted" }, "下：查询帧（橙线）对每一帧的注意力权重；上：蓝框是卷积看得到的范围");
+      let far = 0; w.forEach((a, i) => { if (Math.abs(i - qi) > half) far += a; });
+      return { readout: [
+        { k: "总帧数", v: String(T) },
+        { k: "卷积覆盖", v: `${Math.min(T, v.k)} 帧（${((Math.min(T, v.k) / T) * 100).toFixed(0)}%）` },
+        { k: "注意力落在卷积范围外", v: (far * 100).toFixed(0) + "%", color: "var(--c4)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

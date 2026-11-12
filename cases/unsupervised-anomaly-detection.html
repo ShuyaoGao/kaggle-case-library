@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>无监督异常检测</title>
+<meta name="description" content="Kaggle 案例拆解：在机房温度时间序列上对比聚类距离、分类别高斯、马尔可夫链、孤立森林、单类 SVM 和 LSTM 预测残差六种无监督异常检测方法。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">传感器时间序列 · 无监督异常检测 · 六种方法对比</div>
+  <h1>机房温度异常检测：没有“故障”标签，怎么发现不对劲？</h1>
+  <p class="en">Unsupervised Anomaly Detection</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span><span class="tag dl">深度学习</span>
+    <span class="tag method">时间特征工程</span><span class="tag method">PCA + K-Means 距离</span><span class="tag method">分类别高斯（EllipticEnvelope）</span>
+    <span class="tag method">马尔可夫链</span><span class="tag method">孤立森林</span><span class="tag method">单类 SVM</span><span class="tag method">LSTM 预测残差</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Victor Ambonati</b></span>
+    <span>Kaggle 点赞 <b>1,450</b>（2026-11 抓取）</span>
+    <span>数据集 <b>boltzmannbrain/nab</b>（Numenta 异常基准）</span>
+    <span><a href="https://www.kaggle.com/code/victorambonati/unsupervised-anomaly-detection" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">一台机房空调系统的环境温度记录</div><p>来自 NAB 异常检测基准的 <code>ambient_temperature_system_failure.csv</code>：时间戳 + 温度两列，记录期间空调系统出过故障。<span data-cell="3">出处</span></p></div>
+    <div class="card panel"><h3>要找什么</h3><div class="big">哪些时刻的温度“不正常”</div><p>没有人标注哪些点是故障，所以是<b>无监督</b>异常检测：让算法自己找出和大多数数据不一样的点。作者假设约 1% 的点是异常。<span data-cell="12">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">六种思路逐个试</div><p>聚类后看离中心多远；按“工作日/周末 × 白天/夜晚”分类别各拟合一个高斯分布；马尔可夫链看序列概率；孤立森林；单类 SVM；LSTM 预测下一时刻、看预测误差。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">“分类别 + 高斯”最合适这份数据</div><p>作者的结论：对这个例子，考虑情境的检测（分类别 + 椭圆包络）看起来是好办法。<span data-cell="58">出处</span> 各方法各有所长，作者也明说有的方法不太适合这份数据。<span data-cell="0">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>Numenta Anomaly Benchmark（NAB）</b>中的 <code>realKnownCause/ambient_temperature_system_failure.csv</code>：一台办公环境空调系统的环境温度，记录期间系统出过故障。文件路径见作者第 3–4 格；温度单位是华氏度（作者第 9 格注释）。</p>
+  
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">列数</div><div class="v">2</div></div>
+        <div class="stat-tile"><div class="k">温度单位</div><div class="v">°F → °C</div></div>
+        <div class="stat-tile"><div class="k">预设异常比例</div><div class="v">1%</div></div>
+        <div class="stat-tile"><div class="k">标签（答案列）</div><div class="v">无</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">两列与单位见第 9 格 <span data-cell="9">出处</span>；作者预设 1% 的点为异常见第 12 格 <span data-cell="12">出处</span>。行数在 <code>df.info()</code> 的运行输出里，源码不带输出，这里不列。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>timestamp</code></td><td>记录时间</td><td>日期时间</td></tr>
+        <tr><td><code>value</code></td><td>环境温度（华氏度，作者换成摄氏度）</td><td>数值</td></tr>
+      </table></div>
+      <h3>作者造出来的列（第 11–14 格）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th></tr>
+        <tr><td><code>hours</code> / <code>daylight</code></td><td>几点 / 是否白天（7–22 点）</td></tr>
+        <tr><td><code>DayOfTheWeek</code> / <code>WeekDay</code></td><td>星期几 / 是否工作日</td></tr>
+        <tr><td><code>categories</code></td><td>4 个情境：周末夜、周末白天、工作日夜、工作日白天</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="38">
+    <h3>动手试试 A · 四种方法，同一份数据 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="40">
+    <h3>动手试试 B · 孤立树：离群点几刀就被切出来 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>温度在工作日白天更稳定</td><td><span data-cell="15">第 15 格</span></td></tr>
+        <tr><td>肘部图看不清，聚类方法“随手”取了 15 个簇</td><td><span data-cell="18">第 18 格</span></td></tr>
+        <tr><td>聚类距离法把记录末尾的低温判为异常，但没有检出最高的温度峰值</td><td><span data-cell="24">第 24 格</span></td></tr>
+        <tr><td>分类别 + 高斯：能很好地检出极端值，按情境分开让检测更精确</td><td><span data-cell="32">第 32 格</span></td></tr>
+        <tr><td>马尔可夫链能发现不寻常的序列，但发现不了极端值；在这个例子上难以评估</td><td><span data-cell="37">第 37 格</span></td></tr>
+        <tr><td>单类 SVM 结果和孤立森林相近，但会把一些平均水平的值也判为异常，难说是否合理</td><td><span data-cell="45">第 45 格</span></td></tr>
+        <tr><td>LSTM 训练很慢（作者注释：约 1.5 小时）</td><td><span data-cell="51">第 51 格</span></td></tr>
+        <tr><td>总结：对这个例子，情境异常检测（分类别 + 椭圆包络）看起来是好办法</td><td><span data-cell="58">第 58 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">数据没有异常标签，作者也没有给出准确率之类的数值。每种方法各检出多少个点（<code>value_counts()</code>）都在运行输出里，Kaggle 下载的源码不带输出，所以这里不列数字。马尔可夫链部分依赖的 pyemma 库在 Kaggle 上不可用，相关代码被注释掉，没有实际运行（<span data-cell="34">第 34 格</span>）。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能输出：</b>每个时刻一个“正常 / 异常”标记（或异常分数）。用在监控系统里，就是自动报警。</li>
+        <li><b>同类问题：</b>服务器 CPU 和流量监控、工厂设备振动与温度、电表用电量、银行交易流水、网站访问量突增。</li>
+        <li><b>可迁移的套路：</b>先想清楚要找哪类异常（极端值？在当前情境下反常？顺序反常？）→ 造出时间、情境特征 → 选对应的方法 → 用“预计异常比例”定阈值 → 拿业务事件核对。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>特征：小时、是否白天（7–22 点）、星期几、是否工作日、4 个情境类别 <span data-cell="11">第 11 格</span> <span data-cell="14">第 14 格</span></li>
+        <li>聚类：StandardScaler + PCA(2) + KMeans(15)，按到中心的距离取前 1% <span data-cell="16">第 16 格</span> <span data-cell="20">第 20 格</span></li>
+        <li>情境 + 高斯：EllipticEnvelope(contamination=0.01) <span data-cell="27">第 27 格</span></li>
+        <li>马尔可夫链：温度分 5 档 <span data-cell="34">第 34 格</span></li>
+        <li>IsolationForest(contamination=0.01) <span data-cell="38">第 38 格</span></li>
+        <li>OneClassSVM(nu=0.95×0.01) <span data-cell="42">第 42 格</span></li>
+        <li>LSTM：前 50 个时刻预测下 1 个，误差最大的 1% 为异常 <span data-cell="46">第 46 格</span> <span data-cell="55">第 55 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者事先设定“1% 的点是异常”。如果真实的故障只占 0.1%，或者有 5%，每种方法的结果会怎样？这个比例在实际中怎么定？</li>
+      <li>夜里 25°C 和白天 25°C，哪个更可疑？为什么“分类别”能找到全局阈值找不到的异常？</li>
+      <li>聚类方法没有检出最高的温度峰值，可能是什么原因？（提示：特征里除了温度，还有 4 列时间特征）</li>
+      <li>孤立森林为什么说“异常点更容易被孤立”？如果异常点很多、成群出现，它还灵吗？</li>
+      <li>LSTM 只在最后 1,000 个点上做了检测，前面的数据都用来训练。如果故障发生在训练数据里，模型会怎样？</li>
+      <li>没有标签，怎么判断哪种方法“更好”？你会找什么样的证据？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Victor Ambonati，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：Numenta Anomaly Benchmark（NAB），Kaggle 用户 boltzmannbrain 上传。
+</footer>
+</main>
+
+<script src="nb/unsupervised-anomaly-detection.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const COL = K.colors;
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+  const fadeIn = (els, ctx, ms) => ctx.tween(ms || 400, (t) => els.forEach((e) => (e.style.opacity = t)));
+
+  /* ---------- 模拟机房温度：每小时一个点 ---------- */
+  function simTemp(seed, days, inject) {
+    const r = K.rng(seed), T = [];
+    let drift = 0;
+    for (let h = 0; h < days * 24; h++) {
+      const hour = h % 24, dow = Math.floor(h / 24) % 7, weekday = dow < 5 ? 1 : 0, day = hour >= 7 && hour <= 22 ? 1 : 0;
+      drift = drift * 0.95 + K.randn(r) * 0.15;
+      const base = 21.5 + (weekday && day ? 1.2 : day ? 0.4 : -0.6) + Math.sin((hour - 9) / 24 * 2 * Math.PI) * (weekday && day ? 0.4 : 0.9);
+      T.push({ h, hour, dow, weekday, day, cat: weekday * 2 + day, v: base + drift + K.randn(r) * (weekday && day ? 0.25 : 0.5), tag: 0 });
+    }
+    if (inject) {
+      const n = T.length;
+      const pk = Math.floor(n * 0.35); for (let k = -2; k <= 2; k++) { T[pk + k].v += 6 - Math.abs(k) * 1.8; T[pk + k].tag = 1; }      // 极端高温
+      const nightIdx = T.findIndex((p, i) => i > n * 0.6 && p.weekday && !p.day); for (let k = 0; k < 3; k++) { T[nightIdx + k].v += 5; T[nightIdx + k].tag = 2; } // 夜里像白天一样热
+      for (let i = Math.floor(n * 0.97); i < n; i++) { T[i].v -= 4.5 * (i - n * 0.97) / (n * 0.03); if (i > n * 0.98) T[i].tag = 3; } // 末尾持续走低
+    }
+    return T;
+  }
+  const DEMO = simTemp(4, 30, true);
+
+  /* ---------- 小工具 ---------- */
+  function standardize(X) { const d = X[0].length, m = Array(d).fill(0), s = Array(d).fill(0); X.forEach((x) => x.forEach((v, k) => (m[k] += v / X.length))); X.forEach((x) => x.forEach((v, k) => (s[k] += (v - m[k]) ** 2 / X.length))); return X.map((x) => x.map((v, k) => (v - m[k]) / (Math.sqrt(s[k]) || 1))); }
+  function kmeansND(X, k, seed) {
+    const r = K.rng(seed), d2 = (a, b) => a.reduce((s, v, i) => s + (v - b[i]) ** 2, 0);
+    let C = [X[Math.floor(r() * X.length)].slice()];
+    while (C.length < k) { const D = X.map((p) => Math.min(...C.map((c) => d2(p, c)))); let u = r() * D.reduce((a, b) => a + b, 0), i = 0; while (i < X.length - 1 && (u -= D[i]) > 0) i++; C.push(X[i].slice()); }
+    let lab = [];
+    for (let t = 0; t < 30; t++) {
+      lab = X.map((p) => { let b = 0; C.forEach((c, j) => { if (d2(p, c) < d2(p, C[b])) b = j; }); return b; });
+      C = C.map((c, j) => { const m = X.filter((_, i) => lab[i] === j); return m.length ? c.map((_, q) => m.reduce((a, p) => a + p[q], 0) / m.length) : c; });
+    }
+    return { C, lab, dist: X.map((p, i) => Math.sqrt(d2(p, C[lab[i]]))) };
+  }
+  const cN = (n) => (n <= 1 ? 0 : 2 * (Math.log(n - 1) + 0.5772156649) - (2 * (n - 1)) / n);
+  function iforest(X, nTrees, sub, seed) {
+    const r = K.rng(seed), d = X[0].length, trees = [];
+    function build(idx, depth, lim) {
+      if (idx.length <= 1 || depth >= lim) return { leaf: true, n: idx.length };
+      const f = Math.floor(r() * d); let lo = Infinity, hi = -Infinity; idx.forEach((i) => { lo = Math.min(lo, X[i][f]); hi = Math.max(hi, X[i][f]); });
+      if (hi - lo < 1e-12) return { leaf: true, n: idx.length };
+      const s = lo + r() * (hi - lo);
+      return { f, s, L: build(idx.filter((i) => X[i][f] < s), depth + 1, lim), R: build(idx.filter((i) => X[i][f] >= s), depth + 1, lim) };
+    }
+    const lim = Math.ceil(Math.log2(sub));
+    for (let t = 0; t < nTrees; t++) { const idx = []; for (let k = 0; k < sub; k++) idx.push(Math.floor(r() * X.length)); trees.push(build(idx, 0, lim)); }
+    const path = (x, nd, e) => (nd.leaf ? e + cN(nd.n) : path(x, x[nd.f] < nd.s ? nd.L : nd.R, e + 1));
+    return X.map((x) => Math.pow(2, -trees.reduce((a, t) => a + path(x, t, 0), 0) / trees.length / cN(sub)));
+  }
+  const topFrac = (score, frac) => { const n = Math.max(1, Math.round(score.length * frac)), th = score.slice().sort((a, b) => b - a)[n - 1]; return score.map((s) => (s >= th ? 1 : 0)); };
+  function series(svg, box, T, opt) {
+    opt = opt || {};
+    const vs = T.map((p) => p.v), ax = K.axes(svg, box, [0, T.length], [Math.min(...vs) - 0.5, Math.max(...vs) + 0.5], { xticks: 0, yticks: 3, yfmt: (v) => v.toFixed(0) + "°", xlabel: opt.xlabel });
+    let d = ""; T.forEach((p, i) => (d += (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(p.v)));
+    const path = K.svg(svg, "path", { d, fill: "none", stroke: opt.color || "var(--c1)", "stroke-width": 1.2 });
+    return { ax, path };
+  }
+
+  const steps = [
+    {
+      title: "数据：一条机房温度曲线", kicker: "第 0–9 格 · 数据", at: 0,
+      html: `<p>作者想动手试一试几种异常检测方法，挑了 NAB（Numenta 异常基准）里的一份数据：一台机房空调系统的环境温度，期间系统出过故障。只有两列：<code>timestamp</code> 和 <code>value</code>。</p><p>作者在代码注释里写，温度平均约 71，可见单位是华氏度，于是用 <code>(F − 32) × 5/9</code> 换成摄氏度再画图。动画里的曲线是示意数据。</p>`,
+      cells: [0, 3, 9], highlight: ["(df['value'] - 32) * 5/9"],
+      draw(svg, ctx) {
+        const S = series(svg, { x: 50, y: 30, w: 640, h: 250 }, DEMO, { xlabel: "时间（每小时一个点，示意 30 天）" });
+        const L = S.path.getTotalLength(); S.path.style.strokeDasharray = L; S.path.style.strokeDashoffset = L;
+        const t1 = K.svg(svg, "text", { x: 60, y: 22, "font-size": 13, "font-weight": 700 }, "");
+        (async () => {
+          if (!(await ctx.tween(2200, (t) => (S.path.style.strokeDashoffset = L * (1 - t))))) return;
+          t1.textContent = "华氏 → 摄氏：(F − 32) × 5/9；哪里看着不对劲？";
+          DEMO.forEach((p, i) => { if (p.tag) K.svg(svg, "circle", { cx: S.ax.sx(i), cy: S.ax.sy(p.v), r: 3, fill: "var(--bad)", opacity: 0.7 }); });
+        })();
+      },
+    },
+    {
+      title: "时间特征：小时、白天、工作日、4 个情境", kicker: "第 10–14 格 · 特征工程", at: 10,
+      html: `<p>温度高低要看“什么时候”。作者从时间戳造了几列：</p><ul class="tight"><li><b>hours</b>：几点；<b>daylight</b>：7–22 点算白天</li><li><b>DayOfTheWeek</b>：星期几；<b>WeekDay</b>：是否工作日</li><li><b>categories</b> = WeekDay × 2 + daylight，组成 4 个情境：周末夜、周末白天、工作日夜、工作日白天</li></ul><p>还设了 <code>outliers_fraction = 0.01</code>：预计约 1% 的点是异常，后面好几种方法都用它定阈值。作者画了 4 个情境的温度分布，发现<b>工作日白天温度更稳定</b>（第 15 格）。</p>`,
+      cells: [11, 12, 14], highlight: ["daylight", "WeekDay", "outliers_fraction = 0.01", "categories"],
+      draw(svg, ctx) {
+        const rows = [["2013-07-04 08:00", 8, 1, 3, 1], ["2013-07-04 23:00", 23, 0, 3, 1], ["2013-07-06 14:00", 14, 1, 5, 0], ["2013-07-07 03:00", 3, 0, 6, 0]];
+        const heads = ["timestamp", "hours", "daylight", "DayOfWeek", "WeekDay", "categories"];
+        const x0 = 20, cw = [150, 60, 72, 92, 76, 88];
+        let x = x0; const xs = cw.map((w) => { const v = x; x += w; return v; });
+        heads.forEach((h, j) => K.svg(svg, "text", { x: xs[j] + 4, y: 30, "font-size": 12, "font-weight": 700, fill: j ? "var(--accent)" : "var(--ink)" }, h));
+        const cells = [];
+        rows.forEach((r, i) => {
+          const y = 40 + i * 34;
+          K.svg(svg, "rect", { x: x0, y, width: x - x0, height: 30, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" });
+          const vals = [r[0], r[1], r[2], r[3], r[4], r[4] * 2 + r[2]];
+          vals.forEach((v, j) => { const t = K.svg(svg, "text", { x: xs[j] + 4, y: y + 20, "font-size": 12, fill: j === 5 ? COL[v] : "var(--ink)", "font-weight": j === 5 ? 700 : 400 }, String(v)); if (j) { t.style.opacity = 0; cells.push({ t, j }); } });
+        });
+        const names = ["0 周末夜", "1 周末白天", "2 工作日夜", "3 工作日白天"];
+        const g = K.svg(svg, "g"); g.style.opacity = 0;
+        names.forEach((n, c) => {
+          const vs = DEMO.filter((p) => p.cat === c).map((p) => p.v), m = vs.reduce((a, b) => a + b, 0) / vs.length, sd = Math.sqrt(vs.reduce((a, b) => a + (b - m) ** 2, 0) / vs.length);
+          const bx = 20 + c * 175;
+          K.svg(g, "text", { x: bx, y: 220, "font-size": 12, fill: COL[c], "font-weight": 700 }, n);
+          let d = ""; for (let v = 17; v <= 26; v += 0.1) d += (d ? "L" : "M") + (bx + (v - 17) * 17) + "," + (320 - 75 * Math.exp(-((v - m) ** 2) / (2 * sd * sd)) * (0.6 / sd));
+          K.svg(g, "path", { d, fill: "none", stroke: COL[c], "stroke-width": 2 });
+          K.svg(g, "line", { x1: bx, x2: bx + 155, y1: 320, y2: 320, stroke: "var(--ink-3)" });
+        });
+        (async () => {
+          for (let j = 1; j <= 5; j++) { if (!(await ctx.tween(300, (t) => cells.forEach((c) => { if (c.j === j) c.t.style.opacity = t; })))) return; }
+          await fadeIn([g], ctx, 600);
+        })();
+      },
+    },
+    {
+      title: "方法 1：标准化 → PCA → K-Means", kicker: "第 15–19 格 · 聚类", at: 15,
+      html: `<p>第一种思路：先把“常见的特征组合”聚成团，离所有团都远的点就是异常。作者取温度和 4 个时间特征共 5 列，标准化后用 <b>PCA</b> 压到 2 维，再标准化一次，然后对 k = 1 到 19 跑 K-Means 画肘部曲线。</p><p>作者坦言肘部“看不清”，就随手取了 <b>15 个簇</b>（第 18 格注释）。动画在示意数据上真算：每个点归到最近的中心。</p>`,
+      cells: [16, 17, 18], highlight: ["PCA(n_components=2)", "kmeans[14]"],
+      draw(svg, ctx) {
+        const X = standardize(DEMO.map((p) => [p.v, p.hour, p.day, p.dow, p.weekday]));
+        // 二维 PCA（幂迭代）
+        const d = 5, pc = []; for (let c = 0; c < 2; c++) { let v = Array.from({ length: d }, (_, k) => Math.cos(k + c)); for (let t = 0; t < 60; t++) { const w = Array(d).fill(0); X.forEach((x) => { const s = x.reduce((a, b, k) => a + b * v[k], 0); x.forEach((xx, k) => (w[k] += s * xx)); }); pc.forEach((u) => { const s = w.reduce((a, b, k) => a + b * u[k], 0); for (let k = 0; k < d; k++) w[k] -= s * u[k]; }); const n = Math.hypot(...w) || 1; v = w.map((x) => x / n); } pc.push(v); }
+        const P = standardize(X.map((x) => pc.map((u) => x.reduce((a, b, k) => a + b * u[k], 0))));
+        const km = kmeansND(P, 15, 3);
+        const ax = K.axes(svg, { x: 40, y: 20, w: 400, h: 290 }, [-3.2, 3.2], [-3.2, 3.2], { xticks: 0, yticks: 0, xlabel: "主成分 1", ylabel: "主成分 2" });
+        const dots = P.map((p) => K.svg(svg, "circle", { cx: ax.sx(K.clamp(p[0], -3.2, 3.2)), cy: ax.sy(K.clamp(p[1], -3.2, 3.2)), r: 2.4, fill: "var(--ink-3)", opacity: 0.7 }));
+        const pal = Array.from({ length: 15 }, (_, j) => COL[j % 6]);
+        const info = K.svg(svg, "text", { x: 470, y: 60, "font-size": 14, "font-weight": 700 }, "5 列 → PCA 2 维");
+        const info2 = K.svg(svg, "text", { x: 470, y: 88, "font-size": 12, class: "muted" }, "");
+        (async () => {
+          if (!(await ctx.wait(800))) return;
+          info.textContent = "K-Means，k = 15"; info2.textContent = "作者：肘部不清楚，随手取 15";
+          dots.forEach((e, i) => (e.style.fill = pal[km.lab[i]]));
+          km.C.forEach((c) => K.svg(svg, "text", { x: ax.sx(K.clamp(c[0], -3.2, 3.2)), y: ax.sy(K.clamp(c[1], -3.2, 3.2)) + 5, "text-anchor": "middle", "font-size": 14, fill: "var(--ink)" }, "★"));
+        })();
+      },
+    },
+    {
+      title: "离中心最远的 1% 判为异常", kicker: "第 20–24 格 · 聚类距离", at: 20,
+      html: `<p>每个点算它到所属簇中心的距离，取距离最大的那 1%（<code>outliers_fraction</code>）标为异常。</p><p>作者的观察（第 24 格）：这个方法检出了<b>记录末尾的异常低温</b>，却<b>没有检出最高的温度峰值</b>。原因之一：特征里 5 列有 4 列是时间，温度只占一部分，“距离”被时间特征主导了。动画在示意曲线上画出这种方法标出的点。</p>`,
+      cells: [20, 24], highlight: ["nlargest(number_of_outliers)"],
+      draw(svg, ctx) {
+        const X = standardize(DEMO.map((p) => [p.v, p.hour, p.day, p.dow, p.weekday]));
+        const km = kmeansND(X, 15, 3), flag = topFrac(km.dist, 0.01);
+        const S = series(svg, { x: 50, y: 30, w: 640, h: 230 }, DEMO, { color: "var(--ink-3)" });
+        const marks = DEMO.map((p, i) => (flag[i] ? K.svg(svg, "circle", { cx: S.ax.sx(i), cy: S.ax.sy(p.v), r: 5, fill: "var(--bad)" }) : null)).filter(Boolean);
+        hide(marks);
+        K.svg(svg, "text", { x: 60, y: 300, "font-size": 12, class: "muted" }, "红点：到簇中心距离最大的 1%（示意数据上现场计算）");
+        K.svg(svg, "text", { x: 60, y: 322, "font-size": 12, class: "muted" }, "温度只是 5 个特征之一，所以红点不一定落在最高或最低处");
+        fadeIn(marks, ctx, 700);
+      },
+    },
+    {
+      title: "方法 2：分情境，各拟合一个高斯分布", kicker: "第 25–32 格 · 情境异常", at: 25,
+      html: `<p>同样的温度，放在不同情境下意义不同：夜里该凉的时候却很热，才可疑。作者把数据按 4 个情境拆开，<b>每个情境单独</b>用 <code>EllipticEnvelope</code>（假设数据服从高斯分布，找出落在“椭圆”外面的点）找异常，contamination 同样设 0.01。</p><p>作者结论（第 32 格）：极端值检出得很好，按情境分开让检测更精确。动画：同一个温度值，在“工作日白天”是正常的，在“工作日夜里”却落在了范围外。</p>`,
+      cells: [25, 27, 32], highlight: ["EllipticEnvelope(contamination = outliers_fraction)"],
+      draw(svg, ctx) {
+        const names = ["周末夜", "周末白天", "工作日夜", "工作日白天"];
+        const stats = [0, 1, 2, 3].map((c) => { const vs = DEMO.filter((p) => p.cat === c && !p.tag).map((p) => p.v); const m = vs.reduce((a, b) => a + b, 0) / vs.length; return { m, sd: Math.sqrt(vs.reduce((a, b) => a + (b - m) ** 2, 0) / vs.length) }; });
+        const probe = stats[3].m + 0.3;
+        const lines = [];
+        stats.forEach((st, c) => {
+          const y0 = 50 + c * 72, sx = (v) => 160 + (v - 16) * 50;
+          K.svg(svg, "text", { x: 150, y: y0 + 4, "text-anchor": "end", "font-size": 13, fill: COL[c], "font-weight": 700 }, names[c]);
+          K.svg(svg, "line", { x1: sx(16), x2: sx(27), y1: y0 + 20, y2: y0 + 20, stroke: "var(--ink-3)" });
+          let d = ""; for (let v = 16; v <= 27; v += 0.05) d += (d ? "L" : "M") + sx(v) + "," + (y0 + 20 - 45 * Math.exp(-((v - st.m) ** 2) / (2 * st.sd * st.sd)));
+          K.svg(svg, "path", { d, fill: "none", stroke: COL[c], "stroke-width": 2 });
+          const band = K.svg(svg, "rect", { x: sx(st.m - 2.6 * st.sd), y: y0 - 28, width: sx(st.m + 2.6 * st.sd) - sx(st.m - 2.6 * st.sd), height: 48, fill: COL[c], "fill-opacity": 0.08, stroke: COL[c], "stroke-dasharray": "3 3" });
+          band.style.opacity = 0; lines.push({ band, st, c, y0, sx });
+        });
+        const tx = K.svg(svg, "text", { x: 160, y: 330, "font-size": 13, "font-weight": 700 }, "");
+        (async () => {
+          if (!(await fadeIn(lines.map((l) => l.band), ctx, 700))) return;
+          if (!(await ctx.wait(500))) return;
+          tx.textContent = `同一个温度 ${probe.toFixed(1)}°C 放进 4 个情境里检查：`;
+          for (const l of lines) {
+            const out = Math.abs(probe - l.st.m) > 2.6 * l.st.sd;
+            K.svg(svg, "circle", { cx: l.sx(probe), cy: l.y0 + 20, r: 7, fill: out ? "var(--bad)" : "var(--good)" });
+            K.svg(svg, "text", { x: l.sx(probe) + 12, y: l.y0 + 25, "font-size": 12, fill: out ? "var(--bad)" : "var(--good)", "font-weight": 700 }, out ? "异常" : "正常");
+            if (!(await ctx.wait(450))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "方法 3：马尔可夫链看“顺序”是否反常", kicker: "第 33–36 格 · 序列异常", at: 33,
+      html: `<p>有些异常不是某个值特别高或低，而是<b>变化的顺序</b>不常见。作者把温度分成 5 档：≤18、18–21、21–24、24–27、&gt;27（°C），记作 VL、L、A、H、VH。<b>马尔可夫链</b>统计“从这一档跳到下一档”的概率，再算连续 5 个点组成的序列有多大概率出现；概率太低（代码注释里的门槛是 20%）就算异常。</p><p>注意：这部分依赖的 pyemma 库在 Kaggle 上不可用，代码被注释掉，没有真正运行（第 34 格）。作者认为它能发现不寻常的序列，但抓不到极端值（第 37 格）。</p>`,
+      cells: [33, 34], highlight: ["df_mm", "markovAnomaly"],
+      draw(svg, ctx) {
+        const S = ["VL", "L", "A", "H", "VH"], pos = S.map((_, i) => [100 + i * 130, 120]);
+        const P = [[.58, .38, .02, .01, .01], [.13, .58, .25, .02, .02], [.01, .14, .7, .14, .01], [.01, .02, .28, .59, .1], [.01, .01, .02, .48, .48]];
+        P.forEach((row, i) => row.forEach((p, j) => { if (p >= 0.1 && i !== j) { const a = pos[i], b = pos[j], up = j > i ? -1 : 1; K.svg(svg, "path", { d: `M${a[0]},${a[1] + up * 22} Q${(a[0] + b[0]) / 2},${a[1] + up * 60} ${b[0]},${b[1] + up * 22}`, fill: "none", stroke: "var(--ink-3)", "stroke-width": 1 + p * 4 }); K.svg(svg, "text", { x: (a[0] + b[0]) / 2, y: a[1] + up * 46 + 4, "text-anchor": "middle", "font-size": 10, class: "muted" }, p.toFixed(2)); } }));
+        const nodes = S.map((s, i) => K.node(svg, pos[i][0] - 28, pos[i][1] - 20, 56, 40, s, { bold: true, fs: 14 }));
+        const seqs = [[[1, 2, 2, 3, 2], "常见的序列"], [[1, 3, 0, 4, 1], "罕见的序列"]];
+        const t1 = K.svg(svg, "text", { x: 60, y: 250, "font-size": 14, "font-weight": 700 }, ""), t2 = K.svg(svg, "text", { x: 60, y: 280, "font-size": 13 }, ""), t3 = K.svg(svg, "text", { x: 60, y: 310, "font-size": 13, "font-weight": 700 }, "");
+        (async () => {
+          for (const [sq, name] of seqs) {
+            t1.textContent = name + "：" + sq.map((i) => S[i]).join(" → ");
+            let p = 1; t2.textContent = ""; t3.textContent = "";
+            for (let k = 0; k < sq.length; k++) {
+              nodes.forEach((n, i) => (n.querySelector("rect").style.stroke = i === sq[k] ? "var(--accent)" : "var(--line)"));
+              if (k) { const q = P[sq[k - 1]][sq[k]]; p *= q; t2.textContent += (t2.textContent ? " × " : "概率 = ") + q.toFixed(2); }
+              if (!(await ctx.wait(500))) return;
+            }
+            t3.textContent = `= ${p.toPrecision(2)}（门槛 0.2⁴ = 0.0016）→ ${p < 0.2 ** 4 ? "很低，判为异常" : "正常"}`; t3.style.fill = p < 0.2 ** 4 ? "var(--bad)" : "var(--good)";
+            if (!(await ctx.wait(1400))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "方法 4：孤立森林——异常点更容易被“切”出来", kicker: "第 37–40 格 · 孤立森林", at: 37,
+      html: `<p><b>孤立森林</b>（Isolation Forest）的想法很巧：随机挑一个特征、在它的范围内随机切一刀，反复切，直到每个点被单独隔开。<b>异常点离群，往往切几刀就被孤立</b>；挤在人堆里的普通点要切很多刀。很多棵随机树取平均“刀数”，刀数少的就是异常。</p><p>作者用同样 5 个特征，<code>IsolationForest(contamination=0.01)</code>，并评价它简单、对不同分布都适用、高维数据也高效（第 37 格）。动画在二维示意数据上演示随机切割。</p>`,
+      cells: [37, 38], highlight: ["IsolationForest(contamination = outliers_fraction)"],
+      draw(svg, ctx) {
+        const r = K.rng(8), P = []; for (let i = 0; i < 60; i++) P.push([0.45 + K.randn(r) * 0.1, 0.5 + K.randn(r) * 0.1]); P.push([0.9, 0.15]);
+        const box = { x: 40, y: 20, w: 300, h: 300 }, sx = (v) => box.x + v * box.w, sy = (v) => box.y + (1 - v) * box.h;
+        K.svg(svg, "rect", { x: box.x, y: box.y, width: box.w, height: box.h, fill: "none", stroke: "var(--ink-3)" });
+        P.forEach((p, i) => K.svg(svg, "circle", { cx: sx(p[0]), cy: sy(p[1]), r: i === 60 ? 6 : 3.5, fill: i === 60 ? "var(--bad)" : i === 5 ? "var(--accent)" : "var(--ink-3)" }));
+        const g = K.svg(svg, "g");
+        const info = K.svg(svg, "text", { x: 380, y: 60, "font-size": 14, "font-weight": 700 }, "");
+        const a1 = K.svg(svg, "text", { x: 380, y: 100, "font-size": 13, fill: "var(--bad)" }, ""), a2 = K.svg(svg, "text", { x: 380, y: 130, "font-size": 13, fill: "var(--accent)" }, "");
+        K.svg(svg, "text", { x: 380, y: 300, "font-size": 12, class: "muted" }, "红 = 离群点，蓝 = 人堆里的普通点（示意）");
+        (async () => {
+          const target = [60, 5]; const cuts = [0, 0];
+          let reg = target.map(() => [0, 1, 0, 1]);
+          const done = [false, false];
+          const rr = K.rng(3);
+          for (let k = 0; k < 14 && !(done[0] && done[1]); k++) {
+            for (let t = 0; t < 2; t++) {
+              if (done[t]) continue;
+              const [x0, x1, y0, y1] = reg[t], f = rr() < 0.5 ? 0 : 1, lo = f ? y0 : x0, hi = f ? y1 : x1, s = lo + rr() * (hi - lo), p = P[target[t]];
+              K.svg(g, "line", f ? { x1: sx(x0), x2: sx(x1), y1: sy(s), y2: sy(s), stroke: t ? "var(--accent)" : "var(--bad)", "stroke-width": 1, opacity: 0.7 } : { x1: sx(s), x2: sx(s), y1: sy(y0), y2: sy(y1), stroke: t ? "var(--accent)" : "var(--bad)", "stroke-width": 1, opacity: 0.7 });
+              if (f) reg[t] = p[1] < s ? [x0, x1, y0, s] : [x0, x1, s, y1]; else reg[t] = p[0] < s ? [x0, s, y0, y1] : [s, x1, y0, y1];
+              cuts[t]++;
+              const inside = P.filter((q) => q[0] >= reg[t][0] && q[0] <= reg[t][1] && q[1] >= reg[t][2] && q[1] <= reg[t][3]).length;
+              if (inside <= 1) done[t] = true;
+            }
+            info.textContent = `随机切了 ${k + 1} 轮`;
+            a1.textContent = `离群点：${cuts[0]} 刀${done[0] ? "，已被孤立" : ""}`; a2.textContent = `普通点：${cuts[1]} 刀${done[1] ? "，已被孤立" : ""}`;
+            if (!(await ctx.wait(500))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "方法 5：单类 SVM 画一圈“正常范围”", kicker: "第 41–44 格 · 单类 SVM", at: 41,
+      html: `<p><b>单类 SVM</b>（One-Class SVM）只看“正常”数据，学出一条把大部分数据包起来的边界，边界外的就是异常。它适合“新奇检测”（训练数据里没有异常），对多峰数据也有效（第 41 格）。</p><p>参数 <code>nu</code> 控制允许多少点落在边界外，作者设为 0.95 × 1%。作者的评价（第 45 格）：结果和孤立森林相近，但会把一些平均水平的值也判成异常，难说是否合理。动画示意边界逐步收紧。</p>`,
+      cells: [41, 42], highlight: ["OneClassSVM(nu=0.95 * outliers_fraction)"],
+      draw(svg, ctx) {
+        const r = K.rng(12), P = []; for (let i = 0; i < 80; i++) { const c = i % 2; P.push([c ? 470 + K.randn(r) * 40 : 260 + K.randn(r) * 45, c ? 190 + K.randn(r) * 30 : 150 + K.randn(r) * 35]); }
+        P.push([620, 60], [120, 300]);
+        P.forEach((p, i) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 3.5, fill: i >= 80 ? "var(--bad)" : "var(--ink-3)" }));
+        const e1 = K.svg(svg, "ellipse", { cx: 260, cy: 150, rx: 300, ry: 200, fill: "var(--good)", "fill-opacity": 0.06, stroke: "var(--good)", "stroke-width": 2 });
+        const e2 = K.svg(svg, "ellipse", { cx: 470, cy: 190, rx: 300, ry: 200, fill: "var(--good)", "fill-opacity": 0.06, stroke: "var(--good)", "stroke-width": 2 });
+        const tx = K.svg(svg, "text", { x: 20, y: 325, "font-size": 12, class: "muted" }, "边界从宽到紧，最后只有很少的点留在外面（多峰数据可以有两圈，示意）");
+        ctx.wait(400).then((ok) => ok && ctx.tween(1800, (t) => { K.set(e1, { rx: K.lerp(300, 110, t), ry: K.lerp(200, 85, t) }); K.set(e2, { rx: K.lerp(300, 100, t), ry: K.lerp(200, 72, t) }); }));
+      },
+    },
+    {
+      title: "方法 6：LSTM 根据前 50 个点预测下 1 个", kicker: "第 45–52 格 · 深度学习", at: 45,
+      html: `<p>最后一种用深度学习：训练一个 <b>LSTM</b>（擅长处理序列的循环神经网络），用<b>前 50 个时刻</b>的数据预测<b>下 1 个时刻</b>的温度。预测得越不准，说明这一刻越“出乎意料”。</p><p>作者把最后 1,000 个点留作测试，其余用来训练；网络是两层 LSTM（50 和 100 个单元）+ Dropout + 一个输出。作者注释说训练很慢，约 1.5 小时（第 51 格），所以写了保存和读取模型的代码。动画演示 50 个点的窗口滑动。</p>`,
+      cells: [45, 46, 47, 49], highlight: ["unroll_length = 50", "testdatasize = 1000", "LSTM("],
+      draw(svg, ctx) {
+        const T = DEMO.slice(0, 160);
+        const S = series(svg, { x: 40, y: 30, w: 640, h: 200 }, T, { color: "var(--ink-3)" });
+        const win = K.svg(svg, "rect", { x: 0, y: 30, width: S.ax.sx(50) - S.ax.sx(0), height: 200, fill: "var(--accent)", "fill-opacity": 0.12, stroke: "var(--accent)" });
+        const nxt = K.svg(svg, "circle", { r: 6, fill: "var(--warn)" });
+        const lstm = []; for (let k = 0; k < 6; k++) lstm.push(K.node(svg, 60 + k * 100, 268, 80, 36, k < 5 ? "LSTM" : "预测", { fs: 12, stroke: k < 5 ? "var(--c2)" : "var(--warn)" }));
+        for (let k = 0; k < 5; k++) K.arrow(svg, 140 + k * 100, 286, 158 + k * 100, 286, { color: "var(--c2)" });
+        const lab = K.svg(svg, "text", { x: 40, y: 22, "font-size": 13, "font-weight": 700 }, "");
+        ctx.tween(4000, (t) => {
+          const s = Math.floor(t * 100);
+          K.set(win, { x: S.ax.sx(s) });
+          K.set(nxt, { cx: S.ax.sx(s + 50), cy: S.ax.sy(T[s + 50].v) });
+          lab.textContent = `窗口：第 ${s}–${s + 49} 个点 → 预测第 ${s + 50} 个点（示意）`;
+          lstm.forEach((n, k) => (n.querySelector("rect").style.fill = k === Math.floor(t * 30) % 6 ? "color-mix(in srgb, var(--c2) 30%, var(--panel))" : "var(--panel-2)"));
+        });
+      },
+    },
+    {
+      title: "预测误差最大的 1% 判为异常", kicker: "第 53–57 格 · 预测残差", at: 53,
+      html: `<p>在测试段上，把每个时刻的真实值和预测值相减，取绝对值作为误差；误差最大的 1% 标为异常。训练段不做判断，全部记为正常。</p><p>这种“预测 + 看残差”的思路适合<b>顺序相关</b>的异常：数值本身不极端，但和前面的走势对不上。动画用简单的滑动平均代替 LSTM 做示意预测，只为说明残差的含义。</p>`,
+      cells: [53, 55], highlight: ["abs(y_test[u]- pr)", "nlargest(number_of_outliers)"],
+      draw(svg, ctx) {
+        const T = DEMO.slice(200, 520), pred = T.map((p, i) => (i < 6 ? p.v : T.slice(i - 6, i).reduce((a, q) => a + q.v, 0) / 6));
+        const err = T.map((p, i) => Math.abs(p.v - pred[i])), flag = topFrac(err, 0.02);
+        const S = series(svg, { x: 40, y: 20, w: 640, h: 170 }, T, { color: "var(--c1)" });
+        let d = ""; pred.forEach((v, i) => (d += (i ? "L" : "M") + S.ax.sx(i) + "," + S.ax.sy(v)));
+        const pp = K.svg(svg, "path", { d, fill: "none", stroke: "var(--warn)", "stroke-width": 1.2, "stroke-dasharray": "3 2" });
+        const mx = Math.max(...err);
+        const bars = err.map((e, i) => K.svg(svg, "rect", { x: S.ax.sx(i), y: 320, width: 1.6, height: 0, fill: flag[i] ? "var(--bad)" : "var(--ink-3)" }));
+        K.svg(svg, "text", { x: 44, y: 238, "font-size": 12 }, "下方：|真实 − 预测|，红色为最大的一小撮");
+        K.svg(svg, "text", { x: 470, y: 238, "font-size": 12, fill: "var(--c1)" }, "— 真实"); K.svg(svg, "text", { x: 540, y: 238, "font-size": 12, fill: "var(--warn)" }, "-- 预测（示意）");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1200, (t) => bars.forEach((b, i) => { const h = (err[i] / mx) * 70 * t; K.set(b, { y: 320 - h, height: h }); }))).then((ok) => ok && T.forEach((p, i) => { if (flag[i]) K.svg(svg, "circle", { cx: S.ax.sx(i), cy: S.ax.sy(p.v), r: 4, fill: "var(--bad)" }); }));
+      },
+    },
+    {
+      title: "总结：先想清楚要找哪种异常", kicker: "第 58 格 · 结论", at: 58,
+      html: `<p>作者在每种方法的标题下都写了它适合哪类异常：<b>无序的集体异常</b>（某种特征组合不常见）、<b>情境异常</b>（放在当时的情境下才反常）、<b>有序的序列异常</b>（变化的顺序反常）。最一般的情况要同时考虑顺序和数值组合，常常要组合多种算法（第 58 格）。</p><p>对这份数据，作者的结论是：<b>分情境 + 椭圆包络</b>看起来是好办法。结果对比一节作者写了“以后再做”，没有完成。</p>`,
+      cells: [58],
+      draw(svg, ctx) {
+        const rows = [["聚类距离", "集体（无序）"], ["分情境 + 高斯", "情境、集体（无序）"], ["马尔可夫链", "序列（有序）"], ["孤立森林", "集体（无序）"], ["单类 SVM", "集体（无序）"], ["LSTM 残差", "序列（有序）"]];
+        K.svg(svg, "text", { x: 60, y: 30, "font-size": 13, "font-weight": 700 }, "方法");
+        K.svg(svg, "text", { x: 280, y: 30, "font-size": 13, "font-weight": 700 }, "作者标注的适用异常类型");
+        const els = rows.map(([m, t], i) => { const g = K.svg(svg, "g"); const best = i === 1; K.svg(g, "rect", { x: 50, y: 42 + i * 44, width: 600, height: 38, rx: 6, fill: best ? "color-mix(in srgb, var(--good) 18%, var(--panel))" : "var(--panel-2)", stroke: best ? "var(--good)" : "var(--line)" }); K.svg(g, "text", { x: 64, y: 66 + i * 44, "font-size": 13, "font-weight": 700 }, m); K.svg(g, "text", { x: 280, y: 66 + i * 44, "font-size": 13 }, t + (best ? "   ← 作者：这份数据上较好" : "")); g.style.opacity = 0; return g; });
+        (async () => { for (const g of els) { if (!(await ctx.tween(250, (t) => (g.style.opacity = t)))) return; } })();
+      },
+    },
+  ];
+  /* 截图检查用：地址后加 #fast 跳过动画过程，#fast,nocode 再隐藏代码格 */
+  if (/fast/.test(location.hash)) { const T = K.tween, W = K.wait; K.tween = (ms, f, c) => T(1, f, c); K.wait = (ms, c) => W(1, c); window.requestAnimationFrame = (f) => setTimeout(() => f(performance.now()), 16); if (/nocode/.test(location.hash)) document.head.appendChild(K.el("style", null, ".ch-cells>.cell,.ch-cells>.cell-note,.hero,#brief,#data{display:none}")); }
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：几种方法同场比较 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "m", label: "检测方法", value: "ctx", options: [["glob", "全局阈值：离总体均值太远"], ["ctx", "分情境高斯（作者推荐）"], ["km", "聚类距离（5 个特征，k=15）"], ["if", "孤立森林（5 个特征）"]] },
+      { id: "frac", label: "预计异常比例（outliers_fraction）", min: 0.5, max: 5, step: 0.5, value: 1, fmt: (v) => v + "%" },
+      { id: "seed", label: "重新生成一个月的数据", button: true },
+    ],
+    note: "模拟 30 天、每小时一个温度点（工作日白天更稳定），并埋了 3 种异常：① 突然的高温尖峰；② 工作日夜里温度像白天一样高（单看数值不算极端）；③ 记录末尾持续走低。浏览器里现场计算，红点是方法标出的异常，下方统计三种异常各抓到几个点。",
+    render(svg, v) {
+      const T = simTemp(4 + v.seed * 7, 30, true), f = v.frac / 100;
+      const X5 = standardize(T.map((p) => [p.v, p.hour, p.day, p.dow, p.weekday]));
+      let score;
+      if (v.m === "glob") { const m = T.reduce((a, p) => a + p.v, 0) / T.length; score = T.map((p) => Math.abs(p.v - m)); }
+      else if (v.m === "ctx") { const st = [0, 1, 2, 3].map((c) => { const vs = T.filter((p) => p.cat === c).map((p) => p.v).sort((a, b) => a - b); const med = vs[Math.floor(vs.length / 2)]; const mad = vs.map((x) => Math.abs(x - med)).sort((a, b) => a - b)[Math.floor(vs.length / 2)] * 1.4826; return { med, mad }; }); score = T.map((p) => Math.abs(p.v - st[p.cat].med) / (st[p.cat].mad || 1)); }
+      else if (v.m === "km") score = kmeansND(X5, 15, 3 + v.seed).dist;
+      else score = iforest(X5, 80, 128, 5 + v.seed);
+      const flag = topFrac(score, f);
+      const S = series(svg, { x: 46, y: 16, w: 580, h: 220 }, T, { color: "var(--ink-3)" });
+      T.forEach((p, i) => { if (p.tag) K.svg(svg, "rect", { x: S.ax.sx(i) - 1, y: 16, width: 3, height: 220, fill: COL[p.tag + 1], opacity: 0.18 }); });
+      T.forEach((p, i) => { if (flag[i]) K.svg(svg, "circle", { cx: S.ax.sx(i), cy: S.ax.sy(p.v), r: 3.5, fill: "var(--bad)" }); });
+      const names = ["", "① 高温尖峰", "② 夜里偏热", "③ 末尾走低"];
+      const caught = [1, 2, 3].map((t) => [T.filter((p, i) => p.tag === t && flag[i]).length, T.filter((p) => p.tag === t).length]);
+      caught.forEach(([a, b], k) => { K.svg(svg, "rect", { x: 46 + k * 195, y: 270, width: 14, height: 14, fill: COL[k + 2], opacity: 0.5 }); K.svg(svg, "text", { x: 66 + k * 195, y: 282, "font-size": 12.5, fill: a ? "var(--good)" : "var(--bad)", "font-weight": 700 }, `${names[k + 1]}：抓到 ${a}/${b}`); });
+      const fp = T.filter((p, i) => flag[i] && !p.tag).length;
+      K.svg(svg, "text", { x: 46, y: 314, "font-size": 12, class: "muted" }, "浅色竖条 = 埋入异常的位置（只有模拟数据才知道答案；真实场景里没有）");
+      return { readout: [
+        { k: "标为异常的点", v: String(flag.reduce((a, b) => a + b, 0)) },
+        { k: "三类异常中被发现的", v: `${caught.filter((c) => c[0] > 0).length} / 3`, color: caught.every((c) => c[0] > 0) ? "var(--good)" : "var(--warn)" },
+        { k: "误报（正常点被标红）", v: String(fp), color: fp > 5 ? "var(--bad)" : "var(--ink)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：孤立树的“刀数” ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "who", label: "跟踪哪个点", value: "out", options: [["out", "红色：离群点"], ["in", "蓝色：人堆中心的普通点"], ["edge", "橙色：人堆边缘的点"]] },
+      { id: "dist", label: "离群点离人堆多远", min: 0.05, max: 0.45, step: 0.01, value: 0.35, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "换一棵随机树", button: true },
+    ],
+    note: "左图是一棵随机的孤立树：每一刀随机选横或竖、在当前格子里随机位置切开，直到被跟踪的点独占一格。右边统计 300 棵随机树上三个点平均要切几刀，以及孤立森林据此算出的异常分数（越接近 1 越异常，越接近 0.5 以下越正常）。",
+    render(svg, v) {
+      const r = K.rng(31), P = []; for (let i = 0; i < 80; i++) P.push([0.4 + K.randn(r) * 0.08, 0.5 + K.randn(r) * 0.08]);
+      P.push([K.clamp(0.4 + v.dist * 1.2, 0, 0.98), K.clamp(0.5 - v.dist, 0.02, 1)]);
+      const IDX = { out: 80, in: 0, edge: P.reduce((b, p, i) => (i < 80 && p[0] > P[b][0] ? i : b), 0) };
+      let best = 0; P.slice(0, 80).forEach((p, i) => { if ((p[0] - 0.4) ** 2 + (p[1] - 0.5) ** 2 < (P[best][0] - 0.4) ** 2 + (P[best][1] - 0.5) ** 2) best = i; }); IDX.in = best;
+      function isolate(ti, rr, draw) {
+        let reg = [0, 1, 0, 1], k = 0, pts = P.map((_, i) => i);
+        while (pts.length > 1 && k < 40) {
+          const f = rr() < 0.5 ? 0 : 1, lo = f ? reg[2] : reg[0], hi = f ? reg[3] : reg[1], s = lo + rr() * (hi - lo), p = P[ti];
+          if (draw) draw(f, s, reg.slice());
+          if (f) reg = p[1] < s ? [reg[0], reg[1], reg[2], s] : [reg[0], reg[1], s, reg[3]]; else reg = p[0] < s ? [reg[0], s, reg[2], reg[3]] : [s, reg[1], reg[2], reg[3]];
+          pts = pts.filter((i) => P[i][0] >= reg[0] && P[i][0] <= reg[1] && P[i][1] >= reg[2] && P[i][1] <= reg[3]);
+          k++;
+        }
+        return { k, reg };
+      }
+      const box = { x: 20, y: 20, w: 320, h: 320 }, sx = (x) => box.x + x * box.w, sy = (y) => box.y + (1 - y) * box.h;
+      K.svg(svg, "rect", { x: box.x, y: box.y, width: box.w, height: box.h, fill: "none", stroke: "var(--ink-3)" });
+      const ti = IDX[v.who];
+      const res = isolate(ti, K.rng(100 + v.seed * 17), (f, s, R) => K.svg(svg, "line", f ? { x1: sx(R[0]), x2: sx(R[1]), y1: sy(s), y2: sy(s), stroke: "var(--accent)", "stroke-width": 0.8, opacity: 0.8 } : { x1: sx(s), x2: sx(s), y1: sy(R[2]), y2: sy(R[3]), stroke: "var(--accent)", "stroke-width": 0.8, opacity: 0.8 }));
+      K.svg(svg, "rect", { x: sx(res.reg[0]), y: sy(res.reg[3]), width: sx(res.reg[1]) - sx(res.reg[0]), height: sy(res.reg[2]) - sy(res.reg[3]), fill: "var(--warn)", "fill-opacity": 0.25 });
+      P.forEach((p, i) => K.svg(svg, "circle", { cx: sx(p[0]), cy: sy(p[1]), r: i === IDX.out || i === IDX.in || i === IDX.edge ? 5 : 2.6, fill: i === IDX.out ? "var(--bad)" : i === IDX.in ? "var(--c1)" : i === IDX.edge ? "var(--c2)" : "var(--ink-3)" }));
+      const avg = {}; ["out", "in", "edge"].forEach((w) => { let s = 0; const rr = K.rng(7); for (let t = 0; t < 300; t++) s += isolate(IDX[w], rr).k; avg[w] = s / 300; });
+      const score = (h) => Math.pow(2, -h / cN(P.length));
+      const lines = [["out", "红：离群点", "var(--bad)"], ["edge", "橙：边缘点", "var(--c2)"], ["in", "蓝：中心点", "var(--c1)"]];
+      K.svg(svg, "text", { x: 370, y: 40, "font-size": 13, "font-weight": 700 }, "300 棵树上平均要切几刀");
+      const mx = Math.max(...Object.values(avg));
+      lines.forEach(([w, n, c], k) => {
+        const y = 70 + k * 56;
+        K.svg(svg, "text", { x: 370, y: y, "font-size": 12, fill: c, "font-weight": 700 }, n);
+        K.svg(svg, "rect", { x: 370, y: y + 8, width: (avg[w] / mx) * 120, height: 16, rx: 3, fill: c });
+        K.svg(svg, "text", { x: 376 + (avg[w] / mx) * 120, y: y + 21, "font-size": 11 }, `${avg[w].toFixed(1)} 刀 · 分数 ${score(avg[w]).toFixed(2)}`);
+      });
+      K.svg(svg, "text", { x: 370, y: 270, "font-size": 12, class: "muted" }, `这棵树上，被跟踪的点切了 ${res.k} 刀才独占一格`);
+      return { readout: [
+        { k: "本棵树刀数", v: String(res.k) },
+        { k: "离群点异常分数", v: score(avg.out).toFixed(2), color: score(avg.out) > 0.6 ? "var(--bad)" : "var(--ink)" },
+        { k: "中心点异常分数", v: score(avg.in).toFixed(2) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

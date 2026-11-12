@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>库存优化与 EOQ</title>
+<meta name="description" content="Kaggle 案例拆解：用 Prophet 预测最畅销商品的需求，再用再订货点、安全库存和经济订货批量（EOQ）定下库存策略，并指出原文里的单位问题。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格 + 时间序列 · 需求预测 · 库存优化</div>
+  <h1>仓库该备多少货：从需求预测到经济订货批量</h1>
+  <p class="en">Demand Forecasting and Inventory Optimisation</p>
+  <div class="tags">
+    <span class="tag opt">优化与运筹</span><span class="tag ml">机器学习</span>
+    <span class="tag method">Prophet 时间序列</span><span class="tag method">滚动交叉验证 MAPE</span><span class="tag method">网格搜索调参</span>
+    <span class="tag method">再订货点 ROP</span><span class="tag method">安全库存</span><span class="tag method">经济订货批量 EOQ</span><span class="tag method">随机森林特征重要性</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Simon Tagbor</b></span>
+    <span>Kaggle 点赞 <b>121</b>（2026-11 抓取）</span>
+    <span>数据集 <b>shashwatwork/dataco-smart-supply-chain-for-big-data-analysis</b></span>
+    <span><a href="https://www.kaggle.com/code/simontagbor/demand-forecasting-and-inventory-optimisation" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">DataCo 公司的供应链订单记录</div><p>每行是一条订单明细：卖了什么、卖了多少钱、发往哪个国家、计划几天送到、实际几天送到。<span data-cell="9">出处</span></p></div>
+    <div class="card panel"><h3>要解决什么</h3><div class="big">最畅销的那件商品，仓库该怎么备货</div><p>作者提出两个业务问题：未来需求是多少？最优库存水平是多少？<span data-cell="2">出处</span> 前一个是“预测”，后一个是“优化”。</p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">先预测，再套库存公式</div><p>Prophet 预测销售额并用 128 组超参数网格搜索调参；再用“提前期需求 + 安全库存”算再订货点，用 EOQ 公式算每次订多少；最后用随机森林看哪些因素影响需求。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">再订货点 3753、每次订 35、安全库存 2284</div><p>作者给出的库存策略。<span data-cell="99">出处</span> 但这三个数的<b>单位和量级对不上</b>，本页会拆开讲为什么（第 10、11 章）。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>DataCo Smart Supply Chain for Big Data Analysis</b>：一家名为 DataCo 的公司的订单、商品、客户和配送记录。下面的规模和观察都来自作者在 notebook 里写的文字。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">原始字段数（列）</div><div class="v">53</div></div>
+        <div class="stat-tile"><div class="k">订单明细（行）</div><div class="v">180,519</div></div>
+        <div class="stat-tile"><div class="k">有延迟送达风险的订单</div><div class="v" style="color:var(--warn)">约 55%</div></div>
+        <div class="stat-tile"><div class="k">售价为 $199.99 的商品</div><div class="v">约 75%</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">53 列见第 9 格 <span data-cell="9">出处</span>；处理后 23 列、180519 行见第 26 格 <span data-cell="26">出处</span>；两个百分比是作者看 <code>describe()</code> 后写下的观察 <span data-cell="14">出处</span>。作者后面只盯住一件商品：编号 <b>365</b>，“Perfect Fitness Perfect Rip Deck” <span data-cell="36">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者保留的主要列</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>用途</th></tr>
+        <tr><td><code>shipping date (DateOrders)</code></td><td>发货日期</td><td>时间轴（Prophet 的 ds）</td></tr>
+        <tr><td><code>Sales</code></td><td>这条订单的销售额（美元）</td><td><b>要预测的量</b>（Prophet 的 y）</td></tr>
+        <tr><td><code>Product Card Id</code> / <code>Product Name</code></td><td>商品编号 / 名称</td><td>挑出最畅销商品</td></tr>
+        <tr><td><code>Product Price</code></td><td>商品单价</td><td>估算订货、持有成本</td></tr>
+        <tr><td><code>Days for shipping (real)</code> / <code>(scheduled)</code></td><td>实际 / 计划送达天数</td><td>造出 Lead Time 列</td></tr>
+        <tr><td><code>Customer Country</code> / <code>City</code> / <code>Segment</code>、<code>Market</code></td><td>客户在哪、属于哪类客户</td><td>随机森林的候选因素</td></tr>
+        <tr><td><code>Shipping Mode</code>、<code>Late_delivery_risk</code></td><td>运输方式、是否有延迟风险</td><td>同上</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">列名照第 17 格的保留清单 <span data-cell="17">出处</span>。</p>
+    </div>
+  </div>
+  <div class="panel pad" style="margin-top:14px">
+    <h3 style="margin-top:0">优化问题长什么样</h3>
+    <p>预测完需求以后，后半段是一个经典的<b>库存优化</b>问题：</p>
+    <ul class="tight">
+      <li><b>决策：</b>库存降到多少时下单（再订货点 ROP），每次订多少（订货批量 Q）。</li>
+      <li><b>目标：</b>总成本最小 = 一年的订货费（订得越勤越多）+ 一年的仓储持有费（每次订得越多，平均压在仓库里的货越多）。</li>
+      <li><b>约束：</b>下单后要等“提前期”才到货，这段时间不能断货，所以要留安全库存。</li>
+      <li><b>作者的假设：</b>平均提前期 7 天、最长 10 天 <span data-cell="78">出处</span> <span data-cell="82">出处</span>；订货成本、持有成本数据里没有，按售价的百分比假设 <span data-cell="89">出处</span>。</li>
+    </ul>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="85">
+    <h3>动手试试 A · 库存锯齿图：再订货点定多高才不断货 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="93">
+    <h3>动手试试 B · EOQ 的 U 形成本曲线 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>预测距离在约 200 天以内 MAPE 较低，超过约 250 天误差变大</td><td><span data-cell="50">第 50 格</span></td></tr>
+        <tr><td>网格搜索共试 128 组超参数，最优：additive、seasonality_prior_scale=1、holidays_prior_scale=5、changepoint_prior_scale=0.005</td><td><span data-cell="54">第 54 格</span> <span data-cell="57">第 57 格</span></td></tr>
+        <tr><td>调参后表现和调参前差不多，模型对这些超参数不敏感</td><td><span data-cell="64">第 64 格</span></td></tr>
+        <tr><td>再订货点 3753 “units”</td><td><span data-cell="86">第 86 格</span></td></tr>
+        <tr><td>经济订货批量 35 “units”</td><td><span data-cell="94">第 94 格</span></td></tr>
+        <tr><td>安全库存 2284 “units”；库存降到 3753 时订 35 件</td><td><span data-cell="99">第 99 格</span></td></tr>
+        <tr><td>随机森林：Lead Time 和部分地理因素是重要预测因素，客户类型不是</td><td><span data-cell="114">第 114 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">MAPE 的具体数值、预测曲线和特征重要性的具体数值都在运行输出里，Kaggle 下载的源码不带输出，作者文字里也没写，这里不列。</p>
+      <p class="callout warn"><b>读结论时要小心：</b>① <code>Sales</code> 是销售额（美元），不是件数，所以“3753 units”其实是美元口径；② Prophet 拿的是<b>全部商品</b>的逐条订单（第 43、51 格 <code>prophet_df = df.copy()</code>），没有筛出 365 号商品，也没有按天加总，预测值更接近“一条订单平均卖多少钱”；③ EOQ 里需求用的是“日均”，持有成本却是“每件每年”，单位不一致，再加上订货和持有成本的百分比和文字写反了。所以 35 和 3753 不能直接拿来下单。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能回答：</b>某件商品未来每天大概卖多少；库存降到多少该下单；每次订多少最省钱。</li>
+        <li><b>同类问题：</b>超市、药房备货，医院耗材，工厂原材料，奶茶店每天进多少牛奶。</li>
+        <li><b>可迁移的套路：</b>按商品、按天把销量加总 → 时间序列预测（并用滚动交叉验证看误差） → 用预测均值和波动算安全库存、再订货点 → 用真实的订货费、仓储费算 EOQ → 用模拟检验缺货率。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>预处理：保留 19 列、造日期列和 Lead Time <span data-cell="17">第 17 格</span> <span data-cell="24">第 24 格</span></li>
+        <li>编码：LabelEncoder 与 one-hot 两套数据 <span data-cell="28">第 28 格</span></li>
+        <li>预测：Prophet + 波多黎各节假日 <span data-cell="43">第 43 格</span></li>
+        <li>评估：Prophet 滚动交叉验证、MAPE <span data-cell="47">第 47 格</span></li>
+        <li>调参：4 个超参数的全组合网格搜索 <span data-cell="53">第 53 格</span></li>
+        <li>库存：再订货点、安全库存 <span data-cell="83">第 83 格</span>，EOQ <span data-cell="93">第 93 格</span></li>
+        <li>解释：随机森林回归的特征重要性 <span data-cell="112">第 112 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者说要预测“365 号商品”的需求，可 Prophet 吃进去的是全部商品的订单。你会怎么改代码，才能真正得到“365 号商品每天卖多少件”？</li>
+      <li>EOQ 公式里 D 是“一年的需求量”，H 是“每件每年的持有费”。作者把日均值当成 D，EOQ 会偏大还是偏小？大约差几倍？（提示：√365）</li>
+      <li>安全库存用的是“最大日销量 × 最长提前期 − 平均提前期需求”。这种“最坏情况相乘”的算法，会让库存偏多还是偏少？有没有更好的办法（比如按想要的不缺货概率来算）？</li>
+      <li>网格搜索跑了 128 组、花了很长时间，结果和不调参差不多。下次你会先做什么判断，再决定要不要花这些时间？</li>
+      <li>预测有误差，库存策略也有成本。如果缺货一次损失 50 美元、多压一件货一年花 5 美元，你会把再订货点往高调还是往低调？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Simon Tagbor，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：DataCo Smart Supply Chain for Big Data Analysis（Kaggle 用户 shashwatwork 上传）。
+</footer>
+</main>
+
+<script src="nb/inventory-eoq-forecast.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const fade = (els, v) => els.forEach((e) => (e.style.opacity = v));
+  const T = (svg, x, y, s, o) => K.svg(svg, "text", Object.assign({ x, y, "font-size": 13 }, o || {}), s);
+
+  const steps = [
+    {
+      at: 0, title: "开场：两个业务问题", kicker: "第 0–10 格 · 问题与准备",
+      html: `<p>作者开门见山：供应链的人常靠经验加一点统计来猜需求，商品一多、需求一变就不够用了。这份 notebook 想用代码做两件事 <span data-cell="2">第 2 格</span>：</p><ol class="tight"><li>最畅销的商品未来需求是多少？（<b>预测</b>）</li><li>这件商品最优的库存水平是多少？（<b>优化</b>）</li></ol><p>第 8 格导入了 pandas、Prophet、sklearn 等工具。动画是整条流水线：先预测，预测结果再喂给库存公式。</p>`,
+      cells: [], notes: { 8: "导入工具包：pandas 处理表格，Prophet 做时间序列预测，sklearn 做编码和随机森林。" },
+      draw(svg, ctx) {
+        const items = [["历史订单\n18 万行", "var(--c1)"], ["Prophet\n预测需求", "var(--c2)"], ["再订货点\n+ 安全库存", "var(--c3)"], ["EOQ\n每次订多少", "var(--c5)"], ["库存策略", "var(--accent)"]];
+        const g = [], a = [];
+        items.forEach((d, i) => {
+          const x = 14 + i * 142;
+          const n = K.node(svg, x, 130, 120, 70, d[0], { fill: `color-mix(in srgb, ${d[1]} 16%, var(--panel))`, stroke: d[1], bold: i === 4 });
+          n.style.opacity = 0; g.push(n);
+          if (i) { const ar = K.arrow(svg, x - 22, 165, x - 2, 165); ar.style.opacity = 0; a.push(ar); }
+        });
+        const q1 = T(svg, 150, 100, "问题 1：未来卖多少？", { "font-weight": 700, fill: "var(--c2)" });
+        const q2 = T(svg, 330, 245, "问题 2：仓库里备多少？什么时候订？订多少？", { "font-weight": 700, fill: "var(--c5)" });
+        T(svg, 20, 320, "前半段是“机器学习预测”，后半段是“在成本和缺货之间找最省的方案”（优化）", { class: "muted", "font-size": 12 });
+        fade([q1, q2], 0);
+        (async () => {
+          for (let i = 0; i < 5; i++) {
+            if (!(await ctx.tween(380, (t) => { g[i].style.opacity = t; if (i) a[i - 1].style.opacity = t; }))) return;
+            if (i === 1) await ctx.tween(300, (t) => (q1.style.opacity = t));
+            if (i === 3) await ctx.tween(300, (t) => (q2.style.opacity = t));
+          }
+        })();
+      },
+    },
+    {
+      title: "读数据、看统计摘要", kicker: "第 11–14 格 · 初看数据",
+      html: `<p>读入 <code>DataCoSupplyChainDataset.csv</code>，用 <code>describe()</code> 看每列的统计摘要。作者记下几条观察 <span data-cell="14">第 14 格</span>：</p><ul class="tight"><li>约 55% 的订单有延迟送达风险</li><li>约 75% 的商品售价是 $199.99</li><li>75% 的客户至少买了 $247.40</li></ul><p>动画里的表格行是示意，条形长度对应作者写的两个百分比。</p>`,
+      cells: [11, 13], highlight: ["read_csv", "describe"],
+      draw(svg, ctx) {
+        const rows = [];
+        for (let r = 0; r < 9; r++) for (let c = 0; c < 10; c++) {
+          const e = K.svg(svg, "rect", { x: 30 + c * 30, y: 40 + r * 26, width: 26, height: 20, rx: 3, fill: r === 0 ? "var(--accent-soft)" : "var(--panel-2)", stroke: "var(--line)" });
+          e.style.opacity = 0; rows.push(e);
+        }
+        T(svg, 30, 30, "订单明细表（示意：每行一条订单，每列一个字段）", { class: "muted", "font-size": 12 });
+        T(svg, 30, 290, "共 180,519 行 × 53 列", { "font-weight": 700, "font-size": 15 });
+        const bars = [["延迟送达风险", 0.55, "var(--warn)"], ["售价 = $199.99 的商品", 0.75, "var(--c1)"]];
+        const bs = bars.map((b, i) => {
+          T(svg, 380, 80 + i * 90, b[0], { "font-size": 13 });
+          K.svg(svg, "rect", { x: 380, y: 90 + i * 90, width: 300, height: 26, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" });
+          const r = K.svg(svg, "rect", { x: 380, y: 90 + i * 90, width: 0, height: 26, rx: 4, fill: b[2] });
+          const t = T(svg, 690, 108 + i * 90, "", { "font-weight": 700, "text-anchor": "end" });
+          return { r, t, v: b[1] };
+        });
+        ctx.tween(1200, (t) => rows.forEach((e, i) => (e.style.opacity = K.clamp(t * 90 - i, 0, 1))))
+          .then((ok) => ok && ctx.tween(1200, (t) => bs.forEach((b) => { b.r.setAttribute("width", 300 * b.v * t); b.t.textContent = "约 " + Math.round(b.v * 100 * t) + "%"; })));
+      },
+    },
+    {
+      title: "预处理：只留有用的列，再造新列", kicker: "第 15–26 格 · 数据清洗",
+      html: `<p>53 列里很多和需求预测无关。作者在第 17 格列出要保留的 19 列，其余全部删掉，第 19 格再删掉邮编，第 21 格检查缺失值。</p><p>第 24 格造新列：从发货日期拆出<b>年、月、日、星期几</b>，再造 <code>Lead Time = 实际送达天数 − 计划送达天数</code>，正数表示比计划晚到。处理后剩 23 列、180519 行 <span data-cell="26">第 26 格</span>。</p>`,
+      cells: [17, 24], highlight: ["colums_to_keep", "df['Lead Time']"],
+      draw(svg, ctx) {
+        const chips = [];
+        for (let i = 0; i < 53; i++) {
+          const x = 24 + (i % 18) * 38, y = 40 + Math.floor(i / 18) * 30;
+          chips.push({ keep: i % 3 === 0 || i === 52, e: K.svg(svg, "rect", { x, y, width: 32, height: 22, rx: 4, fill: "var(--c1)", opacity: 0.75 }) });
+        }
+        T(svg, 24, 28, "53 个原始列（示意）", { class: "muted", "font-size": 12 });
+        const lab = T(svg, 24, 150, "", { "font-weight": 700 });
+        const newCols = ["Year", "Month", "Day", "Weekday", "Lead Time"].map((n, i) => {
+          const g = K.node(svg, 24 + i * 120, 170, 108, 40, n, { fill: i === 4 ? "color-mix(in srgb, var(--c5) 22%, var(--panel))" : "color-mix(in srgb, var(--c3) 18%, var(--panel))", stroke: i === 4 ? "var(--c5)" : "var(--c3)", bold: i === 4 });
+          g.style.opacity = 0; return g;
+        });
+        const f = T(svg, 24, 250, "Lead Time = 实际送达天数 − 计划送达天数", { "font-size": 15, "font-weight": 700, fill: "var(--c5)" });
+        const ex = T(svg, 24, 278, "例（示意）：计划 4 天，实际 6 天 → Lead Time = 2，晚到 2 天", { "font-size": 13, class: "muted" });
+        fade([f, ex], 0);
+        ctx.wait(500).then((ok) => ok && ctx.tween(1200, (t) => chips.forEach((c) => { if (!c.keep) c.e.style.opacity = 0.75 * (1 - t) + 0.06 * t; })))
+          .then((ok) => { if (ok) lab.textContent = "保留下来的有用列 + 新造的 5 列 → 共 23 列"; return ok && ctx.tween(1000, (t) => fade(newCols, t)); })
+          .then((ok) => ok && ctx.tween(600, (t) => fade([f, ex], t)));
+      },
+    },
+    {
+      title: "锁定最畅销商品，做两套编码", kicker: "第 27–32 格 · 编码",
+      html: `<p>第 28 格先找出订单最多的商品编号，再写了一个 <code>prepare_data()</code>：只取这件商品的订单，对文字列做两种编码。</p><ul class="tight"><li><b>标签编码</b>（LabelEncoder）：每个类别换成一个整数，留给后面的相关性热力图</li><li><b>独热编码</b>（one-hot）：每个类别单独一列 0/1，留给随机森林</li></ul><p>注意：这两套筛选过的数据只在最后的随机森林里用到，前面的 Prophet 用的仍是全体数据（第 10 章细说）。</p>`,
+      cells: [28], highlight: ["value_counts().index[0]", "LabelEncoder", "get_dummies"],
+      draw(svg, ctx) {
+        const cats = ["Consumer", "Corporate", "Home Office"];
+        const src = cats.map((c, i) => K.node(svg, 30, 70 + i * 60, 130, 44, c));
+        T(svg, 30, 50, "客户类型（文字，示意）", { "font-weight": 700 });
+        T(svg, 250, 50, "标签编码", { "font-weight": 700, fill: "var(--c1)" });
+        T(svg, 430, 50, "独热编码：每类一列", { "font-weight": 700, fill: "var(--c3)" });
+        const le = cats.map((c, i) => { const n = K.node(svg, 250, 70 + i * 60, 80, 44, String(i), { fill: "color-mix(in srgb, var(--c1) 16%, var(--panel))", stroke: "var(--c1)", bold: true }); n.style.opacity = 0; return n; });
+        const oh = [];
+        cats.forEach((c, i) => cats.forEach((d, j) => { const n = K.node(svg, 430 + j * 86, 70 + i * 60, 76, 44, i === j ? "1" : "0", { fill: i === j ? "color-mix(in srgb, var(--c3) 26%, var(--panel))" : "var(--panel-2)", stroke: "var(--c3)", bold: i === j }); n.style.opacity = 0; oh.push(n); }));
+        T(svg, 30, 290, "标签编码省列，但 0<1<2 会让模型以为类别有大小；独热编码没有这个问题，代价是列变多。", { "font-size": 12, class: "muted" });
+        ctx.wait(400).then((ok) => ok && ctx.tween(800, (t) => fade(le, t))).then((ok) => ok && ctx.tween(1000, (t) => oh.forEach((n, i) => (n.style.opacity = K.clamp(t * 9 - i, 0, 1)))));
+      },
+    },
+    {
+      title: "单变量分析：谁卖得最多", kicker: "第 33–37 格 · 探索",
+      html: `<p>第 35 格画了 9 张分布图：订单最多的前 10 件商品、销售额分布、单价分布、客户类型等。作者的观察 <span data-cell="36">第 36 格</span>：</p><ul class="tight"><li>订单最多的是 <b>365 号商品</b> “Perfect Fitness Perfect Rip Deck”，是跑得快的货</li><li>销售额、单价都是右偏长尾：大部分订单金额不高</li><li>大部分客户属于 Consumer（普通消费者）类</li></ul><p>于是后面的预测和库存计算都聚焦 365 号商品 <span data-cell="37">第 37 格</span>。条形高度是示意。</p>`,
+      cells: [35], highlight: ["value_counts().iloc[:10]"],
+      draw(svg, ctx) {
+        const vals = [1, 0.86, 0.8, 0.62, 0.55, 0.5, 0.41, 0.36, 0.33, 0.3];
+        const items = vals.map((v, i) => ({ label: i === 0 ? "365" : "#" + (i + 1), value: v, color: i === 0 ? "var(--c5)" : "var(--ink-3)" }));
+        const els = K.bars(svg, { x: 60, y: 40, w: 600, h: 230 }, items, { fmt: () => "" });
+        els.forEach((e) => { e.h = +e.rect.getAttribute("height"); e.y = +e.rect.getAttribute("y"); e.rect.setAttribute("height", 0); e.rect.setAttribute("y", e.y + e.h); });
+        T(svg, 60, 28, "订单数最多的前 10 件商品（高度示意）", { class: "muted", "font-size": 12 });
+        const star = T(svg, 120, 320, "★ 365 号：Perfect Fitness Perfect Rip Deck → 后面只研究它", { "font-weight": 700, fill: "var(--c5)" });
+        star.style.opacity = 0;
+        ctx.tween(1300, (t) => els.forEach((e) => { e.rect.setAttribute("height", e.h * t); e.rect.setAttribute("y", e.y + e.h * (1 - t)); }))
+          .then((ok) => ok && ctx.tween(500, (t) => (star.style.opacity = t)));
+      },
+    },
+    {
+      title: "时间序列热力图：需求稳不稳", kicker: "第 38–41 格 · 看时间规律",
+      html: `<p>第 40 格把销售额按月加总，画成一条“时间热力图”，颜色越深卖得越多。作者的观察 <span data-cell="41">第 41 格</span>：整体比较稳定；2015、2016、2017 年第一季度差不多，<b>2018 年第一季度明显下滑</b>。</p><p>小细节：代码注释写“按年重采样”，实际 <code>resample('M')</code> 是按月；而且这里用的是全体订单，不只是 365 号商品。动画颜色深浅为示意。</p>`,
+      cells: [40], highlight: ["resample('M')"],
+      draw(svg, ctx) {
+        const years = ["2015", "2016", "2017", "2018"], r = K.rng(4), cells = [];
+        years.forEach((y, yi) => {
+          T(svg, 30, 78 + yi * 56, y, { "font-weight": 700 });
+          for (let m = 0; m < 12; m++) {
+            let v = 0.55 + r() * 0.15 + (m >= 10 ? 0.15 : 0);
+            if (yi === 3) v = m < 3 ? 0.18 + r() * 0.06 : -1;
+            const e = K.svg(svg, "rect", { x: 80 + m * 50, y: 56 + yi * 56, width: 46, height: 40, rx: 4, fill: v < 0 ? "var(--panel-2)" : K.heat(v), stroke: "var(--line)" });
+            e.style.opacity = 0; cells.push(e);
+          }
+        });
+        for (let m = 0; m < 12; m++) T(svg, 103 + m * 50, 48, (m + 1) + "月", { "text-anchor": "middle", "font-size": 11, class: "muted" });
+        const note = T(svg, 80, 300, "← 2018 年第一季度颜色变浅：作者认为值得再查原因", { fill: "var(--warn)", "font-weight": 700 });
+        note.style.opacity = 0;
+        ctx.tween(1600, (t) => cells.forEach((e, i) => (e.style.opacity = K.clamp(t * 48 - i, 0, 1)))).then((ok) => ok && ctx.tween(500, (t) => (note.style.opacity = t)));
+      },
+    },
+    {
+      title: "Prophet 预测：趋势 + 季节 + 节假日", kicker: "第 42–44 格 · 时间序列建模",
+      html: `<p><b>Prophet</b> 是 Facebook 开源的预测工具。它把一条时间序列看成几块积木相加：<b>长期趋势</b> + <b>每年 / 每周的季节波动</b> + <b>节假日效应</b>。</p><p>作者发现大部分订单来自波多黎各，于是把波多黎各节假日表也交给 Prophet <span data-cell="44">第 44 格</span>，再往后预测 365 天。</p><p>动画演示“积木相加”：三条分量曲线是示意，不是作者的结果。</p>`,
+      cells: [43], highlight: ["Prophet(holidays=holidays_df)", "periods=365"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 20, w: 640, h: 270 }, [0, 365], [-1.6, 3.2], { yticks: 0, xticks: 0, xlabel: "一年中的第几天（示意）" });
+        const trend = (d) => 1 + d / 365 * 0.4, season = (d) => 0.5 * Math.sin((d / 365) * 2 * Math.PI - 1.2) + (d > 300 ? 0.6 * Math.sin(((d - 300) / 65) * Math.PI) : 0), week = (d) => 0.18 * Math.sin((d / 7) * 2 * Math.PI);
+        const hol = [1, 6, 120, 185, 330, 359], holi = (d) => hol.reduce((s, h) => s + (Math.abs(d - h) < 2 ? 0.7 : 0), 0);
+        const comps = [[trend, "var(--c1)", "趋势"], [(d) => season(d) - 1.1, "var(--c2)", "年季节"], [(d) => week(d) - 1.1, "var(--c3)", "周波动"], [(d) => holi(d) - 1.4, "var(--c6)", "节假日"]];
+        const path = (f, k) => { let s = ""; for (let d = 0; d <= 365 * k; d += 1) s += (s ? "L" : "M") + ax.sx(d) + "," + ax.sy(f(d)); return s || "M0,0"; };
+        const els = comps.map((c, i) => { T(svg, 560, 40 + i * 18, "— " + c[2], { fill: c[1], "font-size": 12 }); return K.svg(svg, "path", { d: "M0,0", fill: "none", stroke: c[1], "stroke-width": 1.6 }); });
+        const sum = K.svg(svg, "path", { d: "M0,0", fill: "none", stroke: "var(--ink)", "stroke-width": 2.6 });
+        const sumf = (d) => trend(d) + season(d) + week(d) + holi(d);
+        const lab = T(svg, 60, 40, "", { "font-weight": 700 });
+        (async () => {
+          for (let i = 0; i < 4; i++) if (!(await ctx.tween(600, (t) => els[i].setAttribute("d", path(comps[i][0], t))))) return;
+          lab.textContent = "四块加起来 = Prophet 的预测曲线（粗黑线）";
+          await ctx.tween(1400, (t) => sum.setAttribute("d", path((d) => sumf(d) * 0.75 + 0.5, t)));
+        })();
+      },
+    },
+    {
+      title: "滚动交叉验证：模拟“过去预测未来”", kicker: "第 45–50 格 · 评估",
+      html: `<p>怎么知道预测准不准？Prophet 的 <code>cross_validation</code> 会假装站在过去某一天：先用前 730 天训练（<code>initial</code>），往后预测 365 天（<code>horizon</code>），再把这一天往后挪 365 天（<code>period</code>）重来，比较预测和真实值。</p><p>误差用 <b>MAPE</b>（平均绝对百分比误差，比如真实 100 预测 90 就错了 10%）。作者的结论 <span data-cell="50">第 50 格</span>：预测 200 天以内误差较低，超过 250 天明显变大。右侧误差曲线是示意。</p>`,
+      cells: [47, 49], highlight: ["initial='730 days'", "horizon='365 days'", "mape"],
+      draw(svg, ctx) {
+        const x0 = 40, W = 420, days = 1100, sx = (d) => x0 + (d / days) * W;
+        T(svg, x0, 30, "时间轴（示意）", { class: "muted", "font-size": 12 });
+        const folds = [0, 1].map((k) => {
+          const y = 60 + k * 70, cut = 730 + k * 365 * 0.35;
+          const tr = K.svg(svg, "rect", { x: sx(0), y, width: 0, height: 30, rx: 4, fill: "color-mix(in srgb, var(--c1) 30%, var(--panel))", stroke: "var(--c1)" });
+          const te = K.svg(svg, "rect", { x: sx(cut), y, width: 0, height: 30, rx: 4, fill: "color-mix(in srgb, var(--c3) 30%, var(--panel))", stroke: "var(--c3)" });
+          return { tr, te, cut };
+        });
+        T(svg, x0, 225, "■ 训练（initial 730 天）", { fill: "var(--c1)", "font-size": 12 });
+        T(svg, x0 + 170, 225, "■ 预测并对答案（horizon 365 天）", { fill: "var(--c3)", "font-size": 12 });
+        T(svg, x0, 250, "每折的起点向后挪 period = 365 天", { "font-size": 12, class: "muted" });
+        const ax = K.axes(svg, { x: 520, y: 50, w: 170, h: 200 }, [0, 365], [0, 1], { xticks: 2, yticks: 0, xlabel: "预测距离（天）" });
+        T(svg, 520, 40, "MAPE（示意）", { "font-size": 12, "font-weight": 700 });
+        const curve = K.svg(svg, "path", { d: "M0,0", fill: "none", stroke: "var(--warn)", "stroke-width": 2.4 });
+        const mf = (h) => 0.25 + 0.1 * (h / 200) + (h > 230 ? Math.pow((h - 230) / 135, 2) * 0.55 : 0);
+        (async () => {
+          for (const f of folds) {
+            if (!(await ctx.tween(700, (t) => f.tr.setAttribute("width", (sx(f.cut) - sx(0)) * t)))) return;
+            if (!(await ctx.tween(600, (t) => f.te.setAttribute("width", (sx(Math.min(days, f.cut + 365)) - sx(f.cut)) * t)))) return;
+          }
+          await ctx.tween(1200, (t) => { let s = ""; for (let h = 0; h <= 365 * t; h += 3) s += (s ? "L" : "M") + ax.sx(h) + "," + ax.sy(mf(h)); curve.setAttribute("d", s || "M0,0"); });
+        })();
+      },
+    },
+    {
+      title: "网格搜索：把 128 组超参数挨个试一遍", kicker: "第 51–58 格 · 调参",
+      html: `<p>Prophet 有几个“旋钮”（超参数）：季节性是加法还是乘法、季节 / 节假日 / 趋势转折点各允许多灵活。第 51 格列出 2×4×4×4 = <b>128</b> 种组合，第 53 格每组都训练一遍、做一次滚动交叉验证，记下平均 MAPE。</p><p>作者说这段代码跑了很久 <span data-cell="54">第 54 格</span>，最优组合是 additive、seasonality_prior_scale=1、holidays_prior_scale=5、changepoint_prior_scale=0.005 <span data-cell="57">第 57 格</span>。</p><p>两个小问题：第 56 格注释写“最低 RMSE”，实际比的是 MAPE；网格搜索时的模型没加节假日，最终模型却加了。</p>`,
+      cells: [51, 53, 56], highlight: ["param_grid", "results[params] = df_metrics['mape'].mean()", "min(results, key=results.get)"],
+      draw(svg, ctx) {
+        const r = K.rng(8), cells = [];
+        let best = -1;
+        for (let i = 0; i < 128; i++) {
+          const x = 30 + (i % 16) * 30 + (i % 16 >= 8 ? 14 : 0), y = 40 + Math.floor(i / 16) * 30;
+          cells.push({ e: K.svg(svg, "rect", { x, y, width: 26, height: 26, rx: 3, fill: "var(--panel-2)", stroke: "var(--line)" }), m: r() });
+        }
+        best = 0;
+        cells[0].m = -0.2;
+        T(svg, 30, 30, "additive ← 64 组 →", { "font-size": 12, class: "muted" });
+        T(svg, 284, 30, "multiplicative ← 64 组 →", { "font-size": 12, class: "muted" });
+        T(svg, 30, 300, "每格 = 一组超参数：训练一次 + 滚动交叉验证一次；颜色越深 MAPE 越低（示意）", { "font-size": 12, class: "muted" });
+        const cnt = T(svg, 540, 120, "已试 0 / 128", { "font-size": 16, "font-weight": 700 });
+        const win = T(svg, 540, 160, "", { "font-size": 13, fill: "var(--good)", "font-weight": 700 });
+        ctx.tween(2600, (t) => {
+          const n = Math.floor(t * 128);
+          cells.forEach((c, i) => { if (i < n) K.set(c.e, { fill: K.heat(1 - K.clamp(c.m, 0, 1) * 0.85) }); });
+          cnt.textContent = `已试 ${n} / 128`;
+        }).then((ok) => { if (!ok) return; K.set(cells[best].e, { stroke: "var(--good)", "stroke-width": 3 }); win.textContent = "最低：additive, 1, 5, 0.005"; T(svg, 540, 182, "（作者第 57 格）", { "font-size": 12, class: "muted" }); });
+      },
+    },
+    {
+      title: "调参后的模型：结果差不多", kicker: "第 59–73 格 · 重新训练与解读",
+      html: `<p>第 59 格用最优超参数 + 节假日重新训练，再做一次交叉验证，把调参前后的 MAPE 曲线并排画出来（第 63 格）。作者坦白：结果和调参前差不多，说明模型对这些超参数不敏感 <span data-cell="64">第 64 格</span>。</p><p>作者对预测的解读 <span data-cell="73">第 73 格</span>：2015–2017 年每年 10 月小跌、11–12 月大涨；未来的预测非常平稳，可能因为这件商品价格从来没变过。</p><p>注意：业务问题写的是“未来 24 个月”，但代码 <code>periods=365</code> 只往后预测了 12 个月。</p>`,
+      cells: [59, 61, 63], highlight: ["seasonality_prior_scale=1", "changepoint_prior_scale=0.005"],
+      notes: { 66: "看一眼预测表的前两行：yhat 是预测值，yhat_lower / yhat_upper 是不确定区间。", 69: "画出调参后模型的各个分量：趋势、节假日、周季节、年季节。" },
+      draw(svg, ctx) {
+        const boxes = [{ x: 40, t: "调参前（示意）" }, { x: 380, t: "调参后（示意）" }];
+        const mf = (h, k) => 0.25 + 0.1 * (h / 200) + (h > 230 ? Math.pow((h - 230) / 135, 2) * (0.55 - k * 0.03) : 0);
+        const ps = boxes.map((b, k) => {
+          const ax = K.axes(svg, { x: b.x + 20, y: 50, w: 280, h: 200 }, [0, 365], [0, 1], { xticks: 3, yticks: 0, xlabel: "预测距离（天）" });
+          T(svg, b.x + 20, 38, b.t, { "font-weight": 700 });
+          const r = K.rng(20 + k), dots = [];
+          for (let i = 0; i < 70; i++) { const h = r() * 365; dots.push(K.svg(svg, "circle", { cx: ax.sx(h), cy: ax.sy(K.clamp(mf(h, k) + K.randn(r) * 0.08, 0, 1)), r: 0, fill: "var(--c1)", opacity: 0.45 })); }
+          const p = K.svg(svg, "path", { d: "M0,0", fill: "none", stroke: "var(--warn)", "stroke-width": 2.4 });
+          return { ax, p, dots, k };
+        });
+        const eq = T(svg, 200, 320, "两边几乎一样：花很多时间调参，收获不大", { "font-weight": 700, fill: "var(--warn)" });
+        eq.style.opacity = 0;
+        ctx.tween(1000, (t) => ps.forEach((q) => q.dots.forEach((d) => d.setAttribute("r", 2.6 * t))))
+          .then((ok) => ok && ctx.tween(1200, (t) => ps.forEach((q) => { let s = ""; for (let h = 0; h <= 365 * t; h += 3) s += (s ? "L" : "M") + q.ax.sx(h) + "," + q.ax.sy(mf(h, q.k)); q.p.setAttribute("d", s || "M0,0"); })))
+          .then((ok) => ok && ctx.tween(500, (t) => (eq.style.opacity = t)));
+      },
+    },
+    {
+      title: "再订货点：提前期需求 + 安全库存", kicker: "第 74–86 格 · 库存优化（一）",
+      html: `<p><b>再订货点（ROP）</b>：库存降到这个数就该下单。因为下单后要等几天才到货，这几天还在卖，所以：</p><p><code>再订货点 = 提前期需求 + 安全库存</code>，其中 <code>提前期需求 = 日均销量 × 提前期</code>。</p><p>数据里只有“发给客户”的天数，没有“供应商送到仓库”的天数，作者就<b>假设</b>平均提前期 7 天、最长 10 天 <span data-cell="77">第 77 格</span> <span data-cell="82">第 82 格</span>。安全库存用“最大日销量 × 最长提前期 − 提前期需求”。作者得到再订货点 <b>3753</b> <span data-cell="86">第 86 格</span>、安全库存 <b>2284</b> <span data-cell="99">第 99 格</span>。</p><p class="callout warn">反推一下：提前期需求 = 3753 − 2284 = 1469，除以 7 天约等于 210。这个“日均”其实是 Prophet 对<b>单条订单销售额（美元）</b>的平均预测：Prophet 吃的是全部商品的逐条订单，没有按天加总。所以 3753 是美元口径，也不是 365 号商品每天的件数。（1469、210 为本页根据作者两个数字的推算。）</p>`,
+      cells: [79, 83, 85], highlight: ["average_lead_time = 7", "max_lead_time = average_lead_time + 3", "safety_stock =", "reorder_point = lead_time_demand + safety_stock"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 20, w: 620, h: 250 }, [0, 60], [0, 100], { xticks: 6, yticks: 0, xlabel: "天（示意）" });
+        const rop = 45, ss = 18;
+        K.svg(svg, "rect", { x: ax.sx(0), y: ax.sy(ss), width: 620, height: ax.sy(0) - ax.sy(ss), fill: "var(--c3)", "fill-opacity": 0.12 });
+        T(svg, ax.sx(60) - 4, ax.sy(ss / 2) + 4, "安全库存", { "text-anchor": "end", fill: "var(--c3)", "font-size": 12, "font-weight": 700 });
+        K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(60), y1: ax.sy(rop), y2: ax.sy(rop), stroke: "var(--warn)", "stroke-dasharray": "6 4", "stroke-width": 2 });
+        T(svg, ax.sx(60) - 4, ax.sy(rop) - 6, "再订货点", { "text-anchor": "end", fill: "var(--warn)", "font-size": 12, "font-weight": 700 });
+        const pts = [], marks = [];
+        let inv = 90, pending = null; const r = K.rng(3);
+        for (let d = 0; d <= 60; d++) {
+          if (pending && d === pending.at) { inv += pending.q; marks.push({ d, k: "到货" }); pending = null; }
+          pts.push([d, inv]);
+          inv -= 3.4 + r() * 1.6;
+          if (!pending && inv <= rop) { pending = { at: d + 8, q: 58 }; marks.push({ d, k: "下单" }); }
+        }
+        const line = K.svg(svg, "path", { d: "M0,0", fill: "none", stroke: "var(--c1)", "stroke-width": 2.4 });
+        const mk = marks.map((m) => { const g = T(svg, ax.sx(m.d), m.k === "下单" ? ax.sy(rop) + 18 : ax.sy(95), m.k === "下单" ? "▲下单" : "▼到货", { "text-anchor": "middle", "font-size": 11, fill: m.k === "下单" ? "var(--warn)" : "var(--good)", "font-weight": 700 }); g.style.opacity = 0; return { g, d: m.d }; });
+        T(svg, 70, 334, "下单后等提前期才到货；这几天消耗的是“提前期需求”，安全库存兜住意外（曲线为示意）", { "font-size": 12, class: "muted" });
+        ctx.tween(3000, (t) => {
+          const n = Math.floor(t * (pts.length - 1)) + 1;
+          line.setAttribute("d", pts.slice(0, n).map((p, i) => (i ? "L" : "M") + ax.sx(p[0]) + "," + ax.sy(p[1])).join(""));
+          mk.forEach((m) => (m.g.style.opacity = m.d < n ? 1 : 0));
+        });
+      },
+    },
+    {
+      title: "经济订货批量 EOQ：订得勤还是订得多", kicker: "第 87–99 格 · 库存优化（二）",
+      html: `<p><b>EOQ</b> 回答“每次订多少最省钱”。每次订得少，一年要订很多次，订货费高；每次订得多，平均压在仓库的货多，持有费高。总成本是一条 U 形曲线，最低点就是 <code>EOQ = √(2DS/H)</code>：D 是年需求量，S 是每次订货费，H 是每件货存一年的费用。</p><p>作者的结果是 <b>35</b> <span data-cell="94">第 94 格</span>，最终策略：库存降到 3753 时订 35 件 <span data-cell="99">第 99 格</span>。</p><p class="callout warn">这里有三处对不上：① 文字说订货成本 10%、持有成本 30% <span data-cell="89">第 89 格</span>，代码却是 <code>H = 0.10</code>、<code>S = 0.30</code> <span data-cell="91">第 91 格</span>，正好反过来；② D 用的是预测值的<b>日</b>均（还是美元），H 却是“每件每年”，单位不一致，EOQ 会小约 √365 ≈ 19 倍；③ 再订货点 3753 而每次只补 35，补一次货远远不够把库存拉回去，这个策略在现实中会一直下单。</p>`,
+      cells: [91, 93], highlight: ["H = 0.10 * product_price", "S = 0.30 * product_price", "D = new_forecast['yhat'].mean()", "EOQ = math.sqrt((2 * D * S) / H)"],
+      draw(svg, ctx) {
+        const D = 3650, S = 50, H = 10, eoq = Math.sqrt((2 * D * S) / H);
+        const ax = K.axes(svg, { x: 70, y: 20, w: 600, h: 250 }, [20, 600], [0, 4000], { xticks: 5, yticks: 4, xlabel: "每次订货量 Q（件，示意）", ylabel: "一年成本" });
+        const fs = [[(q) => (D / q) * S, "var(--c1)", "订货费 D/Q × S"], [(q) => (q / 2) * H, "var(--c2)", "持有费 Q/2 × H"], [(q) => (D / q) * S + (q / 2) * H, "var(--ink)", "总成本"]];
+        const ps = fs.map((f, i) => { T(svg, 470, 40 + i * 18, "— " + f[2], { fill: f[1], "font-size": 12, "font-weight": i === 2 ? 700 : 400 }); return K.svg(svg, "path", { d: "M0,0", fill: "none", stroke: f[1], "stroke-width": i === 2 ? 2.8 : 1.8 }); });
+        const pth = (f, t) => { let s = ""; for (let q = 20; q <= 20 + 580 * t; q += 4) s += (s ? "L" : "M") + ax.sx(q) + "," + ax.sy(Math.min(4000, f(q))); return s || "M0,0"; };
+        const vl = K.svg(svg, "line", { x1: ax.sx(eoq), x2: ax.sx(eoq), y1: ax.sy(0), y2: ax.sy(0), stroke: "var(--good)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+        const lab = T(svg, ax.sx(eoq) + 8, ax.sy(2600), "", { fill: "var(--good)", "font-weight": 700 });
+        (async () => {
+          for (let i = 0; i < 3; i++) if (!(await ctx.tween(800, (t) => ps[i].setAttribute("d", pth(fs[i][0], t))))) return;
+          if (!(await ctx.tween(600, (t) => vl.setAttribute("y2", K.lerp(ax.sy(0), ax.sy(fs[2][0](eoq)), t))))) return;
+          lab.textContent = `最低点 Q* = √(2DS/H) ≈ ${Math.round(eoq)}`;
+        })();
+      },
+    },
+    {
+      title: "加分题：随机森林找需求的影响因素", kicker: "第 100–119 格 · 解释",
+      html: `<p>作者猜测：提前期、客户类型和地理因素会影响需求 <span data-cell="101">第 101 格</span>。先画相关系数热力图，没有发现和销售额强相关的单个因素 <span data-cell="106">第 106 格</span>；再用 <b>随机森林回归</b>（150 棵树、最深 10 层）预测 <code>Sales</code>，看 <code>feature_importances_</code> 前 5 名。</p><p>作者结论：Lead Time 和部分地理因素排进了前 5，客户类型没有 <span data-cell="114">第 114 格</span>。条形长度是示意。</p><p>需要注意：这件商品单价不变，<code>Sales</code> 基本等于“数量 × 固定单价”，模型其实在预测一条订单买了几件。</p>`,
+      cells: [105, 108, 110, 112], highlight: ["RandomForestRegressor(n_estimators=150, max_depth=10", "feature_importances_"],
+      draw(svg, ctx) {
+        const trees = [];
+        for (let k = 0; k < 5; k++) {
+          const x = 40 + k * 64, g = K.svg(svg, "g");
+          K.svg(g, "line", { x1: x + 20, y1: 60, x2: x + 6, y2: 100, stroke: "var(--c3)", "stroke-width": 2 });
+          K.svg(g, "line", { x1: x + 20, y1: 60, x2: x + 34, y2: 100, stroke: "var(--c3)", "stroke-width": 2 });
+          K.svg(g, "circle", { cx: x + 20, cy: 58, r: 8, fill: "var(--c3)" });
+          K.svg(g, "circle", { cx: x + 6, cy: 104, r: 6, fill: "var(--c3)", opacity: 0.6 });
+          K.svg(g, "circle", { cx: x + 34, cy: 104, r: 6, fill: "var(--c3)", opacity: 0.6 });
+          g.style.opacity = 0; trees.push(g);
+        }
+        T(svg, 40, 36, "150 棵决策树（画 5 棵示意）", { "font-size": 12, class: "muted" });
+        T(svg, 40, 150, "每棵树记下：用哪个特征分叉后，误差降得最多", { "font-size": 12 });
+        T(svg, 40, 170, "→ 把 150 棵树的“功劳”平均 = 特征重要性", { "font-size": 12 });
+        const items = [{ label: "Lead Time", value: 0.9, color: "var(--c5)" }, { label: "地理因素 A", value: 0.7, color: "var(--c1)" }, { label: "地理因素 B", value: 0.55, color: "var(--c1)" }, { label: "其他特征", value: 0.4, color: "var(--ink-3)" }, { label: "其他特征", value: 0.3, color: "var(--ink-3)" }];
+        const els = K.bars(svg, { x: 380, y: 40, w: 320, h: 200 }, items, { horizontal: true, labelWidth: 100, fmt: () => "" });
+        els.forEach((e) => { e.w = +e.rect.getAttribute("width"); e.rect.setAttribute("width", 0); });
+        T(svg, 380, 270, "前 5 重要特征（长度示意）", { "font-size": 12, class: "muted" });
+        T(svg, 380, 295, "客户类型 Customer Segment 不在前 5", { "font-size": 13, fill: "var(--warn)", "font-weight": 700 });
+        ctx.tween(1000, (t) => trees.forEach((g, i) => (g.style.opacity = K.clamp(t * 5 - i, 0, 1))))
+          .then((ok) => ok && ctx.tween(1200, (t) => els.forEach((e) => e.rect.setAttribute("width", e.w * t))));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：库存锯齿图模拟 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "rop", label: "再订货点 ROP（件）", min: 300, max: 1600, step: 10, value: 800 },
+      { id: "q", label: "每次订货量 Q（件）", min: 200, max: 3000, step: 50, value: 1200 },
+      { id: "cv", label: "每天销量的波动（标准差占平均的比例）", min: 0, max: 0.8, step: 0.05, value: 0.3, fmt: (v) => Math.round(v * 100) + "%" },
+      { id: "late", label: "供应商延迟的概率（延迟时提前期 10 天，否则 7 天）", min: 0, max: 1, step: 0.05, value: 0.3, fmt: (v) => Math.round(v * 100) + "%" },
+      { id: "seed", label: "换一组随机需求", button: true },
+    ],
+    note: "模拟一年（365 天）：每天随机卖出约 100 件（按滑块的波动），库存降到再订货点就下单，提前期过后到货。卖不出去的算缺货。作者的思路对应：提前期需求 = 100 × 7 = 700，再加安全库存。拖低 ROP 看红色缺货出现，拖高 Q 看平均库存上升。",
+    render(svg, v) {
+      const r = K.rng(77 + v.seed * 31), mu = 100, days = 365;
+      let inv = v.rop + v.q, pipe = [], orders = 0, lost = 0, demandAll = 0, outDays = 0, sumInv = 0;
+      const series = [], outs = [], orderDays = [];
+      for (let d = 0; d < days; d++) {
+        pipe = pipe.filter((o) => { if (o.at === d) { inv += o.q; return false; } return true; });
+        const dem = Math.max(0, Math.round(mu + K.randn(r) * mu * v.cv));
+        demandAll += dem;
+        const sold = Math.min(inv, dem);
+        if (sold < dem) { lost += dem - sold; outDays++; outs.push(d); }
+        inv -= sold;
+        const onOrder = pipe.reduce((s, o) => s + o.q, 0);
+        if (inv + onOrder <= v.rop) { const L = r() < v.late ? 10 : 7; pipe.push({ at: d + L, q: v.q }); orders++; orderDays.push(d); }
+        sumInv += inv; series.push(inv);
+      }
+      const maxY = Math.max(...series, v.rop) * 1.08;
+      const ax = K.axes(svg, { x: 60, y: 16, w: 560, h: 290 }, [0, days], [0, maxY], { xticks: 6, yticks: 4, xlabel: "第几天" });
+      K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(days), y1: ax.sy(v.rop), y2: ax.sy(v.rop), stroke: "var(--warn)", "stroke-dasharray": "6 4", "stroke-width": 1.6 });
+      K.svg(svg, "text", { x: ax.sx(days) - 4, y: ax.sy(v.rop) - 5, "text-anchor": "end", "font-size": 11, fill: "var(--warn)" }, "再订货点");
+      outs.forEach((d) => K.svg(svg, "rect", { x: ax.sx(d), y: ax.sy(maxY), width: Math.max(1.5, ax.sx(1) - ax.sx(0)), height: ax.sy(0) - ax.sy(maxY), fill: "var(--bad)", "fill-opacity": 0.18 }));
+      K.svg(svg, "path", { d: series.map((y, i) => (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(y)).join(""), fill: "none", stroke: "var(--c1)", "stroke-width": 1.6 });
+      orderDays.forEach((d) => K.svg(svg, "circle", { cx: ax.sx(d), cy: ax.sy(v.rop), r: 2.6, fill: "var(--warn)" }));
+      K.svg(svg, "text", { x: 60, y: 350, "font-size": 12, class: "muted" }, "蓝线=库存  橙点=下单  红色竖条=当天缺货");
+      const fill = 1 - lost / demandAll;
+      return { readout: [
+        { k: "缺货天数", v: outDays + " 天", color: outDays > 0 ? "var(--bad)" : "var(--good)" },
+        { k: "满足率（卖出/需求）", v: (fill * 100).toFixed(1) + "%", color: fill < 0.98 ? "var(--bad)" : "var(--good)" },
+        { k: "平均库存", v: Math.round(sumInv / days) + " 件" },
+        { k: "一年下单次数", v: orders + " 次" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：EOQ 成本曲线 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "d", label: "需求：平均每天卖多少件", min: 10, max: 500, step: 5, value: 100 },
+      { id: "s", label: "每次订货费 S（美元/次）", min: 5, max: 300, step: 5, value: 60 },
+      { id: "h", label: "持有费 H（美元/件/年）", min: 1, max: 80, step: 1, value: 20 },
+      { id: "unit", label: "D 用哪个数", value: "year", options: [["year", "正确：年需求 = 日均 × 365"], ["day", "作者的做法：直接用日均"]] },
+    ],
+    note: "现场画出一年的订货费、持有费和总成本，找最低点。默认值是示意数字。把“D 用哪个数”切到作者的做法，看 EOQ 一下子缩小到约 1/19，而总成本反而变高。",
+    render(svg, v) {
+      const Dyear = v.d * 365, Dused = v.unit === "year" ? Dyear : v.d;
+      const eoqUsed = Math.sqrt((2 * Dused * v.s) / v.h), eoqTrue = Math.sqrt((2 * Dyear * v.s) / v.h);
+      const cost = (q) => (Dyear / q) * v.s + (q / 2) * v.h;
+      const qMax = Math.max(eoqTrue * 2.6, 50), qMin = Math.max(1, Math.min(eoqUsed, eoqTrue * 0.25));
+      const yMax = cost(eoqTrue) * 2.4;
+      const ax = K.axes(svg, { x: 70, y: 16, w: 550, h: 280 }, [0, qMax], [0, yMax], { xticks: 5, yticks: 4, xlabel: "每次订货量 Q（件）", yfmt: (x) => K.fmt(x, 0) });
+      const path = (f) => { let s = ""; for (let i = 0; i <= 200; i++) { const q = qMin + (qMax - qMin) * i / 200; s += (s ? "L" : "M") + ax.sx(q) + "," + ax.sy(Math.min(yMax, f(q))); } return s; };
+      K.svg(svg, "path", { d: path((q) => (Dyear / q) * v.s), fill: "none", stroke: "var(--c1)", "stroke-width": 1.8 });
+      K.svg(svg, "path", { d: path((q) => (q / 2) * v.h), fill: "none", stroke: "var(--c2)", "stroke-width": 1.8 });
+      K.svg(svg, "path", { d: path(cost), fill: "none", stroke: "var(--ink)", "stroke-width": 2.6 });
+      K.svg(svg, "line", { x1: ax.sx(eoqTrue), x2: ax.sx(eoqTrue), y1: ax.sy(0), y2: ax.sy(cost(eoqTrue)), stroke: "var(--good)", "stroke-dasharray": "5 3", "stroke-width": 2 });
+      K.svg(svg, "circle", { cx: ax.sx(eoqTrue), cy: ax.sy(cost(eoqTrue)), r: 5, fill: "var(--good)" });
+      if (v.unit === "day") {
+        const qx = Math.max(eoqUsed, qMin);
+        K.svg(svg, "line", { x1: ax.sx(qx), x2: ax.sx(qx), y1: ax.sy(0), y2: ax.sy(Math.min(yMax, cost(qx))), stroke: "var(--bad)", "stroke-dasharray": "5 3", "stroke-width": 2 });
+        K.svg(svg, "text", { x: ax.sx(qx) + 6, y: ax.sy(yMax) + 30, "font-size": 12, fill: "var(--bad)", "font-weight": 700 }, "← 单位用错算出的 Q");
+      }
+      K.svg(svg, "text", { x: 70, y: 340, "font-size": 12, fill: "var(--c1)" }, "— 订货费");
+      K.svg(svg, "text", { x: 150, y: 340, "font-size": 12, fill: "var(--c2)" }, "— 持有费");
+      K.svg(svg, "text", { x: 230, y: 340, "font-size": 12, "font-weight": 700 }, "— 总成本（绿点=真正最低点）");
+      return { readout: [
+        { k: "算出的 EOQ", v: Math.round(eoqUsed) + " 件", color: v.unit === "day" ? "var(--bad)" : "var(--good)" },
+        { k: "按这个 Q 的年总成本", v: "$" + K.fmt(cost(eoqUsed), 0) },
+        { k: "正确 EOQ 的年总成本", v: "$" + K.fmt(cost(eoqTrue), 0), color: "var(--good)" },
+        { k: "一年订货次数", v: (Dyear / eoqUsed).toFixed(0) + " 次" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

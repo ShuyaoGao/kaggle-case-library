@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>广告点击率预测</title>
+<meta name="description" content="Kaggle 案例拆解：Avazu 移动广告点击率（CTR）预测——四千万条曝光记录分块抽样、时段特征、按点击率给高基数类别分级、决策树选特征、XGBoost 建模。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格数据 · 二分类 · 计算广告</div>
+  <h1>广告点击率：这条广告，用户会不会点？</h1>
+  <p class="en">CTR Practice（Avazu Click-Through Rate Prediction，原文为繁体中文）</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">分块读取 + 抽样</span><span class="tag method">时段 / 星期特征</span><span class="tag method">按点击率分级（高基数类别）</span>
+    <span class="tag method">独热编码</span><span class="tag method">50/50 欠采样</span><span class="tag method">决策树 + GridSearchCV</span><span class="tag method">特征重要性筛选</span><span class="tag method">XGBoost</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>AkiShen</b></span>
+    <span>Kaggle 点赞 <b>333</b>（2026-11 抓取）</span>
+    <span>比赛 <b>avazu-ctr-prediction</b></span>
+    <span><a href="https://www.kaggle.com/code/akishen74/ctr-practice" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">移动广告平台 Avazu 的 4000 多万条广告曝光</div><p>每一行是一次“广告被展示”：几点、在哪个网站或 App、什么设备、广告位在哪……特征几乎全是类别编号。<span data-cell="1">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这次展示会不会被点击（click）</div><p><b>点击率（CTR）</b>= 点击次数 ÷ 展示次数。作者说正例（被点击）约占 17%。用前 10 天的数据，预测第 11 天。<span data-cell="5">出处</span> <span data-cell="22">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">先瘦身，再分级，最后上 XGBoost</div><p>每 100 万行抽 5%；时间变成“星期几 + 两小时时段”；取值太多的类别按各自的点击率归成 5 级；独热编码；用 50/50 平衡的子集调决策树、筛特征；最后用 XGBoost 在全部抽样数据上训练。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">提交分数 0.40560（第一名 0.37913）</div><p>作者写明本次提交得分 0.40560，排行榜第一名 0.37913（这个比赛分数越低越好）。<span data-cell="32">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据来自 2015 年 Kaggle 比赛 <b>Click-Through Rate Prediction</b>（主办方 Avazu，一家移动广告平台）。训练集是 10 天的曝光记录，测试集是第 11 天。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">训练集行数</div><div class="v">超过 4000 万</div></div>
+        <div class="stat-tile"><div class="k">作者抽样比例</div><div class="v">5%</div></div>
+        <div class="stat-tile"><div class="k">被点击的比例</div><div class="v" style="color:var(--c6)">约 17%</div></div>
+        <div class="stat-tile"><div class="k">时间跨度</div><div class="v">10 天 → 预测第 11 天</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">行数和抽样见第 1 格 <span data-cell="1">出处</span>；时间跨度见第 5 格 <span data-cell="5">出处</span>；正例比例见第 22 格 <span data-cell="22">出处</span>。作者还提到，int 类型的特征最多只有 4,333 种取值，判断所有特征其实都是类别 <span data-cell="8">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>id</code></td><td>曝光编号</td><td>编号</td></tr>
+        <tr><td><code>click</code></td><td><b>要预测的答案</b>：1 = 点击了，0 = 没点</td><td>0/1</td></tr>
+        <tr><td><code>hour</code></td><td>时间，格式 YYMMDDHH（年月日小时）</td><td>整数</td></tr>
+        <tr><td><code>C1</code> <code>C14</code>–<code>C21</code></td><td>匿名的类别特征</td><td>类别</td></tr>
+        <tr><td><code>banner_pos</code></td><td>广告位位置</td><td>类别</td></tr>
+        <tr><td><code>site_*</code> / <code>app_*</code></td><td>广告出现在哪个网站或 App：编号、域名、类别</td><td>类别</td></tr>
+        <tr><td><code>device_*</code></td><td>设备编号、IP、型号、设备类型、联网方式</td><td>类别</td></tr>
+      </table></div>
+      <p style="font-size:13px;color:var(--ink-2)">hour 的格式见第 6 格的 <code>get_date</code> 函数 <span data-cell="6">出处</span>；device_id、C14–C21 等列名见第 16、17 格；其余列名和含义按比赛数据说明整理。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="14">
+    <h3>动手试试 A · 按点击率给网站分级：人少的网站最容易“冤枉” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="31">
+    <h3>动手试试 B · AUC 和对数损失：用 0/1 还是用概率？ <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>训练数据超过 4000 万行，Pandas 读不下，按每 100 万行分块、每块抽 5%</td><td><span data-cell="1">第 1 格</span></td></tr>
+        <tr><td>日期本身没意义，但星期几、一天中的时段有意义；为避免维度太多，24 小时并成 12 个两小时时段</td><td><span data-cell="5">第 5 格</span></td></tr>
+        <tr><td>int 型特征最多也只有 4,333 种取值，所有特征都当作类别</td><td><span data-cell="8">第 8 格</span></td></tr>
+        <tr><td>取值超过 10 种的特征，按各取值的点击率分为 very_high / higher / mid / lower / very_low 五级</td><td><span data-cell="11">第 11 格</span></td></tr>
+        <tr><td>device_id、C14、C17、C19、C20、C21 处理后只剩一种取值，删除</td><td><span data-cell="16">第 16 格</span></td></tr>
+        <tr><td>正例约 17%，比例失衡，选择 XGBoost；先用 50/50 子集调参</td><td><span data-cell="22">第 22 格</span></td></tr>
+        <tr><td>提交得分 0.40560，排行榜第一名 0.37913</td><td><span data-cell="32">第 32 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">网格搜索的最佳深度、AUC、特征重要性排名、混淆矩阵都在运行输出里，源码不带，作者文字里也没写，所以这里只列第 32 格写明的提交分数。</p>
+      <p class="callout warn"><b>读的时候要留心：</b>① 第 22 格说“建立 100 株决策树”，第 25、28 格代码其实是 <code>cv=100</code>，意思是 <b>100 折交叉验证</b>（把数据切 100 份轮流验证），不是 100 棵树。② 第 31 格的 AUC 是在<b>训练集</b>上算的，而且用的是 <code>predict</code> 给出的 0/1 结果而不是概率，这个分数既偏乐观，也不是真正意义上的 AUC（实验 B 可以看到差别）。③ 第 14 格的点击率分级用到了答案列 click，是在整个抽样训练集上算的，没有分折，模型在训练集上会“提前知道”每个取值的点击率。④ 分级只看前 1000 个最常见的取值，其余全部归入 mid；出现次数很少的取值点击率波动很大，容易被分到极端档。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>一次广告展示被点击的概率。广告平台按“出价 × 预估点击率”排序决定展示谁的广告，预估越准，平台和广告主都越赚钱。</li>
+        <li><b>同类问题：</b>信息流推荐里“会不会点开这条新闻”、电商搜索“会不会点这个商品”、App 推送“会不会打开”、邮件营销“会不会打开邮件”。</li>
+        <li><b>可迁移的套路：</b>数据太大先分块抽样 → 时间拆成星期和时段 → 高基数类别要么分级、要么目标编码、要么哈希 → 独热编码 → 先在小样本上调参、筛特征 → 用梯度提升树在大样本上训练 → 用对数损失这类“看概率准不准”的指标评估。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>分块读取 <code>chunksize=10**6</code> + 每块抽 5% <span data-cell="2">第 2 格</span></li>
+        <li>星期几、两小时时段 <span data-cell="6">第 6 格</span></li>
+        <li>按点击率 ±2%、±4% 分五级 <span data-cell="14">第 14 格</span></li>
+        <li><code>pd.get_dummies</code> 独热编码 <span data-cell="18">第 18 格</span></li>
+        <li>50/50 欠采样 + DecisionTree GridSearchCV <span data-cell="23">第 23 格</span> <span data-cell="25">第 25 格</span></li>
+        <li>按重要性保留前 1/3，再保留重要性 &gt; 0.005 的特征 <span data-cell="27">第 27 格</span> <span data-cell="30">第 30 格</span></li>
+        <li>XGBClassifier（500 棵树，深度 11，GPU） <span data-cell="31">第 31 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者从 4000 万行里只用了 5%。抽样会损失什么？哪些“罕见但重要”的情况可能被抽丢？</li>
+      <li>一个网站只出现过 3 次、被点了 2 次，点击率 67%，被分到 very_high。你会相信这个分级吗？有什么更稳妥的做法？</li>
+      <li>为什么广告平台更关心“预测的点击概率准不准”（对数损失），而不只是“猜对了多少次”（准确率）？</li>
+      <li>用“星期几”和“时段”预测点击，背后的生活常识是什么？你觉得深夜和午休时间，哪个时段点击率更高？</li>
+      <li>device_ip、device_model 这类信息能帮助预测点击，但也涉及用户隐私。广告平台应该能用到多细的信息？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 AkiShen，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Kaggle 比赛 Click-Through Rate Prediction（Avazu，2015）。
+</footer>
+</main>
+
+<script src="nb/ctr-avazu-practice.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  if (location.hash === "#fast") { // 自查用：动画直接跳到最后一帧
+    K.tween = (ms, fn, ctx) => { if (ctx && !ctx.alive()) return Promise.resolve(false); fn(1, 1); return Promise.resolve(true); };
+    K.wait = (ms, ctx) => Promise.resolve(!ctx || ctx.alive());
+    document.head.appendChild(K.el("style", null, ".ch-cells > .cell, .ch-cells > .cell-note { display: none }"));
+  }
+  const fade = (els, ctx, ms) => ctx.tween(ms || 500, (t) => els.forEach((e) => (e.style.opacity = t)));
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+  const LV = [["very_high", "var(--c6)"], ["higher", "var(--warn)"], ["mid", "var(--ink-3)"], ["lower", "var(--c2)"], ["very_low", "var(--c1)"]];
+
+  const steps = [
+    {
+      at: 0, title: "点击率与 Avazu 的题目", kicker: "第 0–1 格 · 背景",
+      html: `<p>你刷手机时看到的广告，背后都有一个模型在预测：<b>你会不会点它</b>。点击率 CTR = 点击 ÷ 展示。广告平台大多按“出价 × 预估点击率”决定给你看哪条广告，所以 CTR 预测是互联网广告的核心问题之一。</p><p>Avazu 的训练数据超过 4000 万行，Pandas 一次读不下 <span data-cell="1">出处</span>。第 0 格是 Kaggle 的默认开头，指定测试集和提交模板的路径。</p>`,
+      cells: [0, 1],
+      draw(svg, ctx) {
+        const r = K.rng(7), N = 60, phones = [];
+        for (let i = 0; i < N; i++) phones.push({ x: 40 + (i % 15) * 28, y: 70 + Math.floor(i / 15) * 50, c: r() < 0.17 });
+        K.svg(svg, "text", { x: 40, y: 36, "font-size": 13, class: "muted" }, "60 次广告展示（示意）：亮起的 = 被点击");
+        const els = phones.map((p) => K.svg(svg, "rect", { x: p.x, y: p.y, width: 18, height: 30, rx: 3, fill: "var(--panel-2)", stroke: "var(--ink-3)" }));
+        const lab = K.svg(svg, "text", { x: 500, y: 140, "font-size": 30, "font-weight": 700, fill: "var(--c6)" }, "");
+        K.svg(svg, "text", { x: 500, y: 170, "font-size": 13 }, "CTR = 点击 ÷ 展示");
+        K.svg(svg, "text", { x: 500, y: 220, "font-size": 12, class: "muted" }, "平台排序：出价 × 预估 CTR");
+        let clicks = 0;
+        (async () => {
+          for (let i = 0; i < N; i++) {
+            if (phones[i].c) { clicks++; K.set(els[i], { fill: "var(--c6)", stroke: "var(--c6)" }); }
+            lab.textContent = ((clicks / (i + 1)) * 100).toFixed(0) + "%";
+            if (!(await ctx.wait(40))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "分块读取，每块抽 5%", kicker: "第 2–4 格 · 读数据",
+      html: `<p>作者用 <code>chunksize=10**6</code> 每次只读 100 万行，从每一块里随机抽 5%，拼成一个小得多的训练集。然后读入测试集，和训练集<b>上下拼成一张表</b> <code>df</code>，方便对两者做完全一样的预处理；记下训练集的长度 <code>train_len</code>，之后再切开。</p>`,
+      cells: [2, 4], highlight: ["chunksize = 10 ** 6", "sample(frac=.05"],
+      draw(svg, ctx) {
+        const chunks = 8, out = [];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "原始文件：一块 = 100 万行（示意只画 8 块）");
+        const bs = [];
+        for (let k = 0; k < chunks; k++) bs.push(K.svg(svg, "rect", { x: 30 + k * 80, y: 44, width: 72, height: 110, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" }));
+        K.svg(svg, "text", { x: 30, y: 200, "font-size": 13, class: "muted" }, "每块抽 5% → 新的训练集");
+        const acc = K.svg(svg, "rect", { x: 30, y: 214, width: 0, height: 40, rx: 4, fill: "var(--c1)" });
+        const lab = K.svg(svg, "text", { x: 30, y: 280, "font-size": 13, "font-weight": 700 }, "");
+        (async () => {
+          for (let k = 0; k < chunks; k++) {
+            K.set(bs[k], { stroke: "var(--accent)", "stroke-width": 2 });
+            const sl = K.svg(svg, "rect", { x: 30 + k * 80, y: 44 + 104, width: 72, height: 6, fill: "var(--c1)" });
+            if (!(await ctx.tween(260, (t) => { sl.setAttribute("y", K.lerp(148, 214, t)); sl.setAttribute("x", K.lerp(30 + k * 80, 30 + k * 30, t)); sl.setAttribute("width", K.lerp(72, 30, t)); sl.setAttribute("height", K.lerp(6, 40, t)); }))) return;
+            acc.setAttribute("width", (k + 1) * 30); lab.textContent = "已处理第 " + (k + 1) + " 块";
+            K.set(bs[k], { stroke: "var(--line)", "stroke-width": 1 });
+          }
+          lab.textContent = "约 4000 万 × 5% ≈ 200 万行（量级估算）";
+        })();
+      },
+    },
+    {
+      title: "时间特征：星期几 + 两小时时段", kicker: "第 5–7 格 · 特征工程",
+      html: `<p><code>hour</code> 是 YYMMDDHH 格式。作者的判断：训练是 10 天、预测第 11 天，具体<b>日期没意义</b>，但<b>星期几</b>有意义；一天中的<b>时段</b>反映生活习惯，也有意义 <span data-cell="5">出处</span>。</p><p>为了不让类别太多，24 个小时两两合并成 12 个时段（23–01、01–03……21–23）。</p>`,
+      cells: [5, 6], highlight: ["dayofweek", "def tran_hour"],
+      draw(svg, ctx) {
+        const raw = "14102915";
+        const parts = [["14", "年"], ["10", "月"], ["29", "日"], ["15", "时"]];
+        const ps = parts.map((p, i) => K.node(svg, 40 + i * 70, 40, 62, 50, p[0], { fs: 20, bold: true, stroke: K.colors[i] }));
+        parts.forEach((p, i) => K.svg(svg, "text", { x: 71 + i * 70, y: 108, "text-anchor": "middle", "font-size": 12, class: "muted" }, p[1]));
+        K.svg(svg, "text", { x: 40, y: 30, "font-size": 12, class: "muted" }, "hour = " + raw + "（示意）");
+        const w = K.node(svg, 380, 30, 150, 44, "星期几 → 周三", { stroke: "var(--c3)", bold: true });
+        const h = K.node(svg, 380, 84, 150, 44, "时段 → 15-17", { stroke: "var(--c4)", bold: true });
+        hide([w, h]);
+        const a1 = K.arrow(svg, 320, 64, 375, 52), a2 = K.arrow(svg, 320, 64, 375, 106); hide([a1, a2]);
+        // 24 小时 → 12 时段的钟面
+        const cx = 360, cy = 240, R = 80, segs = [];
+        for (let k = 0; k < 12; k++) {
+          const a0 = ((k * 2 - 1) / 24) * 2 * Math.PI - Math.PI / 2, a1_ = ((k * 2 + 1) / 24) * 2 * Math.PI - Math.PI / 2;
+          const p0 = [cx + R * Math.cos(a0), cy + R * Math.sin(a0)], p1 = [cx + R * Math.cos(a1_), cy + R * Math.sin(a1_)];
+          const sg = K.svg(svg, "path", { d: `M${cx},${cy} L${p0[0]},${p0[1]} A${R},${R} 0 0 1 ${p1[0]},${p1[1]} Z`, fill: K.colors[k % 6], opacity: 0, stroke: "var(--panel)" });
+          segs.push(sg);
+        }
+        K.svg(svg, "text", { x: 470, y: 230, "font-size": 13 }, "24 小时 → 12 个两小时时段");
+        K.svg(svg, "text", { x: 470, y: 254, "font-size": 12, class: "muted" }, "类别少一半，每类样本更多");
+        fade([a1, a2], ctx, 400).then((ok) => ok && fade([w, h], ctx, 400)).then(async (ok) => { if (!ok) return; for (const s of segs) if (!(await ctx.tween(120, (t) => (s.style.opacity = 0.7 * t)))) return; });
+      },
+    },
+    {
+      title: "所有特征都是类别", kicker: "第 8–10 格 · 数据类型",
+      html: `<p>作者数了每个特征有多少种不同取值：即使是 int 型的特征，最多也只有 4,333 种，相对于几百万行数据，显然是编号而不是连续的量 <span data-cell="8">出处</span>。所以<b>全部当作类别</b>，把这些列转成字符串类型。</p><p>有的特征取值多达上百万种（比如设备 IP），直接独热编码会生成上百万列，这就是“<b>高基数</b>”问题。</p>`,
+      cells: [8, 9, 10], highlight: ["value_counts()", "astype(str)"],
+      draw(svg, ctx) {
+        const items = [["banner_pos", 7], ["device_type", 5], ["site_category", 22], ["app_category", 30], ["C18", 4], ["device_model", 5000], ["site_id", 3000], ["device_ip", 900000]];
+        const ax = K.axes(svg, { x: 140, y: 20, w: 520, h: 280 }, [0, 6], [0, items.length], { yticks: 0, xticks: 6, xlabel: "不同取值的个数（对数刻度，示意）", xfmt: (v) => "10^" + v });
+        const bars = items.map((d, i) => {
+          const y = ax.sy(items.length - i - 0.5);
+          K.svg(svg, "text", { x: 134, y: y + 4, "text-anchor": "end", "font-size": 12 }, d[0]);
+          return { r: K.svg(svg, "rect", { x: ax.sx(0), y: y - 11, width: 0, height: 22, rx: 3, fill: d[1] > 10 ? "var(--warn)" : "var(--c1)" }), v: Math.log10(d[1]) };
+        });
+        const l10 = K.svg(svg, "line", { x1: ax.sx(1), x2: ax.sx(1), y1: 20, y2: 300, stroke: "var(--bad)", "stroke-dasharray": "5 3" });
+        K.svg(svg, "text", { x: ax.sx(1) + 4, y: 34, "font-size": 12, fill: "var(--bad)" }, "10 种：超过就要缩减（下一章）");
+        ctx.tween(1200, (t) => bars.forEach((b) => b.r.setAttribute("width", ax.sx(b.v * t) - ax.sx(0))));
+      },
+    },
+    {
+      title: "按点击率给取值分级", kicker: "第 11–14 格 · 高基数处理",
+      html: `<p>取值超过 10 种的特征要“缩减”。作者的办法：算出每个取值自己的点击率，和整体平均点击率比较，分成 5 级 <span data-cell="11">出处</span>：</p><ul class="tight"><li>高出平均 4% 以上 → very_high；高出 2%–4% → higher</li><li>低于平均 2%–4% → lower；低于 4% 以上 → very_low</li><li>其余 → mid</li></ul><p>为了省时间，只给出现次数最多的前 1000 个取值算点击率，其余都归入 mid。这本质上是一种粗粒度的“目标编码”。</p>`,
+      cells: [11, 12, 14], highlight: ["very_high = df_describe.loc['mean','click'] + 0.04", "fq[:1000]", "def get_click_rate"],
+      draw(svg, ctx) {
+        const r = K.rng(5), mean = 0.17, sites = [];
+        for (let i = 0; i < 26; i++) sites.push(mean + K.randn(r) * 0.04);
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 230 }, [0.04, 0.3], [0, 1], { yticks: 0, xlabel: "各网站自己的点击率（示意）", xfmt: (v) => Math.round(v * 100) + "%" });
+        const th = [mean - 0.04, mean - 0.02, mean + 0.02, mean + 0.04];
+        th.forEach((x) => K.svg(svg, "line", { x1: ax.sx(x), x2: ax.sx(x), y1: 30, y2: 260, stroke: "var(--line)", "stroke-dasharray": "4 3" }));
+        K.svg(svg, "line", { x1: ax.sx(mean), x2: ax.sx(mean), y1: 30, y2: 260, stroke: "var(--ink)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: ax.sx(mean), y: 24, "text-anchor": "middle", "font-size": 12 }, "整体平均");
+        const zone = (v) => (v > th[3] ? 0 : v > th[2] ? 1 : v < th[0] ? 4 : v < th[1] ? 3 : 2);
+        [["very_low", (0.04 + th[0]) / 2, 4], ["lower", (th[0] + th[1]) / 2, 3], ["mid", mean, 2], ["higher", (th[2] + th[3]) / 2, 1], ["very_high", (th[3] + 0.3) / 2, 0]].forEach(([n, x, k]) => K.svg(svg, "text", { x: ax.sx(x), y: 250, "text-anchor": "middle", "font-size": 11, "font-weight": 700, fill: LV[k][1] }, n));
+        const ds = sites.map((v, i) => K.svg(svg, "circle", { cx: ax.sx(v), cy: 50, r: 7, fill: "var(--ink-3)" }));
+        ctx.tween(1400, (t) => ds.forEach((d, i) => { d.setAttribute("cy", 50 + t * (70 + (i % 6) * 22)); if (t > 0.5) K.set(d, { fill: LV[zone(sites[i])][1] }); }));
+      },
+    },
+    {
+      title: "去掉单值特征，独热编码", kicker: "第 15–21 格 · 编码",
+      html: `<p>分级后，作者对每个特征画计数图，发现 device_id、C14、C17、C19、C20、C21 处理后<b>只剩一种取值</b>，对预测没有帮助，删掉 <span data-cell="16">出处</span>。</p><p>然后对所有特征做<b>独热编码</b> <code>pd.get_dummies</code>：每个取值变成一列 0/1。因为取值已经被压缩到最多几种，列数可控。最后按 <code>train_len</code> 把训练集和测试集重新切开。</p>`,
+      cells: [15, 16, 17, 18], highlight: ["df.drop(['device_id'", "pd.get_dummies(df)"],
+      draw(svg, ctx) {
+        const vals = ["very_high", "mid", "lower", "mid", "very_low"];
+        K.node(svg, 30, 40, 120, 30, "site_id（分级后）", { fs: 11, bold: true });
+        vals.forEach((v, i) => K.node(svg, 30, 76 + i * 36, 120, 30, v, { fs: 12, color: LV.find((l) => l[0] === v)[1] }));
+        K.arrow(svg, 156, 160, 200, 160);
+        const heads = LV.map((l) => l[0]), cells = [];
+        heads.forEach((h, j) => { const g = K.node(svg, 210 + j * 96, 40, 90, 30, "site_" + h, { fs: 10, bold: true }); g.style.opacity = 0; cells.push(g); vals.forEach((v, i) => { const c = K.node(svg, 210 + j * 96, 76 + i * 36, 90, 30, v === h ? "1" : "0", { fill: v === h ? "var(--accent-soft)" : "var(--panel-2)" }); c.style.opacity = 0; cells.push(c); }); });
+        const del = K.node(svg, 30, 280, 400, 36, "删除：device_id、C14、C17、C19、C20、C21（只剩一种取值）", { fs: 12, stroke: "var(--bad)", color: "var(--bad)" });
+        del.style.opacity = 0;
+        (async () => { for (const c of cells) if (!(await ctx.tween(50, (t) => (c.style.opacity = t)))) return; await ctx.tween(400, (t) => (del.style.opacity = t)); })();
+      },
+    },
+    {
+      title: "50/50 平衡 + 决策树调参", kicker: "第 22–25 格 · 调参",
+      html: `<p>作者说正例约 17%、数据很大，打算用 XGBoost。为了省调参时间，先从未点击的记录里抽出和点击一样多的数量，拼成<b>点击、未点击各占 50%</b> 的小数据集，用 ROC AUC 当标准调参 <span data-cell="22">出处</span>。</p><p>先用<b>决策树</b>做网格搜索，试 gini / entropy 两种分裂标准、深度 1 到 19。</p><p class="note">文字里说“建立 100 株决策树”，代码 <code>cv=100</code> 实际是 100 折交叉验证：同一组参数要训练 100 次，非常耗时。</p>`,
+      cells: [22, 23, 25], highlight: ["cv=100", "sample(n=len(train[train['click'] == 1])"],
+      draw(svg, ctx) {
+        const N = 100, k = 17, dots = [];
+        for (let i = 0; i < N; i++) dots.push(K.svg(svg, "circle", { cx: 40 + (i % 20) * 16, cy: 60 + Math.floor(i / 20) * 18, r: 5, fill: i < k ? "var(--c6)" : "var(--c1)" }));
+        K.svg(svg, "text", { x: 40, y: 36, "font-size": 13, class: "muted" }, "原始：点击 17%（红）");
+        const lab = K.svg(svg, "text", { x: 40, y: 172, "font-size": 13, "font-weight": 700 }, "");
+        // 网格
+        const gx = 400, gy = 50;
+        K.svg(svg, "text", { x: gx, y: 36, "font-size": 13, class: "muted" }, "网格搜索：2 种标准 × 深度 1–19");
+        const grid = [];
+        for (let c = 0; c < 2; c++) for (let d = 0; d < 19; d++) grid.push(K.svg(svg, "rect", { x: gx + d * 15, y: gy + c * 26, width: 13, height: 22, rx: 2, fill: "var(--panel-2)", stroke: "var(--line)" }));
+        K.svg(svg, "text", { x: gx - 6, y: gy + 15, "text-anchor": "end", "font-size": 10 }, "gini");
+        K.svg(svg, "text", { x: gx - 6, y: gy + 41, "text-anchor": "end", "font-size": 10 }, "entropy");
+        K.svg(svg, "text", { x: gx, y: 140, "font-size": 12 }, "每一格都要做 cv = 100 折交叉验证");
+        K.svg(svg, "text", { x: gx, y: 160, "font-size": 12, class: "muted" }, "38 组参数 × 100 次 = 3800 次训练");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1200, (t) => { dots.forEach((d, i) => { if (i >= k && i >= 2 * k) d.style.opacity = 1 - 0.9 * t; }); lab.textContent = t > 0.95 ? "欠采样后：点击 17 : 未点击 17 = 50%" : ""; }))
+          .then(async (ok) => { if (!ok) return; for (const g of grid) { K.set(g, { fill: "color-mix(in srgb, var(--accent) 45%, var(--panel))" }); if (!(await ctx.wait(30))) return; } });
+      },
+    },
+    {
+      title: "两轮筛选特征", kicker: "第 26–30 格 · 特征选择",
+      html: `<p>用最佳参数的决策树在 50/50 数据上训练，取 <code>feature_importances_</code> 排序；<b>只保留重要性排名前 1/3 的特征</b>，再做一次网格搜索（深度 1 到 11）。</p><p>用新的最佳树再排一次重要性，最终只保留<b>重要性大于 0.005</b> 的特征，作为 XGBoost 的输入 <span data-cell="30">出处</span>。</p>`,
+      cells: [26, 27, 28, 29, 30], highlight: ["int(len(feature_importances)/3)", "> 0.005"],
+      draw(svg, ctx) {
+        const r = K.rng(4), imp = []; for (let i = 0; i < 30; i++) imp.push(Math.pow(r(), 3));
+        imp.sort((a, b) => b - a);
+        const ax = K.axes(svg, { x: 50, y: 30, w: 620, h: 230 }, [0, 30], [0, imp[0] * 1.05], { xticks: 0, yticks: 0, xlabel: "独热编码后的特征（按重要性排序，示意）", ylabel: "重要性" });
+        const bs = imp.map((v, i) => K.svg(svg, "rect", { x: ax.sx(i + 0.1), width: ax.sx(0.8) - ax.sx(0), y: ax.sy(v), height: ax.sy(0) - ax.sy(v), fill: "var(--c1)" }));
+        const cut = K.svg(svg, "line", { x1: ax.sx(10), x2: ax.sx(10), y1: 30, y2: 260, stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "6 3" });
+        const ct = K.svg(svg, "text", { x: ax.sx(10) + 6, y: 46, "font-size": 13, fill: "var(--warn)", "font-weight": 700 }, "第一轮：只留前 1/3");
+        hide([cut, ct]);
+        ctx.wait(500).then((ok) => ok && fade([cut, ct], ctx, 400)).then((ok) => ok && ctx.tween(800, (t) => bs.forEach((b, i) => { if (i >= 10) b.style.opacity = 1 - 0.85 * t; })))
+          .then((ok) => { if (!ok) return; const y = ax.sy(imp[0] * 0.08); K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(10), y1: y, y2: y, stroke: "var(--good)", "stroke-width": 2, "stroke-dasharray": "4 3" }); K.svg(svg, "text", { x: ax.sx(10.6), y: y - 6, "font-size": 12, fill: "var(--good)", "font-weight": 700 }, "← 第二轮：重要性 > 0.005（位置示意）"); });
+      },
+    },
+    {
+      title: "XGBoost 建模与提交", kicker: "第 31–32 格 · 建模",
+      html: `<p>最后用 <b>XGBoost</b>（一种梯度提升树）在全部抽样训练数据（不再是 50/50）上训练：500 棵树，每棵最深 11 层，用 GPU 加速。然后预测测试集每条曝光的<b>点击概率</b>，写入提交文件。</p><p>作者写明：本次提交得分 <b>0.40560</b>，排行榜第一名 0.37913（越低越好）<span data-cell="32">出处</span>。</p><p class="note">第 31 格打印的 AUC 是在训练集上、用 0/1 硬预测算的，偏乐观，不能代表测试表现。</p>`,
+      cells: [31, 32], highlight: ["XGBClassifier", "roc_auc_score(y,y_pred)", "predict_proba(test)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 30, w: 400, h: 240 }, [0, 10], [-1.2, 1.2], { xticks: 0, yticks: 0, xlabel: "某个特征（示意）" });
+        const xs = []; for (let x = 0; x <= 10; x += 0.1) xs.push(x);
+        const truth = (x) => Math.sin(x * 0.9) * 0.8 + 0.2 * Math.cos(x * 2.3);
+        const r = K.rng(2), pts = []; for (let i = 0; i < 60; i++) { const x = r() * 10; pts.push([x, truth(x) + K.randn(r) * 0.15]); }
+        pts.forEach((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 3, fill: "var(--ink-3)", opacity: 0.6 }));
+        const pred = xs.map(() => 0);
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--accent)", "stroke-width": 3 });
+        const lab = K.svg(svg, "text", { x: 480, y: 60, "font-size": 15, "font-weight": 700 }, "第 0 棵树");
+        K.svg(svg, "text", { x: 480, y: 90, "font-size": 12, class: "muted" }, "每棵新树只学“前面还没学好的残差”");
+        K.svg(svg, "text", { x: 480, y: 112, "font-size": 12, class: "muted" }, "（一维示意；真实模型 500 棵、深 11）");
+        const draw = () => { let d = ""; xs.forEach((x, i) => (d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(pred[i]))); path.setAttribute("d", d); };
+        draw();
+        (async () => {
+          for (let k = 1; k <= 8; k++) {
+            // 一棵深度很浅的“树桩”：找一个切点，左右各取残差均值
+            let best = null;
+            for (let s = 0.5; s < 10; s += 0.5) {
+              const L = pts.filter((p) => p[0] <= s), R = pts.filter((p) => p[0] > s);
+              const res = (arr) => arr.reduce((a, p) => a + (p[1] - pred[Math.round(p[0] * 10)]), 0) / Math.max(1, arr.length);
+              const ml = res(L), mr = res(R);
+              const err = L.concat(R).reduce((a, p) => { const e = p[1] - pred[Math.round(p[0] * 10)] - (p[0] <= s ? ml : mr); return a + e * e; }, 0);
+              if (!best || err < best.err) best = { s, ml, mr, err };
+            }
+            const old = pred.slice();
+            if (!(await ctx.tween(350, (t) => { xs.forEach((x, i) => (pred[i] = old[i] + 0.6 * t * (x <= best.s ? best.ml : best.mr))); draw(); }))) return;
+            lab.textContent = "第 " + k + " 棵树";
+          }
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：按点击率分级 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "band", label: "分级阈值：高于 / 低于平均多少算 higher / lower（very 档为其 2 倍）", min: 0.005, max: 0.06, step: 0.005, value: 0.02, fmt: (v) => "±" + (v * 100).toFixed(1) + "%" },
+      { id: "minN", label: "只给展示次数不少于 N 的网站分级（其余归 mid）", min: 1, max: 500, step: 1, value: 1 },
+      { id: "seed", label: "换一批网站", button: true },
+    ],
+    note: "模拟 40 个网站：展示次数从 5 次到 2 万次不等，每个网站真实点击率在 12%–22% 之间。网站展示次数越少，算出来的点击率越受运气影响。圆点大小 = 展示次数，横轴 = 观测到的点击率，颜色 = 分到的级别。看看被分到 very_high / very_low 的，是不是大多是小圆点；再把 N 调大，看“冤案”是否减少。",
+    render(svg, v) {
+      const r = K.rng(21 + v.seed * 13), mean = 0.17, sites = [];
+      for (let i = 0; i < 40; i++) {
+        const n = Math.round(Math.exp(Math.log(5) + r() * (Math.log(20000) - Math.log(5)))), p = 0.12 + r() * 0.1;
+        let c = 0; for (let k = 0; k < n; k++) if (r() < p) c++;
+        sites.push({ n, p, obs: c / n });
+      }
+      const lvl = (s) => { if (s.n < v.minN) return 2; const d = s.obs - mean; return d > 2 * v.band ? 0 : d > v.band ? 1 : d < -2 * v.band ? 4 : d < -v.band ? 3 : 2; };
+      const truthLvl = (s) => { const d = s.p - mean; return d > 2 * v.band ? 0 : d > v.band ? 1 : d < -2 * v.band ? 4 : d < -v.band ? 3 : 2; };
+      const ax = K.axes(svg, { x: 60, y: 20, w: 560, h: 260 }, [0, 0.6], [0, 1], { yticks: 0, xlabel: "观测到的点击率", xfmt: (x) => Math.round(x * 100) + "%" });
+      [mean - 2 * v.band, mean - v.band, mean + v.band, mean + 2 * v.band].forEach((x) => K.svg(svg, "line", { x1: ax.sx(x), x2: ax.sx(x), y1: 20, y2: 280, stroke: "var(--line)", "stroke-dasharray": "4 3" }));
+      K.svg(svg, "line", { x1: ax.sx(mean), x2: ax.sx(mean), y1: 20, y2: 280, stroke: "var(--ink)", "stroke-width": 1.5 });
+      let wrong = 0, extreme = 0, extremeSmall = 0;
+      sites.forEach((s, i) => {
+        const L = lvl(s); if (L !== truthLvl(s) && s.n >= v.minN) wrong++;
+        if ((L === 0 || L === 4)) { extreme++; if (s.n < 100) extremeSmall++; }
+        K.svg(svg, "circle", { cx: ax.sx(Math.min(s.obs, 0.6)), cy: 40 + ((i * 37) % 220), r: 2 + Math.log10(s.n) * 2.6, fill: LV[L][1], opacity: 0.75, stroke: "var(--panel)" });
+      });
+      LV.forEach((l, k) => K.svg(svg, "text", { x: 60 + k * 112, y: 330, "font-size": 12, fill: l[1], "font-weight": 700 }, "● " + l[0]));
+      return { readout: [
+        { k: "分到两个极端档的网站", v: extreme + " 个" },
+        { k: "其中展示不足 100 次的", v: extremeSmall + " 个", color: extremeSmall ? "var(--bad)" : "var(--good)" },
+        { k: "分级与真实点击率所属档不一致", v: wrong + " 个" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：AUC 与对数损失 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "d", label: "模型区分能力", min: 0, max: 3, step: 0.1, value: 1.2, fmt: (v) => v.toFixed(1) },
+      { id: "mode", label: "拿什么去算分", value: "prob", options: [["prob", "预测概率（predict_proba）"], ["hard", "0/1 硬预测（predict）"]] },
+      { id: "shift", label: "概率整体偏高（例如在 50/50 数据上训练后没校正）", min: 0, max: 2, step: 0.05, value: 0, fmt: (v) => "+" + v.toFixed(2) + "（对数赔率）" },
+    ],
+    note: "模拟 3,000 次展示，真实点击率 17%。模型给每次展示一个分数，转成点击概率。现场计算 AUC（排序好不好）和对数损失（概率准不准，越低越好）。试试：① 切到“0/1 硬预测”，AUC 掉了多少；② 把“概率整体偏高”往右拖，AUC 不变，对数损失却变差。广告平台按概率计费出价，所以更看重对数损失。",
+    render(svg, v) {
+      const r = K.rng(99), n = 3000, Y = [], S = [];
+      for (let i = 0; i < n; i++) { const y = r() < 0.17 ? 1 : 0; Y.push(y); S.push(K.randn(r) + (y ? v.d : 0)); }
+      // 用逻辑回归式的校准：先算“正确”概率的截距，再加偏移
+      const base = Math.log(0.17 / 0.83) - v.d / 2;
+      let P = S.map((s) => K.sigmoid(base + v.d * s * 0.9 + v.shift));
+      if (v.mode === "hard") P = P.map((p) => (p > 0.5 ? 1 : 0));
+      // AUC（考虑并列）
+      const idx = P.map((p, i) => i).sort((a, b) => P[a] - P[b]);
+      let rank = new Array(n), i = 0;
+      while (i < n) { let j = i; while (j + 1 < n && P[idx[j + 1]] === P[idx[i]]) j++; for (let k = i; k <= j; k++) rank[idx[k]] = (i + j) / 2 + 1; i = j + 1; }
+      let rp = 0, npos = 0; Y.forEach((y, k) => { if (y) { rp += rank[k]; npos++; } });
+      const auc = (rp - (npos * (npos + 1)) / 2) / (npos * (n - npos));
+      const eps = 1e-15; let ll = 0; Y.forEach((y, k) => { const p = K.clamp(P[k], eps, 1 - eps); ll -= y ? Math.log(p) : Math.log(1 - p); }); ll /= n;
+      const avgP = P.reduce((a, b) => a + b, 0) / n;
+      // 画：两类的预测概率分布
+      const bins = 25, h0 = new Array(bins).fill(0), h1 = new Array(bins).fill(0);
+      P.forEach((p, k) => { const b = Math.min(bins - 1, Math.floor(p * bins)); (Y[k] ? h1 : h0)[b]++; });
+      const mx = Math.max(...h0, ...h1);
+      const ax = K.axes(svg, { x: 50, y: 20, w: 560, h: 240 }, [0, 1], [0, mx], { yticks: 0, xlabel: "模型给出的点击概率", xfmt: (x) => Math.round(x * 100) + "%" });
+      for (let b = 0; b < bins; b++) {
+        const x0 = ax.sx(b / bins), w = ax.sx(1 / bins) - ax.sx(0);
+        K.svg(svg, "rect", { x: x0 + 1, width: w / 2 - 1, y: ax.sy(h0[b]), height: ax.sy(0) - ax.sy(h0[b]), fill: "var(--c1)", opacity: 0.7 });
+        K.svg(svg, "rect", { x: x0 + w / 2, width: w / 2 - 1, y: ax.sy(h1[b]), height: ax.sy(0) - ax.sy(h1[b]), fill: "var(--c6)", opacity: 0.85 });
+      }
+      K.svg(svg, "text", { x: 60, y: 310, "font-size": 12, class: "muted" }, "蓝 = 实际没点，红 = 实际点了（3,000 次模拟展示）");
+      return { readout: [
+        { k: "AUC（越高越好）", v: auc.toFixed(3) },
+        { k: "对数损失（越低越好）", v: ll > 10 ? ll.toFixed(1) : ll.toFixed(4), color: ll > 0.5 ? "var(--bad)" : "var(--good)" },
+        { k: "平均预测点击率", v: (avgP * 100).toFixed(1) + "%" },
+        { k: "真实点击率", v: ((npos / n) * 100).toFixed(1) + "%" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>U-Net 细胞核分割</title>
+<meta name="description" content="Kaggle 案例拆解：用 Keras 搭一个 U-Net，在显微镜图像里逐像素找出细胞核——编码器下采样、解码器上采样、跳跃连接、阈值化、连通域与游程编码提交。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">医学图像 · 语义分割 · 编码器-解码器</div>
+  <h1>U-Net 细胞核分割：给每个像素判“是不是细胞核”</h1>
+  <p class="en">Keras U-Net starter - LB 0.277</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">U-Net</span><span class="tag method">编码器下采样</span><span class="tag method">转置卷积上采样</span><span class="tag method">跳跃连接</span>
+    <span class="tag method">ELU + Dropout</span><span class="tag method">二元交叉熵</span><span class="tag method">早停 + 检查点</span><span class="tag method">连通域标记</span><span class="tag method">游程编码 RLE</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Kjetil Åmdal-Sævik</b></span>
+    <span>Kaggle 点赞 <b>3,502</b>（2026-11 抓取）</span>
+    <span>比赛 <b>2018 Data Science Bowl</b>（找细胞核）</span>
+    <span><a href="https://www.kaggle.com/code/keegil/keras-u-net-starter-lb-0-277" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">各种显微镜下的细胞照片</div><p>每张训练图配有若干张掩膜（mask）图片，<b>每个细胞核单独一张</b>。图片来自不同的染色方式和放大倍数，大小不一。作者统一缩放到 128×128。<span data-cell="1">出处</span> <span data-cell="3">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">每个像素是不是细胞核</div><p>这叫<b>语义分割</b>：输出一张和原图一样大的“黑白图”。比赛还要求把每个细胞核分开，按“单个细胞核”提交。<span data-cell="19">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">U 形网络：先压缩，再还原，中间搭桥</div><p>编码器 4 次池化把 128 缩到 8，解码器 4 次转置卷积放大回 128，每一层用<b>跳跃连接</b>把编码器的细节拼过来。最后每个像素一个 sigmoid 概率。<span data-cell="10">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">公开榜 0.233 → 0.277</div><p>作者写明：第 2 版在排行榜（LB）上得 0.233，第 7 版得 0.277；并提醒结果“每次运行波动很大”。<span data-cell="24">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛 <b>2018 Data Science Bowl</b> 的第一阶段数据：<code>stage1_train/</code> 和 <code>stage1_test/</code> 两个文件夹，每张图一个子文件夹（目录结构见第 2、4 格的代码）。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">训练用尺寸</div><div class="v">128×128</div></div>
+        <div class="stat-tile"><div class="k">颜色通道</div><div class="v">3</div></div>
+        <div class="stat-tile"><div class="k">验证集比例</div><div class="v">10%</div></div>
+        <div class="stat-tile"><div class="k">要分的类</div><div class="v">2（核 / 背景）</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">尺寸和通道见 <span data-cell="1">第 1 格</span>，验证比例见 <span data-cell="12">第 12 格</span>。原图大小不一，测试图的原尺寸被记下来，预测后再放大回去 <span data-cell="4">第 4 格</span>。图片总数以比赛数据页为准，作者文字里没有写。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每个样本包含什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>images/&lt;id&gt;.png</code></td><td>显微镜照片（读入时只取前 3 个通道）</td><td>彩色图</td></tr>
+        <tr><td><code>masks/*.png</code></td><td><b>要预测的答案</b>：每张只标一个细胞核，白 = 核</td><td>黑白图（多张）</td></tr>
+        <tr><td><code>Y_train[n]</code></td><td>作者把多张掩膜合并成一张 128×128 的 0/1 图</td><td>布尔矩阵</td></tr>
+        <tr><td>提交 <code>ImageId, EncodedPixels</code></td><td>每个细胞核一行，像素用游程编码表示</td><td>CSV</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="21">
+    <h3>动手试试 B · 点格子画掩膜，看游程编码（RLE） <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="14">
+    <h3>动手试试 A · 调阈值，看分割掩膜和各项指标 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>第 2 版公开榜得分 0.233；第 7 版 0.277（比赛指标是多个 IoU 阈值下的平均精度）</td><td><span data-cell="24">第 24 格</span></td></tr>
+        <tr><td>神经网络结果“极不稳定”，每次运行差别很大，第 3 版明显更差</td><td><span data-cell="24">第 24 格</span></td></tr>
+        <tr><td>作者自己写的 Keras 版 mean IoU 指标“肯定不对”：和排行榜差距很大，而且训练中只会一直上升</td><td><span data-cell="7">第 7 格</span></td></tr>
+        <tr><td>模型至少能拟合训练集；验证集“还不错”，仍需更多训练和调整</td><td><span data-cell="16">第 16 格</span> <span data-cell="18">第 18 格</span></td></tr>
+        <tr><td>训练设置：验证集 10%，batch 16，最多 50 轮，早停耐心 5 轮，保存最好的模型</td><td><span data-cell="12">第 12 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">训练损失、验证集指标等数字都在运行输出里，源码不带输出，这里只列作者在文字里写明的排行榜分数。0.277 是比赛专用指标，不是像素准确率，不能和分类任务的“准确率”直接比较。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>输入一张显微镜图，输出每个像素属于细胞核的概率；阈值化后再分成一个个细胞核，可以自动计数、测面积。</li>
+        <li><b>同类问题：</b>CT/MRI 器官和肿瘤勾画、眼底血管分割、遥感图里找建筑和道路、卫星图找船（Airbus）、工业表面缺陷、自动驾驶的道路分割、抠图。</li>
+        <li><b>可迁移的套路：</b>编码器-解码器 + 跳跃连接；输出层 1×1 卷积 + sigmoid（二类）或 softmax（多类）；用 Dice/IoU 评估；早停 + 检查点；预测后做连通域、形态学等后处理。</li>
+        <li><b>小数据也能用：</b>作者在开头提到 U-Net 在小数据集上往往效果不错。<span data-cell="0">第 0 格</span></li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>读取、缩放、合并多张掩膜 <span data-cell="4">第 4 格</span></li>
+        <li>多阈值 mean IoU 指标（作者自认有误）<span data-cell="8">第 8 格</span></li>
+        <li>U-Net：Conv2D + ELU + Dropout + MaxPooling / Conv2DTranspose + concatenate <span data-cell="10">第 10 格</span></li>
+        <li>Adam + 二元交叉熵，EarlyStopping + ModelCheckpoint <span data-cell="12">第 12 格</span></li>
+        <li>阈值 0.5、放大回原尺寸 <span data-cell="14">第 14 格</span></li>
+        <li>连通域标记 + 游程编码 <span data-cell="19">第 19 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>如果去掉跳跃连接，只保留“压缩 → 还原”，分割结果的边界会变成什么样？为什么？</li>
+      <li>作者把所有细胞核掩膜合成一张（<code>np.maximum</code>），训练的是“像素是不是细胞核”。这样两个紧贴的细胞核会被预测成一块，比赛却按单个细胞核计分。你会怎么改？</li>
+      <li>细胞核像素可能只占图片的一小部分。只用二元交叉熵训练会有什么倾向？Dice 损失为什么常被用来补充？</li>
+      <li>作者承认自己的指标实现不对，但仍然用它监控训练。在没有可靠验证指标的情况下，早停还靠得住吗？</li>
+      <li>把图片从原尺寸缩到 128×128 再放大回去，会损失什么？对小细胞核影响大还是大细胞核影响大？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Kjetil Åmdal-Sævik（Kaggle 用户 keegil），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。U-Net 原论文：Ronneberger, Fischer &amp; Brox, 2015。比赛：Kaggle 2018 Data Science Bowl。
+</footer>
+</main>
+
+<script src="nb/unet-nuclei-segmentation.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 生成一张示意“细胞图”：N×N 网格上的若干椭圆细胞核 ---------- */
+  function makeCells(seed, N, n) {
+    const r = K.rng(seed), cells = [];
+    let tries = 0;
+    while (cells.length < n && tries++ < 500) {
+      const c = { x: 3 + r() * (N - 6), y: 3 + r() * (N - 6), a: N * (0.05 + r() * 0.06), b: N * (0.04 + r() * 0.05), t: r() * Math.PI };
+      if (cells.every((d) => Math.hypot(d.x - c.x, d.y - c.y) > (d.a + c.a) * 0.95)) cells.push(c);
+    }
+    const gt = new Uint8Array(N * N), id = new Int16Array(N * N);
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) cells.forEach((c, k) => {
+      const dx = x + 0.5 - c.x, dy = y + 0.5 - c.y, u = dx * Math.cos(c.t) + dy * Math.sin(c.t), v = -dx * Math.sin(c.t) + dy * Math.cos(c.t);
+      if ((u * u) / (c.a * c.a) + (v * v) / (c.b * c.b) <= 1) { gt[y * N + x] = 1; id[y * N + x] = k + 1; }
+    });
+    return { N, cells, gt, id };
+  }
+  /* 4 连通域标记（对应 skimage.morphology.label） */
+  function label(mask, N) {
+    const lab = new Int32Array(N * N); let n = 0;
+    for (let i = 0; i < N * N; i++) {
+      if (!mask[i] || lab[i]) continue;
+      n++; const st = [i]; lab[i] = n;
+      while (st.length) {
+        const p = st.pop(), x = p % N, y = (p / N) | 0;
+        [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(([dx, dy]) => { const X = x + dx, Y = y + dy; if (X >= 0 && Y >= 0 && X < N && Y < N) { const q = Y * N + X; if (mask[q] && !lab[q]) { lab[q] = n; st.push(q); } } });
+      }
+    }
+    return { lab, n };
+  }
+  const gridRects = (svg, x0, y0, N, size, colorOf) => {
+    const els = [];
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) els.push(K.svg(svg, "rect", { x: x0 + x * size, y: y0 + y * size, width: size - 0.6, height: size - 0.6, fill: colorOf(x, y) }));
+    return els;
+  };
+
+  const steps = [
+    {
+      title: "任务：逐像素找细胞核", at: 0, kicker: "第 0–2 格 · 问题",
+      html: `<p>2018 Data Science Bowl 要求从各种显微镜图片里找出所有细胞核。和分类（整张图一个标签）、检测（每个物体一个框）不同，<b>语义分割</b>要对<b>每一个像素</b>回答“是不是细胞核”，输出一张同样大小的掩膜图。</p><p>作者选用 U-Net：一种为生物医学图像设计的分割网络，在小数据集上往往也能工作得不错。</p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        const D = makeCells(3, 24, 9), s = 11;
+        K.svg(svg, "text", { x: 30 + 132, y: 26, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "输入：显微镜图（示意）");
+        K.svg(svg, "text", { x: 430 + 132, y: 26, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "输出：每个像素 0 / 1");
+        const r = K.rng(8);
+        gridRects(svg, 30, 40, 24, s, (x, y) => D.gt[y * 24 + x] ? `color-mix(in srgb, var(--c4) ${60 + Math.round(r() * 30)}%, var(--panel))` : `color-mix(in srgb, var(--ink-3) ${8 + Math.round(r() * 10)}%, var(--panel))`);
+        const out = gridRects(svg, 430, 40, 24, s, () => "var(--panel-2)");
+        const scan = K.svg(svg, "rect", { x: 30, y: 40, width: s, height: s, fill: "none", stroke: "var(--accent)", "stroke-width": 2 });
+        const ar = K.arrow(svg, 310, 172, 420, 172, { color: "var(--accent)" });
+        K.svg(svg, "text", { x: 365, y: 162, "text-anchor": "middle", "font-size": 12, fill: "var(--accent)" }, "U-Net");
+        ctx.tween(3200, (t) => {
+          const k = Math.floor(t * 576);
+          for (let i = 0; i < Math.min(576, k + 1); i++) out[i].style.fill = D.gt[i] ? "var(--ink)" : "var(--panel-2)";
+          scan.setAttribute("x", 30 + (k % 24) * s); scan.setAttribute("y", 40 + Math.floor(Math.min(575, k) / 24) * s);
+        });
+        K.svg(svg, "text", { x: 360, y: 330, "text-anchor": "middle", "font-size": 12, class: "muted" }, "每个像素都要分类：实心格 = 细胞核（1），底色格 = 背景（0）");
+      },
+    },
+    {
+      title: "读图、缩放、合并掩膜", at: 3, kicker: "第 3–6 格 · 数据准备",
+      html: `<p>每张训练图有一个 <code>masks/</code> 文件夹，里面<b>每个细胞核单独一张</b>二值图。作者把它们都缩放到 128×128，再用 <code>np.maximum</code> 逐像素取最大值，合并成一张“所有细胞核”的掩膜。</p><p>测试图也缩到 128×128，但先用 <code>sizes_test</code> 记下原尺寸，预测完要放大回去才能提交。</p>`,
+      cells: [4], highlight: ["np.maximum(mask, mask_)", "sizes_test.append", "resize"],
+      draw(svg, ctx) {
+        const D = makeCells(5, 16, 4), s = 9;
+        const singles = D.cells.map((c, k) => {
+          const g = K.svg(svg, "g");
+          K.svg(g, "text", { x: 30 + k * 160 + 72, y: 30, "text-anchor": "middle", "font-size": 12 }, `mask_${k + 1}.png`);
+          gridRects(g, 30 + k * 160, 40, 16, s, (x, y) => (D.id[y * 16 + x] === k + 1 ? "var(--c" + (k + 1) + ")" : "var(--panel-2)"));
+          return g;
+        });
+        const merged = K.svg(svg, "g");
+        const mr = gridRects(merged, 288, 200, 16, s, () => "var(--panel-2)");
+        K.svg(merged, "text", { x: 360, y: 192, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "np.maximum 合并后的 Y_train[n]");
+        merged.style.opacity = 0;
+        (async () => {
+          if (!(await ctx.wait(600))) return;
+          if (!(await ctx.tween(400, (t) => (merged.style.opacity = t)))) return;
+          for (let k = 0; k < 4; k++) {
+            if (!(await ctx.tween(500, (t) => { singles[k].setAttribute("transform", `translate(${(288 - (30 + k * 160)) * t},${160 * t})`); singles[k].style.opacity = 1 - t * 0.9; }))) return;
+            mr.forEach((e, i) => { if (D.id[i] === k + 1) e.style.fill = "var(--ink)"; });
+          }
+        })();
+      },
+    },
+    {
+      title: "自定义指标：多阈值 IoU", at: 7, kicker: "第 7–8 格 · 评估",
+      html: `<p>比赛的评分是：在 IoU 阈值 0.5, 0.55, …, 0.95 下分别算精度，再取平均。<b>IoU</b>（交并比）= 预测与真实重叠的像素数 / 两者合起来的像素数。</p><p>作者想在 Keras 里复现它：把预测概率在 0.5~0.95 的每个阈值下二值化，用 <code>tf.metrics.mean_iou</code> 算分再平均。但作者自己在文字里说明：<b>这个实现“肯定不对”</b>，和排行榜差距很大。这是一个诚实的提醒：训练时看的指标不一定等于真正的考核指标。</p>`,
+      cells: [8, 7], highlight: ["np.arange(0.5, 1.0, 0.05)", "tf.metrics.mean_iou"],
+      draw(svg, ctx) {
+        const cx = 170, cy = 175;
+        const A = K.svg(svg, "circle", { cx: cx - 30, cy, r: 90, fill: "var(--c1)", "fill-opacity": 0.25, stroke: "var(--c1)", "stroke-width": 2 });
+        const B = K.svg(svg, "circle", { cx: cx + 30, cy, r: 90, fill: "var(--c2)", "fill-opacity": 0.25, stroke: "var(--c2)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: cx - 100, y: 60, "font-size": 13, fill: "var(--c1)", "font-weight": 700 }, "真实细胞核");
+        K.svg(svg, "text", { x: cx + 40, y: 60, "font-size": 13, fill: "var(--c2)", "font-weight": 700 }, "预测");
+        const iouTxt = K.svg(svg, "text", { x: cx, y: 300, "text-anchor": "middle", "font-size": 15, "font-weight": 700 }, "");
+        const ths = []; for (let t = 0.5; t < 0.999; t += 0.05) ths.push(+t.toFixed(2));
+        K.svg(svg, "text", { x: 400, y: 40, "font-size": 13, "font-weight": 700 }, "10 个 IoU 阈值：这个预测算不算“命中”？");
+        const marks = ths.map((t, i) => { const g = K.node(svg, 400 + (i % 5) * 62, 60 + Math.floor(i / 5) * 60, 54, 42, t.toFixed(2), { fs: 13 }); return g; });
+        const avg = K.svg(svg, "text", { x: 400, y: 210, "font-size": 14, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 400, y: 250, "font-size": 12, class: "muted" }, "比赛分数 = 各阈值下 TP/(TP+FP+FN) 的平均");
+        K.svg(svg, "text", { x: 400, y: 272, "font-size": 12, fill: "var(--warn)" }, "作者：自己写的 Keras 版本“肯定不对”");
+        const area = (d) => { // 两个半径 90 的圆，圆心距 d，交集面积
+          const R = 90; if (d >= 2 * R) return 0; return 2 * R * R * Math.acos(d / (2 * R)) - (d / 2) * Math.sqrt(4 * R * R - d * d);
+        };
+        ctx.tween(2600, (t) => {
+          const d = K.lerp(150, 20, t);
+          A.setAttribute("cx", cx - d / 2); B.setAttribute("cx", cx + d / 2);
+          const I = area(d), U = 2 * Math.PI * 8100 - I, v = I / U;
+          iouTxt.textContent = `IoU = ${v.toFixed(2)}`;
+          let hit = 0;
+          marks.forEach((g, i) => { const ok = v > ths[i]; if (ok) hit++; g.querySelector("rect").style.fill = ok ? "color-mix(in srgb, var(--good) 30%, var(--panel))" : "var(--panel-2)"; });
+          avg.textContent = `命中 ${hit} / 10 个阈值 → 这一个细胞核贡献 ${(hit / 10).toFixed(1)}`;
+        });
+      },
+    },
+    {
+      title: "编码器：卷积 + 池化，层层压缩", at: 9, kicker: "第 9 格 · 下采样",
+      html: `<p>U-Net 的左半边叫<b>编码器</b>。每一层做两次 3×3 卷积（提取特征），再做 2×2 最大池化（尺寸减半）。作者的版本：</p><p>128×128×16 → 64×64×32 → 32×32×64 → 16×16×128 → 8×8×256</p><p>图越来越小、通道越来越多：网络逐渐忘掉“具体在哪个像素”，但越来越清楚“这是什么”。最开始的 <code>Lambda(x / 255)</code> 把像素缩到 0~1。</p>`,
+      cells: [10], highlight: ["MaxPooling2D", "Lambda(lambda x: x / 255)", "c1 = Conv2D(16", "c5 = Conv2D(256"],
+      draw(svg, ctx) {
+        const L = [[128, 16], [64, 32], [32, 64], [16, 128], [8, 256]];
+        const els = L.map((l, i) => {
+          const h = 30 + l[0] * 1.6, w = 10 + Math.log2(l[1]) * 5, x = 40 + i * 140, y = 175 - h / 2;
+          const g = K.svg(svg, "g");
+          // 叠放几层表示通道
+          for (let k = 2; k >= 0; k--) K.svg(g, "rect", { x: x + k * 5, y: y - k * 5, width: w, height: h, rx: 3, fill: `color-mix(in srgb, var(--c1) ${20 + i * 14}%, var(--panel))`, stroke: "var(--c1)" });
+          K.svg(g, "text", { x: x + w / 2 + 5, y: y + h + 18, "text-anchor": "middle", "font-size": 12 }, `${l[0]}×${l[0]}`);
+          K.svg(g, "text", { x: x + w / 2 + 5, y: y + h + 33, "text-anchor": "middle", "font-size": 11, class: "muted" }, `${l[1]} 通道`);
+          K.svg(g, "text", { x: x + w / 2 + 5, y: y - 18, "text-anchor": "middle", "font-size": 12, "font-weight": 700, fill: "var(--c1)" }, i < 4 ? `c${i + 1}` : "c5 瓶颈");
+          g.style.opacity = 0;
+          return { g, x, w };
+        });
+        // 2×2 池化小演示
+        const pool = K.svg(svg, "g"); pool.style.opacity = 0;
+        const vals = [3, 7, 1, 4];
+        vals.forEach((v, i) => K.node(pool, 500 + (i % 2) * 30, 22 + Math.floor(i / 2) * 30, 28, 28, String(v), { fs: 12, rx: 3, fill: v === 7 ? "color-mix(in srgb, var(--c2) 30%, var(--panel))" : "var(--panel-2)" }));
+        K.arrow(pool, 562, 52, 592, 52);
+        K.node(pool, 596, 38, 28, 28, "7", { fs: 12, rx: 3, fill: "color-mix(in srgb, var(--c2) 30%, var(--panel))" });
+        K.svg(pool, "text", { x: 632, y: 56, "font-size": 11 }, "2×2 取最大");
+        (async () => {
+          for (let i = 0; i < L.length; i++) {
+            if (!(await ctx.tween(400, (t) => (els[i].g.style.opacity = t)))) return;
+            if (i < L.length - 1) { const a = K.arrow(svg, els[i].x + els[i].w + 14, 175, 40 + (i + 1) * 140 - 4, 175, { color: "var(--c2)" }); K.svg(svg, "text", { x: (els[i].x + els[i].w + 40 + (i + 1) * 140) / 2 + 5, y: 168, "text-anchor": "middle", "font-size": 10, fill: "var(--c2)" }, "池化"); }
+            if (i === 1) pool.style.opacity = 1;
+          }
+        })();
+      },
+    },
+    {
+      title: "ELU、He 初始化与 Dropout", at: 11, kicker: "第 11 格 · 训练细节",
+      html: `<p>每个卷积用 <b>ELU</b> 激活（负半轴是平滑的指数曲线而不是一刀切成 0），用 <b>He 正态初始化</b>（按输入数量缩放初始权重，适合 ReLU 一类激活）。</p><p>两次卷积之间插入 <b>Dropout</b>：训练时随机让一部分神经元“休息”，防止死记训练图。越深的层丢得越多：浅层 0.1，中间 0.2，瓶颈 0.3。作者在更新说明里写了“改用 ELU、加入 dropout”。</p>`,
+      cells: [10, 11], highlight: ["activation='elu'", "kernel_initializer='he_normal'", "Dropout(0.1)", "Dropout(0.3)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 40, w: 250, h: 230 }, [-4, 3], [-1.2, 3], { xlabel: "输入", ylabel: "输出" });
+        let d1 = "", d2 = "";
+        for (let x = -4; x <= 3.001; x += 0.1) { d1 += (d1 ? "L" : "M") + ax.sx(x) + "," + ax.sy(x > 0 ? x : Math.exp(x) - 1); d2 += (d2 ? "L" : "M") + ax.sx(x) + "," + ax.sy(Math.max(0, x)); }
+        K.svg(svg, "path", { d: d2, fill: "none", stroke: "var(--ink-3)", "stroke-width": 1.5, "stroke-dasharray": "4 3" });
+        K.svg(svg, "path", { d: d1, fill: "none", stroke: "var(--c3)", "stroke-width": 3 });
+        K.svg(svg, "text", { x: 70, y: 32, "font-size": 12, fill: "var(--c3)", "font-weight": 700 }, "ELU（实线）vs ReLU（虚线）");
+        const rates = [["浅层 c1、c2、c8、c9", 0.1], ["中层 c3、c4、c6、c7", 0.2], ["瓶颈 c5", 0.3]];
+        const groups = rates.map((rr, gi) => {
+          K.svg(svg, "text", { x: 380, y: 50 + gi * 100, "font-size": 12, "font-weight": 700 }, `${rr[0]} · Dropout ${rr[1]}`);
+          return Array.from({ length: 20 }, (_, i) => K.svg(svg, "circle", { cx: 392 + (i % 10) * 30, cy: 72 + gi * 100 + Math.floor(i / 10) * 26, r: 9, fill: "var(--c1)" }));
+        });
+        (async () => {
+          for (let k = 0; k < 8; k++) {
+            const r = K.rng(k + 1);
+            groups.forEach((G, gi) => G.forEach((c) => { const off = r() < rates[gi][1]; c.style.fill = off ? "var(--panel-2)" : "var(--c1)"; c.style.stroke = off ? "var(--line)" : "none"; }));
+            if (!(await ctx.wait(650))) return;
+          }
+        })();
+        K.svg(svg, "text", { x: 380, y: 330, "font-size": 11, class: "muted" }, "每次训练迭代随机关掉一部分（灰色），预测时全部打开");
+      },
+    },
+    {
+      title: "解码器：转置卷积放大", at: 10, kicker: "第 10 格（上） · 上采样",
+      html: `<p>右半边叫<b>解码器</b>，要把 8×8 的小特征图一路放大回 128×128。作者用 <code>Conv2DTranspose(…, (2, 2), strides=(2, 2))</code>，即<b>转置卷积</b>：每个输入像素乘上一个可学习的 2×2 卷积核，“摊开”成 2×2 的一块，于是尺寸翻倍。</p><p>和直接插值放大不同，转置卷积的放大方式是网络自己学出来的。</p>`,
+      cells: [10], highlight: ["Conv2DTranspose", "strides=(2, 2)"],
+      draw(svg, ctx) {
+        const inp = [[2, 0, 1], [1, 3, 0], [0, 1, 2]], ker = [[1, 0.5], [0.5, 0.25]];
+        const s = 44, ox = 40, oy = 80;
+        K.svg(svg, "text", { x: ox + 66, y: 60, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "输入 3×3");
+        const ins = [];
+        inp.forEach((row, y) => row.forEach((v, x) => ins.push(K.node(svg, ox + x * s, oy + y * s, s - 4, s - 4, String(v), { fs: 14, rx: 4, fill: K.heat(v / 3) }))));
+        K.svg(svg, "text", { x: 230, y: 60, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "可学习的 2×2 核");
+        ker.forEach((row, y) => row.forEach((v, x) => K.node(svg, 200 + x * 32, 80 + y * 32, 30, 30, String(v), { fs: 12, rx: 3, fill: "color-mix(in srgb, var(--c2) 25%, var(--panel))" })));
+        const s2 = 34, ox2 = 360, oy2 = 60;
+        K.svg(svg, "text", { x: ox2 + 102, y: 44, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "输出 6×6（尺寸翻倍）");
+        const outs = [];
+        for (let y = 0; y < 6; y++) for (let x = 0; x < 6; x++) { const g = K.node(svg, ox2 + x * s2, oy2 + y * s2, s2 - 3, s2 - 3, "", { fs: 11, rx: 3, fill: "var(--panel-2)" }); outs.push(g); }
+        const hi = K.svg(svg, "rect", { x: 0, y: 0, width: s - 4, height: s - 4, fill: "none", stroke: "var(--accent)", "stroke-width": 3, rx: 4 });
+        const hi2 = K.svg(svg, "rect", { x: 0, y: 0, width: 2 * s2 - 3, height: 2 * s2 - 3, fill: "none", stroke: "var(--accent)", "stroke-width": 3, rx: 4 });
+        (async () => {
+          for (let i = 0; i < 9; i++) {
+            const x = i % 3, y = Math.floor(i / 3), v = inp[y][x];
+            hi.setAttribute("x", ox + x * s); hi.setAttribute("y", oy + y * s);
+            hi2.setAttribute("x", ox2 + 2 * x * s2); hi2.setAttribute("y", oy2 + 2 * y * s2);
+            for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) {
+              const g = outs[(2 * y + dy) * 6 + 2 * x + dx], val = v * ker[dy][dx];
+              g.querySelector("rect").style.fill = K.heat(val / 3);
+              g.querySelector("text").textContent = K.fmt(val, val % 1 ? 2 : 0);
+            }
+            if (!(await ctx.wait(500))) return;
+          }
+          hi.style.opacity = hi2.style.opacity = 0;
+        })();
+        K.svg(svg, "text", { x: 40, y: 330, "font-size": 12, class: "muted" }, "步长 = 2 时，每个输入像素 × 核 → 输出里互不重叠的一个 2×2 块（数值为示意）");
+      },
+    },
+    {
+      title: "跳跃连接：把细节拼回来", at: 10, kicker: "第 10 格（中） · U 形结构",
+      html: `<p>只靠放大，8×8 里丢掉的边缘细节是找不回来的。U-Net 的关键是<b>跳跃连接</b>：解码器每放大一次，就把编码器同样尺寸的特征图（c4、c3、c2、c1）原样搬过来，用 <code>concatenate</code> 在通道方向<b>拼接</b>，再做两次卷积融合。</p><p>编码器的特征告诉网络“边缘在哪里”，解码器的特征告诉网络“这是不是细胞核”。整个网络画出来像字母 U，因此得名。</p>`,
+      cells: [10], highlight: ["concatenate([u6, c4])", "concatenate([u7, c3])", "concatenate([u8, c2])", "concatenate([u9, c1], axis=3)"],
+      draw(svg, ctx) {
+        const lv = [128, 64, 32, 16, 8];
+        const pos = (side, i) => ({ x: side === 0 ? 40 + i * 70 : 680 - i * 70 - 34, y: 30 + i * 62 });
+        const enc = lv.map((n, i) => { const p = pos(0, i); return K.node(svg, p.x, p.y, 70, 34, i < 4 ? `c${i + 1} ${n}²` : `c5 ${n}²`, { fs: 11, fill: "color-mix(in srgb, var(--c1) 22%, var(--panel))", stroke: "var(--c1)" }); });
+        const dec = lv.slice(0, 4).map((n, i) => { const p = pos(1, i); const g = K.node(svg, p.x - 36, p.y, 70, 34, `c${9 - i} ${n}²`, { fs: 11, fill: "color-mix(in srgb, var(--c3) 22%, var(--panel))", stroke: "var(--c3)" }); g.style.opacity = 0; return g; });
+        for (let i = 0; i < 4; i++) { const a = pos(0, i), b = pos(0, i + 1); K.arrow(svg, a.x + 35, a.y + 34, b.x + 35, b.y - 2, { color: "var(--c1)" }); }
+        const skips = [], ups = [];
+        for (let i = 3; i >= 0; i--) {
+          const a = pos(0, i), b = pos(1, i), c = i === 3 ? pos(0, 4) : pos(1, i + 1);
+          const s = K.arrow(svg, a.x + 72, a.y + 17, b.x - 38, b.y + 17, { color: "var(--c2)", dash: "6 4", sw: 2 }); s.style.opacity = 0; skips[i] = s;
+          const u = K.arrow(svg, i === 3 ? c.x + 70 : c.x - 1, c.y, b.x - 1, b.y + 36, { color: "var(--c3)" }); u.style.opacity = 0; ups[i] = u;
+        }
+        K.svg(svg, "text", { x: 360, y: 330, "text-anchor": "middle", "font-size": 12 }, "蓝：编码器（下采样）  绿：解码器（转置卷积上采样）  橙虚线：跳跃连接 concatenate");
+        const out = K.node(svg, 600, 2, 110, 24, "1×1 卷积 → 掩膜", { fs: 11, fill: "var(--accent-soft)", stroke: "var(--accent)" }); out.style.opacity = 0;
+        (async () => {
+          if (!(await ctx.wait(500))) return;
+          for (let i = 3; i >= 0; i--) {
+            if (!(await ctx.tween(350, (t) => (ups[i].style.opacity = t)))) return;
+            if (!(await ctx.tween(450, (t) => { skips[i].style.opacity = t; dec[i].style.opacity = t; }))) return;
+          }
+          out.style.opacity = 1;
+        })();
+      },
+    },
+    {
+      title: "输出层与损失函数", at: 10, notes: {"10": "这一格就是完整的 U-Net：c1–c5 是编码器，u6–u9 是转置卷积，concatenate 是跳跃连接，最后 1×1 卷积 + sigmoid 输出。"}, kicker: "第 10 格（下） · 输出与完整代码",
+      html: `<p>最后一层 <code>Conv2D(1, (1, 1), activation='sigmoid')</code>：1×1 卷积把 16 个通道合成 1 个，sigmoid 把它压到 0~1，表示“这个像素是细胞核的概率”。</p><p>损失函数是<b>二元交叉熵</b>（binary cross-entropy）：对每个像素都当作一次二分类，真实是 1 却预测得低、真实是 0 却预测得高，都会被罚；所有像素取平均。优化器用 Adam。</p>`,
+      cells: [10], highlight: ["Conv2D(1, (1, 1), activation='sigmoid')", "loss='binary_crossentropy'", "optimizer='adam'"],
+      draw(svg, ctx) {
+        const D = makeCells(11, 16, 5), s = 17, r = K.rng(2);
+        const logits = Array.from(D.gt, (g) => (g ? 2.2 : -2.2) + K.randn(r) * 1.4);
+        K.svg(svg, "text", { x: 30 + 136, y: 26, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "sigmoid 输出的概率图（示意）");
+        const P = gridRects(svg, 30, 36, 16, s, () => "var(--panel-2)");
+        K.svg(svg, "text", { x: 400, y: 50, "font-size": 13, "font-weight": 700 }, "单个像素的损失：");
+        K.svg(svg, "text", { x: 400, y: 76, "font-size": 13, "font-family": "var(--mono)" }, "−[y·log p + (1−y)·log(1−p)]");
+        const ax = K.axes(svg, { x: 420, y: 110, w: 260, h: 160 }, [0, 1], [0, 4], { xlabel: "预测概率 p", ylabel: "损失" });
+        let a = "", b = "";
+        for (let p = 0.02; p <= 0.981; p += 0.01) { a += (a ? "L" : "M") + ax.sx(p) + "," + ax.sy(-Math.log(p)); b += (b ? "L" : "M") + ax.sx(p) + "," + ax.sy(-Math.log(1 - p)); }
+        K.svg(svg, "path", { d: a, fill: "none", stroke: "var(--ink)", "stroke-width": 2.5 });
+        K.svg(svg, "path", { d: b, fill: "none", stroke: "var(--c4)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 440, y: 125, "font-size": 12 }, "y=1（细胞核）");
+        K.svg(svg, "text", { x: 600, y: 125, "font-size": 12, fill: "var(--c4)" }, "y=0（背景）");
+        const lossT = K.svg(svg, "text", { x: 400, y: 325, "font-size": 13, "font-weight": 700 }, "");
+        ctx.tween(1800, (t) => {
+          let L = 0;
+          P.forEach((e, i) => { const p = K.sigmoid(logits[i] * t); e.style.fill = `color-mix(in srgb, var(--c4) ${Math.round(p * 100)}%, var(--panel))`; L += D.gt[i] ? -Math.log(p) : -Math.log(1 - p); });
+          lossT.textContent = `整张图平均损失：${(L / 256).toFixed(3)}（随训练下降，示意）`;
+        });
+      },
+    },
+    {
+      title: "训练：早停 + 保存最佳", at: 12, kicker: "第 12 格 · 训练",
+      html: `<p>作者用 10% 训练图做验证集（<code>validation_split=0.1</code>），batch 很小只有 16（因为数据少），最多训练 50 轮。</p><p><b>EarlyStopping(patience=5)</b>：验证损失连续 5 轮没有变好就停；<b>ModelCheckpoint(save_best_only=True)</b>：只保存验证损失最低的那一版。预测时再 <code>load_model</code> 读回这一版。作者提到损失曲线“有点不稳定”。</p>`,
+      cells: [12], highlight: ["EarlyStopping(patience=5", "save_best_only=True", "validation_split=0.1", "batch_size=16", "epochs=50"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [0, 50], [0, 0.6], { xlabel: "轮次 epoch（示意曲线）", ylabel: "损失" });
+        const r = K.rng(7), tr = [], va = [];
+        for (let e = 0; e <= 50; e++) { tr.push(0.08 + 0.45 * Math.exp(-e / 6) + Math.abs(K.randn(r)) * 0.01); va.push(0.11 + 0.42 * Math.exp(-e / 5) + (e > 14 ? (e - 14) * 0.0035 : 0) + K.randn(r) * 0.012); }
+        let best = 0, stopAt = 50;
+        for (let e = 1; e <= 50; e++) { if (va[e] < va[best]) best = e; if (e - best >= 5) { stopAt = e; break; } }
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 }), p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c2)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 520, y: 50, "font-size": 12, fill: "var(--c1)" }, "训练损失");
+        K.svg(svg, "text", { x: 520, y: 68, "font-size": 12, fill: "var(--c2)" }, "验证损失");
+        const star = K.svg(svg, "circle", { r: 0, fill: "var(--good)" });
+        const vline = K.svg(svg, "line", { x1: ax.sx(stopAt), x2: ax.sx(stopAt), y1: 30, y2: 280, stroke: "var(--bad)", "stroke-dasharray": "5 3" }); vline.style.opacity = 0;
+        const msg = K.svg(svg, "text", { x: ax.sx(stopAt) + 6, y: 100, "font-size": 12, fill: "var(--bad)" }, `连续 5 轮未改善 → 第 ${stopAt} 轮停`); msg.style.opacity = 0;
+        const bt = K.svg(svg, "text", { x: 0, y: 0, "font-size": 12, fill: "var(--good)", "font-weight": 700 }, "");
+        ctx.tween(2600, (t) => {
+          const m = Math.round(t * stopAt);
+          let a = "", b = "", bb = 0;
+          for (let e = 0; e <= m; e++) { a += (a ? "L" : "M") + ax.sx(e) + "," + ax.sy(tr[e]); b += (b ? "L" : "M") + ax.sx(e) + "," + ax.sy(va[e]); if (va[e] < va[bb]) bb = e; }
+          p1.setAttribute("d", a); p2.setAttribute("d", b);
+          star.setAttribute("cx", ax.sx(bb)); star.setAttribute("cy", ax.sy(va[bb])); star.setAttribute("r", 6);
+          bt.setAttribute("x", ax.sx(bb) - 30); bt.setAttribute("y", ax.sy(va[bb]) + 24); bt.textContent = "保存这一版";
+        }).then((ok) => ok && ctx.tween(400, (t) => { vline.style.opacity = msg.style.opacity = t; }));
+      },
+    },
+    {
+      title: "预测：阈值 0.5，放大回原尺寸", at: 13, kicker: "第 13–17 格 · 推理",
+      html: `<p>读回最佳模型，分别对训练部分、验证部分和测试集预测。概率 &gt; 0.5 的像素判为细胞核（<code>preds &gt; 0.5</code>）。</p><p>测试图预测完是 128×128，要用 <code>resize</code> 放大回第 2 步记下的原始尺寸，才能和官方标注对齐。作者随机抽几张训练和验证样本，并排看原图、真实掩膜、预测掩膜做“健全性检查”。</p>`,
+      cells: [14, 17], highlight: ["(preds_test > 0.5)", "preds_test_upsampled", "sizes_test[i][0]"],
+      draw(svg, ctx) {
+        const D = makeCells(21, 16, 5), s = 11, r = K.rng(4);
+        const prob = Array.from(D.gt, (g) => K.sigmoid((g ? 2 : -2.4) + K.randn(r) * 0.9));
+        const panel = (x, title, f) => { K.svg(svg, "text", { x: x + 88, y: 30, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, title); return gridRects(svg, x, 40, 16, s, f); };
+        panel(20, "原图（示意）", (x, y) => (D.gt[y * 16 + x] ? "color-mix(in srgb, var(--c4) 70%, var(--panel))" : "color-mix(in srgb, var(--ink-3) 12%, var(--panel))"));
+        panel(260, "真实掩膜", (x, y) => (D.gt[y * 16 + x] ? "var(--ink)" : "var(--panel-2)"));
+        const pr = panel(500, "预测概率 → 阈值 0.5", (x, y) => `color-mix(in srgb, var(--c4) ${Math.round(prob[y * 16 + x] * 100)}%, var(--panel))`);
+        K.svg(svg, "text", { x: 360, y: 250, "text-anchor": "middle", "font-size": 13 }, "128×128 → resize → 原始尺寸（每张测试图不同，如 256×320）");
+        const bar = K.svg(svg, "rect", { x: 260, y: 270, width: 0, height: 22, rx: 4, fill: "var(--c1)", "fill-opacity": 0.35, stroke: "var(--c1)" });
+        K.svg(svg, "text", { x: 360, y: 322, "text-anchor": "middle", "font-size": 11, class: "muted" }, "（尺寸为举例）");
+        ctx.wait(800).then((ok) => ok && ctx.tween(900, (t) => pr.forEach((e, i) => { const p = prob[i]; e.style.fill = t < 1 ? `color-mix(in srgb, var(--c4) ${Math.round(p * 100)}%, var(--panel))` : p > 0.5 ? "var(--ink)" : "var(--panel-2)"; })))
+          .then((ok) => ok && ctx.tween(900, (t) => bar.setAttribute("width", 200 * t)));
+      },
+    },
+    {
+      title: "连通域拆分 + 游程编码提交", at: 18, kicker: "第 18–23 格 · 提交",
+      html: `<p>比赛按<b>单个细胞核</b>评分，所以要把一张掩膜拆开：<code>skimage.morphology.label</code> 找出互不相连的白色区域（<b>连通域</b>），每个区域当作一个细胞核。</p><p>每个细胞核再用<b>游程编码</b>（RLE）压成一串数字：把图按<b>列优先</b>拉成一条线，记录“从第几个像素开始、连续几个是 1”。例如 <code>5 3 12 2</code> 表示第 5–7 和第 12–13 个像素是细胞核。最后写成 CSV 提交。</p>`,
+      cells: [19, 21], highlight: ["label(x > cutoff)", "x.T.flatten()", "run_lengths.extend((b + 1, 0))"],
+      draw(svg, ctx) {
+        const N = 10, s = 22, ox = 30, oy = 40;
+        const mask = new Uint8Array(N * N);
+        [[1, 1, 3, 3], [6, 2, 3, 2], [2, 6, 2, 3], [6, 6, 3, 3]].forEach(([x0, y0, w, h]) => { for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) mask[y * N + x] = 1; });
+        const L = label(mask, N);
+        const R = gridRects(svg, ox, oy, N, s, (x, y) => (mask[y * N + x] ? "var(--ink)" : "var(--panel-2)"));
+        K.svg(svg, "text", { x: ox + 110, y: 30, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, "阈值后的掩膜（10×10 示意）");
+        const info = K.svg(svg, "text", { x: 300, y: 50, "font-size": 13, "font-weight": 700 }, "");
+        const rows = [];
+        const cur = K.svg(svg, "rect", { x: 0, y: 0, width: s, height: s, fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 }); cur.style.opacity = 0;
+        (async () => {
+          if (!(await ctx.wait(500))) return;
+          if (!(await ctx.tween(700, (t) => R.forEach((e, i) => { if (L.lab[i]) e.style.fill = `color-mix(in srgb, var(--c${L.lab[i]}) ${Math.round(t * 100)}%, var(--ink))`; })))) return;
+          info.textContent = `label() 找到 ${L.n} 个连通域 = ${L.n} 个细胞核，各自编码一行：`;
+          cur.style.opacity = 1;
+          for (let k = 1; k <= L.n; k++) {
+            const row = K.svg(svg, "text", { x: 300, y: 84 + (k - 1) * 34, "font-size": 13, "font-family": "var(--mono)", fill: `var(--c${k})` }, `细胞核 ${k}：`);
+            rows.push(row);
+            const runs = []; let prev = -2;
+            for (let p = 0; p < N * N; p++) {
+              const x = Math.floor(p / N), y = p % N; // 列优先
+              if (L.lab[y * N + x] !== k) continue;
+              cur.setAttribute("x", ox + x * s); cur.setAttribute("y", oy + y * s);
+              if (p > prev + 1) runs.push(p + 1, 0);
+              runs[runs.length - 1]++; prev = p;
+              row.textContent = `细胞核 ${k}：` + runs.join(" ");
+              if (!(await ctx.wait(70))) return;
+            }
+          }
+          cur.style.opacity = 0;
+          K.svg(svg, "text", { x: 300, y: 84 + L.n * 34 + 10, "font-size": 12, class: "muted" }, "按列从上到下、从左到右数，像素序号从 1 开始");
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：阈值 / Dice / IoU / 比赛分数 ---------- */
+  const N = 64;
+  function toImage(svg, x, y, w, N, pix) {
+    const cv = document.createElement("canvas"); cv.width = cv.height = N;
+    const g = cv.getContext("2d"), im = g.createImageData(N, N);
+    for (let i = 0; i < N * N; i++) { const c = pix(i); im.data[i * 4] = c[0]; im.data[i * 4 + 1] = c[1]; im.data[i * 4 + 2] = c[2]; im.data[i * 4 + 3] = 255; }
+    g.putImageData(im, 0, 0);
+    const e = K.svg(svg, "image", { x, y, width: w, height: w, preserveAspectRatio: "none" });
+    e.setAttribute("href", cv.toDataURL()); e.style.imageRendering = "pixelated";
+    return e;
+  }
+  const rgb = (name) => { const d = document.createElement("div"); d.style.color = `var(${name})`; document.body.appendChild(d); const m = getComputedStyle(d).color.match(/\d+/g).map(Number); d.remove(); return m; };
+  const mix = (a, b, t) => [0, 1, 2].map((i) => Math.round(a[i] * t + b[i] * (1 - t)));
+  K.lab(document.getElementById("lab1"), {
+    width: 660, height: 300,
+    controls: [
+      { id: "th", label: "判为细胞核的概率阈值（作者用 0.5）", min: 0.05, max: 0.95, step: 0.01, value: 0.5, fmt: (v) => v.toFixed(2) },
+      { id: "q", label: "模拟模型的好坏（越大越清晰）", min: 0.5, max: 4, step: 0.1, value: 2, fmt: (v) => v.toFixed(1) },
+      { id: "blur", label: "边缘模糊程度（像素）", min: 0, max: 3, step: 1, value: 1 },
+      { id: "seed", label: "换一张图", button: true },
+    ],
+    note: "左：模拟的概率图；中：阈值化后的掩膜（每个连通域一种颜色）；右：与真实掩膜对比（绿=正确命中，红=多判，黄=漏判）。比赛分数按第 7 格说的规则：IoU 阈值 0.5–0.95 下 TP/(TP+FP+FN) 的平均。阈值太低细胞核粘成一团，太高被切碎或消失。",
+    render(svg, v) {
+      const D = makeCells(200 + v.seed * 7, N, 14), r = K.rng(9 + v.seed);
+      // 概率图：真实掩膜 → 盒式模糊 → 加噪声 → sigmoid
+      let f = Float32Array.from(D.gt, (g) => (g ? 1 : -1));
+      for (let it = 0; it < v.blur; it++) {
+        const g2 = new Float32Array(N * N);
+        for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) { let s = 0, c = 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const X = x + dx, Y = y + dy; if (X >= 0 && Y >= 0 && X < N && Y < N) { s += f[Y * N + X]; c++; } } g2[y * N + x] = s / c; }
+        f = g2;
+      }
+      const noise = new Float32Array(N * N).map(() => K.randn(r));
+      const sm = new Float32Array(N * N);
+      for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) { let s = 0, c = 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const X = x + dx, Y = y + dy; if (X >= 0 && Y >= 0 && X < N && Y < N) { s += noise[Y * N + X]; c++; } } sm[y * N + x] = s / c; }
+      const prob = Float32Array.from(f, (val, i) => K.sigmoid(val * v.q * 1.6 + sm[i] * 2.2 - 0.2));
+      const pred = Uint8Array.from(prob, (p) => (p > v.th ? 1 : 0));
+      const L = label(pred, N), G = label(D.gt, N);
+      const cPanel = rgb("--panel"), cInk = rgb("--ink"), cC4 = rgb("--c4"), cGood = rgb("--good"), cBad = rgb("--bad"), cWarn = rgb("--warn");
+      const pal = ["--c1", "--c2", "--c3", "--c4", "--c5", "--c6"].map(rgb);
+      const W = 200;
+      K.svg(svg, "text", { x: 10 + W / 2, y: 16, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, "模型概率图（模拟）");
+      K.svg(svg, "text", { x: 230 + W / 2, y: 16, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, `阈值后：${L.n} 个连通域`);
+      K.svg(svg, "text", { x: 450 + W / 2, y: 16, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, `对比真实（${G.n} 个细胞核）`);
+      toImage(svg, 10, 26, W, N, (i) => mix(cC4, cPanel, prob[i]));
+      toImage(svg, 230, 26, W, N, (i) => (L.lab[i] ? pal[(L.lab[i] - 1) % 6] : cPanel));
+      let TP = 0, FP = 0, FN = 0;
+      toImage(svg, 450, 26, W, N, (i) => { if (pred[i] && D.gt[i]) { TP++; return cGood; } if (pred[i]) { FP++; return cBad; } if (D.gt[i]) { FN++; return cWarn; } return cPanel; });
+      [10, 230, 450].forEach((x) => K.svg(svg, "rect", { x, y: 26, width: W, height: W, fill: "none", stroke: "var(--line)" }));
+      const dice = (2 * TP) / (2 * TP + FP + FN || 1), iouv = TP / (TP + FP + FN || 1);
+      // 物体级匹配：预测连通域与真实细胞核的 IoU 矩阵
+      const inter = Array.from({ length: L.n + 1 }, () => new Float32Array(G.n + 1)), ap = new Float32Array(L.n + 1), ag = new Float32Array(G.n + 1);
+      for (let i = 0; i < N * N; i++) { ap[L.lab[i]]++; ag[G.lab[i]]++; if (L.lab[i] && G.lab[i]) inter[L.lab[i]][G.lab[i]]++; }
+      let score = 0;
+      for (let t = 0.5; t < 0.999; t += 0.05) {
+        let tp = 0;
+        for (let p = 1; p <= L.n; p++) for (let g = 1; g <= G.n; g++) { const I = inter[p][g]; if (I && I / (ap[p] + ag[g] - I) > t) tp++; }
+        const fp = L.n - tp, fn = G.n - tp;
+        score += tp / (tp + fp + fn || 1);
+      }
+      score /= 10;
+      K.svg(svg, "text", { x: 10, y: 250, "font-size": 12 }, "像素级：Dice = 2·TP / (2·TP + FP + FN)，IoU = TP / (TP + FP + FN)");
+      K.svg(svg, "text", { x: 10, y: 270, "font-size": 12 }, "物体级：一个预测连通域与某个真实细胞核 IoU > t 才算命中（IoU > 0.5 时最多只能匹配一个）");
+      K.svg(svg, "text", { x: 10, y: 290, "font-size": 12, class: "muted" }, "绿 = 判对的细胞核像素   红 = 多判（假阳性）   黄 = 漏判（假阴性）");
+      return { readout: [
+        { k: "像素 Dice", v: dice.toFixed(3), color: dice > 0.8 ? "var(--good)" : "var(--warn)" },
+        { k: "像素 IoU", v: iouv.toFixed(3) },
+        { k: "连通域 预测 / 真实", v: `${L.n} / ${G.n}`, color: L.n === G.n ? "var(--good)" : "var(--warn)" },
+        { k: "比赛式多阈值分数", v: score.toFixed(3), color: score > 0.5 ? "var(--good)" : "var(--bad)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：点格子画掩膜，看 RLE ---------- */
+  const lab2State = { c: 0 };
+  const RN = 12, rmask = new Uint8Array(RN * RN);
+  [[2, 2, 3, 4], [7, 3, 3, 3], [3, 8, 5, 2]].forEach(([x0, y0, w, h]) => { for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) rmask[y * RN + x] = 1; });
+  const rs = 26, rox = 14, roy = 14;
+  const lab2 = K.lab(document.getElementById("lab2"), {
+    width: 660, height: 350,
+    controls: [
+      { id: "order", label: "展开顺序", value: "col", options: [["col", "列优先（比赛要求）"], ["row", "行优先（错误示范）"]] },
+      { id: "clear", label: "清空", button: true },
+    ],
+    note: "列优先就是代码里的 x.T.flatten()。点击左边的格子切换 0/1。右边实时按第 19 格的 rle_encoding 和 prob_to_rles 计算：先找连通域，每个细胞核单独一行“起点 长度 起点 长度 …”。",
+    render(svg, v) {
+      if (v.clear !== lab2State.c) { lab2State.c = v.clear; rmask.fill(0); }
+      const L = label(rmask, RN);
+      for (let y = 0; y < RN; y++) for (let x = 0; x < RN; x++) {
+        const k = L.lab[y * RN + x];
+        K.svg(svg, "rect", { x: rox + x * rs, y: roy + y * rs, width: rs - 2, height: rs - 2, rx: 3, fill: k ? `var(--c${((k - 1) % 6) + 1})` : "var(--panel-2)", stroke: "var(--line)" });
+      }
+      // 列优先序号示例：首列
+      const idx = (x, y) => (v.order === "col" ? x * RN + y : y * RN + x);
+      K.svg(svg, "text", { x: rox, y: roy + RN * rs + 16, "font-size": 11, class: "muted" }, v.order === "col" ? "序号：第 1 列从上往下是 1–12，第 2 列是 13–24 ……" : "序号：第 1 行从左往右是 1–12 ……");
+      K.svg(svg, "text", { x: 340, y: 28, "font-size": 13, "font-weight": 700 }, `找到 ${L.n} 个细胞核，提交内容：`);
+      K.svg(svg, "text", { x: 340, y: 50, "font-size": 12, "font-family": "var(--mono)", class: "muted" }, "ImageId, EncodedPixels");
+      let total = 0;
+      for (let k = 1; k <= L.n; k++) {
+        const dots = [];
+        for (let y = 0; y < RN; y++) for (let x = 0; x < RN; x++) if (L.lab[y * RN + x] === k) dots.push(idx(x, y));
+        dots.sort((a, b) => a - b);
+        const runs = []; let prev = -2;
+        dots.forEach((b) => { if (b > prev + 1) runs.push(b + 1, 0); runs[runs.length - 1]++; prev = b; });
+        total += runs.length;
+        if (k <= 8) {
+          let s = runs.join(" ");
+          if (s.length > 34) s = s.slice(0, 33) + "…";
+          K.svg(svg, "text", { x: 340, y: 74 + (k - 1) * 26, "font-size": 12.5, "font-family": "var(--mono)", fill: `var(--c${((k - 1) % 6) + 1})` }, `img_01, ${s}`);
+        }
+      }
+      if (L.n > 8) K.svg(svg, "text", { x: 340, y: 74 + 8 * 26, "font-size": 12, class: "muted" }, `……还有 ${L.n - 8} 行`);
+      const ones = rmask.reduce((a, b) => a + b, 0);
+      return { readout: [
+        { k: "细胞核像素", v: String(ones) },
+        { k: "连通域（提交行数）", v: String(L.n) },
+        { k: "RLE 数字个数", v: String(total) },
+        { k: "压缩比（像素/数字）", v: total ? (ones / total).toFixed(1) : "—" },
+      ] };
+    },
+  });
+  (function () {
+    const host = document.getElementById("lab2").querySelector(".svgbox");
+    host.style.cursor = "pointer";
+    host.addEventListener("click", (e) => {
+      const s = host.querySelector("svg"), r = s.getBoundingClientRect();
+      const x = (((e.clientX - r.left) / r.width) * 660 - rox) / rs, y = (((e.clientY - r.top) / r.height) * 350 - roy) / rs;
+      if (x < 0 || y < 0 || x >= RN || y >= RN) return;
+      const i = Math.floor(y) * RN + Math.floor(x);
+      rmask[i] = rmask[i] ? 0 : 1;
+      lab2.update();
+    });
+  })();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>卫星图地块分割</title>
+<meta name="description" content="Kaggle 案例拆解：用 DeepLabV3+ 给 DeepGlobe 卫星图像的每个像素分类（城市、农田、草地、森林、水体、荒地、未知），讲清楚掩膜编码、空洞卷积、Dice 损失和 IoU 指标。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">卫星图像 · 语义分割 · 遥感土地覆盖</div>
+  <h1>卫星图地块分割：给地面的每个像素贴上“城市 / 农田 / 森林 / 水”标签</h1>
+  <p class="en">DeepGlobe Land Cover Classification with DeepLabV3+</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">语义分割</span><span class="tag method">掩膜独热编码</span><span class="tag method">随机裁剪与翻转</span>
+    <span class="tag method">DeepLabV3+</span><span class="tag method">ResNet50 迁移学习</span><span class="tag method">空洞卷积</span><span class="tag method">Dice 损失</span><span class="tag method">IoU</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Balraj Ashwath</b></span>
+    <span>Kaggle 点赞 <b>536</b>（2026-11 抓取）</span>
+    <span>数据集 <b>balraj98/deepglobe-land-cover-classification-dataset</b></span>
+    <span><a href="https://www.kaggle.com/code/balraj98/deepglobe-land-cover-classification-deeplabv3" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">803 张高分辨率卫星照片 + 涂色答案</div><p>每张 2448×2448 像素，每个像素对应地面 50 厘米；每张配一张“掩膜”，用 7 种颜色标出每个像素是什么地物。（数据集说明）</p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">每个像素属于哪一类地物</div><p>城市、农田、草地、森林、水体、荒地、未知（云等）。这叫<b>语义分割</b>：不是给整张图一个标签，而是给每个像素一个标签。<span data-cell="8">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">DeepLabV3+，ResNet50 预训练编码器</div><p>随机裁剪 1024×1024、随机翻转；Dice 损失、Adam 优化器、IoU 指标，训练 5 轮，保存验证 IoU 最好的模型。<span data-cell="25">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">输出每块地的分类图和“城市概率”热图</div><p>作者把预测结果和真实掩膜并排画出，并打印验证集的平均 IoU 和 Dice 损失 <span data-cell="36">出处</span>。具体数值在运行输出里，源码不带，这里不列。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集来自 2018 年 CVPR 的 <b>DeepGlobe 土地覆盖分类挑战赛</b>，卫星影像由 DigitalGlobe 采集。以下数字和类别颜色来自数据集说明页。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">带答案的训练图</div><div class="v">803</div></div>
+        <div class="stat-tile"><div class="k">图片尺寸</div><div class="v" style="font-size:20px">2448×2448</div></div>
+        <div class="stat-tile"><div class="k">地面分辨率</div><div class="v">50 cm</div></div>
+        <div class="stat-tile"><div class="k">类别数</div><div class="v">7</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">另有 171 张验证图、172 张测试图，但没有掩膜。作者只用 803 张训练图，再按 9:1 切出自己的验证集 <span data-cell="5">出处</span>。数据集有使用许可限制（DeepGlobe 规则与 DigitalGlobe 内部使用协议）。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">7 种地物（掩膜颜色 R,G,B）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>类别</th><th>颜色</th><th>说明</th></tr>
+        <tr><td>城市 urban_land</td><td><code>0,255,255</code></td><td>人造建筑区（暂不标道路）</td></tr>
+        <tr><td>农田 agriculture_land</td><td><code>255,255,0</code></td><td>农场、果园、苗圃等规划种植</td></tr>
+        <tr><td>草地 rangeland</td><td><code>255,0,255</code></td><td>非森林、非农田的绿地</td></tr>
+        <tr><td>森林 forest_land</td><td><code>0,255,0</code></td><td>有一定树冠密度的林地</td></tr>
+        <tr><td>水体 water</td><td><code>0,0,255</code></td><td>河流、海洋、湖泊、湿地</td></tr>
+        <tr><td>荒地 barren_land</td><td><code>255,255,255</code></td><td>山地、岩石、沙漠、海滩</td></tr>
+        <tr><td>未知 unknown</td><td><code>0,0,0</code></td><td>云和其他</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">数据集说明特别提醒：掩膜里的数值<b>不一定正好是 0 或 255</b>，转成标签时应以 128 为界二值化。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="10">
+    <h3>动手试试 A · 掩膜颜色 → 类别编号：为什么要“以 128 为界” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="21">
+    <h3>动手试试 B · 空洞卷积：不加参数，看得更远 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="25">
+    <h3>动手试试 C · IoU 和 Dice：两张掩膜重合得怎么样 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者的做法与输出</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>选用全部 7 类（含 unknown）进行分割</td><td><span data-cell="8">第 8 格</span></td></tr>
+        <tr><td>训练增强：随机裁剪 1024×1024 + 水平 / 垂直翻转；验证用中心裁剪</td><td><span data-cell="15">第 15 格</span></td></tr>
+        <tr><td>DeepLabV3+，编码器 ResNet50（ImageNet 预训练），sigmoid 输出</td><td><span data-cell="21">第 21 格</span></td></tr>
+        <tr><td>Dice 损失、IoU（阈值 0.5）、Adam 学习率 0.00008、训练 5 轮</td><td><span data-cell="25">第 25 格</span></td></tr>
+        <tr><td>逐张输出：原图、真实掩膜、预测掩膜、“城市”概率热图</td><td><span data-cell="34">第 34 格</span></td></tr>
+        <tr><td>打印平均 IoU 和 Dice 损失，画训练 / 验证曲线</td><td><span data-cell="36">第 36 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">原 notebook 的 IoU、Dice 数值和预测图都在运行输出里，Kaggle 下载的源码不带输出，作者的文字里也没写数值，所以这里不列分数。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一张新的卫星或航拍照片，自动画出城市、农田、森林、水体的范围，计算各类面积。</li>
+        <li><b>同类问题：</b>城市扩张监测、毁林监测、洪水淹没范围、耕地保护、光伏板识别、道路和建筑提取。</li>
+        <li><b>和地理空间的关系：</b>分割结果再配上影像的地理坐标，就成了一张土地利用地图，可以叠加人口、房价、灾害等数据继续分析。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>RGB 掩膜 → 独热编码 → argmax 还原 <span data-cell="10">第 10 格</span></li>
+        <li>PyTorch Dataset 读图读掩膜 <span data-cell="11">第 11 格</span></li>
+        <li>albumentations 增强 <span data-cell="15">第 15 格</span></li>
+        <li>segmentation_models_pytorch 的 DeepLabV3Plus <span data-cell="21">第 21 格</span></li>
+        <li>按验证 IoU 保存最好模型 <span data-cell="28">第 28 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>第 10 格用“完全相等”比较掩膜颜色，但数据集说明颜色值不一定正好是 0 或 255。不纯的像素会被当成哪一类？（提示：实验 A）</li>
+      <li>第 33 格写了 <code>best_model = model</code>，覆盖了前面加载的“验证 IoU 最好的模型”。后面的预测用的是哪一轮的模型？</li>
+      <li>第 31 格的“测试集”其实就是验证集，而验证集又被用来挑最好的模型。这样得到的分数可能偏高还是偏低？</li>
+      <li>7 个类别每个像素只能属于一类，作者却用了 sigmoid（每类独立打分）而不是 softmax。这两种做法有什么区别？</li>
+      <li>卫星图能看清 50 厘米的东西。这对城市规划有用，但会不会涉及个人隐私？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Balraj Ashwath，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的“卫星图”和掩膜均为程序生成的模拟图，不是 DeepGlobe 的影像。数据集：DeepGlobe 2018 Land Cover Classification Challenge（Demir et al., CVPR Workshops 2018）。
+</footer>
+</main>
+
+<script src="nb/deepglobe-land-cover-deeplab.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  const CLS = ["城市", "农田", "草地", "森林", "水体", "荒地", "未知"];
+  const RGB = [[0, 255, 255], [255, 255, 0], [255, 0, 255], [0, 255, 0], [0, 0, 255], [255, 255, 255], [0, 0, 0]];
+  // 页面里画掩膜用主题色（深浅色都可读），图例和数据集颜色一一对应
+  const MCOL = ["var(--c1)", "var(--warn)", "var(--c5)", "var(--c3)", "var(--c4)", "var(--ink-3)", "var(--ink)"];
+  // “卫星图”的模拟色：用主题色混合出偏自然的颜色
+  const SAT = ["color-mix(in srgb, var(--ink-3) 70%, var(--panel))", "color-mix(in srgb, var(--warn) 45%, var(--c3))", "color-mix(in srgb, var(--c3) 45%, var(--panel))", "color-mix(in srgb, var(--c3) 85%, var(--ink))", "color-mix(in srgb, var(--c1) 70%, var(--ink))", "color-mix(in srgb, var(--warn) 35%, var(--panel))", "var(--panel-2)"];
+  // 生成一张模拟地块图：若干种子点 + 最近邻（类似泰森多边形）+ 一条河
+  function landMap(seed, n) {
+    const r = K.rng(seed), S = [];
+    for (let i = 0; i < 14; i++) S.push([r() * n, r() * n, [0, 1, 1, 2, 3, 3, 5, 1, 2, 0, 3, 1, 2, 6][i]]);
+    const M = [];
+    for (let y = 0; y < n; y++) { M.push([]); for (let x = 0; x < n; x++) {
+      let b = 0, bd = 1e9; S.forEach((s, k) => { const d = (s[0] - x) ** 2 + (s[1] - y) ** 2 + (K.randn(r) * 0.4) ** 2; if (d < bd) { bd = d; b = k; } });
+      let c = S[b][2];
+      const river = Math.abs(y - (n * 0.55 + Math.sin(x / n * 6) * n * 0.12)) < n * 0.035;
+      if (river) c = 4;
+      M[y].push(c);
+    } }
+    return M;
+  }
+  function drawGrid(svg, M, x0, y0, size, colors, opt) {
+    opt = opt || {};
+    const n = M.length, c = size / n, els = [];
+    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) els.push(K.svg(svg, "rect", { x: x0 + x * c, y: y0 + y * c, width: c + 0.4, height: c + 0.4, fill: colors[M[y][x]], opacity: opt.opacity == null ? 1 : opt.opacity }));
+    return els;
+  }
+  function legend(svg, x, y) { CLS.forEach((c, i) => { K.svg(svg, "rect", { x, y: y + i * 20, width: 14, height: 14, fill: MCOL[i], stroke: "var(--line)" }); K.svg(svg, "text", { x: x + 20, y: y + i * 20 + 12, "font-size": 12 }, c); }); }
+
+  const steps = [
+    {
+      at: 0, title: "开场：从天上看地面，给每个像素分类", kicker: "第 0–4 格 · 任务与工具",
+      html: `<p>任务是<b>土地覆盖分类</b>：给卫星照片的每一个像素判断它是城市、农田、草地、森林、水体、荒地还是未知（比如云）。这在环境监测、精准农业、城市规划里都很重要。</p><p>作者用的模型是 <b>DeepLabV3+</b>（Google 提出的分割网络），工具是 PyTorch、albumentations（数据增强）和 <code>segmentation_models_pytorch</code>（现成的分割模型库）。</p>`,
+      cells: [2, 3],
+      draw(svg, ctx) {
+        const M = landMap(3, 40);
+        const sat = drawGrid(svg, M, 20, 40, 260, SAT);
+        const msk = drawGrid(svg, M, 380, 40, 260, MCOL, { opacity: 0 });
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, "font-weight": 700 }, "输入：卫星照片（模拟）");
+        K.svg(svg, "text", { x: 380, y: 30, "font-size": 13, "font-weight": 700 }, "输出：每个像素的类别");
+        const ar = K.arrow(svg, 288, 170, 372, 170); ar.style.opacity = 0;
+        K.svg(svg, "text", { x: 288, y: 160, "font-size": 11 }, "DeepLabV3+");
+        legend(svg, 652, 60);
+        const scan = K.svg(svg, "rect", { x: 380, y: 40, width: 3, height: 260, fill: "var(--accent)" });
+        ctx.tween(500, (t) => (ar.style.opacity = t)).then((ok) => ok && ctx.tween(1800, (t) => { const xx = 380 + 260 * t; scan.setAttribute("x", xx); msk.forEach((e) => { if (+e.getAttribute("x") < xx) e.style.opacity = 1; }); }));
+      },
+    },
+    {
+      title: "读元数据，按 9:1 切出验证集", kicker: "第 5 格 · 数据划分",
+      html: `<p><code>metadata.csv</code> 记录了每张图的编号、卫星图路径和掩膜路径。作者只取 <code>split == 'train'</code> 的 803 张（只有它们有掩膜），打乱后随机抽 10% 当验证集，剩下 90% 训练。</p><p class="note">打乱那一步没有设随机种子，抽验证集时才设了 <code>random_state=42</code>，所以每次运行切出来的验证集可能不同，结果不容易复现。</p>`,
+      cells: [5], highlight: ["sample(frac=0.1, random_state=42)", "sample(frac=1)"],
+      draw(svg, ctx) {
+        const n = 80, tiles = [];
+        for (let i = 0; i < n; i++) tiles.push(K.svg(svg, "rect", { x: 40 + (i % 20) * 32, y: 50 + Math.floor(i / 20) * 40, width: 28, height: 34, rx: 3, fill: "var(--c1)", opacity: 0.8 }));
+        const r = K.rng(5), val = new Set(); while (val.size < 8) val.add(Math.floor(r() * n));
+        K.svg(svg, "text", { x: 40, y: 34, "font-size": 13 }, "803 张带掩膜的训练图（示意为 80 格）");
+        const lab = K.svg(svg, "text", { x: 40, y: 260, "font-size": 14, "font-weight": 700 }, "");
+        ctx.wait(600).then((ok) => ok && ctx.tween(900, (t) => tiles.forEach((e, i) => { if (val.has(i)) K.set(e, { fill: t > 0.5 ? "var(--c6)" : "var(--c1)" }); })))
+          .then((ok) => { if (ok) lab.textContent = "蓝 = 训练 90%，红 = 验证 10%"; });
+      },
+    },
+    {
+      title: "7 种地物，各有一个颜色", kicker: "第 6–9 格 · 类别表",
+      html: `<p><code>class_dict.csv</code> 写着每个类别的名字和它在掩膜里的颜色（R, G, B），比如城市是青色 (0,255,255)、水体是蓝色 (0,0,255)。作者选了全部 7 类，包括“未知”。</p><p class="note">第 8 格打印“已选类别”时打印的其实是全部类别 <code>class_names</code>，不是 <code>select_classes</code>；这里两者恰好一样，所以看不出问题。</p>`,
+      cells: [6, 8], highlight: ["select_classes = "],
+      draw(svg, ctx) {
+        const rows = CLS.map((c, i) => { const g = K.svg(svg, "g"); g.style.opacity = 0; K.svg(g, "rect", { x: 60, y: 30 + i * 42, width: 34, height: 34, rx: 4, fill: MCOL[i], stroke: "var(--line)" }); K.svg(g, "text", { x: 110, y: 52 + i * 42, "font-size": 14 }, c); K.svg(g, "text", { x: 220, y: 52 + i * 42, "font-size": 13, "font-family": "var(--mono)" }, "(" + RGB[i].join(", ") + ")"); K.svg(g, "text", { x: 400, y: 52 + i * 42, "font-size": 13, "font-family": "var(--mono)" }, "→ 类别编号 " + i); return g; });
+        K.svg(svg, "text", { x: 400, y: 330, "font-size": 11, class: "muted" }, "左侧色块为页面配色，括号内是数据集颜色");
+        (async () => { for (const g of rows) if (!(await ctx.tween(220, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "把彩色掩膜变成“每类一张 0/1 图”", kicker: "第 10 格 · 独热编码与还原",
+      html: `<p>模型不认识颜色，要把掩膜转换成它能学的形式：</p><ul class="tight"><li><code>one_hot_encode</code>：对 7 种颜色各做一张“是不是这个颜色”的 0/1 图，叠成 7 层。每个像素在且仅在一层上是 1。</li><li><code>reverse_one_hot</code>：反过来，每个像素取 7 层里值最大的那层的编号（argmax）。</li><li><code>colour_code_segmentation</code>：编号再换回颜色，方便画图。</li></ul><p class="note">这里用 <code>np.equal</code> 要求颜色<b>完全相等</b>。数据集说明提醒掩膜值不一定正好是 0/255；一个颜色不纯的像素在 7 层上全是 0，argmax 会把它当成第 0 类（城市）。更稳妥的做法是先按 128 二值化。</p>`,
+      cells: [10], highlight: ["np.equal(label, colour)", "np.argmax(image, axis = -1)"],
+      draw(svg, ctx) {
+        const M = landMap(8, 12);
+        drawGrid(svg, M, 30, 50, 180, MCOL);
+        K.svg(svg, "text", { x: 30, y: 38, "font-size": 12, "font-weight": 700 }, "彩色掩膜（12×12 示意）");
+        const layers = [];
+        [0, 1, 3, 4].forEach((k, li) => {
+          const ox = 270 + li * 112;
+          K.svg(svg, "text", { x: ox, y: 38, "font-size": 12 }, "第 " + k + " 层：" + CLS[k]);
+          const els = [];
+          for (let y = 0; y < 12; y++) for (let x = 0; x < 12; x++) els.push(K.svg(svg, "rect", { x: ox + x * 8.5, y: 50 + y * 8.5, width: 8, height: 8, fill: M[y][x] === k ? MCOL[k] : "var(--panel-2)", opacity: 0 }));
+          layers.push(els);
+        });
+        K.svg(svg, "text", { x: 270, y: 180, "font-size": 12, class: "muted" }, "…共 7 层，每个像素只在一层上是 1");
+        K.svg(svg, "text", { x: 30, y: 270, "font-size": 13 }, "还原：每个像素取值最大的那一层（argmax）→ 类别编号 → 颜色");
+        (async () => { for (const L of layers) if (!(await ctx.tween(450, (t) => L.forEach((e) => (e.style.opacity = t))))) return; })();
+      },
+    },
+    {
+      title: "数据集类：一张卫星图配一张掩膜", kicker: "第 11–13 格 · PyTorch Dataset",
+      html: `<p><code>LandCoverDataset</code> 告诉 PyTorch 第 i 个样本怎么拿：用 OpenCV 读卫星图和掩膜（OpenCV 默认 BGR 顺序，要转成 RGB），把掩膜独热编码，再依次做增强和预处理。</p><p>然后取一张样本，并排画出原图、彩色掩膜和类别编号图。</p><p class="note">第 13 格算了一个随机下标 <code>random_idx</code> 却没用，实际总是取第 2 张。</p>`,
+      cells: [11, 13], highlight: ["cv2.COLOR_BGR2RGB", "dataset[2]"],
+      draw(svg, ctx) {
+        const M = landMap(12, 36);
+        const a = drawGrid(svg, M, 20, 50, 210, SAT), b = drawGrid(svg, M, 250, 50, 210, MCOL, { opacity: 0 });
+        const c = []; const n = 36, cs = 210 / n;
+        for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) c.push(K.svg(svg, "rect", { x: 480 + x * cs, y: 50 + y * cs, width: cs + 0.3, height: cs + 0.3, fill: `color-mix(in srgb, var(--ink) ${Math.round((M[y][x] / 6) * 90)}%, var(--panel))`, opacity: 0 }));
+        [["原图（模拟）", 20], ["真实掩膜", 250], ["类别编号（深 = 编号大）", 480]].forEach(([t, x]) => K.svg(svg, "text", { x, y: 38, "font-size": 12, "font-weight": 700 }, t));
+        ctx.wait(400).then((ok) => ok && ctx.tween(700, (t) => b.forEach((e) => (e.style.opacity = t)))).then((ok) => ok && ctx.tween(700, (t) => c.forEach((e) => (e.style.opacity = t))));
+      },
+    },
+    {
+      title: "数据增强：随机裁剪、随机翻转", kicker: "第 14–17 格 · albumentations",
+      html: `<p>原图 2448×2448 太大，一次放不进显卡。训练时每次<b>随机裁出 1024×1024</b> 的一块，再以 50% 的概率水平翻转、50% 的概率垂直翻转；验证时只做<b>中心裁剪</b>，保证每次评估看到的一样。</p><p>关键点：<b>图像和掩膜必须做完全相同的变换</b>，albumentations 同时接收 <code>image</code> 和 <code>mask</code> 就是为了这个。卫星图从天上往下拍，没有“上下左右”之分，所以翻转后仍然是合理的图。</p>`,
+      cells: [15, 17], highlight: ["RandomCrop(height=1024, width=1024", "VerticalFlip"],
+      draw(svg, ctx) {
+        const M = landMap(21, 48);
+        drawGrid(svg, M, 20, 40, 280, SAT);
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 12, "font-weight": 700 }, "整张图 2448×2448（模拟）");
+        const crop = K.svg(svg, "rect", { x: 40, y: 60, width: 117, height: 117, fill: "none", stroke: "var(--accent)", "stroke-width": 3 });
+        const out1 = K.svg(svg, "g"), out2 = K.svg(svg, "g");
+        K.svg(svg, "text", { x: 360, y: 30, "font-size": 12, "font-weight": 700 }, "裁下的 1024×1024");
+        K.svg(svg, "text", { x: 540, y: 30, "font-size": 12, "font-weight": 700 }, "同样翻转后的掩膜");
+        const draw = (x0, y0, flipH, flipV) => {
+          out1.innerHTML = ""; out2.innerHTML = "";
+          const sub = []; for (let y = 0; y < 20; y++) { sub.push([]); for (let x = 0; x < 20; x++) sub[y].push(M[y0 + y][x0 + x]); }
+          const T = sub.map((row, y) => row.map((_, x) => sub[flipV ? 19 - y : y][flipH ? 19 - x : x]));
+          drawGrid(out1, T, 360, 50, 160, SAT); drawGrid(out2, T, 540, 50, 160, MCOL);
+        };
+        const lab = K.svg(svg, "text", { x: 360, y: 240, "font-size": 13 }, "");
+        (async () => {
+          const r = K.rng(4);
+          for (let k = 0; k < 5; k++) {
+            const x0 = Math.floor(r() * 28), y0 = Math.floor(r() * 28), fh = r() < 0.5, fv = r() < 0.5;
+            if (!(await ctx.tween(500, (t) => K.set(crop, { x: K.lerp(+crop.getAttribute("x"), 20 + x0 * (280 / 48), t), y: K.lerp(+crop.getAttribute("y"), 40 + y0 * (280 / 48), t) })))) return;
+            draw(x0, y0, fh, fv); lab.textContent = "水平翻转：" + (fh ? "是" : "否") + "　垂直翻转：" + (fv ? "是" : "否");
+            if (!(await ctx.wait(900))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "DeepLabV3+：编码器、空洞卷积、解码器", kicker: "第 18–21 格 · 模型结构",
+      html: `<p>DeepLabV3+ 分三部分：</p><ul class="tight"><li><b>编码器</b>：ResNet50，在 ImageNet 上预训练过（迁移学习），一层层提取特征，图越来越小、信息越来越抽象；</li><li><b>ASPP 空洞空间金字塔池化</b>：用几种不同“空洞率”的卷积并排看同一张特征图，有的看近处细节，有的看远处大范围，再拼在一起；</li><li><b>解码器</b>：把抽象特征放大回原尺寸，并和编码器浅层的高分辨率特征拼接（跳连），让边界更清楚。</li></ul><p>输出 7 个通道（每类一张概率图），作者用 <code>sigmoid</code> 激活。注释里也提到，多类分割可以用 <code>softmax2d</code>。</p>`,
+      cells: [21], highlight: ["smp.DeepLabV3Plus", "ENCODER = 'resnet50'", "ACTIVATION = 'sigmoid'"],
+      draw(svg, ctx) {
+        const enc = [[30, 60, 60, 220], [110, 90, 50, 160], [180, 115, 40, 110], [240, 135, 30, 70]];
+        const els = [];
+        enc.forEach(([x, y, w, h], i) => els.push(K.svg(svg, "rect", { x, y, width: w, height: h, rx: 4, fill: `color-mix(in srgb, var(--c1) ${30 + i * 18}%, var(--panel))`, stroke: "var(--c1)" })));
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12 }, "编码器 ResNet50（预训练）");
+        const rates = [1, 6, 12, 18];
+        const aspp = rates.map((d, i) => { const g = K.node(svg, 310, 60 + i * 52, 110, 42, "空洞率 " + d, { fs: 12, fill: "color-mix(in srgb, var(--c2) 18%, var(--panel))", stroke: "var(--c2)" }); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 310, y: 300, "font-size": 12 }, "ASPP：多种视野并排");
+        const dec = [[460, 115, 40, 110], [520, 90, 50, 160], [590, 60, 60, 220]].map(([x, y, w, h]) => { const e = K.svg(svg, "rect", { x, y, width: w, height: h, rx: 4, fill: "color-mix(in srgb, var(--c3) 30%, var(--panel))", stroke: "var(--c3)" }); e.style.opacity = 0; return e; });
+        K.svg(svg, "text", { x: 470, y: 300, "font-size": 12 }, "解码器：放大回原尺寸");
+        const skip = K.svg(svg, "path", { d: "M 140 85 C 200 20, 480 20, 545 85", fill: "none", stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "5 3" }); skip.style.opacity = 0;
+        K.svg(svg, "text", { x: 300, y: 30, "font-size": 11, fill: "var(--warn)" }, "跳连：浅层细节直接送到解码器");
+        const out = K.node(svg, 660, 150, 50, 40, "7 类", { fs: 12, bold: true }); out.style.opacity = 0;
+        (async () => {
+          if (!(await ctx.wait(400))) return;
+          for (const g of aspp) if (!(await ctx.tween(250, (t) => (g.style.opacity = t)))) return;
+          for (const e of dec) if (!(await ctx.tween(250, (t) => (e.style.opacity = t)))) return;
+          if (!(await ctx.tween(400, (t) => (skip.style.opacity = t)))) return;
+          await ctx.tween(300, (t) => (out.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "Dice 损失、IoU 指标、Adam 优化器", kicker: "第 22–25 格 · 训练配置",
+      html: `<p>训练批大小 4（大图很占显存），验证批大小 1。超参数：训练 5 轮；优化器 Adam，学习率 0.00008；定义了余弦退火学习率调度器，但注释写明“本 notebook 没用”。</p><ul class="tight"><li><b>Dice 损失</b>：1 − 2×重叠面积 ÷（预测面积 + 真实面积）。它直接奖励“重叠得多”，不怕某一类面积很小。</li><li><b>IoU</b>（交并比）：重叠面积 ÷ 合并面积，越接近 1 越好，概率先按 0.5 的阈值变成 0/1 再算。</li></ul><p>如果有上一次保存的模型权重，就先加载，接着训练。</p>`,
+      cells: [23, 25], highlight: ["DiceLoss()", "IoU(threshold=0.5)", "lr=0.00008", "EPOCHS = 5"],
+      draw(svg, ctx) {
+        const A = K.svg(svg, "circle", { cx: 230, cy: 170, r: 100, fill: "var(--c1)", opacity: 0.4 });
+        const B = K.svg(svg, "circle", { cx: 230, cy: 170, r: 90, fill: "var(--c6)", opacity: 0.4 });
+        K.svg(svg, "text", { x: 70, y: 40, "font-size": 12, fill: "var(--c1)", "font-weight": 700 }, "● 真实区域");
+        K.svg(svg, "text", { x: 180, y: 40, "font-size": 12, fill: "var(--c6)", "font-weight": 700 }, "● 预测区域");
+        const t1 = K.svg(svg, "text", { x: 440, y: 120, "font-size": 16, "font-family": "var(--mono)" }, "");
+        const t2 = K.svg(svg, "text", { x: 440, y: 160, "font-size": 16, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 440, y: 220, "font-size": 12, class: "muted" }, "IoU = 交集 / 并集");
+        K.svg(svg, "text", { x: 440, y: 240, "font-size": 12, class: "muted" }, "Dice = 2×交集 / (A + B)");
+        K.svg(svg, "text", { x: 440, y: 260, "font-size": 12, class: "muted" }, "（圆的面积比例为浏览器现算）");
+        const area = (r1, r2, d) => { if (d >= r1 + r2) return 0; if (d <= Math.abs(r1 - r2)) return Math.PI * Math.min(r1, r2) ** 2; const a = r1 * r1 * Math.acos((d * d + r1 * r1 - r2 * r2) / (2 * d * r1)), b = r2 * r2 * Math.acos((d * d + r2 * r2 - r1 * r1) / (2 * d * r2)), c = 0.5 * Math.sqrt((-d + r1 + r2) * (d + r1 - r2) * (d - r1 + r2) * (d + r1 + r2)); return a + b - c; };
+        ctx.tween(3000, (t) => { const d = 150 * Math.abs(Math.cos(t * Math.PI)); B.setAttribute("cx", 230 + d); const I = area(100, 90, d), SA = Math.PI * 1e4, SB = Math.PI * 8100; t1.textContent = "IoU  = " + (I / (SA + SB - I)).toFixed(2); t2.textContent = "Dice = " + ((2 * I) / (SA + SB)).toFixed(2); });
+      },
+    },
+    {
+      title: "训练 5 轮，保存最好的模型", kicker: "第 26–28 格 · 训练循环",
+      html: `<p><code>TrainEpoch</code> 和 <code>ValidEpoch</code> 是库里现成的“跑一轮”工具。每一轮：在训练集上更新参数，再在验证集上算 Dice 损失和 IoU；如果这一轮的验证 IoU 比以前都高，就把模型存成 <code>best_model.pth</code>。</p><p>这种“只保存验证最好的那一轮”的做法，相当于简单版的早停，防止后面几轮过拟合把模型变差。</p>`,
+      cells: [26, 28], highlight: ["best_iou_score < valid_logs['iou_score']", "torch.save"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [0, 4], [0, 1], { xlabel: "轮次 epoch（曲线为示意）", ylabel: "IoU", xticks: 4 });
+        const tr = [0.35, 0.55, 0.64, 0.7, 0.74], va = [0.4, 0.55, 0.6, 0.62, 0.61];
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 3 }), p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 3 });
+        K.svg(svg, "text", { x: 80, y: 46, "font-size": 12, fill: "var(--c1)" }, "— 训练");
+        K.svg(svg, "text", { x: 140, y: 46, "font-size": 12, fill: "var(--c6)" }, "— 验证");
+        const star = K.svg(svg, "text", { x: 0, y: 0, "font-size": 20, fill: "var(--warn)" }, ""); const lab = K.svg(svg, "text", { x: 420, y: 300, "font-size": 12 }, "");
+        (async () => {
+          let best = 0;
+          for (let e = 0; e <= 4; e++) {
+            if (!(await ctx.tween(500, (t) => { const f = (A) => A.slice(0, e + 1).map((v, i) => (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(v)).join(""); p1.setAttribute("d", f(tr)); p2.setAttribute("d", f(va)); }))) return;
+            if (va[e] > best) { best = va[e]; K.set(star, { x: ax.sx(e) - 7, y: ax.sy(va[e]) - 8 }); star.textContent = "★"; lab.textContent = `第 ${e} 轮验证 IoU 创新高 → 保存模型`; }
+            else lab.textContent = `第 ${e} 轮没有更好 → 不保存`;
+            if (!(await ctx.wait(500))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "预测：原图、真实、预测、城市热图", kicker: "第 29–34 格 · 可视化结果",
+      html: `<p>加载保存的最好模型，对验证集里的每张图做预测：模型输出 7 张概率图，argmax 得到每个像素的类别，再上色；同时单独取出“城市”那一张概率图画成热图。每张结果都存成 png，并排显示原图、真实掩膜、预测掩膜、城市热图。</p><p class="note">两个问题：① 第 33 格 <code>best_model = model</code> 把刚加载的“最好模型”换成了训练最后一轮的模型；② 所谓“测试集”就是验证集，而验证集已经被用来挑选最好的模型，所以在它上面的表现会偏乐观。</p>`,
+      cells: [31, 33, 34], highlight: ["best_model = model", "pred_urban_land_heatmap"],
+      draw(svg, ctx) {
+        const M = landMap(33, 30), r = K.rng(5);
+        const P = M.map((row, y) => row.map((c, x) => { if (r() < 0.12) { const nb = M[Math.min(29, y + 1)][x]; return nb; } return c; }));
+        const items = [["原图（模拟）", M, SAT], ["真实掩膜", M, MCOL], ["预测掩膜（模拟）", P, MCOL]];
+        items.forEach(([t, G, C], i) => { K.svg(svg, "text", { x: 15 + i * 175, y: 38, "font-size": 12, "font-weight": 700 }, t); const els = drawGrid(svg, G, 15 + i * 175, 50, 165, C, { opacity: 0 }); setTimeout(() => {}, 0); items[i].push(els); });
+        K.svg(svg, "text", { x: 540, y: 38, "font-size": 12, "font-weight": 700 }, "“城市”概率热图");
+        const heat = []; const cs = 165 / 30;
+        for (let y = 0; y < 30; y++) for (let x = 0; x < 30; x++) { const p = P[y][x] === 0 ? 0.7 + 0.3 * r() : 0.15 * r(); heat.push(K.svg(svg, "rect", { x: 540 + x * cs, y: 50 + y * cs, width: cs + 0.3, height: cs + 0.3, fill: K.heat(p), opacity: 0 })); }
+        (async () => { for (const it of items) if (!(await ctx.tween(400, (t) => it[3].forEach((e) => (e.style.opacity = t))))) return; await ctx.tween(400, (t) => heat.forEach((e) => (e.style.opacity = t))); })();
+        legend(svg, 20, 230);
+      },
+    },
+    {
+      title: "评估与训练曲线", kicker: "第 35–40 格 · 平均 IoU、Dice 损失",
+      html: `<p>用 <code>ValidEpoch</code> 在“测试集”（即验证集）上跑一遍，打印平均 IoU 和平均 Dice 损失。再把每一轮的训练、验证 IoU 和 Dice 损失画成曲线并保存图片。</p><p>看曲线时要留意：训练 IoU 一直涨、验证 IoU 停住甚至下降，说明开始过拟合。作者只训练了 5 轮，模型可能还没学够。</p><p class="note">如果第 25 格把 <code>TRAINING</code> 设为 False（只做预测），<code>train_logs_list</code> 不存在，第 38 格会报错。</p>`,
+      cells: [36, 38, 39, 40], highlight: ["Mean IoU Score"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 270, h: 250 }, [0, 4], [0, 1], { xlabel: "轮次（示意）", ylabel: "IoU", xticks: 4 });
+        const ax2 = K.axes(svg, { x: 420, y: 30, w: 270, h: 250 }, [0, 4], [0, 1], { xlabel: "轮次（示意）", ylabel: "Dice 损失", xticks: 4 });
+        const S = [[ax, [0.35, 0.55, 0.64, 0.7, 0.74], "var(--c1)"], [ax, [0.4, 0.55, 0.6, 0.62, 0.61], "var(--c6)"], [ax2, [0.6, 0.42, 0.34, 0.29, 0.26], "var(--c1)"], [ax2, [0.55, 0.42, 0.37, 0.35, 0.36], "var(--c6)"]];
+        const ps = S.map(([a, , c]) => K.svg(svg, "path", { d: "", fill: "none", stroke: c, "stroke-width": 3 }));
+        K.svg(svg, "text", { x: 80, y: 300, "font-size": 12, fill: "var(--c1)" }, "— 训练");
+        K.svg(svg, "text", { x: 140, y: 300, "font-size": 12, fill: "var(--c6)" }, "— 验证");
+        ctx.tween(1600, (t) => S.forEach(([a, v], k) => { let d = ""; for (let e = 0; e <= 4 * t; e += 0.05) { const i = Math.floor(e), f = e - i, y = i < 4 ? K.lerp(v[i], v[i + 1], f) : v[4]; d += (d ? "L" : "M") + a.sx(e) + "," + a.sy(y); } ps[k].setAttribute("d", d); }));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：完全相等 vs 以 128 为界 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "noise", label: "掩膜颜色的“不纯”程度（JPEG 压缩、缩放造成的偏差）", min: 0, max: 60, step: 1, value: 12 },
+      { id: "method", label: "颜色 → 类别的办法", value: "eq", options: [["eq", "完全相等（作者的 np.equal）"], ["thr", "先以 128 为界二值化，再比较"]] },
+      { id: "seed", label: "换一张", button: true },
+    ],
+    note: "浏览器生成一张 32×32 的真实标签，按数据集颜色表转成 RGB 掩膜，再给一部分像素的颜色加上随机偏差（模拟数据集说明里“不一定正好是 0 和 255”）。然后用所选办法还原成类别：完全相等时，颜色不纯的像素在 7 层上都是 0，argmax 会落到第 0 类“城市”。",
+    render(svg, v) {
+      const T = landMap(50 + v.seed * 7, 32), r = K.rng(9 + v.seed);
+      const pix = T.map((row) => row.map((c) => RGB[c].map((ch) => (r() < 0.35 ? K.clamp(ch + Math.round(K.randn(r) * v.noise), 0, 255) : ch))));
+      const dec = pix.map((row) => row.map((p) => {
+        const q = v.method === "thr" ? p.map((ch) => (ch >= 128 ? 255 : 0)) : p;
+        const k = RGB.findIndex((c) => c[0] === q[0] && c[1] === q[1] && c[2] === q[2]);
+        return k < 0 ? 0 : k; // 全 0 时 argmax 取第 0 类
+      }));
+      let wrong = 0, toUrban = 0;
+      T.forEach((row, y) => row.forEach((c, x) => { if (dec[y][x] !== c) { wrong++; if (dec[y][x] === 0) toUrban++; } }));
+      drawGrid(svg, T, 10, 30, 250, MCOL); drawGrid(svg, dec, 280, 30, 250, MCOL);
+      K.svg(svg, "text", { x: 10, y: 22, "font-size": 12, "font-weight": 700 }, "真实类别");
+      K.svg(svg, "text", { x: 280, y: 22, "font-size": 12, "font-weight": 700 }, "从（不纯的）颜色还原的类别");
+      legend(svg, 550, 40);
+      return { readout: [
+        { k: "还原错误的像素", v: wrong + " / 1024", color: wrong ? "var(--bad)" : "var(--good)" },
+        { k: "其中被错当成“城市”", v: String(toUrban) },
+        { k: "像素准确率", v: ((1 - wrong / 1024) * 100).toFixed(1) + "%" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：空洞卷积 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "d", label: "空洞率（卷积核取样点之间隔几格）", min: 1, max: 8, step: 1, value: 1 },
+      { id: "layers", label: "叠几层 3×3 卷积", min: 1, max: 4, step: 1, value: 1 },
+      { id: "cx", label: "看哪个像素（横向位置）", min: 4, max: 27, step: 1, value: 16 },
+    ],
+    note: "每层都是 3×3 的卷积核（只有 9 个参数），空洞率 d 表示 9 个取样点之间隔 d−1 格。浏览器现场算出：输出图上一个像素，最终“看得到”输入图上的哪些格子（感受野）。空洞率越大，参数一样多，视野却成倍扩大，这正是 DeepLabV3+ 的 ASPP 用多种空洞率的原因：同时看清细节和大范围的上下文。",
+    render(svg, v) {
+      const N = 32, cs = 10, ox = 20, oy = 20, M = landMap(77, N);
+      drawGrid(svg, M, ox, oy, N * cs, SAT);
+      let set = new Set([v.cx + "," + 16]);
+      for (let l = 0; l < v.layers; l++) {
+        const nxt = new Set();
+        set.forEach((k) => { const [x, y] = k.split(",").map(Number); for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) { const X = x + a * v.d, Y = y + b * v.d; if (X >= 0 && X < N && Y >= 0 && Y < N) nxt.add(X + "," + Y); } });
+        set = nxt;
+      }
+      const last = []; for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) last.push([v.cx + a * v.d, 16 + b * v.d]);
+      set.forEach((k) => { const [x, y] = k.split(",").map(Number); K.svg(svg, "rect", { x: ox + x * cs, y: oy + y * cs, width: cs, height: cs, fill: "var(--accent)", opacity: 0.45 }); });
+      last.forEach(([x, y]) => { if (x >= 0 && x < N && y >= 0 && y < N) K.svg(svg, "rect", { x: ox + x * cs + 1, y: oy + y * cs + 1, width: cs - 2, height: cs - 2, fill: "none", stroke: "var(--c6)", "stroke-width": 2 }); });
+      K.svg(svg, "rect", { x: ox + v.cx * cs, y: oy + 16 * cs, width: cs, height: cs, fill: "var(--ink)" });
+      const xs = [...set].map((k) => +k.split(",")[0]), span = Math.max(...xs) - Math.min(...xs) + 1;
+      K.svg(svg, "text", { x: 360, y: 60, "font-size": 13 }, "黑格 = 输出的一个像素");
+      K.svg(svg, "text", { x: 360, y: 84, "font-size": 13, fill: "var(--c6)" }, "红框 = 最后一层的 9 个取样点");
+      K.svg(svg, "text", { x: 360, y: 108, "font-size": 13 }, "蓝色 = 最终能“看到”的范围");
+      K.svg(svg, "text", { x: 360, y: 150, "font-size": 12, class: "muted" }, "示意：输入图 32×32（模拟卫星图）");
+      return { readout: [
+        { k: "参数个数（每层 3×3）", v: String(9 * v.layers) },
+        { k: "感受野宽度", v: span + " 像素" },
+        { k: "看到的格子数", v: String(set.size) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：IoU 与 Dice ---------- */
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "dx", label: "预测区域向右偏移（像素）", min: -12, max: 12, step: 1, value: 3 },
+      { id: "grow", label: "预测区域膨胀 / 收缩", min: -4, max: 4, step: 1, value: 0 },
+      { id: "thr", label: "把概率变成 0/1 的阈值", min: 0.1, max: 0.9, step: 0.05, value: 0.5, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "真实掩膜是一块不规则的“城市”区域（32×32 网格）。预测是一张概率图（越靠近预测中心概率越高），按阈值变成 0/1 后，浏览器逐格计算交集、并集，得到 IoU 和 Dice。作者第 25 格的 IoU 用的阈值就是 0.5。Dice 总是 ≥ IoU，两者都在 0 到 1 之间，1 表示完全重合。",
+    render(svg, v) {
+      const N = 32, cs = 9, ox = 20, oy = 20;
+      const inTrue = (x, y) => ((x - 15) / 8) ** 2 + ((y - 15) / 6) ** 2 + 0.25 * Math.sin(x / 2) < 1;
+      const prob = (x, y) => { const d = Math.sqrt(((x - 15 - v.dx) / (8 + v.grow)) ** 2 + ((y - 15) / (6 + v.grow * 0.75)) ** 2); return K.sigmoid((1 - d) * 6); };
+      let I = 0, U = 0, A = 0, B = 0;
+      for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+        const t = inTrue(x, y), p = prob(x, y) >= v.thr;
+        if (t) A++; if (p) B++; if (t && p) I++; if (t || p) U++;
+        K.svg(svg, "rect", { x: ox + x * cs, y: oy + y * cs, width: cs - 0.5, height: cs - 0.5, fill: t && p ? "var(--c4)" : t ? "var(--c1)" : p ? "var(--c6)" : "var(--panel-2)" });
+        K.svg(svg, "rect", { x: 330 + x * cs, y: oy + y * cs, width: cs - 0.5, height: cs - 0.5, fill: K.heat(prob(x, y)) });
+      }
+      K.svg(svg, "text", { x: 20, y: 14, "font-size": 12, "font-weight": 700 }, "蓝 = 漏掉，红 = 多报，紫 = 重合");
+      K.svg(svg, "text", { x: 330, y: 14, "font-size": 12, "font-weight": 700 }, "模型输出的概率图（模拟）");
+      return { readout: [
+        { k: "IoU = 交 / 并", v: U ? (I / U).toFixed(3) : "—", color: "var(--c4)" },
+        { k: "Dice = 2交 / (真+预)", v: A + B ? ((2 * I) / (A + B)).toFixed(3) : "—" },
+        { k: "Dice 损失", v: A + B ? (1 - (2 * I) / (A + B)).toFixed(3) : "—" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

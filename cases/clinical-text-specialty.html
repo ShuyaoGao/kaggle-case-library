@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>病历文本分专科</title>
+<meta name="description" content="Kaggle 案例拆解：读一份医疗转录病历，猜它属于哪个专科——TF-IDF、t-SNE、PCA、弹性网逻辑回归、scispaCy 医学实体抽取和 SMOTE，以及用领域知识合并类别。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">文本数据 · 多分类 · 临床自然语言处理</div>
+  <h1>病历文本分专科：读一段病历，猜它是哪个科写的</h1>
+  <p class="en">Clinical Text Classification</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">分句 / 分词 / 词形还原</span><span class="tag method">TF-IDF（1–3 元组）</span><span class="tag method">t-SNE</span><span class="tag method">PCA</span>
+    <span class="tag method">弹性网逻辑回归</span><span class="tag method">scispaCy 医学实体</span><span class="tag method">SMOTE</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>RS</b>（Kaggle 用户 ritheshsreenivasan）</span>
+    <span>Kaggle 点赞 <b>317</b>（2026-11 抓取）</span>
+    <span>数据集 <b>tboyle10/medicaltranscriptions</b></span>
+    <span><a href="https://www.kaggle.com/code/ritheshsreenivasan/clinical-text-classification" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">医疗转录病历样本</div><p>从 mtsamples.com 网站抓取的病历转录文本（医生口述后整理成的文字），每份标有所属专科。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这份病历属于哪个专科</div><p>例如心血管、神经科、骨科、放射科……是一个多分类问题。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">TF-IDF → PCA → 逻辑回归，两轮改进</div><p>第一轮直接分类；第二轮用医学知识删掉、合并重叠的类别，并只保留 scispaCy 识别出的医学实体词；最后用 SMOTE 扩充少数类。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">第一轮“很差”，第二轮“明显改善”</div><p>作者只用文字评价，没有写数字。<span data-cell="33">出处</span> <span data-cell="50">出处</span> 结论是：数据噪声大、类别之间内容高度重叠。<span data-cell="59">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集说明：医疗数据受隐私法规（如美国 HIPAA）保护，很难公开获取；这份数据集收集的是公开网站上的病历转录<b>样本</b>，覆盖多个专科，许可证为 CC0。以下信息来自数据集说明和作者 notebook。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">每行代表</div><div class="v" style="font-size:16px">一份病历转录</div></div>
+        <div class="stat-tile"><div class="k">作者保留的类别</div><div class="v" style="font-size:16px">样本数 &gt; 50 的专科</div></div>
+        <div class="stat-tile"><div class="k">第一轮颜色数</div><div class="v">21</div></div>
+        <div class="stat-tile"><div class="k">第二轮颜色数</div><div class="v">12</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">总行数、各专科数量由第 7、9 格打印在运行输出里，源码不带，这里不写。“颜色数”是作者画 t-SNE 时给调色板设的颜色个数（<span data-cell="23">第 23 格</span> 为 21，<span data-cell="44">第 44 格</span> 为 12），大致对应两轮各有多少个专科。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">用到的列</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>transcription</code></td><td>病历转录全文：主诉、病史、检查、诊断、处置等，英文自由文本</td><td>文本</td></tr>
+        <tr><td><code>medical_specialty</code></td><td><b>要预测的答案</b>：专科名称，如 Radiology、Neurology、Surgery……原始值前面带一个空格</td><td>类别</td></tr>
+        <tr><td>其他列</td><td>作者第 6 格打印了全部列名，但后面只用上面两列 <span data-cell="12">出处</span></td><td>—</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">专科名称出现在作者代码里，例如 <span data-cell="34">第 34 格</span>、<span data-cell="57">第 57 格</span>。本页不摘录病历原文；实验里的病历片段是为演示自编的短句。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="21">
+    <h3>动手试试 A · 亲手算 TF-IDF：哪些词最能代表一个专科 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="51">
+    <h3>动手试试 B · 先 SMOTE 还是先切分：分数会差多少 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>t-SNE 图显示很多类别相互重叠</td><td><span data-cell="22">第 22 格</span></td></tr>
+        <tr><td>第一轮结果“相当差”；外科、急诊、出院小结、各种笔记等类别本身就和各专科重叠，应当去掉</td><td><span data-cell="33">第 33 格</span></td></tr>
+        <tr><td>删除 / 合并类别并只保留医学实体后，结果“明显改善”</td><td><span data-cell="50">第 50 格</span></td></tr>
+        <tr><td>用 SMOTE 之后仍有一些类别分不好，作者翻看了放射科、新生儿科、血液肿瘤科的样本</td><td><span data-cell="55">第 55 格</span></td></tr>
+        <tr><td>数据噪声大、内容跨类别重叠；可以用领域知识减少类别；SMOTE 可能改善；手工特征未必能推广</td><td><span data-cell="59">第 59 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">每一轮的分类报告（精确率、召回率、F1）都在运行输出里，作者文字只写了“差”“明显改善”，没有给数字，所以这里不列分数。还要注意：第二轮删掉了好几个难分的类别，题目本身变容易了，两轮分数不能直接比。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>把一份新录入的病历自动分到对应专科，用于病历归档、转诊分流、科研检索。</li>
+        <li><b>同类问题：</b>患者留言自动分科、医保报销单据分类、科研论文按学科归类、客服工单分派。</li>
+        <li><b>可迁移的套路：</b>文本清洗 → TF-IDF 把文字变成数字 → 降维可视化看类别是否可分 → 线性模型做基线 → 用领域知识整理标签 → 只保留领域实体词去噪 → 不平衡时在训练集内过采样。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>NLTK 分句、分词、WordNet 词形还原 <span data-cell="16">第 16 格</span></li>
+        <li><code>TfidfVectorizer</code>（1–3 元组、去停用词、最多 1000 个特征） <span data-cell="21">第 21 格</span></li>
+        <li>t-SNE 可视化 <span data-cell="23">第 23 格</span>；PCA 保留 95% 方差 <span data-cell="25">第 25 格</span></li>
+        <li>逻辑回归（elasticnet，saga，l1_ratio=0.5） <span data-cell="28">第 28 格</span></li>
+        <li>scispaCy <code>en_ner_bionlp13cg_md</code> 医学实体 <span data-cell="37">第 37 格</span>；SMOTE <span data-cell="51">第 51 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者把“外科”“急诊报告”“出院小结”等类别整个删掉。这让分数变好看了，但真实医院里这些病历照样会来。你会怎么处理它们？</li>
+      <li>SMOTE 在切分训练 / 测试之前做，测试集里混进了合成样本。为什么这会让分数虚高？正确顺序是什么？</li>
+      <li>词形还原只保留每份病历的第一句和倒数第二句。你猜作者原本想保留哪两句？只看两句话，丢掉了什么信息？</li>
+      <li>TF-IDF 把一份病历变成 1000 个数字，词的先后顺序全丢了。“没有发热”和“发热”在这里会有什么区别？</li>
+      <li>一份讲“心脏手术”的病历，标签该是心血管科还是外科？标签本身模糊时，模型的上限在哪里？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 RS（Kaggle 用户 ritheshsreenivasan），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意，实验中的病历短句为自编示例。数据集：Medical Transcriptions（Kaggle 用户 tboyle10 整理，抓取自 mtsamples.com，CC0）。
+</footer>
+</main>
+
+<script src="nb/clinical-text-specialty.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  const steps = [
+    {
+      title: "读数据：句子、词汇和专科", kicker: "第 3–7 格 · 初步统计",
+      html: `<p>作者先写了一个小函数：用 NLTK 把每份病历<b>分句</b>、再<b>分词</b>，统计句子总数和不同的词有多少个（词汇量）。<span data-cell="4">第 4 格</span></p><p>读入 <code>mtsamples.csv</code>，去掉病历为空的行，打印句子数、词汇量，再按专科分组数一数每个专科有多少份病历。<span data-cell="7">第 7 格</span></p>`,
+      cells: [4, 7], highlight: ["sent_tokenize", "word_tokenize"],
+      draw(svg, ctx) {
+        const text = "Patient complains of chest pain. ECG shows ST elevation. Cardiology consult requested.";
+        const sents = text.split(/(?<=\.)\s/);
+        const t0 = K.svg(svg, "text", { x: 30, y: 40, "font-size": 13, "font-family": "var(--mono)" }, text);
+        K.svg(svg, "text", { x: 30, y: 20, "font-size": 12, class: "muted" }, "示意句子（自编）");
+        const vocab = new Set();
+        const cnt = K.svg(svg, "text", { x: 30, y: 320, "font-size": 14, "font-weight": 700 }, "");
+        (async () => {
+          if (!(await ctx.wait(500))) return;
+          let y = 90;
+          for (let s = 0; s < sents.length; s++) {
+            K.svg(svg, "text", { x: 30, y, "font-size": 12, fill: "var(--c1)", "font-weight": 700 }, "句 " + (s + 1));
+            const words = sents[s].replace(".", " .").split(" ").filter(Boolean);
+            let x = 80;
+            for (const w of words) {
+              const lw = w.toLowerCase();
+              const isNew = !vocab.has(lw); vocab.add(lw);
+              const wd = Math.max(26, w.length * 8 + 10);
+              K.svg(svg, "rect", { x, y: y - 16, width: wd, height: 24, rx: 4, fill: isNew ? "color-mix(in srgb, var(--c3) 25%, var(--panel))" : "var(--panel-2)", stroke: "var(--line)" });
+              K.svg(svg, "text", { x: x + wd / 2, y: y + 1, "text-anchor": "middle", "font-size": 12, "font-family": "var(--mono)" }, w);
+              x += wd + 6;
+              cnt.textContent = `句子数 ${s + 1}   不同的词 ${vocab.size}`;
+              if (!(await ctx.wait(110))) return;
+            }
+            y += 60;
+          }
+        })();
+      },
+    },
+    {
+      title: "少于 50 份的专科先删掉", kicker: "第 8–11 格 · 类别筛选",
+      html: `<p>有些专科只有寥寥几份病历，模型几乎学不到东西。作者只保留<b>样本数大于 50</b> 的专科，再画出每个专科的数量条形图。<span data-cell="8">第 8 格</span> <span data-cell="9">第 9 格</span></p><p>动画里条的长短是示意（真实数量在运行输出里）：可以看到类别数量很不均衡，少的类别被一刀切掉。</p>`,
+      cells: [9, 11], highlight: ["x.shape[0] > 50"],
+      draw(svg, ctx) {
+        const items = [["专科 A", 260], ["专科 B", 180], ["专科 C", 140], ["专科 D", 95], ["专科 E", 70], ["专科 F", 44], ["专科 G", 25], ["专科 H", 9]];
+        const bs = K.bars(svg, { x: 20, y: 20, w: 600, h: 270 }, items.map(([l, v], i) => ({ label: l, value: v, color: v > 50 ? "var(--c1)" : "var(--bad)" })), { horizontal: true, labelWidth: 70, max: 280, fmt: (v) => "" });
+        const W = bs.map((e) => +e.rect.getAttribute("width"));
+        bs.forEach((e) => e.rect.setAttribute("width", 0));
+        const cut = K.svg(svg, "line", { x1: 90 + (480 * 50) / 280, x2: 90 + (480 * 50) / 280, y1: 14, y2: 296, stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "5 4" });
+        cut.style.opacity = 0;
+        const t = K.svg(svg, "text", { x: 96 + (480 * 50) / 280, y: 316, "font-size": 12, fill: "var(--warn)", "font-weight": 700 }, "50 份：低于这条线的专科被删除（数量为示意）");
+        t.style.opacity = 0;
+        ctx.tween(1100, (q) => bs.forEach((e, i) => e.rect.setAttribute("width", W[i] * q)))
+          .then((ok) => ok && ctx.tween(500, (q) => (cut.style.opacity = t.style.opacity = q)))
+          .then((ok) => ok && ctx.tween(600, (q) => bs.forEach((e, i) => { if (items[i][1] <= 50) e.rect.style.opacity = 1 - 0.8 * q; })));
+      },
+    },
+    {
+      title: "只留两列，先读几份样例", kicker: "第 12–14 格 · 选列",
+      html: `<p>建模只需要两列：病历全文 <code>transcription</code> 和专科 <code>medical_specialty</code>。作者再删一次空值，打印了第 5、125、1000 份病历看看原文长什么样。<span data-cell="13">第 13 格</span> <span data-cell="14">第 14 格</span></p><p>病历通常有固定的段落：主诉、现病史、既往史、检查、诊断、处置……动画用色块示意这种结构，不是真实病历内容。</p>`,
+      cells: [13, 14],
+      draw(svg, ctx) {
+        const secs = [["主诉 CHIEF COMPLAINT", 0.06, "var(--c1)"], ["现病史 HISTORY OF PRESENT ILLNESS", 0.22, "var(--c2)"], ["既往史 PAST HISTORY", 0.12, "var(--c3)"], ["体格检查 PHYSICAL EXAM", 0.2, "var(--c4)"], ["诊断 / 印象 IMPRESSION", 0.1, "var(--c5)"], ["处置 / 计划 PLAN", 0.15, "var(--c6)"]];
+        let y = 30;
+        secs.forEach(([s, h, c], i) => {
+          const H = h * 300;
+          const r = K.svg(svg, "rect", { x: 40, y, width: 0, height: H - 4, rx: 4, fill: c, opacity: 0.35 });
+          const tx = K.svg(svg, "text", { x: 52, y: y + Math.min(H / 2 + 4, 18), "font-size": 12, "font-weight": 700 }, s);
+          tx.style.opacity = 0;
+          ctx.wait(i * 220).then((ok) => ok && ctx.tween(400, (q) => { r.setAttribute("width", 620 * q); tx.style.opacity = q; }));
+          y += H;
+        });
+        K.svg(svg, "text", { x: 40, y: 318, "font-size": 12, class: "muted" }, "一份病历转录的常见结构（示意；段落名称因病历而异）");
+      },
+    },
+    {
+      title: "清洗：词形还原，只留首尾两句", kicker: "第 15–19 格 · 文本预处理",
+      html: `<p>两个清洗函数。<code>lemmatize_text</code>：分句后只取<b>第一句</b>和<b>倒数第二句</b>，把里面的词还原成原形（如 tumors → tumor）。<code>clean_text</code>：去标点、去数字、转小写。<span data-cell="16">第 16 格</span></p><p>注意两个细节：<code>sentences[len-2 : len-1]</code> 取到的是倒数第二句而不是最后一句，像是想取最后一句时写偏了一位；正则那一行注释说“替换成空格”，代码却替换成空字符串，而且标点前面已经删光了，这一行其实不起作用。</p>`,
+      cells: [16, 18], highlight: ["final_sentences = sentences[len(sentences)-2: len(sentences)-1]", "lemmatizer.lemmatize(word)"],
+      notes: { 16: "sentences[len-2:len-1] 只含倒数第二句；若要最后一句应写 sentences[-1:]。" },
+      draw(svg, ctx) {
+        const S = ["第 1 句", "第 2 句", "第 3 句", "第 4 句", "第 5 句", "倒数第 2 句", "最后一句"];
+        const keep = new Set([0, 5]);
+        const els = S.map((s, i) => K.node(svg, 40 + i * 92, 60, 84, 46, s, { fs: 12 }));
+        K.svg(svg, "text", { x: 40, y: 40, "font-size": 13, "font-weight": 700 }, "一份病历分句后：");
+        const res = [];
+        ctx.wait(700).then((ok) => ok && ctx.tween(800, (q) => els.forEach((e, i) => { if (!keep.has(i)) e.style.opacity = 1 - 0.8 * q; })))
+          .then((ok) => {
+            if (!ok) return;
+            K.set(els[0].querySelector("rect"), { stroke: "var(--good)", "stroke-width": 2.5 });
+            K.set(els[5].querySelector("rect"), { stroke: "var(--good)", "stroke-width": 2.5 });
+            K.svg(svg, "text", { x: 592, y: 130, "text-anchor": "middle", "font-size": 12, fill: "var(--warn)" }, "↑ 没被保留");
+            const pairs = [["tumors", "tumor"], ["Patients", "Patient"], ["vessels", "vessel"], ["123 mg,", "mg"]];
+            pairs.forEach(([a, b], k) => {
+              K.svg(svg, "text", { x: 60, y: 190 + k * 32, "font-size": 13, "font-family": "var(--mono)" }, a);
+              K.arrow(svg, 170, 186 + k * 32, 230, 186 + k * 32);
+              const t = K.svg(svg, "text", { x: 240, y: 190 + k * 32, "font-size": 13, "font-family": "var(--mono)", fill: "var(--good)" }, b.toLowerCase());
+              res.push(t);
+            });
+            K.svg(svg, "text", { x: 360, y: 220, "font-size": 12, class: "muted" }, "词形还原 + 去标点数字 + 小写（示意）");
+          });
+      },
+    },
+    {
+      title: "TF-IDF：把病历变成 1000 个数字", kicker: "第 20–21 格 · 特征提取",
+      html: `<p><b>TF-IDF</b> 给每个词打分：在这份病历里出现得越多（TF）分越高；在所有病历里都常见（IDF 低）则分越低。所以“patient”这种到处都有的词分很低，“cardiac catheterization”这种只在少数病历里出现的词分很高。<span data-cell="20">第 20 格</span></p><p>作者的设置：去掉英文停用词，取 1 到 3 个词的组合（n-gram），出现在 75% 以上病历里的词组丢掉，最多保留 1000 个特征。<span data-cell="21">第 21 格</span></p>`,
+      cells: [21], highlight: ["ngram_range=(1,3), max_df=0.75", "max_features=1000"],
+      draw(svg, ctx) {
+        const words = [["patient", 0.9, 0.05], ["history", 0.8, 0.12], ["chest pain", 0.5, 0.6], ["catheterization", 0.55, 0.95], ["ejection fraction", 0.5, 0.85]];
+        K.svg(svg, "text", { x: 220, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "TF（本文里多常见）");
+        K.svg(svg, "text", { x: 420, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "IDF（越稀有越高）");
+        K.svg(svg, "text", { x: 610, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--accent)" }, "TF × IDF");
+        const rows = words.map(([w, tf, idf], i) => {
+          const y = 50 + i * 52;
+          K.svg(svg, "text", { x: 136, y: y + 18, "text-anchor": "end", "font-size": 12, "font-family": "var(--mono)" }, w);
+          return [K.svg(svg, "rect", { x: 146, y, width: 0, height: 24, fill: "var(--c1)", rx: 3 }), K.svg(svg, "rect", { x: 340, y, width: 0, height: 24, fill: "var(--c2)", rx: 3 }), K.svg(svg, "rect", { x: 540, y, width: 0, height: 24, fill: "var(--accent)", rx: 3 }), tf, idf];
+        });
+        K.svg(svg, "text", { x: 30, y: 325, "font-size": 12, class: "muted" }, "示意数值：到处都有的词得分低，专科特有的词得分高");
+        ctx.tween(900, (q) => rows.forEach((r) => { r[0].setAttribute("width", 150 * r[3] * q); r[1].setAttribute("width", 150 * r[4] * q); }))
+          .then((ok) => ok && ctx.tween(900, (q) => rows.forEach((r) => r[2].setAttribute("width", 140 * r[3] * r[4] * 1.6 * q))));
+      },
+    },
+    {
+      title: "t-SNE：各专科的点挤在一起", kicker: "第 22–23 格 · 可视化",
+      html: `<p>把 1000 维的 TF-IDF 用 <b>t-SNE</b> 压到 2 维画散点图，每个专科一种颜色。t-SNE 的原则是：高维里相近的点，在平面上也尽量挨着。<span data-cell="22">第 22 格</span></p><p>作者的观察：<b>很多类别互相重叠</b>。这提前预告了：光靠这些词，模型很难把专科分清楚。</p>`,
+      cells: [23], highlight: ["TSNE(n_components=2,init='random',random_state=0, perplexity=40)"],
+      draw(svg, ctx) {
+        const r = K.rng(7), P = [];
+        for (let c = 0; c < 6; c++) { const cx = 360 + Math.cos(c) * 90, cy = 170 + Math.sin(c * 1.3) * 60; for (let k = 0; k < 35; k++) P.push({ c, x0: 60 + r() * 600, y0: 30 + r() * 280, x1: cx + K.randn(r) * 70, y1: cy + K.randn(r) * 50 }); }
+        const els = P.map((p) => K.svg(svg, "circle", { cx: p.x0, cy: p.y0, r: 4, fill: K.colors[p.c], opacity: 0.55 }));
+        const it = K.svg(svg, "text", { x: 20, y: 325, "font-size": 12, "font-family": "var(--mono)" }, "");
+        ctx.wait(500).then((ok) => ok && ctx.tween(2200, (t) => { it.textContent = "t-SNE 迭代中… 结果：各色点群大面积重叠（示意）"; els.forEach((e, i) => { e.setAttribute("cx", K.lerp(P[i].x0, P[i].x1, t)); e.setAttribute("cy", K.lerp(P[i].y0, P[i].y1, t)); }); }));
+      },
+    },
+    {
+      title: "PCA：保留 95% 的信息", kicker: "第 24–26 格 · 降维",
+      html: `<p>建模前，作者用 <b>PCA</b> 把 1000 维压缩到“刚好保留 95% 方差”所需的维数（<code>n_components=0.95</code>），然后按专科分层切出 25% 当测试集。<span data-cell="25">第 25 格</span></p><p>PCA 找的是数据变化最大的几个方向，把原来的坐标“旋转”到这些方向上，再丢掉变化很小的方向。注意 PCA 是在<b>全部数据</b>上拟合后才切分的，测试集的信息也参与了降维。</p>`,
+      cells: [25], highlight: ["PCA(n_components=0.95)", "stratify=labels"],
+      draw(svg, ctx) {
+        const ev = [0.22, 0.14, 0.1, 0.08, 0.07, 0.06, 0.05, 0.045, 0.04, 0.035, 0.03, 0.028, 0.026, 0.024, 0.022, 0.02, 0.018, 0.016, 0.014, 0.012];
+        const ax = K.axes(svg, { x: 60, y: 30, w: 580, h: 250 }, [0, 20], [0, 1], { xticks: 4, yticks: 4, xlabel: "主成分个数（示意）", ylabel: "累计方差", yfmt: (v) => Math.round(v * 100) + "%" });
+        let cum = 0; const pts = ev.map((e, i) => { cum += e; return [i + 1, Math.min(1, cum)]; });
+        const bars = ev.map((e, i) => K.svg(svg, "rect", { x: ax.sx(i + 0.6), y: ax.sy(0), width: 18, height: 0, fill: "var(--c1)", opacity: 0.4 }));
+        let d = ""; pts.forEach((p, i) => (d += (i ? "L" : "M") + ax.sx(p[0]).toFixed(1) + "," + ax.sy(p[1]).toFixed(1)));
+        const path = K.svg(svg, "path", { d, fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        const L = path.getTotalLength(); path.style.strokeDasharray = L; path.style.strokeDashoffset = L;
+        K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(20), y1: ax.sy(0.95), y2: ax.sy(0.95), stroke: "var(--warn)", "stroke-dasharray": "5 4" });
+        K.svg(svg, "text", { x: ax.sx(0.3), y: ax.sy(0.95) - 6, "font-size": 12, fill: "var(--warn)" }, "95%：到这里就停");
+        ctx.tween(1000, (t) => bars.forEach((b, i) => { b.setAttribute("y", ax.sy(ev[i] * t)); b.setAttribute("height", ax.sy(0) - ax.sy(ev[i] * t)); })).then((ok) => ok && ctx.tween(1200, (t) => (path.style.strokeDashoffset = L * (1 - t))));
+      },
+    },
+    {
+      title: "第一轮：弹性网逻辑回归", kicker: "第 27–32 格 · 建模与评估",
+      html: `<p>分类器是<b>逻辑回归</b>，正则方式选 <code>elasticnet</code>（L1 和 L2 各占一半，<code>l1_ratio=0.5</code>），用 <code>saga</code> 求解。多分类时，它给每个专科各算一个分数，取最高的那个。<span data-cell="28">第 28 格</span></p><p>然后画混淆矩阵、打印分类报告。作者的评价很直接：“<b>结果相当差</b>”。<span data-cell="33">第 33 格</span> 动画里的混淆矩阵是示意：对角线不够亮，大量病历被分到了“外科”等综合类别里。</p>`,
+      cells: [28, 30, 32], highlight: ["penalty= 'elasticnet', solver= 'saga', l1_ratio=0.5"],
+      draw(svg, ctx) {
+        const n = 6, names = ["外科", "心血管", "骨科", "放射", "神经", "消化"], r = K.rng(4);
+        const M = []; for (let i = 0; i < n; i++) { const row = []; for (let j = 0; j < n; j++) row.push(i === j ? 0.35 + r() * 0.2 : j === 0 ? 0.25 : r() * 0.12); M.push(row); }
+        names.forEach((s, j) => { K.svg(svg, "text", { x: 160 + j * 46 + 20, y: 36, "text-anchor": "middle", "font-size": 11 }, s); K.svg(svg, "text", { x: 152, y: 64 + j * 46, "text-anchor": "end", "font-size": 11 }, s); });
+        const cells = [];
+        M.forEach((row, i) => row.forEach((v, j) => cells.push([K.svg(svg, "rect", { x: 160 + j * 46, y: 44 + i * 46, width: 42, height: 42, rx: 3, fill: "var(--panel-2)" }), v])));
+        K.svg(svg, "text", { x: 460, y: 80, "font-size": 13, "font-weight": 700 }, "示意混淆矩阵");
+        K.svg(svg, "text", { x: 460, y: 106, "font-size": 12 }, "对角线 = 判对");
+        K.svg(svg, "text", { x: 460, y: 130, "font-size": 12, fill: "var(--warn)" }, "第一列很亮：很多病历被");
+        K.svg(svg, "text", { x: 460, y: 150, "font-size": 12, fill: "var(--warn)" }, "当成了“外科”");
+        ctx.tween(1200, (t) => cells.forEach(([c, v], k) => K.set(c, { fill: K.heat(v * K.clamp(t * 1.5 - k / 50, 0, 1)) })));
+      },
+    },
+    {
+      title: "用医学常识整理类别", kicker: "第 33–34 格 · 领域知识",
+      html: `<p>作者分析：“外科”几乎是个大杂烩，心血管、神经等专科都有手术；“急诊报告”“出院小结”“各类笔记”“会诊-病史体检”等是<b>文书类型</b>而不是专科，内容和各专科重叠。于是删掉这些类别，以及“疼痛管理”“全科”；再把<b>神经外科并入神经科</b>、<b>肾内科并入泌尿科</b>。<span data-cell="33">第 33 格</span> <span data-cell="34">第 34 格</span></p><p>小问题：这一格打印的“缩减后类别”用的是只删了外科时的分组结果，后面几个类别的删除没有反映在打印里。</p>`,
+      cells: [34], highlight: ["== 'Surgery'", "'Neurosurgery'", "'Nephrology'"],
+      notes: { 34: "打印用的 final_data_categories 在删除“外科”之后就没再更新，所以打印出的列表里还有后面被删掉的类别。" },
+      draw(svg, ctx) {
+        const del = ["Surgery 外科", "SOAP / Chart / Progress Notes", "Office Notes", "Consult - History and Phy.", "Emergency Room Reports", "Discharge Summary", "Pain Management", "General Medicine"];
+        const mer = [["Neurosurgery", "Neurology"], ["Nephrology", "Urology"]];
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 13, "font-weight": 700, fill: "var(--bad)" }, "删除（与专科重叠的文书类 / 大杂烩）");
+        const ds = del.map((d, i) => { const g = K.node(svg, 30, 38 + i * 34, 300, 28, d, { fs: 12 }); return g; });
+        K.svg(svg, "text", { x: 380, y: 26, "font-size": 13, "font-weight": 700, fill: "var(--good)" }, "合并");
+        mer.forEach(([a, b], i) => {
+          const y = 60 + i * 90;
+          const A = K.node(svg, 380, y, 130, 32, a, { fs: 12 });
+          K.node(svg, 560, y, 120, 32, b, { fs: 12, bold: true });
+          const ar = K.arrow(svg, 512, y + 16, 556, y + 16, { color: "var(--good)" }); ar.style.opacity = 0;
+          ctx.wait(1800 + i * 500).then((ok) => ok && ctx.tween(500, (t) => { ar.style.opacity = t; A.setAttribute("transform", `translate(${40 * t},0)`); A.style.opacity = 1 - 0.6 * t; }));
+        });
+        (async () => {
+          for (const g of ds) { if (!(await ctx.wait(180))) return; K.set(g.querySelector("rect"), { stroke: "var(--bad)" }); g.style.opacity = 0.35; }
+        })();
+      },
+    },
+    {
+      title: "scispaCy：只留医学实体词", kicker: "第 35–41 格 · 医学 NLP",
+      html: `<p>第二个改进：用 <b>scispaCy</b> 的生物医学命名实体模型 <code>en_ner_bionlp13cg_md</code>，从病历里只挑出<b>医学实体</b>（器官、组织、细胞、基因产物、癌症等），其余普通词全部扔掉，再做词形还原和清洗。<span data-cell="35">第 35 格</span> <span data-cell="40">第 40 格</span></p><p>动画示意：一句话里被识别为实体的词高亮保留，其他词淡出。这相当于用医学知识先把“噪声词”筛掉。</p>`,
+      cells: [37, 38, 40], highlight: ["for ent in doc.ents:"],
+      draw(svg, ctx) {
+        const words = [["The", 0], ["patient", 0], ["has", 0], ["a", 0], ["mass", 0], ["in", 0], ["the", 0], ["left", 0], ["breast", 1], ["with", 0], ["axillary", 1], ["lymph", 1], ["node", 1], ["involvement", 0], ["and", 0], ["elevated", 0], ["CA-125", 1]];
+        let x = 30, y = 70;
+        const els = words.map(([w, ent]) => {
+          const wd = w.length * 8.4 + 14;
+          if (x + wd > 690) { x = 30; y += 46; }
+          const r = K.svg(svg, "rect", { x, y: y - 20, width: wd, height: 30, rx: 5, fill: "var(--panel-2)", stroke: "var(--line)" });
+          const t = K.svg(svg, "text", { x: x + wd / 2, y: y, "text-anchor": "middle", "font-size": 13, "font-family": "var(--mono)" }, w);
+          x += wd + 6;
+          return { r, t, ent };
+        });
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 12, class: "muted" }, "自编示意句；高亮 = 模型可能识别出的医学实体");
+        const out = K.svg(svg, "text", { x: 30, y: 300, "font-size": 14, "font-family": "var(--mono)", fill: "var(--accent)" }, "");
+        ctx.wait(700).then((ok) => ok && ctx.tween(1200, (q) => els.forEach((e) => { if (e.ent) K.set(e.r, { fill: `color-mix(in srgb, var(--accent) ${Math.round(35 * q)}%, var(--panel))`, stroke: "var(--accent)" }); else { e.r.style.opacity = 1 - 0.75 * q; e.t.style.opacity = 1 - 0.75 * q; } })))
+          .then((ok) => { if (ok) out.textContent = "→ breast axillary lymph node CA-125"; });
+      },
+    },
+    {
+      title: "第二轮：重新提特征、再训练", kicker: "第 42–49 格 · 改进后的流程",
+      html: `<p>在只剩医学实体的文本上重做一遍：TF-IDF 加了 <code>min_df=5</code>（至少出现在 5 份病历里）和 <code>sublinear_tf=True</code>（词频取对数，出现 10 次不等于 10 倍重要），再 t-SNE、PCA、切分、同样的逻辑回归。<span data-cell="43">第 43 格</span> <span data-cell="48">第 48 格</span></p><p>作者说结果“<b>明显改善</b>”。<span data-cell="50">第 50 格</span> 但要记住，这一轮已经删掉了最难分的几个类别，题目本身变简单了，改善里有多少来自“去掉难题”、多少来自“更好的特征”，原 notebook 没有拆开比较。</p>`,
+      cells: [43, 48], highlight: ["min_df=5", "sublinear_tf=True"],
+      notes: { 48: "注释掉的一行表明作者也试过多层感知机 MLPClassifier，最终仍用逻辑回归。" },
+      draw(svg, ctx) {
+        const flow = ["实体抽取", "TF-IDF\nmin_df=5", "PCA 95%", "分层切分", "逻辑回归\nelasticnet"];
+        const nodes = flow.map((f, i) => { const g = K.node(svg, 20 + i * 140, 60, 120, 56, f, { fs: 12 }); g.style.opacity = 0.25; return g; });
+        flow.slice(1).forEach((_, i) => K.arrow(svg, 140 + i * 140, 88, 158 + i * 140, 88));
+        K.svg(svg, "text", { x: 20, y: 170, "font-size": 13, "font-weight": 700 }, "sublinear_tf：词频取对数");
+        const ax = K.axes(svg, { x: 60, y: 190, w: 300, h: 110 }, [0, 20], [0, 20], { xticks: 4, yticks: 2, xlabel: "词出现次数" });
+        let d1 = "", d2 = "";
+        for (let x = 0; x <= 20; x += 0.5) { d1 += (d1 ? "L" : "M") + ax.sx(x) + "," + ax.sy(x); d2 += (d2 ? "L" : "M") + ax.sx(x) + "," + ax.sy(x ? (1 + Math.log(x)) * 4 : 0); }
+        K.svg(svg, "path", { d: d1, fill: "none", stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+        K.svg(svg, "path", { d: d2, fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 400, y: 240, "font-size": 12, fill: "var(--ink-3)" }, "--- 原始词频");
+        K.svg(svg, "text", { x: 400, y: 262, "font-size": 12, fill: "var(--accent)" }, "—— 1 + log(词频)：越往后涨得越慢");
+        (async () => { for (const g of nodes) if (!(await ctx.tween(300, (t) => (g.style.opacity = 0.25 + 0.75 * t)))) return; })();
+      },
+    },
+    {
+      title: "SMOTE：给少数类造样本", kicker: "第 50–54 格 · 不平衡处理",
+      html: `<p>有些专科样本少，作者用 <b>SMOTE</b> 合成新样本：在一个少数类样本和它的同类近邻之间连线，在线上随机取点。参数 <code>sampling_strategy='minority'</code> 只扩充<b>最少的那一个</b>类别。<span data-cell="51">第 51 格</span></p><p>关键问题在顺序：作者<b>先对全部数据做 SMOTE，再切分</b>训练和测试。测试集里会混进由训练样本“插值”出来的假样本，它们和训练集里的真样本非常像，测试分数因此虚高。下面的实验可以看到差别。</p>`,
+      cells: [51], highlight: ["SMOTE(sampling_strategy='minority')", "train_test_split(X, y, stratify=y,random_state=1)"],
+      draw(svg, ctx) {
+        const r = K.rng(31), real = [];
+        for (let i = 0; i < 8; i++) real.push([300 + K.randn(r) * 90, 170 + K.randn(r) * 60]);
+        real.forEach((p) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 6, fill: "var(--c6)" }));
+        K.svg(svg, "text", { x: 20, y: 26, "font-size": 12, class: "muted" }, "实心 = 少数类真实样本，空心 = SMOTE 合成（示意）");
+        const tag = K.svg(svg, "text", { x: 500, y: 120, "font-size": 13, "font-weight": 700, fill: "var(--warn)" }, "");
+        const tag2 = K.svg(svg, "text", { x: 500, y: 144, "font-size": 12, fill: "var(--warn)" }, "");
+        (async () => {
+          const syn = [];
+          for (let k = 0; k < 12; k++) {
+            const a = real[Math.floor(r() * real.length)];
+            const b = real.filter((p) => p !== a).sort((p, q) => Math.hypot(p[0] - a[0], p[1] - a[1]) - Math.hypot(q[0] - a[0], q[1] - a[1]))[0];
+            const ln = K.svg(svg, "line", { x1: a[0], y1: a[1], x2: b[0], y2: b[1], stroke: "var(--warn)", "stroke-dasharray": "3 3", opacity: 0.6 });
+            const u = r();
+            syn.push(K.svg(svg, "circle", { cx: K.lerp(a[0], b[0], u), cy: K.lerp(a[1], b[1], u), r: 5, fill: "none", stroke: "var(--c6)", "stroke-width": 2 }));
+            if (!(await ctx.wait(160))) return;
+            ln.remove();
+          }
+          tag.textContent = "先 SMOTE 再切分：";
+          tag2.textContent = "有些空心点会被分进测试集";
+          syn.forEach((s, i) => { if (i % 3 === 0) K.set(s, { stroke: "var(--warn)", "stroke-width": 3 }); });
+        })();
+      },
+    },
+    {
+      title: "翻看分错的样本与总结", kicker: "第 55–59 格 · 误差分析",
+      html: `<p>仍有一些类别分不好，作者直接打印了放射科、新生儿科、血液肿瘤科的病历原文来看原因。<span data-cell="55">第 55 格</span> 这种“回到原始数据看错例”是很好的习惯。</p><p>作者总结：数据噪声很大；很多内容跨类别重叠；可以用领域知识减少类别；数据不平衡，SMOTE 可能改善；手工设计的特征或许在这份数据上有效，但不一定能推广到其他病历数据。<span data-cell="59">第 59 格</span></p>`,
+      cells: [56, 57, 58],
+      draw(svg, ctx) {
+        const items = [["放射科报告", "影像描述里会提到心、肺、骨……\n各个专科的器官都可能出现"], ["新生儿科", "内容和儿科、产科高度相似"], ["血液肿瘤科", "化疗、肿瘤内容也出现在\n其他专科的病历里"]];
+        items.forEach(([h, t], i) => {
+          const g = K.node(svg, 30 + i * 225, 60, 205, 150, h + "\n\n" + t, { fs: 12 });
+          g.style.opacity = 0;
+          ctx.wait(i * 400).then((ok) => ok && ctx.tween(400, (q) => (g.style.opacity = q)));
+        });
+        K.svg(svg, "text", { x: 30, y: 260, "font-size": 13, "font-weight": 700 }, "共同原因：标签按“科室”分，文字内容却按“身体部位 / 疾病”分");
+        K.svg(svg, "text", { x: 30, y: 285, "font-size": 12, class: "muted" }, "（框内是对这类病历容易混淆的原因的示意性解释，不是作者原文）");
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：TF-IDF ---------- */
+  const corpus = [
+    ["心血管", "patient with chest pain and shortness of breath. ecg shows st elevation. cardiac catheterization planned. ejection fraction reduced."],
+    ["心血管", "history of hypertension and atrial fibrillation. echocardiogram shows mitral valve regurgitation. patient stable."],
+    ["骨科", "patient with knee pain after fall. x-ray shows tibial fracture. orthopedic fixation planned. patient stable."],
+    ["骨科", "chronic lower back pain. lumbar spine mri shows disc herniation. physical therapy recommended."],
+    ["神经科", "patient with headache and seizure. mri brain shows lesion. eeg abnormal. neurology follow up."],
+    ["神经科", "numbness and weakness of left arm. history of stroke. ct head without acute change. patient stable."],
+  ];
+  const STOP = new Set("with and of the a in to after shows without".split(" "));
+  const toks = (s) => s.toLowerCase().replace(/[^a-z\- ]/g, " ").split(/\s+/).filter((w) => w && !STOP.has(w));
+  function grams(s, n) { const t = toks(s), out = []; for (let k = 1; k <= n; k++) for (let i = 0; i + k <= t.length; i++) out.push(t.slice(i, i + k).join(" ")); return out; }
+  function tfidf(docs, n, sub) {
+    const G = docs.map((d) => grams(d, n)), df = {};
+    G.forEach((g) => new Set(g).forEach((w) => (df[w] = (df[w] || 0) + 1)));
+    const N = docs.length;
+    return G.map((g) => {
+      const tf = {}; g.forEach((w) => (tf[w] = (tf[w] || 0) + 1));
+      const v = {}; let norm = 0;
+      for (const w in tf) { const t = sub ? 1 + Math.log(tf[w]) : tf[w]; const idf = Math.log((1 + N) / (1 + df[w])) + 1; v[w] = t * idf; norm += v[w] * v[w]; }
+      norm = Math.sqrt(norm) || 1; for (const w in v) v[w] /= norm;
+      return v;
+    });
+  }
+  const cos = (a, b) => { let s = 0; for (const w in a) if (b[w]) s += a[w] * b[w]; return s; };
+  const labHost = document.getElementById("lab1");
+  const inputBox = K.el("div", { style: "margin:0 0 8px" }, `<label style="font-size:13px">输入一句英文病历描述（自己编，比如 “mri of the brain shows a lesion”）：</label><br><input type="text" value="patient with chest pain, ecg abnormal" style="width:100%;max-width:560px;padding:6px 8px;font:inherit;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink)">`);
+  labHost.before(inputBox);
+  const inp = inputBox.querySelector("input");
+  const lab1 = K.lab(labHost, {
+    width: 640, height: 340,
+    controls: [
+      { id: "n", label: "n-gram 最长几个词", min: 1, max: 3, step: 1, value: 1 },
+      { id: "sub", label: "词频处理", value: "raw", options: [["raw", "原始词频（作者第一轮）"], ["log", "sublinear：1 + log（作者第二轮）"]] },
+    ],
+    note: "语料是 6 段自编的短病历（3 个专科各 2 段）加上你输入的那一句。浏览器现场算 TF-IDF（和 sklearn 一样的平滑 IDF 和 L2 归一化），左边列出你这句话里权重最高的词组，右边用余弦相似度算它和每个专科的平均相似度，选最高的当预测。试试输入骨科、神经科的描述；把 n-gram 调到 2、3，看“chest pain”这样的词组怎样出现。",
+    render(svg, v) {
+      const docs = corpus.map((c) => c[1]).concat([inp.value || ""]);
+      const V = tfidf(docs, v.n, v.sub === "log");
+      const q = V[V.length - 1];
+      const top = Object.entries(q).sort((a, b) => b[1] - a[1]).slice(0, 8);
+      K.svg(svg, "text", { x: 20, y: 24, "font-size": 13, "font-weight": 700 }, "你这句话里 TF-IDF 最高的词组");
+      top.forEach(([w, s], i) => {
+        K.svg(svg, "text", { x: 170, y: 54 + i * 32, "text-anchor": "end", "font-size": 12, "font-family": "var(--mono)" }, w.length > 22 ? w.slice(0, 21) + "…" : w);
+        K.svg(svg, "rect", { x: 180, y: 40 + i * 32, width: 150 * s / (top[0] ? top[0][1] : 1), height: 20, rx: 3, fill: "var(--accent)" });
+        K.svg(svg, "text", { x: 186 + 150 * s / (top[0] ? top[0][1] : 1), y: 55 + i * 32, "font-size": 11, class: "muted" }, s.toFixed(2));
+      });
+      if (!top.length) K.svg(svg, "text", { x: 20, y: 60, "font-size": 13, fill: "var(--warn)" }, "（没有可用的词，换一句试试）");
+      const specs = ["心血管", "骨科", "神经科"];
+      const sims = specs.map((sp) => { const idx = corpus.map((c, i) => (c[0] === sp ? i : -1)).filter((i) => i >= 0); return idx.reduce((a, i) => a + cos(q, V[i]), 0) / idx.length; });
+      const best = sims.indexOf(Math.max(...sims));
+      K.svg(svg, "text", { x: 400, y: 24, "font-size": 13, "font-weight": 700 }, "和各专科的平均余弦相似度");
+      specs.forEach((sp, i) => {
+        K.svg(svg, "text", { x: 400, y: 70 + i * 60, "font-size": 13, fill: i === best ? "var(--good)" : "var(--ink)", "font-weight": i === best ? 700 : 400 }, sp + (i === best ? "  ← 预测" : ""));
+        K.svg(svg, "rect", { x: 400, y: 78 + i * 60, width: Math.max(2, 220 * sims[i] / Math.max(0.01, ...sims)), height: 18, rx: 3, fill: i === best ? "var(--good)" : "var(--c1)" });
+        K.svg(svg, "text", { x: 400, y: 112 + i * 60, "font-size": 11, class: "muted" }, sims[i].toFixed(3));
+      });
+      return { readout: [
+        { k: "语料中不同的词组数", v: String(new Set(docs.flatMap((d) => grams(d, v.n))).size) },
+        { k: "预测专科", v: sims[best] > 0 ? specs[best] : "无法判断", color: "var(--good)" },
+      ] };
+    },
+  });
+  inp.addEventListener("input", () => lab1.update());
+
+  /* ---------- 实验 B：SMOTE 顺序 ---------- */
+  function knnPred(X, y, x, k) {
+    const d = X.map((p, i) => [Math.hypot(p[0] - x[0], p[1] - x[1]), y[i]]).sort((a, b) => a[0] - b[0]).slice(0, k);
+    const c = [0, 0, 0]; d.forEach((q) => c[q[1]]++); return c.indexOf(Math.max(...c));
+  }
+  function smote(X, y, cls, nNew, rnd) {
+    const P = X.filter((_, i) => y[i] === cls), out = [];
+    for (let k = 0; k < nNew; k++) {
+      const a = P[Math.floor(rnd() * P.length)];
+      const nn = P.filter((q) => q !== a).sort((p, q) => Math.hypot(p[0] - a[0], p[1] - a[1]) - Math.hypot(q[0] - a[0], q[1] - a[1])).slice(0, 5);
+      const b = nn[Math.floor(rnd() * nn.length)] || a, u = rnd();
+      out.push([K.lerp(a[0], b[0], u), K.lerp(a[1], b[1], u)]);
+    }
+    return out;
+  }
+  function genData(seed, nMin) {
+    const r = K.rng(seed), X = [], y = [];
+    const C = [[0.35, 0.4, 150], [0.62, 0.55, 150], [0.5, 0.3, nMin]];
+    C.forEach(([cx, cy, n], c) => { for (let i = 0; i < n; i++) { X.push([cx + K.randn(r) * 0.13, cy + K.randn(r) * 0.13]); y.push(c); } });
+    return { X, y, r };
+  }
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "m", label: "少数类真实样本数（另两类各 150）", min: 8, max: 80, step: 1, value: 20 },
+      { id: "k", label: "分类器：k 近邻的 k", min: 1, max: 15, step: 2, value: 1 },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "三类模拟数据（第三类是少数类）。同样用 SMOTE 把少数类补到 150，同样 75%/25% 分层切分，同样的 k 近邻分类器，只是顺序不同：A = 作者的做法（先 SMOTE 再切分），B = 先切分、只在训练集里 SMOTE。另外抽一份全新的、从没参与过的真实数据当“真实考场”。看 A 的测试分数和真实考场差多少。k=1 时差距最明显。",
+    render(svg, v) {
+      const D = genData(900 + v.seed * 11, v.m), rnd = D.r;
+      const fresh = genData(5000 + v.seed, Math.round((v.m * 150) / 150));
+      const split = (X, y) => { const idx = X.map((_, i) => i).sort(() => rnd() - 0.5); const te = new Set(); [0, 1, 2].forEach((c) => { const ic = idx.filter((i) => y[i] === c); ic.slice(0, Math.round(ic.length * 0.25)).forEach((i) => te.add(i)); }); return { tr: idx.filter((i) => !te.has(i)), te: [...te] }; };
+      const recall2 = (Xtr, ytr, Xte, yte) => { let tp = 0, n = 0; Xte.forEach((x, i) => { if (yte[i] === 2) { n++; if (knnPred(Xtr, ytr, x, v.k) === 2) tp++; } }); return n ? tp / n : 0; };
+      // A：先 SMOTE 再切分
+      const synA = smote(D.X, D.y, 2, 150 - v.m, rnd);
+      const XA = D.X.concat(synA), yA = D.y.concat(synA.map(() => 2));
+      const sA = split(XA, yA);
+      const recA = recall2(sA.tr.map((i) => XA[i]), sA.tr.map((i) => yA[i]), sA.te.map((i) => XA[i]), sA.te.map((i) => yA[i]));
+      const recAreal = recall2(sA.tr.map((i) => XA[i]), sA.tr.map((i) => yA[i]), fresh.X, fresh.y);
+      // B：先切分，再只对训练集 SMOTE
+      const sB = split(D.X, D.y);
+      const XtrB = sB.tr.map((i) => D.X[i]), ytrB = sB.tr.map((i) => D.y[i]);
+      const synB = smote(XtrB, ytrB, 2, Math.max(0, ytrB.filter((c) => c === 0).length - ytrB.filter((c) => c === 2).length), rnd);
+      const XtrB2 = XtrB.concat(synB), ytrB2 = ytrB.concat(synB.map(() => 2));
+      const recB = recall2(XtrB2, ytrB2, sB.te.map((i) => D.X[i]), sB.te.map((i) => D.y[i]));
+      const recBreal = recall2(XtrB2, ytrB2, fresh.X, fresh.y);
+      const nSynTest = sA.te.filter((i) => i >= D.X.length).length;
+      const bars = [["A 先 SMOTE：自己的测试集", recA, "var(--warn)"], ["A 先 SMOTE：真实考场", recAreal, "var(--c6)"], ["B 先切分：自己的测试集", recB, "var(--c1)"], ["B 先切分：真实考场", recBreal, "var(--c3)"]];
+      K.svg(svg, "text", { x: 20, y: 26, "font-size": 13, "font-weight": 700 }, "少数类召回率（第三类被找出来的比例）");
+      bars.forEach(([k, val, c], i) => {
+        K.svg(svg, "text", { x: 220, y: 64 + i * 56, "text-anchor": "end", "font-size": 12 }, k);
+        K.svg(svg, "rect", { x: 230, y: 48 + i * 56, width: Math.max(2, 330 * val), height: 26, rx: 4, fill: c });
+        K.svg(svg, "text", { x: 236 + 330 * val, y: 66 + i * 56, "font-size": 12, class: "muted" }, (val * 100).toFixed(0) + "%");
+      });
+      K.svg(svg, "text", { x: 20, y: 300, "font-size": 12 }, `A 的测试集里混进了 ${nSynTest} 个合成样本，它们是训练样本之间的“插值”，几乎必然被认对`);
+      return { readout: [
+        { k: "A 测试集分数", v: (recA * 100).toFixed(0) + "%", color: "var(--warn)" },
+        { k: "A 在真实考场", v: (recAreal * 100).toFixed(0) + "%" },
+        { k: "A 的虚高", v: ((recA - recAreal) * 100).toFixed(0) + " 个百分点", color: recA - recAreal > 0.05 ? "var(--bad)" : null },
+        { k: "B 测试集 / 真实考场", v: (recB * 100).toFixed(0) + "% / " + (recBreal * 100).toFixed(0) + "%" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,739 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>石头剪刀布擂台</title>
+<meta name="description" content="Kaggle 案例拆解：17 个石头剪刀布智能体同台循环赛，从固定出拳、看对手上一手、统计频率、马尔可夫链，到多臂老虎机挑策略和决策树预测。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">问题</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">博弈环境 · 两人对战 · 猜对手的套路</div>
+  <h1>石头剪刀布擂台：17 个智能体谁能看穿对手</h1>
+  <p class="en">Rock Paper Scissors - Agents Comparison</p>
+  <div class="tags">
+    <span class="tag rl">强化学习</span><span class="tag ml">机器学习</span>
+    <span class="tag method">规则智能体</span><span class="tag method">纳什均衡</span><span class="tag method">频率统计</span>
+    <span class="tag method">马尔可夫链 / 转移矩阵</span><span class="tag method">多臂老虎机（Thompson 采样）</span><span class="tag method">决策树</span><span class="tag method">循环赛评估</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Yaroslav Isaienkov</b></span>
+    <span>Kaggle 点赞 <b>621</b>（2026-11 抓取）</span>
+    <span>比赛 <b>Rock, Paper, Scissors（Kaggle 模拟赛）</b></span>
+    <span><a href="https://www.kaggle.com/code/ihelon/rock-paper-scissors-agents-comparison" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">没有数据表，只有一个对战环境</div><p>两个程序连续玩 1000 次石头剪刀布，每一步只能看到“现在第几步”和“对手上一步出了什么”。<span data-cell="59">出处</span></p></div>
+    <div class="card panel"><h3>要决定什么</h3><div class="big">下一步出石头、布还是剪刀</div><p>没有标准答案。唯一的反馈是这一步赢了、平了还是输了，1000 步加起来比总分。</p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">17 种出拳“性格”</div><p>固定出拳、看对手上一手、统计对手最爱出什么、纯随机（纳什均衡）、马尔可夫链、记忆模式、多臂老虎机挑策略、决策树预测、几何法等。<span data-cell="67">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一张 17×17 的循环赛成绩表</div><p>每两个智能体打一局 1000 步，把得分画成热力图。<span data-cell="69">出处</span> 具体分数在运行输出里，源码不带，这里不列。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>问题长什么样</h2>
+  <p class="lead">这是一个强化学习 / 博弈问题：没有“训练集 + 标签”，只有一个会回应你的对手。下面的规则都来自 notebook 代码里实际出现的设置。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本设置</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">每局步数</div><div class="v">1000</div></div>
+        <div class="stat-tile"><div class="k">可选动作</div><div class="v">3 种</div></div>
+        <div class="stat-tile"><div class="k">参赛智能体</div><div class="v">17 个</div></div>
+        <div class="stat-tile"><div class="k">每步时限</div><div class="v">1 秒</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">每局 1000 步见 <span data-cell="59">第 59 格</span>；动作数 <code>signs: 3</code> 和每步时限 <code>actTimeout: 1</code> 见 <span data-cell="47">第 47 格</span>的注释；17 个参赛者见 <span data-cell="67">第 67 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">状态、动作、奖励</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>名字</th><th>白话含义</th><th>角色</th></tr>
+        <tr><td><code>observation.step</code></td><td>现在是第几步（从 0 开始）</td><td>状态</td></tr>
+        <tr><td><code>observation.lastOpponentAction</code></td><td>对手上一步出了什么，第 0 步没有</td><td>状态</td></tr>
+        <tr><td><code>configuration.signs</code></td><td>手势种类数，这里是 3</td><td>规则</td></tr>
+        <tr><td><code>return 0 / 1 / 2</code></td><td><b>要做的决定</b>：0 石头、1 布、2 剪刀</td><td>动作</td></tr>
+        <tr><td>每步结果</td><td>赢 +1、平 0、输 −1（第 35 格的 <code>get_step_result_for_my_agent</code> 就是这样算的）</td><td>奖励</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">智能体自己要记住历史：环境只告诉你对手<b>上一步</b>，想看更早的，得自己存。<span data-cell="17">出处</span></p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="38">
+    <h3>动手试试 A · 多臂老虎机怎么挑出克制对手的策略 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="41">
+    <h3>动手试试 B · 你来出拳，转移矩阵来猜你 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="69">
+    <h3>动手试试 C · 迷你循环赛：11 个智能体两两对打 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者 notebook 里写明的内容</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>每两个智能体只比 1 局、每局 1000 步，结果画成热力图</td><td><span data-cell="0">第 0 格</span> <span data-cell="68">第 68 格</span></td></tr>
+        <tr><td>纳什均衡策略就是“永远随机出”</td><td><span data-cell="28">第 28 格</span></td></tr>
+        <tr><td>Markov 智能体每 250 步清空一次统计表，500 步后改为按概率抽样，900 步后故意换打法“出其不意”</td><td><span data-cell="32">第 32 格</span>（代码注释）</td></tr>
+        <tr><td>多臂老虎机：子策略全加上会超过每步 1 秒的时限而被判无效，所以只挑了一部分</td><td><span data-cell="38">第 38 格</span>（代码注释）</td></tr>
+        <tr><td>最后一节可以写自己的智能体，和全部 17 个对手各打一局</td><td><span data-cell="71">第 71 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">循环赛的具体分数在热力图（运行输出）里。Kaggle 下载的源码不带输出，作者文字里也没写谁赢了多少，所以这里不列分数。动手试试 C 是浏览器里用简化版智能体重新打的，数字只代表模拟结果。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套思路能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>面对一个“会重复自己习惯”的对手，从它的历史动作里找规律，预测它下一步，再出克制它的动作。</li>
+        <li><b>同类问题：</b>游戏 AI、对抗性定价（猜竞争对手调价）、网络安全里猜攻击者下一步、体育战术分析（点球往哪边扑）。</li>
+        <li><b>可迁移的套路：</b>先写几个简单基线 → 写一个统一的对战评估器 → 循环赛比较 → 用“多臂老虎机”在多个策略之间动态切换。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>固定 / 循环出拳 <span data-cell="5">第 5 格</span></li>
+        <li>看对手上一手：模仿、克制、反克制 <span data-cell="17">第 17 格</span> <span data-cell="23">第 23 格</span></li>
+        <li>频率统计 <span data-cell="26">第 26 格</span>；纳什均衡 <span data-cell="29">第 29 格</span></li>
+        <li>马尔可夫链 / 转移矩阵 <span data-cell="32">第 32 格</span> <span data-cell="41">第 41 格</span></li>
+        <li>记忆模式匹配 <span data-cell="35">第 35 格</span></li>
+        <li>多臂老虎机（Beta 分布 Thompson 采样）<span data-cell="38">第 38 格</span></li>
+        <li>决策树在线学习 <span data-cell="44">第 44 格</span></li>
+        <li>kaggle_environments 对战与循环赛 <span data-cell="59">第 59 格</span> <span data-cell="68">第 68 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>“永远随机出”在理论上谁也打不败它，可它也赢不了谁。为什么比赛里几乎没人只交一个纯随机的智能体？</li>
+      <li>作者每对智能体只打 1 局。如果两个都带随机性，一局 1000 步的输赢能说明谁更强吗？你会怎么改？</li>
+      <li>第 60 格的说明写的是“invert_my_last_action vs copy_opponent_agent”，第 61 格实际跑的却是 statistical_prediction 对 hit_the_last_own_action。这类“说明和代码对不上”在看别人 notebook 时要怎么防？</li>
+      <li>Reactionary 智能体的判断条件是 <code>get_score(...) &lt;= 1</code>。如果得分只可能是 −1、0、1，这个条件什么时候不成立？这说明了什么？</li>
+      <li>多臂老虎机把 20 多个子策略当“老虎机”来选。它和“直接训练一个大模型预测对手”相比，好处和坏处各是什么？</li>
+      <li>如果你知道对手是本页的某个智能体，你会怎样专门设计一个克制它的智能体？对手也这么想时会发生什么？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Yaroslav Isaienkov（各智能体代码分别来自 notebook 里注明的 Kaggle 作者），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。比赛：Kaggle Rock, Paper, Scissors。
+</footer>
+</main>
+
+<script src="nb/rps-agents-arena.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 公共：手势、胜负 ---------- */
+  const SH = ["石", "布", "剪"], NM = ["石头", "布", "剪刀"], COL = ["var(--c1)", "var(--c3)", "var(--c6)"];
+  const beat = (a) => (a + 1) % 3;                 // 能赢 a 的手势：布赢石头、剪刀赢布、石头赢剪刀
+  const score = (a, b) => (a === b ? 0 : a === beat(b) ? 1 : -1);
+  const rint = (r) => Math.floor(r() * 3);
+  function hand(p, x, y, m, rad) {
+    rad = rad || 13;
+    const g = K.svg(p, "g");
+    K.svg(g, "circle", { cx: x, cy: y, r: rad, fill: COL[m] });
+    K.svg(g, "text", { x, y: y + rad * 0.36, "text-anchor": "middle", "font-size": rad * 0.95, "font-weight": 700, fill: "#fff" }, SH[m]);
+    return g;
+  }
+  function gammaS(k, r) {
+    if (k < 1) return gammaS(k + 1, r) * Math.pow(r(), 1 / k);
+    const d = k - 1 / 3, c = 1 / Math.sqrt(9 * d);
+    for (;;) {
+      let x, v; do { x = K.randn(r); v = 1 + c * x; } while (v <= 0);
+      v = v * v * v; const u = r();
+      if (u < 1 - 0.0331 * x * x * x * x || Math.log(u) < 0.5 * x * x + d * (1 - v + Math.log(v))) return d * v;
+    }
+  }
+  const betaS = (a, b, r) => { const x = gammaS(a, r), y = gammaS(b, r); return x / (x + y); };
+  const argmax = (a) => a.reduce((bi, v, i) => (v > a[bi] ? i : bi), 0);
+
+  /* ---------- 简化版智能体（照 notebook 各格的思路用 JS 重写） ---------- */
+  // 每个工厂返回 act(t, my, opp)：my/opp 是到上一步为止双方的出拳历史
+  function sampleRow(row, r) { const s = row[0] + row[1] + row[2]; let u = r() * s; for (let i = 0; i < 3; i++) { u -= row[i]; if (u < 0) return i; } return 2; }
+  function makeBandit(r) {
+    // 子策略（第 38 格的一部分）：镜像 0/1/2、自身 0/1/2、打败对手最常出的、反打败、转移矩阵（确定性）
+    const subs = [
+      ["mirror_0", (t, m, o) => o[t - 1]], ["mirror_1", (t, m, o) => (o[t - 1] + 1) % 3], ["mirror_2", (t, m, o) => (o[t - 1] + 2) % 3],
+      ["self_0", (t, m, o) => m[t - 1]], ["self_1", (t, m, o) => (m[t - 1] + 1) % 3], ["self_2", (t, m, o) => (m[t - 1] + 2) % 3],
+      ["popular_beater", (t, m, o, S) => beat(argmax(S.oc))], ["anti_popular", (t, m, o, S) => (argmax(S.mc) + 2) % 3],
+      ["trans_matrix", (t, m, o, S) => (t < 2 ? rint(r) : beat(argmax(S.T[o[t - 1]])))],
+    ];
+    const st = subs.map(() => [1, 1]), S = { oc: [0, 0, 0], mc: [0, 0, 0], T: [[.1, .1, .1], [.1, .1, .1], [.1, .1, .1]] };
+    let prev = null; const used = [];
+    const f = (t, m, o) => {
+      if (t > 0) {
+        const a = o[t - 1];
+        S.oc[a]++; S.mc[m[t - 1]]++; if (t > 1) S.T[o[t - 2]][a]++;
+        if (prev) subs.forEach((s, i) => {
+          st[i][0] = (st[i][0] - 1) / 1.05 + 1; st[i][1] = (st[i][1] - 1) / 1.05 + 1;
+          const d = (a - prev[i] + 3) % 3;          // 和第 38 格一样：1 = 子策略会输，2 = 会赢
+          if (d === 1) st[i][1] += 3; else if (d === 2) st[i][0] += 3; else { st[i][0] += 1.5; st[i][1] += 1.5; }
+        });
+      }
+      prev = subs.map((s) => (t === 0 ? rint(r) : s[1](t, m, o, S)));
+      let best = 0, bp = -1;
+      st.forEach((ab, i) => { const p = betaS(ab[0], ab[1], r); if (p > bp) { bp = p; best = i; } });
+      used.push(best);
+      return prev[best];
+    };
+    f.used = used; f.names = subs.map((s) => s[0]); f.state = st;
+    return f;
+  }
+  const AG = {
+    rock: ["一直出石头", () => () => 0],
+    paper: ["一直出布", () => () => 1],
+    scissors: ["一直出剪刀", () => () => 2],
+    hitown: ["赢自己上一手", () => { let l = 0; return () => (l = (l + 1) % 3); }],
+    copy: ["模仿对手", (r) => (t, m, o) => (t ? o[t - 1] : rint(r))],
+    react: ["克制对手上一手", (r) => (t, m, o) => (t ? beat(o[t - 1]) : rint(r))],
+    counter: ["反克制", (r) => { let l; return (t, m, o) => { if (!t) l = rint(r); else if (score(l, o[t - 1]) === 1) l = (l + 2) % 3; else l = beat(o[t - 1]); return l; }; }],
+    stat: ["频率统计", (r) => { const c = [0, 0, 0]; return (t, m, o) => { if (!t) return rint(r); c[o[t - 1]]++; return beat(argmax(c)); }; }],
+    nash: ["纳什（随机）", (r) => () => rint(r)],
+    trans: ["转移矩阵", (r) => { const T = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]; return (t, m, o) => { if (t > 1) T[o[t - 2]][o[t - 1]]++; if (t > 1 && T[o[t - 1]].some((x) => x)) return beat(sampleRow(T[o[t - 1]], r)); return rint(r); }; }],
+    bandit: ["多臂老虎机", (r) => makeBandit(r)],
+  };
+  function play(fa, fb, n) {
+    const ma = [], mb = []; let s = 0; const cum = [];
+    for (let t = 0; t < n; t++) {
+      const a = fa(t, ma, mb), b = fb(t, mb, ma);
+      ma.push(a); mb.push(b); s += score(a, b); cum.push(s);
+    }
+    return { s, cum, ma, mb };
+  }
+
+  const steps = [
+    {
+      title: "开场：规则与赛场", at: 0, kicker: "第 0–2 格 · 开场",
+      html: `<p>作者把 Kaggle 石头剪刀布比赛里流传的各种智能体收集到一起，一共 17 个，最后让它们<b>两两对打</b>，看谁克谁。<span data-cell="0">出处</span></p><p>规则大家都会：布包石头、剪刀剪布、石头砸剪刀。关键在于<b>要连续出 1000 次</b>：对手只要有一点习惯，就可能被看穿。</p>`,
+      draw(svg, ctx) {
+        const P = [[200, 70], [310, 260], [90, 260]];
+        P.forEach((p, i) => hand(svg, p[0], p[1], i, 32));
+        const arrows = [[0, 1], [1, 2], [2, 0]].map(([a, b]) => {
+          // 从被克制的指向克制它的：石头→布 表示“布赢石头”
+          const [x1, y1] = P[a], [x2, y2] = P[b], dx = x2 - x1, dy = y2 - y1, L = Math.hypot(dx, dy);
+          const g = K.arrow(svg, x1 + dx / L * 40, y1 + dy / L * 40, x2 - dx / L * 40, y2 - dy / L * 40, { color: "var(--ink-2)", sw: 2 });
+          g.style.opacity = 0; return g;
+        });
+        K.svg(svg, "text", { x: 200, y: 330, "text-anchor": "middle", "font-size": 12, class: "muted" }, "箭头指向赢家：布赢石头，剪刀赢布，石头赢剪刀");
+        K.svg(svg, "text", { x: 420, y: 60, "font-size": 15, "font-weight": 700 }, "一局 = 连续出拳 1000 次");
+        const cnt = K.svg(svg, "text", { x: 420, y: 100, "font-size": 30, "font-weight": 700, fill: "var(--accent)", "font-family": "var(--mono)" }, "第 0 步");
+        const row = K.svg(svg, "g");
+        const r = K.rng(4);
+        (async () => {
+          for (const a of arrows) if (!(await ctx.tween(350, (t) => (a.style.opacity = t)))) return;
+          for (let k = 0; k < 12; k++) {
+            hand(row, 432 + (k % 6) * 44, 150 + Math.floor(k / 6) * 40, rint(r), 15);
+            cnt.textContent = "第 " + (k + 1) + " 步";
+            if (!(await ctx.wait(160))) return;
+          }
+          await ctx.tween(1200, (t) => (cnt.textContent = "第 " + Math.round(12 + t * 988) + " 步"));
+        })();
+        K.svg(svg, "text", { x: 420, y: 260, "font-size": 13 }, "每步：赢 +1，平 0，输 −1");
+        K.svg(svg, "text", { x: 420, y: 284, "font-size": 13 }, "1000 步加起来比总分");
+      },
+    },
+    {
+      title: "最笨的选手：固定出拳", kicker: "第 3–14 格 · 规则智能体",
+      html: `<p>先来 4 个最简单的：永远出石头、永远出布、永远出剪刀，以及“出能赢自己上一手的”（石头→布→剪刀→石头……循环）。<span data-cell="5">第 5 格</span></p><p>它们完全不看对手，所以只要对手稍微留心，就会被吃干抹净。动画里“永远出布”遇上“永远出石头”，每一步都赢，分数一路直线往上涨。</p>`,
+      cells: [5, 8, 11, 14], highlight: ["return 0", "return 1", "return 2", "(my_last_action + 1) % 3"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 20, y: 36, "font-size": 13, "font-weight": 700 }, "永远出布");
+        K.svg(svg, "text", { x: 20, y: 86, "font-size": 13, "font-weight": 700 }, "永远出石头");
+        const ax = K.axes(svg, { x: 60, y: 140, w: 600, h: 160 }, [0, 1000], [-1000, 1000], { yticks: 2, xlabel: "步数", ylabel: "布的累计得分" });
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c3)", "stroke-width": 2.5 });
+        (async () => {
+          for (let k = 0; k < 14; k++) {
+            hand(svg, 120 + k * 40, 32, 1, 13); hand(svg, 120 + k * 40, 82, 0, 13);
+            if (!(await ctx.wait(90))) return;
+          }
+          await ctx.tween(1600, (t) => { const n = t * 1000; path.setAttribute("d", `M${ax.sx(0)},${ax.sy(0)}L${ax.sx(n)},${ax.sy(n)}`); });
+        })();
+      },
+    },
+    {
+      title: "盯着对手上一手", kicker: "第 15–23 格 · 规则智能体",
+      html: `<p>接下来三个会“看”对手了，但只看<b>上一步</b>：</p><ul class="tight"><li><b>模仿对手</b>：对手上一步出什么，我这步就出什么 <span data-cell="17">第 17 格</span></li><li><b>克制对手上一手</b>（Reactionary）：出能赢对手上一步的 <span data-cell="20">第 20 格</span></li><li><b>反克制</b>（Counter Reactionary）：上一步我赢了就换一招，没赢就出克制对手上一步的 <span data-cell="23">第 23 格</span></li></ul><p>它们的弱点是一样的：自己的出拳完全由对手上一步决定，换句话说，<b>它们本身也很好猜</b>。</p>`,
+      cells: [17, 20, 23], highlight: ["observation.lastOpponentAction", "(observation.lastOpponentAction + 1) % configuration.signs"],
+      draw(svg, ctx) {
+        const r = K.rng(8), opp = Array.from({ length: 9 }, () => rint(r));
+        K.svg(svg, "text", { x: 20, y: 70, "font-size": 13, "font-weight": 700 }, "对手");
+        K.svg(svg, "text", { x: 20, y: 170, "font-size": 13, "font-weight": 700 }, "克制对手");
+        K.svg(svg, "text", { x: 20, y: 186, "font-size": 12, class: "muted" }, "上一手");
+        K.svg(svg, "text", { x: 20, y: 300, "font-size": 12, class: "muted" }, "每一步只盯对手上一步：箭头从对手第 t 步指到我方第 t+1 步");
+        (async () => {
+          for (let k = 0; k < 9; k++) {
+            const x = 130 + k * 64;
+            hand(svg, x, 66, opp[k], 16);
+            if (k > 0) {
+              K.arrow(svg, x - 64 + 10, 82, x - 6, 148, { color: "var(--accent)" });
+              const me = beat(opp[k - 1]), g = hand(svg, x, 166, me, 16);
+              const res = score(me, opp[k]);
+              K.svg(svg, "text", { x, y: 210, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: res > 0 ? "var(--good)" : res < 0 ? "var(--bad)" : "var(--ink-3)" }, res > 0 ? "赢" : res < 0 ? "输" : "平");
+            }
+            if (!(await ctx.wait(420))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "数一数对手最爱出什么", kicker: "第 24–26 格 · 频率统计",
+      html: `<p>“Statistical”智能体给对手的每种出拳记账，然后永远出能赢<b>对手最常出的那一种</b>的手势。<span data-cell="26">第 26 格</span></p><p>对付“偏爱石头”的对手很有效；但对付循环出拳的对手，三种次数一样多，统计就失灵了。顺带一提：这个智能体在第 0 步直接 <code>return</code>，什么都没返回。</p>`,
+      cells: [26], highlight: ["action_histogram[action] += 1", "(mode_action + 1) % configuration.signs"],
+      draw(svg, ctx) {
+        const r = K.rng(12), cnt = [0, 0, 0];
+        const ax = K.axes(svg, { x: 80, y: 40, w: 300, h: 240 }, [0, 3], [0, 40], { xticks: 0, yticks: 4, ylabel: "对手出过的次数" });
+        const bars = [0, 1, 2].map((i) => { K.svg(svg, "text", { x: ax.sx(i + 0.5), y: 300, "text-anchor": "middle", "font-size": 13 }, NM[i]); return K.svg(svg, "rect", { x: ax.sx(i + 0.15), y: ax.sy(0), width: ax.sx(0.7) - ax.sx(0), height: 0, fill: COL[i], rx: 3 }); });
+        const lab = K.svg(svg, "text", { x: 430, y: 120, "font-size": 15, "font-weight": 700 }, "");
+        const lab2 = K.svg(svg, "text", { x: 430, y: 150, "font-size": 13, class: "muted" }, "对手偏爱石头（示意：50% 出石头）");
+        const big = K.svg(svg, "g");
+        (async () => {
+          for (let k = 0; k < 60; k++) {
+            const a = r() < 0.5 ? 0 : rint(r); cnt[a]++;
+            bars.forEach((b, i) => { b.setAttribute("y", ax.sy(cnt[i])); b.setAttribute("height", ax.sy(0) - ax.sy(cnt[i])); });
+            const m = argmax(cnt);
+            lab.textContent = `最多的是${NM[m]} → 我出${NM[beat(m)]}`;
+            big.innerHTML = ""; hand(big, 520, 220, beat(m), 34);
+            if (!(await ctx.wait(70))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "纳什均衡：干脆完全随机", kicker: "第 27–29 格 · 博弈论",
+      html: `<p>博弈论有个结论：在石头剪刀布里，如果三种手势各出 1/3、完全随机，<b>任何对手都占不到你的便宜</b>（长期期望得分是 0）。这个“谁单方面改策略都没好处”的状态叫<b>纳什均衡</b>。<span data-cell="28">第 28 格</span></p><p>代价是你也赢不了谁。动画里随机选手对上“永远出布”，分数只是在 0 附近随机晃动。</p>`,
+      cells: [29], highlight: ["random.randint(0, 2)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 620, h: 250 }, [0, 1000], [-100, 100], { yticks: 4, xlabel: "步数", ylabel: "随机选手的累计得分" });
+        K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(1000), y1: ax.sy(0), y2: ax.sy(0), stroke: "var(--ink-3)", "stroke-width": 1.5 });
+        const cols = ["var(--c1)", "var(--c2)", "var(--c4)"];
+        const paths = cols.map((c) => K.svg(svg, "path", { d: "", fill: "none", stroke: c, "stroke-width": 1.6, opacity: 0.85 }));
+        const runs = [1, 2, 3].map((sd) => { const r = K.rng(sd * 31), out = []; let s = 0; for (let t = 0; t < 1000; t++) { s += score(rint(r), 1); out.push(s); } return out; });
+        K.svg(svg, "text", { x: 70, y: 330, "font-size": 12, class: "muted" }, "三条线 = 三局模拟（对手永远出布）。都在 0 上下徘徊，没有谁能持续赢。");
+        ctx.tween(2200, (t) => {
+          const n = Math.max(2, Math.floor(t * 1000));
+          paths.forEach((p, k) => { let d = ""; for (let i = 0; i < n; i += 4) d += (d ? "L" : "M") + ax.sx(i) + "," + ax.sy(K.clamp(runs[k][i], -100, 100)); p.setAttribute("d", d); });
+        });
+      },
+    },
+    {
+      title: "马尔可夫链：根据最近几步猜下一步", kicker: "第 30–32 格 · 马尔可夫链",
+      html: `<p>Markov 智能体把“最近 k=2 轮双方出了什么”当成一个钥匙，记下每把钥匙之后对手出了什么，然后预测对手最可能出的那一种，出克制它的手势。<span data-cell="32">第 32 格</span></p><p>注释里还写了三招“反侦察”：每 250 步清空一次记录；500 步后不再总出最可能的，而是按概率抽；900 步后故意出“被克制的那一手”，想打对手个措手不及。</p>`,
+      cells: [32], highlight: ["refresh table every 250 steps", "table[key][observation.lastOpponentAction] += 1", "np.argmax(table[key])"],
+      draw(svg, ctx) {
+        const keys = ["石布石剪", "布布剪石", "剪石石石"], counts = [[1, 1, 1], [1, 1, 1], [1, 1, 1]];
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, class: "muted" }, "钥匙 = 最近两轮（对手, 我）的出拳；表格 = 这把钥匙之后对手出了什么（示意）");
+        const cells = keys.map((k, i) => {
+          K.svg(svg, "text", { x: 40, y: 92 + i * 70, "font-size": 15, "font-family": "var(--mono)" }, k);
+          return [0, 1, 2].map((j) => {
+            const x = 200 + j * 110, y = 64 + i * 70;
+            K.svg(svg, "rect", { x, y, width: 100, height: 46, rx: 6, fill: "var(--panel-2)", stroke: "var(--line)" });
+            return K.svg(svg, "text", { x: x + 50, y: y + 29, "text-anchor": "middle", "font-size": 16, "font-weight": 700 }, "1");
+          });
+        });
+        [0, 1, 2].forEach((j) => K.svg(svg, "text", { x: 250 + j * 110, y: 56, "text-anchor": "middle", "font-size": 12, fill: COL[j] }, "下一步出" + NM[j]));
+        const pred = K.svg(svg, "text", { x: 560, y: 120, "font-size": 14, "font-weight": 700 }, "");
+        const pg = K.svg(svg, "g");
+        const r = K.rng(5), bias = [0, 2, 1];
+        (async () => {
+          for (let s = 0; s < 36; s++) {
+            const i = s % 3, a = r() < 0.7 ? bias[i] : rint(r);
+            counts[i][a]++; cells[i][a].textContent = counts[i][a];
+            const m = argmax(counts[i]);
+            pred.textContent = `钥匙「${keys[i]}」`; pg.innerHTML = "";
+            K.svg(pg, "text", { x: 560, y: 146, "font-size": 13 }, `预测对手出${NM[m]}`);
+            hand(pg, 600, 200, beat(m), 26);
+            K.svg(pg, "text", { x: 600, y: 248, "text-anchor": "middle", "font-size": 12 }, "我出" + NM[beat(m)]);
+            if (!(await ctx.wait(140))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "记忆模式：在历史里找相同的片段", kicker: "第 33–35 格 · 模式匹配",
+      html: `<p>Memory Patterns 把最近 3 轮（双方共 6 个出拳）当成一个“片段”，在记忆里找之前出现过的相同片段，看那时对手接下来出了什么。<span data-cell="35">第 35 格</span></p><p>它还会每 80–120 步检查一次自己最近的战绩，如果比历史最好成绩的一半还差，就把记忆全部清空重来。这样对手换打法时，它不会被旧习惯拖累。</p>`,
+      cells: [35], highlight: ["find_pattern", "results_sum < (best_sum_of_results * 0.5)"],
+      draw(svg, ctx) {
+        const r = K.rng(21), seq = [];
+        const pat = [0, 1, 2, 2, 1, 0];
+        for (let i = 0; i < 26; i++) seq.push(rint(r));
+        [3, 15].forEach((p) => pat.forEach((v, j) => (seq[p + j] = v)));
+        seq[9] = 1; seq[21] = 1;
+        for (let j = 0; j < 6; j++) seq[20 + j] = pat[j];
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, class: "muted" }, "历史记录（双方交替：对手, 我, 对手, 我……，示意）");
+        seq.forEach((m, i) => hand(svg, 30 + i * 26, 80, m, 11));
+        const win = K.svg(svg, "rect", { x: 30 + 20 * 26 - 13, y: 64, width: 6 * 26, height: 32, rx: 6, fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 30 + 20 * 26 - 13, y: 120, "font-size": 12, fill: "var(--accent)" }, "最近 3 轮");
+        const scan = K.svg(svg, "rect", { x: 17, y: 64, width: 6 * 26, height: 32, rx: 6, fill: "none", stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "4 3" });
+        const note = K.svg(svg, "text", { x: 20, y: 190, "font-size": 15, "font-weight": 700 }, "");
+        const hits = K.svg(svg, "g");
+        (async () => {
+          for (let p = 0; p <= 14; p++) {
+            scan.setAttribute("x", 30 + p * 26 - 13);
+            const ok = pat.every((v, j) => seq[p + j] === v);
+            if (ok) {
+              K.svg(hits, "rect", { x: 30 + p * 26 - 13, y: 64, width: 6 * 26, height: 32, rx: 6, fill: "var(--warn)", "fill-opacity": 0.18 });
+              K.svg(hits, "text", { x: 30 + (p + 6) * 26, y: 145, "text-anchor": "middle", "font-size": 12, fill: "var(--warn)" }, "之后对手出" + NM[seq[p + 6]]);
+              K.arrow(hits, 30 + (p + 6) * 26, 132, 30 + (p + 6) * 26, 96, { color: "var(--warn)" });
+            }
+            if (!(await ctx.wait(ok ? 700 : 180))) return;
+          }
+          note.textContent = "两次都出现在“布”之前 → 预测对手下一步出布 → 我出剪刀";
+          hand(svg, 360, 260, 2, 30);
+        })();
+      },
+    },
+    {
+      title: "多臂老虎机：在一堆策略里挑当下最灵的", kicker: "第 36–38 格 · 强化学习",
+      html: `<p>这是全篇最有“强化学习味道”的一个。它手里有 20 多个子策略（镜像对手、重复自己、打败对手最爱、转移矩阵……），每个子策略看成一台<b>老虎机</b>。<span data-cell="38">第 38 格</span></p><p>每一步：</p><ul class="tight"><li>回头看上一步：如果当时用某个子策略，会赢还是输？赢了给它的 a 加 3，输了给 b 加 3，平局各加 1.5；所有旧记录按 1.05 衰减，越久远越不算数</li><li>对每台老虎机从 Beta(a, b) 分布里<b>抽一个随机数</b>，谁抽到的最大就用谁（这叫 Thompson 采样）</li></ul><p>赢得多的子策略分布会往右挪、变尖，越来越常被选中；但偶尔也会给别的策略机会，这就是“探索与利用”的平衡。</p>`,
+      cells: [38], highlight: ["np.random.beta", "bandit_state[name][0] += step_size", "decay_rate = 1.05"],
+      draw(svg, ctx) {
+        const arms = [["镜像对手+1", 0.62, "var(--c1)"], ["打败对手最爱", 0.48, "var(--c2)"], ["转移矩阵", 0.35, "var(--c4)"]];
+        const st = arms.map(() => [1, 1]);
+        const ax = K.axes(svg, { x: 50, y: 30, w: 420, h: 240 }, [0, 1], [0, 8], { yticks: 0, xlabel: "子策略“赢”的概率" });
+        const paths = arms.map((a) => K.svg(svg, "path", { d: "", fill: "none", stroke: a[2], "stroke-width": 2.5 }));
+        const dots = arms.map((a) => K.svg(svg, "circle", { cx: 0, cy: 0, r: 0, fill: a[2] }));
+        const lg = arms.map((a, i) => K.svg(svg, "text", { x: 500, y: 60 + i * 26, "font-size": 13, fill: a[2], "font-weight": 700 }, a[0]));
+        const cntT = K.svg(svg, "text", { x: 500, y: 170, "font-size": 13 }, "");
+        const pick = K.svg(svg, "text", { x: 500, y: 200, "font-size": 14, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 500, y: 300, "font-size": 12, class: "muted" }, "曲线 = Beta(a, b) 分布");
+        K.svg(svg, "text", { x: 500, y: 318, "font-size": 12, class: "muted" }, "圆点 = 这一步抽到的随机数");
+        function pdf(a, b) { // 数值归一化
+          const xs = [], ys = []; let tot = 0;
+          for (let i = 1; i < 100; i++) { const x = i / 100, y = Math.exp((a - 1) * Math.log(x) + (b - 1) * Math.log(1 - x)); xs.push(x); ys.push(y); tot += y / 100; }
+          return xs.map((x, i) => [x, ys[i] / tot]);
+        }
+        const r = K.rng(77), cnt = [0, 0, 0];
+        (async () => {
+          for (let s = 0; s < 60; s++) {
+            const smp = st.map((ab) => betaS(ab[0], ab[1], r));
+            const b = argmax(smp); cnt[b]++;
+            const win = r() < arms[b][1];
+            if (win) st[b][0] += 1; else st[b][1] += 1;
+            paths.forEach((p, i) => p.setAttribute("d", pdf(st[i][0], st[i][1]).map((q, k) => (k ? "L" : "M") + ax.sx(q[0]) + "," + ax.sy(Math.min(q[1], 8))).join("")));
+            dots.forEach((d, i) => { d.setAttribute("cx", ax.sx(smp[i])); d.setAttribute("cy", ax.sy(0) - 8 - i * 12); d.setAttribute("r", i === b ? 7 : 4); });
+            pick.textContent = `第 ${s + 1} 步选：${arms[b][0]}（${win ? "赢" : "没赢"}）`;
+            cntT.textContent = `被选次数 ${cnt.join(" / ")}`;
+            if (!(await ctx.wait(s < 10 ? 380 : 110))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "转移矩阵和决策树：把“猜对手”变成预测题", kicker: "第 39–44 格 · 统计与机器学习",
+      html: `<p><b>转移矩阵</b>智能体只记一张 3×3 的表：对手上一步出 X 之后，下一步出 Y 的次数。然后按这一行的比例随机抽一个预测，再出克制它的手势。<span data-cell="41">第 41 格</span></p><p><b>决策树</b>智能体则把它变成真正的机器学习问题：用最近几步的出拳、步数除以 2/3/5 的余数、长期出拳比例当特征，对手下一步出什么当标签，<b>边打边训练</b>一棵决策树来预测。<span data-cell="44">第 44 格</span></p>`,
+      cells: [41, 44], highlight: ["T[a2, a1] += 1", "DecisionTreeClassifier"],
+      draw(svg, ctx) {
+        const T = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "行 = 对手上一步，列 = 对手下一步（示意：对手爱按 石→布→剪 循环）");
+        const rect = [], txt = [];
+        for (let i = 0; i < 3; i++) {
+          K.svg(svg, "text", { x: 78, y: 92 + i * 70, "text-anchor": "end", "font-size": 13, fill: COL[i] }, NM[i]);
+          K.svg(svg, "text", { x: 130 + i * 90, y: 52, "text-anchor": "middle", "font-size": 13, fill: COL[i] }, NM[i]);
+          rect.push([]); txt.push([]);
+          for (let j = 0; j < 3; j++) {
+            rect[i].push(K.svg(svg, "rect", { x: 88 + j * 90, y: 62 + i * 70, width: 84, height: 62, rx: 6, fill: "var(--panel-2)", stroke: "var(--line)" }));
+            txt[i].push(K.svg(svg, "text", { x: 130 + j * 90, y: 99 + i * 70, "text-anchor": "middle", "font-size": 16, "font-weight": 700 }, "0"));
+          }
+        }
+        const r = K.rng(3);
+        let prev = 0;
+        (async () => {
+          for (let s = 0; s < 45; s++) {
+            const nx = r() < 0.75 ? (prev + 1) % 3 : rint(r);
+            T[prev][nx]++;
+            const mx = Math.max(...T.flat());
+            for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) { txt[i][j].textContent = T[i][j]; K.set(rect[i][j], { fill: K.heat(T[i][j] / mx) }); }
+            prev = nx;
+            if (!(await ctx.wait(80))) return;
+          }
+          K.node(svg, 420, 70, 270, 50, "对手上一步 = 布 → 看第 2 行", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+          K.node(svg, 420, 150, 270, 50, "这一行“剪刀”最多 → 猜对手出剪刀");
+          K.node(svg, 420, 230, 270, 50, "我出石头", { bold: true });
+          hand(svg, 650, 255, 0, 18);
+        })();
+      },
+    },
+    {
+      title: "高手们的组合拳：统计预测、RPS Dojo、几何法", kicker: "第 45–53 格 · 进阶智能体",
+      html: `<p>这三个来自比赛里排名靠前的公开方案，代码更长，思路都是“多个预测器 + 按最近战绩挑一个”：</p><ul class="tight"><li><b>Statistical Prediction</b>：统计对手“相对上一步转了几格”的规律，按频率加权随机猜 <span data-cell="47">第 47 格</span></li><li><b>High Performance RPS Dojo</b>：同时用 1–3 步历史做很多个哈希预测器，记每个预测器的得分，挑最好的 <span data-cell="50">第 50 格</span></li><li><b>Geometry</b>：把三种手势的概率放进一个三角形，当成复平面上的一个点来旋转、组合 <span data-cell="53">第 53 格</span></li></ul><p>动画演示几何法的核心想法：任意一组（石头、布、剪刀）概率都是三角形里的一个点，正中心就是纳什均衡的 (1/3, 1/3, 1/3)。</p>`,
+      cells: [47, 50, 53], highlight: ["basis = np.array", "probs_to_complex", "def get_score(S, A1, A2)"],
+      draw(svg, ctx) {
+        const C = [360, 185], R = 140;
+        const V = [0, 1, 2].map((i) => [C[0] + R * Math.cos(-Math.PI / 2 + i * 2 * Math.PI / 3), C[1] + R * Math.sin(-Math.PI / 2 + i * 2 * Math.PI / 3)]);
+        K.svg(svg, "path", { d: `M${V[0]}L${V[1]}L${V[2]}Z`, fill: "var(--panel-2)", stroke: "var(--ink-3)" });
+        V.forEach((v, i) => hand(svg, v[0] + (v[0] - C[0]) * 0.18, v[1] + (v[1] - C[1]) * 0.18, i, 16));
+        K.svg(svg, "circle", { cx: C[0], cy: C[1], r: 4, fill: "var(--ink-3)" });
+        K.svg(svg, "text", { x: C[0] + 8, y: C[1] + 18, "font-size": 11, class: "muted" }, "纳什 (⅓,⅓,⅓)");
+        const pt = K.svg(svg, "circle", { cx: C[0], cy: C[1], r: 9, fill: "var(--accent)" });
+        const lab = K.svg(svg, "text", { x: 560, y: 120, "font-size": 13, "font-family": "var(--mono)" }, "");
+        const lab2 = K.svg(svg, "text", { x: 560, y: 150, "font-size": 13 }, "");
+        K.svg(svg, "text", { x: 20, y: 330, "font-size": 12, class: "muted" }, "点越靠近哪个角，越倾向出那个手势；旋转 120° = 把整套预测“错开一格”，用来对付会反猜你的对手");
+        const path = [[0.6, 0.2, 0.2], [0.2, 0.6, 0.2], [0.2, 0.2, 0.6], [0.34, 0.33, 0.33], [0.7, 0.25, 0.05]];
+        const toXY = (p) => [p[0] * V[0][0] + p[1] * V[1][0] + p[2] * V[2][0], p[0] * V[0][1] + p[1] * V[1][1] + p[2] * V[2][1]];
+        (async () => {
+          let cur = [1 / 3, 1 / 3, 1 / 3];
+          for (const nx of path) {
+            const a = cur.slice();
+            if (!(await ctx.tween(900, (t) => {
+              const p = a.map((v, i) => K.lerp(v, nx[i], t)), xy = toXY(p);
+              pt.setAttribute("cx", xy[0]); pt.setAttribute("cy", xy[1]);
+              lab.textContent = `石 ${p[0].toFixed(2)} 布 ${p[1].toFixed(2)} 剪 ${p[2].toFixed(2)}`;
+              lab2.textContent = "最可能：" + NM[argmax(p)] + " → 出" + NM[beat(argmax(p))];
+            }))) return;
+            cur = nx;
+            if (!(await ctx.wait(400))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "搭擂台：kaggle_environments 让两个智能体对打", kicker: "第 54–65 格 · 评估环境",
+      html: `<p>前面每个智能体都用 <code>%%writefile</code> 存成了一个 .py 文件。现在作者用 Kaggle 官方的 <code>kaggle_environments</code> 建一个石头剪刀布环境，每局 1000 步 <span data-cell="59">第 59 格</span>，用 <code>env.run</code> 播放对局动画，用 <code>evaluate</code> 只拿最终得分 <span data-cell="64">第 64 格</span>。</p><p>注意：第 60 格的说明写的是“invert_my_last_action vs copy_opponent_agent”，但第 61 格实际跑的是 statistical_prediction 对 hit_the_last_own_action，说明文字没跟着代码改。</p>`,
+      cells: [59, 61, 64], highlight: ["make(", "\"episodeSteps\": 1000", "evaluate("],
+      draw(svg, ctx) {
+        const env = K.node(svg, 270, 120, 180, 90, "环境 rps\n裁判：记分、计步", { fill: "var(--accent-soft)", stroke: "var(--accent)", bold: true });
+        K.node(svg, 30, 125, 150, 80, "智能体 A\n(.py 文件)");
+        K.node(svg, 540, 125, 150, 80, "智能体 B\n(.py 文件)");
+        const msgs = [
+          K.svg(svg, "text", { x: 190, y: 112, "font-size": 12, fill: "var(--c1)" }, "观察：step、对手上一手"),
+          K.svg(svg, "text", { x: 190, y: 236, "font-size": 12, fill: "var(--c3)" }, "动作：0 / 1 / 2"),
+        ];
+        const ball1 = K.svg(svg, "circle", { cx: 270, cy: 150, r: 6, fill: "var(--c1)" }), ball2 = K.svg(svg, "circle", { cx: 180, cy: 185, r: 6, fill: "var(--c3)" });
+        const ball3 = K.svg(svg, "circle", { cx: 450, cy: 150, r: 6, fill: "var(--c1)" }), ball4 = K.svg(svg, "circle", { cx: 540, cy: 185, r: 6, fill: "var(--c3)" });
+        K.arrow(svg, 268, 150, 182, 150); K.arrow(svg, 182, 185, 268, 185); K.arrow(svg, 452, 150, 538, 150); K.arrow(svg, 538, 185, 452, 185);
+        const sc = K.svg(svg, "text", { x: 360, y: 290, "text-anchor": "middle", "font-size": 15, "font-weight": 700 }, "");
+        const r = K.rng(9); let s = 0, n = 0;
+        (async () => {
+          for (let k = 0; k < 40; k++) {
+            if (!(await ctx.tween(260, (t) => {
+              ball1.setAttribute("cx", K.lerp(270, 180, t)); ball3.setAttribute("cx", K.lerp(450, 540, t));
+              ball2.setAttribute("cx", K.lerp(180, 270, t)); ball4.setAttribute("cx", K.lerp(540, 450, t));
+            }))) return;
+            n++; s += score(rint(r), rint(r));
+            sc.textContent = `第 ${n} 步 · A 的累计得分 ${s}`;
+          }
+        })();
+        K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 12, class: "muted" }, "evaluate() 不播动画，直接返回一局结束时双方的得分");
+      },
+    },
+    {
+      title: "循环赛：17 个智能体两两过招", kicker: "第 66–69 格 · 评估",
+      html: `<p>把 17 个智能体排成一张表，每一对 (i, j) 打一局 1000 步，把 i 的得分填进第 i 行第 j 列，j 的得分填进第 j 行第 i 列，最后画成热力图。<span data-cell="68">第 68 格</span></p><p>17 个选手要打 17×16/2 = 136 局。作者每对只打 1 局，对带随机性的智能体来说，结果会有一定的运气成分。另外第 67 格的 <code>np.int</code> 在新版 NumPy 里已被删除，现在直接运行会报错，要改成 <code>int</code>。</p>`,
+      cells: [67, 68, 69], highlight: ["np.int", "evaluate(", "sns.heatmap"],
+      draw(svg, ctx) {
+        const n = 11, sz = 24, x0 = 200, y0 = 30;
+        K.svg(svg, "text", { x: 20, y: 40, "font-size": 13, class: "muted" }, "逐格填表（示意，");
+        K.svg(svg, "text", { x: 20, y: 58, "font-size": 13, class: "muted" }, "颜色是随机示意，");
+        K.svg(svg, "text", { x: 20, y: 76, "font-size": 13, class: "muted" }, "真结果见实验 C）");
+        const r = K.rng(2), cells = [];
+        for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+          const c = K.svg(svg, "rect", { x: x0 + j * sz, y: y0 + i * sz, width: sz - 2, height: sz - 2, rx: 2, fill: i === j ? "var(--line)" : "var(--panel-2)" });
+          cells.push({ i, j, c });
+        }
+        const lab = K.svg(svg, "text", { x: 500, y: 300, "font-size": 13, "font-family": "var(--mono)" }, "");
+        (async () => {
+          let k = 0;
+          for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+            const v = (r() - 0.5) * 2;
+            K.set(cells[i * n + j].c, { fill: K.heat(v, true) }); K.set(cells[j * n + i].c, { fill: K.heat(-v, true) });
+            lab.textContent = `已比 ${++k} / ${n * (n - 1) / 2} 局`;
+            if (!(await ctx.wait(40))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "轮到你：写一个自己的智能体", kicker: "第 70–78 格 · 动手",
+      html: `<p>最后作者留了一个模板：把你的智能体写进 <code>your_agent.py</code>，它会和前面 17 个对手各打一局，结果画成一列热力图（色标固定在 −500 到 500）。<span data-cell="76">第 76 格</span></p><p>模板里的示例智能体是“永远出石头”。动画是在浏览器里真打出来的：它对上本页的简化版对手：克制上一手、频率统计、转移矩阵、多臂老虎机很快就学会出布，石头被打得很惨；模仿对手、随机这类选手只能和它打平。</p>`,
+      cells: [72, 76], highlight: ["return 0", "\"your_agent.py\""],
+      draw(svg, ctx) {
+        const keys = ["paper", "scissors", "hitown", "copy", "react", "stat", "nash", "trans", "bandit"];
+        const res = keys.map((k, i) => ({ k, v: play(AG.rock[1](K.rng(1)), AG[k][1](K.rng(50 + i)), 1000).s }));
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 13, class: "muted" }, "“永远出石头”对各个简化对手的 1000 步得分（浏览器内模拟）");
+        const ax = K.axes(svg, { x: 140, y: 40, w: 520, h: 270 }, [-1000, 1000], [0, keys.length], { xticks: 4, yticks: 0 });
+        K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(0), y1: 40, y2: 310, stroke: "var(--ink-3)" });
+        const bars = res.map((d, i) => {
+          K.svg(svg, "text", { x: 132, y: 40 + i * 30 + 19, "text-anchor": "end", "font-size": 12 }, AG[d.k][0]);
+          return { d, rect: K.svg(svg, "rect", { x: ax.sx(0), y: 40 + i * 30 + 5, width: 0, height: 20, rx: 3, fill: d.v >= 0 ? "var(--good)" : "var(--bad)" }), t: K.svg(svg, "text", { x: 0, y: 40 + i * 30 + 19, "font-size": 11 }, "") };
+        });
+        ctx.tween(1500, (t) => bars.forEach((b) => {
+          const v = b.d.v * t, x1 = ax.sx(Math.min(0, v)), x2 = ax.sx(Math.max(0, v));
+          b.rect.setAttribute("x", x1); b.rect.setAttribute("width", x2 - x1);
+          b.t.setAttribute("x", v >= 0 ? x2 + 4 : x1 - 4); K.set(b.t, { "text-anchor": v >= 0 ? "start" : "end" }); b.t.textContent = Math.round(v);
+        }));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+  if (/[?&]fold/.test(location.search)) document.querySelectorAll(".ch-cells > .cell, .cell-note").forEach((e) => (e.style.display = "none"));  // 自查截图用：只隐藏代码格，保留实验
+
+  /* ---------- 实验 A：老虎机选子策略 ---------- */
+  const OPP = {
+    rock: ["一直出石头", () => () => 0],
+    cycle: ["按 石→布→剪 循环", () => (t) => t % 3],
+    copy: ["模仿你上一手", (r) => (t, m, o) => (t ? o[t - 1] : rint(r))],
+    bias: ["随机，但 50% 偏爱石头", (r) => () => (r() < 0.5 ? 0 : rint(r))],
+    nash: ["完全随机（纳什）", (r) => () => rint(r)],
+    switch: ["前 500 步一直出布，后 500 步循环", () => (t) => (t < 500 ? 1 : t % 3)],
+  };
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "opp", label: "对手是谁", value: "cycle", options: Object.keys(OPP).map((k) => [k, OPP[k][0]]) },
+      { id: "seed", label: "再打一局", button: true },
+    ],
+    note: "我方是简化版多臂老虎机：9 个子策略各是一台老虎机，Beta 分布 Thompson 采样挑选，记录按 1.05 衰减（和第 38 格相同的更新规则）。下方色带是每一步选中的子策略。",
+    render(svg, v) {
+      const r = K.rng(1000 + v.seed * 7), me = makeBandit(r), op = OPP[v.opp][1](K.rng(2000 + v.seed));
+      const g = play(me, op, 1000);
+      const ax = K.axes(svg, { x: 56, y: 16, w: 560, h: 210 }, [0, 1000], [-200, 1000], { yticks: 4, xlabel: "步数", ylabel: "我方累计得分" });
+      K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(1000), y1: ax.sy(0), y2: ax.sy(0), stroke: "var(--ink-3)" });
+      let d = ""; g.cum.forEach((c, i) => { if (i % 3 === 0) d += (d ? "L" : "M") + ax.sx(i) + "," + ax.sy(K.clamp(c, -200, 1000)); });
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--accent)", "stroke-width": 2.2 });
+      const pal = ["var(--c1)", "var(--c1)", "var(--c1)", "var(--c2)", "var(--c2)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c6)"];
+      const op2 = [1, 0.65, 0.35, 1, 0.65, 0.35, 1, 1, 1];
+      const cnt = new Array(9).fill(0);
+      me.used.forEach((u, i) => { cnt[u]++; if (i % 2 === 0) K.svg(svg, "rect", { x: ax.sx(i), y: 268, width: ax.sx(2) - ax.sx(0) + 0.3, height: 22, fill: pal[u], opacity: op2[u] }); });
+      K.svg(svg, "text", { x: 56, y: 262, "font-size": 11, class: "muted" }, "每一步选中的子策略：");
+      const leg = [["镜像对手", "var(--c1)"], ["重复自己", "var(--c2)"], ["打败对手最爱", "var(--c3)"], ["反打败", "var(--c4)"], ["转移矩阵", "var(--c6)"]];
+      leg.forEach((l, i) => { K.svg(svg, "rect", { x: 56 + i * 116, y: 304, width: 12, height: 12, fill: l[1] }); K.svg(svg, "text", { x: 72 + i * 116, y: 314, "font-size": 11 }, l[0]); });
+      K.svg(svg, "text", { x: 56, y: 340, "font-size": 11, class: "muted" }, "同一颜色深浅 = 偏移 0 / +1 / +2");
+      let w = 0, l = 0; g.ma.forEach((a, i) => { const s = score(a, g.mb[i]); if (s > 0) w++; else if (s < 0) l++; });
+      const top = argmax(cnt);
+      return { readout: [
+        { k: "1000 步总分", v: String(g.s), color: g.s > 0 ? "var(--good)" : "var(--bad)" },
+        { k: "赢 / 平 / 输", v: `${w} / ${1000 - w - l} / ${l}` },
+        { k: "最常用的子策略", v: me.names[top] },
+        { k: "它被选中的比例", v: ((cnt[top] / 10)).toFixed(0) + "%" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：你来出拳 ---------- */
+  let gameMe = [], gameAi = [], lastC = [0, 0, 0, 0], aiT = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], aiR = K.rng(99), aiPred = null;
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "b0", label: "出石头", button: true },
+      { id: "b1", label: "出布", button: true },
+      { id: "b2", label: "出剪刀", button: true },
+      { id: "reset", label: "重新开始", button: true },
+    ],
+    note: "电脑用的是第 41 格的“对手转移矩阵”：记下你出 X 之后下一手出 Y 的次数，按比例猜你下一手，再出克制它的。试着先有规律地出（比如一直按 石→布→剪 循环），再试着尽量乱出。",
+    render(svg, v) {
+      const now = [v.b0, v.b1, v.b2, v.reset];
+      if (now[3] !== lastC[3]) { gameMe = []; gameAi = []; aiT = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]; }
+      else for (let k = 0; k < 3; k++) if (now[k] !== lastC[k]) {
+        const t = gameMe.length;
+        // 电脑先决定（只看你过去的出拳），再和你这一手比
+        let ai;
+        if (t > 0 && aiT[gameMe[t - 1]].some((x) => x)) { aiPred = sampleRow(aiT[gameMe[t - 1]], aiR); ai = beat(aiPred); } else { aiPred = null; ai = rint(aiR); }
+        if (t > 0) aiT[gameMe[t - 1]][k]++;
+        gameMe.push(k); gameAi.push(ai);
+      }
+      lastC = now;
+      const n = gameMe.length;
+      let w = 0, l = 0; for (let i = 0; i < n; i++) { const s = score(gameMe[i], gameAi[i]); if (s > 0) w++; else if (s < 0) l++; }
+      K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, "font-weight": 700 }, "你");
+      K.svg(svg, "text", { x: 20, y: 80, "font-size": 13, "font-weight": 700 }, "电脑");
+      const from = Math.max(0, n - 18);
+      for (let i = from; i < n; i++) {
+        const x = 80 + (i - from) * 31;
+        hand(svg, x, 26, gameMe[i], 12); hand(svg, x, 76, gameAi[i], 12);
+        const s = score(gameMe[i], gameAi[i]);
+        K.svg(svg, "text", { x, y: 108, "text-anchor": "middle", "font-size": 11, fill: s > 0 ? "var(--good)" : s < 0 ? "var(--bad)" : "var(--ink-3)" }, s > 0 ? "赢" : s < 0 ? "输" : "平");
+      }
+      if (!n) K.svg(svg, "text", { x: 80, y: 60, "font-size": 14, class: "muted" }, "点左边的按钮开始出拳");
+      K.svg(svg, "text", { x: 20, y: 138, "font-size": 12, class: "muted" }, "电脑记的表：你出完（行）之后，下一手出了（列）多少次");
+      for (let i = 0; i < 3; i++) {
+        K.svg(svg, "text", { x: 70, y: 186 + i * 36, "text-anchor": "end", "font-size": 12, fill: COL[i] }, NM[i]);
+        const mx = Math.max(1, ...aiT[i]);
+        for (let j = 0; j < 3; j++) {
+          K.svg(svg, "rect", { x: 80 + j * 70, y: 166 + i * 36, width: 64, height: 30, rx: 4, fill: K.heat(aiT[i][j] / mx), stroke: n && gameMe[n - 1] === i ? "var(--accent)" : "var(--line)" });
+          K.svg(svg, "text", { x: 112 + j * 70, y: 186 + i * 36, "text-anchor": "middle", "font-size": 13 }, aiT[i][j]);
+        }
+      }
+      [0, 1, 2].forEach((j) => K.svg(svg, "text", { x: 112 + j * 70, y: 160, "text-anchor": "middle", "font-size": 11, fill: COL[j] }, NM[j]));
+      K.svg(svg, "text", { x: 330, y: 190, "font-size": 13 }, n ? (aiPred == null ? "电脑上一手：还没数据，随机出" : `电脑上一手猜你出${NM[aiPred]}，所以出${NM[beat(aiPred)]}`) : "");
+      K.svg(svg, "text", { x: 330, y: 220, "font-size": 12, class: "muted" }, "蓝框那一行 = 电脑下一手要查的行");
+      return { readout: [
+        { k: "已出", v: n + " 手" },
+        { k: "你 赢 / 平 / 输", v: `${w} / ${n - w - l} / ${l}` },
+        { k: "你的净胜", v: String(w - l), color: w - l >= 0 ? "var(--good)" : "var(--bad)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：迷你循环赛 ---------- */
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 560,
+    controls: [
+      { id: "steps", label: "每局步数", min: 100, max: 1000, step: 100, value: 1000 },
+      { id: "rounds", label: "每对打几局取平均", min: 1, max: 5, step: 1, value: 1 },
+      { id: "seed", label: "换随机种子重打", button: true },
+    ],
+    note: "11 个智能体是照 notebook 思路写的简化版（不是原代码）。格子里是“行”对“列”的得分（赢 +1、输 −1 的累计），橙色 = 行方赢，蓝色 = 行方输。作者每对只打 1 局；把“每对打几局”调大、再换种子，看哪些格子会变色。",
+    render(svg, v) {
+      const keys = Object.keys(AG), n = keys.length, M = keys.map(() => new Array(n).fill(0));
+      for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+        let s = 0;
+        for (let k = 0; k < v.rounds; k++) {
+          const sd = 1 + v.seed * 997 + i * 31 + j * 7 + k * 131;
+          s += play(AG[keys[i]][1](K.rng(sd)), AG[keys[j]][1](K.rng(sd + 1)), v.steps).s;
+        }
+        M[i][j] = s / v.rounds; M[j][i] = -s / v.rounds;
+      }
+      const x0 = 130, y0 = 10, sz = 41;
+      keys.forEach((k, i) => {
+        K.svg(svg, "text", { x: x0 - 6, y: y0 + i * sz + 25, "text-anchor": "end", "font-size": 11 }, AG[k][0]);
+        const tx = x0 + i * sz + 22, ty = y0 + n * sz + 8;
+        K.svg(svg, "text", { x: tx, y: ty, "text-anchor": "end", "font-size": 10, transform: `rotate(-50 ${tx} ${ty})` }, AG[k][0]);
+        for (let j = 0; j < n; j++) {
+          const val = M[i][j];
+          K.svg(svg, "rect", { x: x0 + j * sz, y: y0 + i * sz, width: sz - 2, height: sz - 2, rx: 2, fill: i === j ? "var(--line)" : K.heat(val / v.steps * 2, true) });
+          if (i !== j) K.svg(svg, "text", { x: x0 + j * sz + sz / 2 - 1, y: y0 + i * sz + 25, "text-anchor": "middle", "font-size": 10 }, Math.round(val));
+        }
+      });
+      const tot = M.map((row) => row.reduce((a, b) => a + b, 0));
+      const order = keys.map((k, i) => i).sort((a, b) => tot[b] - tot[a]);
+      return { readout: [
+        { k: "总分第一", v: AG[keys[order[0]]][0], color: "var(--good)" },
+        { k: "总分第二", v: AG[keys[order[1]]][0] },
+        { k: "总分垫底", v: AG[keys[order[n - 1]]][0], color: "var(--bad)" },
+        { k: "纳什（随机）总分", v: String(Math.round(tot[keys.indexOf("nash")])) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

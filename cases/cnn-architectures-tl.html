@@ -1,0 +1,701 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>经典 CNN 与迁移学习</title>
+<meta name="description" content="Kaggle 案例拆解：VGG、Inception、ResNet、Xception 四代经典卷积网络的核心设计，以及用预训练网络提取特征、20 张图训练小分类器的迁移学习做法。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">自然图像 · 预训练模型 · 迁移学习</div>
+  <h1>经典 CNN 架构巡礼：从 VGG 到 ResNet，再用 20 张图做迁移学习</h1>
+  <p class="en">CNN Architectures : VGG, ResNet, Inception + TL</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span><span class="tag dl">深度学习</span>
+    <span class="tag method">VGG16 / VGG19</span><span class="tag method">Inception</span><span class="tag method">ResNet 跳连</span><span class="tag method">Xception 深度可分离卷积</span>
+    <span class="tag method">ImageNet 预训练</span><span class="tag method">特征提取</span><span class="tag method">VarianceThreshold + MLP</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Shivam Bansal</b></span>
+    <span>Kaggle 点赞 <b>2,677</b>（2026-11 抓取）</span>
+    <span>数据集 <b>dogs-vs-cats、flowers-recognition、fruits-360 等示例图 + Keras 预训练权重</b></span>
+    <span><a href="https://www.kaggle.com/code/shivamb/cnn-architectures-vgg-resnet-inception-tl" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">几张示例图 + ImageNet 预训练权重</div><p>预训练权重来自 ImageNet（约 1400 万张标注图、2.2 万类，比赛版用 1000 类）。<span data-cell="0">出处</span> 演示用猫、狗、向日葵、香蕉 4 张图；迁移学习部分用 fruits-360 里香蕉、草莓各 10 张。<span data-cell="21">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">① 图里是 1000 类中的哪一类 ② 香蕉还是草莓</div><p>前半部分直接用预训练网络做 ImageNet 1000 类预测（取前 3 名）；后半部分把网络当“特征提取器”，训练一个新的二分类器。</p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">四代经典架构 + 特征提取式迁移学习</div><p>VGG（堆叠 3×3 卷积）、Inception（多尺寸并联 + 1×1 降维）、ResNet（跳连）、Xception（深度可分离卷积）；然后 ResNet50 去掉顶层提特征，接 sklearn 的方差筛选 + 多层感知机。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">20 张训练图，2 张测试图都分对</div><p>作者写道：只用 20 行训练数据的简单神经网络，就正确分类了测试集里的两张图。<span data-cell="32">出处</span> 这是演示，不是严格评估（见第 04、05 节）。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">这份 notebook 没有一个统一的“数据集”，而是用到两类东西：一是 Keras 提供的、在 ImageNet 上训练好的模型权重；二是从三个公开 Kaggle 数据集里挑出的少量示例图片。下表的数字都来自作者的文字和代码。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">ImageNet 标注图片</div><div class="v">约 1400 万</div></div>
+        <div class="stat-tile"><div class="k">ImageNet 类别 / 比赛用类别</div><div class="v">2.2 万+ / 1000</div></div>
+        <div class="stat-tile"><div class="k">预测演示图片</div><div class="v">4 张</div></div>
+        <div class="stat-tile"><div class="k">迁移学习：训练 / 测试</div><div class="v">20 / 2 张</div></div>
+        <div class="stat-tile"><div class="k">输入尺寸</div><div class="v">224×224</div></div>
+        <div class="stat-tile"><div class="k">ResNet50 特征（推算）</div><div class="v">7×7×2048</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">ImageNet 规模见 <span data-cell="0">第 0 格</span>；4 张演示图和 224×224 见 <span data-cell="3">第 3 格</span>；香蕉、草莓各 10 张训练、各 1 张测试见 <span data-cell="21">第 21 格</span>。7×7×2048 是按 ResNet50 去掉顶层后的结构推算的，作者打印的形状在运行输出里。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">用到了哪些图片和权重</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>来源</th><th>用途</th><th>出处</th></tr>
+        <tr><td><code>dogs-vs-cats-redux</code>：1 张猫、1 张狗</td><td>让预训练模型做 1000 类预测；狗图还用来演示提特征</td><td><span data-cell="3">第 3 格</span></td></tr>
+        <tr><td><code>flowers-recognition</code>：1 张向日葵</td><td>预测演示</td><td><span data-cell="3">第 3 格</span></td></tr>
+        <tr><td><code>fruits-360</code>：香蕉、草莓</td><td>1 张香蕉做预测演示；<b>各 10 张训练、各 1 张测试</b>，标签“banana / strawberry”是要预测的答案</td><td><span data-cell="21">第 21 格</span></td></tr>
+        <tr><td>VGG16、VGG19、InceptionV3、ResNet50、Xception 权重</td><td>ImageNet 上预训练好的参数（Keras 格式 .h5 文件）</td><td><span data-cell="5">第 5 格</span> <span data-cell="13">第 13 格</span></td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="13">
+    <h3>动手试试 A · 参数量计算器：普通卷积、深度可分离卷积、1×1 降维、3×3 堆叠 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="29">
+    <h3>动手试试 B · 样本很少时，好的特征比好的分类器更重要 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>ImageNet 约 1400 万张手工标注图、2.2 万多类；年度比赛用 1000 类的子集，许多冠军方案是 CNN</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>VGG16：13 个卷积层 + 3 个全连接层（4096、4096、1000），结构简单，但训练慢、模型大</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>VGG 用步长 1 的 3×3 卷积堆叠，有效感受野相当于 7×7，参数更少</td><td><span data-cell="6">第 6 格</span></td></tr>
+        <tr><td>InceptionNet（GoogLeNet）共 22 层，是 2014 年 ImageNet 冠军；1×1 卷积用来降维</td><td><span data-cell="8">第 8 格</span></td></tr>
+        <tr><td>残差块让“恒等映射”很容易学到，加层不会损害性能；作者提到可构建 152 层的网络</td><td><span data-cell="10">第 10 格</span></td></tr>
+        <tr><td>Xception 用深度可分离卷积替换 Inception 模块</td><td><span data-cell="12">第 12 格</span></td></tr>
+        <tr><td>只用 20 行训练数据的简单神经网络，正确分类了 2 张测试图</td><td><span data-cell="32">第 32 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">原 notebook 没有任何准确率指标：预训练模型的 top-3 预测画在运行输出的条形图里，迁移学习部分只预测了 2 张测试图。Kaggle 下载的源码不带输出，所以这里不列任何概率或分数。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>不训练也能用预训练模型识别 1000 类常见物体；只有几十张自己的图时，用“冻结主干提特征 + 小分类器”快速做出一个可用的分类器。</li>
+        <li><b>同类问题：</b>工厂里新零件的分类、小众农产品分级、以图搜图（用特征向量算相似度）、医学影像的小样本研究、给图片聚类去重。</li>
+        <li><b>可迁移的套路：</b>选一个 ImageNet 预训练网络 → <code>include_top=False</code> 去掉原分类层 → 用它的 <code>preprocess_input</code> 处理图片 → 提特征（最好再做全局池化或 PCA 降维）→ 训练逻辑回归 / MLP / SVM → 用足够多的测试图评估。数据多了再考虑解冻部分层做微调。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>手写 VGG16（Keras 函数式 API） <span data-cell="1">第 1 格</span></li>
+        <li>预训练模型预测 top-3：VGG16 <span data-cell="5">第 5 格</span>、VGG19 <span data-cell="7">第 7 格</span>、InceptionV3 <span data-cell="9">第 9 格</span>、ResNet50 <span data-cell="11">第 11 格</span></li>
+        <li>特征提取：<code>ResNet50(weights='imagenet', include_top=False)</code> <span data-cell="15">第 15 格</span> <span data-cell="17">第 17 格</span></li>
+        <li>迁移学习数据：香蕉、草莓各 10 张 + 2 张测试 <span data-cell="21">第 21 格</span></li>
+        <li>分类器：<code>Pipeline(VarianceThreshold, MLPClassifier(100, 10))</code> <span data-cell="29">第 29 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>只用 20 张训练图、2 张测试图“全对”，能说明这个迁移学习方案有多好吗？你会怎样设计一个更可信的评估（测试集多大、怎么划分、看什么指标）？</li>
+      <li>ResNet50 去掉顶层后，展平的特征有 7×7×2048 = 100,352 维，而训练样本只有 20 个。为什么这时还能分对？作者用 <code>VarianceThreshold</code> 想解决什么？用全局平均池化或 PCA 会不会更好？</li>
+      <li>作者手写的 VGG16 输入是 <code>Input((224,224,1))</code>（单通道），而预训练权重是在 RGB 三通道上学到的。这两者能直接对接吗？</li>
+      <li>代码里所有模型都用了 <code>vgg16.preprocess_input</code>。InceptionV3、Xception 的官方预处理是把像素缩放到 [−1, 1]，用错预处理会有什么后果？</li>
+      <li>两个 3×3 卷积和一个 5×5 卷积感受野一样大，前者参数更少、还多一次非线性。它的代价是什么？（结合实验 A）</li>
+      <li>香蕉和草莓颜色差别极大。如果换成“哈士奇 vs 阿拉斯加”，冻结的预训练特征还够用吗？什么时候需要解冻部分层做微调？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Shivam Bansal，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的图片和数据均为代码生成的模拟示意。预训练权重来自 Keras Applications（ImageNet）。
+</footer>
+</main>
+
+<script src="nb/cnn-architectures-tl.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* ===== 页面专用：像素图工具（用代码生成小图并在浏览器里真算卷积、池化、仿射变换） ===== */
+  const PX = (function () {
+    function rgbOf(name, fb) {
+      let s = (K.css(name) || fb || "#888888").trim();
+      if (s[0] !== "#") return [128, 128, 128];
+      if (s.length === 4) s = "#" + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+      return [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
+    }
+    function grid(W, H, f) { const a = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) a[y * W + x] = f(x, y); return { W, H, a }; }
+    function at(m, x, y) { return m.a[y * m.W + x]; }
+    function atClamp(m, x, y) { x = x < 0 ? 0 : x >= m.W ? m.W - 1 : x; y = y < 0 ? 0 : y >= m.H ? m.H - 1 : y; return m.a[y * m.W + x]; }
+    function atZero(m, x, y) { return x < 0 || y < 0 || x >= m.W || y >= m.H ? 0 : m.a[y * m.W + x]; }
+    /* Keras padding='same'：边界外按 0 补 */
+    function conv(m, k) { const n = k.length, r = (n - 1) / 2; return grid(m.W, m.H, (x, y) => { let s = 0; for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) s += k[j][i] * atZero(m, x + i - r, y + j - r); return s; }); }
+    function map(m, f) { const o = { W: m.W, H: m.H, a: new Float32Array(m.a.length) }; for (let i = 0; i < m.a.length; i++) o.a[i] = f(m.a[i], i); return o; }
+    const relu = (m) => map(m, (v) => (v > 0 ? v : 0));
+    function pool(m, s) { s = s || 2; const W = Math.ceil(m.W / s), H = Math.ceil(m.H / s); return grid(W, H, (x, y) => { let b = -Infinity; for (let j = 0; j < s; j++) for (let i = 0; i < s; i++) { const xx = x * s + i, yy = y * s + j; if (xx < m.W && yy < m.H) b = Math.max(b, at(m, xx, yy)); } return b; }); }
+    function range(m) { let lo = Infinity, hi = -Infinity; for (const v of m.a) { if (v < lo) lo = v; if (v > hi) hi = v; } return [lo, hi]; }
+    function bilinear(m, x, y) {
+      const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+      return (atClamp(m, x0, y0) * (1 - fx) + atClamp(m, x0 + 1, y0) * fx) * (1 - fy) + (atClamp(m, x0, y0 + 1) * (1 - fx) + atClamp(m, x0 + 1, y0 + 1) * fx) * fy;
+    }
+    /* 类似 Keras ImageDataGenerator：绕中心旋转/剪切/缩放/平移/翻转，边界外用最近像素填充（fill_mode='nearest'） */
+    function affine(m, p) {
+      const th = ((p.rot || 0) * Math.PI) / 180, c = Math.cos(th), s = Math.sin(th), sh = p.shear || 0, z = p.zoom || 1;
+      const cx = (m.W - 1) / 2, cy = (m.H - 1) / 2, tx = (p.tx || 0) * m.W, ty = (p.ty || 0) * m.H;
+      return grid(m.W, m.H, (x, y) => {
+        let u = x - cx - tx, v = y - cy - ty;
+        if (p.flip) u = -u;
+        if (p.vflip) v = -v;
+        let a = c * u + s * v, b = -s * u + c * v;
+        a = a - sh * b;
+        return bilinear(m, a / z + cx, b / z + cy) * (p.bright == null ? 1 : p.bright);
+      });
+    }
+    function toURL(m, mode, lo, hi) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      const P = rgbOf("--panel", "#ffffff"), A = rgbOf("--c1"), B = rgbOf("--c2");
+      if (lo == null || hi == null) { const r = range(m); if (lo == null) lo = r[0]; if (hi == null) hi = r[1]; }
+      const span = hi - lo || 1, amax = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+      for (let i = 0; i < m.a.length; i++) {
+        const v = m.a[i]; let r, gg, b;
+        if (mode === "div") { const t = Math.max(-1, Math.min(1, v / amax)), C = t >= 0 ? B : A, k = Math.abs(t); r = P[0] + (C[0] - P[0]) * k; gg = P[1] + (C[1] - P[1]) * k; b = P[2] + (C[2] - P[2]) * k; }
+        else if (mode === "heat") { const k = Math.max(0, Math.min(1, (v - lo) / span)); r = P[0] + (A[0] - P[0]) * k; gg = P[1] + (A[1] - P[1]) * k; b = P[2] + (A[2] - P[2]) * k; }
+        else { const k = Math.max(0, Math.min(1, (v - lo) / span)) * 255; r = gg = b = k; }
+        d[i * 4] = r; d[i * 4 + 1] = gg; d[i * 4 + 2] = b; d[i * 4 + 3] = 255;
+      }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    /* 彩色图：m 为 {W,H,rgb:[Float32Array*3]}，取值 0–1 */
+    function rgbURL(m) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      for (let i = 0; i < m.W * m.H; i++) { for (let c = 0; c < 3; c++) d[i * 4 + c] = Math.max(0, Math.min(1, m.rgb[c][i])) * 255; d[i * 4 + 3] = 255; }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    function draw(svg, x, y, w, h, m, mode, lo, hi) {
+      const e = K.svg(svg, "image", { x, y, width: w, height: h, preserveAspectRatio: "none" });
+      e.style.imageRendering = "pixelated";
+      e.setAttribute("href", m.rgb ? rgbURL(m) : toURL(m, mode, lo, hi));
+      K.svg(svg, "rect", { x, y, width: w, height: h, fill: "none", stroke: "var(--line)" });
+      return e;
+    }
+    function update(e, m, mode, lo, hi) { e.setAttribute("href", m.rgb ? rgbURL(m) : toURL(m, mode, lo, hi)); }
+    function lines(svg, x, y, w, h, W, H, op) {
+      const g = K.svg(svg, "g");
+      for (let i = 0; i <= W; i++) K.svg(g, "line", { x1: x + (w * i) / W, x2: x + (w * i) / W, y1: y, y2: y + h, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      for (let j = 0; j <= H; j++) K.svg(g, "line", { y1: y + (h * j) / H, y2: y + (h * j) / H, x1: x, x2: x + w, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      return g;
+    }
+    const smooth = (e0, e1, x) => { const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+    const blob = (x, y, cx, cy, sx, sy) => Math.exp(-(((x - cx) * (x - cx)) / (2 * sx * sx) + ((y - cy) * (y - cy)) / (2 * sy * sy)));
+    return { grid, at, atClamp, conv, map, relu, pool, range, bilinear, affine, toURL, rgbURL, draw, update, lines, smooth, blob, rgbOf };
+  })();
+
+  /* ---- 用代码画示意图片（RGB 0–1）。kind: cat / dog / flower / banana / strawberry ---- */
+  const SHAPES = {
+    cat(u, v) {
+      const ear = (cx) => { const dx = Math.abs(u - cx), t = (0.42 - v) / 0.2; return t > 0 && t < 1 && dx < 0.11 * (1 - t) + 0.01; };
+      if (ear(0.32) || ear(0.68)) return [0.85, 0.55, 0.25];
+      const d = Math.hypot(u - 0.5, (v - 0.56) * 1.1);
+      if (d > 0.3) return null;
+      for (const ex of [0.39, 0.61]) { const e = Math.hypot(u - ex, (v - 0.5) * 1.4); if (e < 0.05) return e < 0.02 ? [0.05, 0.05, 0.05] : [0.45, 0.75, 0.25]; }
+      if (Math.hypot(u - 0.5, v - 0.62) < 0.03) return [0.95, 0.5, 0.6];
+      if (Math.abs(v - 0.66 - Math.abs(u - 0.5) * 0.15) < 0.006 && Math.abs(u - 0.5) > 0.08 && Math.abs(u - 0.5) < 0.3) return [0.95, 0.95, 0.9];
+      const stripe = Math.sin(u * 40) > 0.6 && v < 0.5 ? 0.12 : 0;
+      return [0.92 - stripe, 0.62 - stripe, 0.3 - stripe];
+    },
+    dog(u, v) {
+      for (const ex of [0.26, 0.74]) { const e = ((u - ex) / 0.09) ** 2 + ((v - 0.55) / 0.2) ** 2; if (e < 1) return [0.35, 0.2, 0.1]; }
+      const d = ((u - 0.5) / 0.26) ** 2 + ((v - 0.5) / 0.3) ** 2;
+      if (d > 1) return null;
+      if (Math.hypot(u - 0.5, v - 0.66) < 0.045) return [0.05, 0.05, 0.05];
+      for (const ex of [0.4, 0.6]) if (Math.hypot(u - ex, v - 0.45) < 0.035) return [0.08, 0.06, 0.05];
+      if (((u - 0.5) / 0.14) ** 2 + ((v - 0.68) / 0.12) ** 2 < 1) return [0.93, 0.85, 0.72];
+      return [0.72, 0.5, 0.28];
+    },
+    flower(u, v) {
+      const dx = u - 0.5, dy = v - 0.5, r = Math.hypot(dx, dy), th = Math.atan2(dy, dx);
+      if (r < 0.15) return (Math.sin(dx * 90) * Math.sin(dy * 90) > 0.3) ? [0.3, 0.18, 0.08] : [0.42, 0.26, 0.1];
+      if (r < 0.26 + 0.17 * Math.abs(Math.cos(6 * th))) return [0.98, 0.8 - 0.25 * (r / 0.43), 0.1];
+      if (v > 0.8 && Math.abs(u - 0.5) < 0.02) return [0.2, 0.55, 0.2];
+      return null;
+    },
+    banana(u, v) {
+      const dx = u - 0.5, dy = v + 0.05, r = Math.hypot(dx, dy), a = Math.atan2(dx, dy);
+      const lim = 0.85; if (Math.abs(a) > lim) return null;
+      const th = 0.1 * Math.sqrt(Math.max(0, 1 - (a / lim) ** 2)) + 0.01;
+      if (Math.abs(r - 0.58) > th) return null;
+      if (Math.abs(a) > lim * 0.9) return [0.35, 0.25, 0.1];
+      const sh = 0.85 + 0.15 * ((r - 0.58) / th);
+      return [0.98 * sh, 0.86 * sh, 0.25 * sh];
+    },
+    strawberry(u, v) {
+      if (v < 0.3 && v > 0.18 && Math.abs(u - 0.5) < 0.2 * (1 - Math.abs(v - 0.24) / 0.06 * 0.5) && Math.sin((u - 0.5) * 40) > -0.3) return [0.2, 0.6, 0.2];
+      const t = (v - 0.25) / 0.6; if (t < 0 || t > 1) return null;
+      const hw = 0.3 * Math.pow(1 - t, 0.75) * (0.75 + 0.25 * Math.sin(Math.PI * Math.min(1, t * 3)));
+      if (Math.abs(u - 0.5) > hw) return null;
+      if (Math.sin(u * 60) > 0.92 && Math.sin(v * 60 + u * 30) > 0.8) return [0.98, 0.9, 0.4];
+      const sh = 1 - 0.35 * Math.abs(u - 0.5) / Math.max(hw, 0.01);
+      return [0.88 * sh, 0.12 * sh, 0.15 * sh];
+    },
+  };
+  /* opt: {rot, dx, dy, scale, jitter(颜色扰动), clutter(背景杂乱 0–1), seed} */
+  function pic(kind, N, opt) {
+    opt = opt || {};
+    const r = K.rng(opt.seed || 1), th = ((opt.rot || 0) * Math.PI) / 180, c = Math.cos(th), s = Math.sin(th), sc = opt.scale || 1;
+    const cj = [0, 1, 2].map(() => 1 + (r() - 0.5) * 2 * (opt.jitter || 0));
+    const blobs = Array.from({ length: Math.round((opt.clutter || 0) * 6) }, () => [r(), r(), 0.06 + r() * 0.12, [r(), r(), r()]]);
+    const bg = opt.bg || [0.9, 0.9, 0.88];
+    const R = new Float32Array(N * N), G = new Float32Array(N * N), B = new Float32Array(N * N);
+    for (let py = 0; py < N; py++) for (let px = 0; px < N; px++) {
+      const x = (px + 0.5) / N - 0.5 - (opt.dx || 0), y = (py + 0.5) / N - 0.5 - (opt.dy || 0);
+      const u = (c * x + s * y) / sc + 0.5, v = (-s * x + c * y) / sc + 0.5;
+      let col = SHAPES[kind](u, v);
+      if (col) col = col.map((q, k) => q * cj[k]);
+      else {
+        col = bg.slice();
+        const X = (px + 0.5) / N, Y = (py + 0.5) / N;
+        for (const b of blobs) if (Math.hypot(X - b[0], Y - b[1]) < b[2]) col = b[3];
+      }
+      const i = py * N + px, nz = (r() - 0.5) * 0.04;
+      R[i] = col[0] + nz; G[i] = col[1] + nz; B[i] = col[2] + nz;
+    }
+    return { W: N, H: N, rgb: [R, G, B] };
+  }
+  function img(svg, x, y, w, m) { const e = K.svg(svg, "image", { x, y, width: w, height: w }); e.setAttribute("href", PX.rgbURL(m)); K.svg(svg, "rect", { x, y, width: w, height: w, fill: "none", stroke: "var(--line)" }); return e; }
+  const fade = (els, v) => els.forEach((e) => (e.style.opacity = v));
+
+  const steps = [
+    {
+      title: "背景：ImageNet 与它催生的 CNN", kicker: "第 0 格 · 背景",
+      html: `<p><b>ImageNet</b> 有约 1400 万张手工标注的图片、2.2 万多个日常类别。每年的 ImageNet 比赛用其中 1000 类的子集，比谁分类最准。很多冠军方案都是卷积神经网络。</p><p>在 ImageNet 上训练好的网络权重被公开出来，叫<b>预训练模型</b>。它们已经学会了边缘、纹理、形状、部件这些通用视觉特征，可以拿来直接预测，也可以“借”给别的任务用。这就是迁移学习的基础。</p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        const r = K.rng(4), tiles = [];
+        for (let i = 0; i < 120; i++) tiles.push(K.svg(svg, "rect", { x: 30 + (i % 15) * 17, y: 40 + Math.floor(i / 15) * 17, width: 14, height: 14, rx: 2, fill: K.colors[Math.floor(r() * 6)], opacity: 0 }));
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "约 1400 万张标注图（每格代表一大批）");
+        const ar = K.arrow(svg, 300, 110, 370, 110); ar.style.opacity = 0;
+        const box = K.node(svg, 380, 70, 140, 80, "比赛版\n1000 类", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" }); box.style.opacity = 0;
+        const tl = [["VGG16 / 19", "2014，结构最简单"], ["GoogLeNet / Inception", "2014 冠军，22 层"], ["ResNet", "跳连，可到 152 层"], ["Xception", "深度可分离卷积"]];
+        const items = tl.map((d, i) => { const g = K.node(svg, 40 + i * 168, 220, 156, 70, d[0] + "\n" + d[1], { fs: 12, fill: `color-mix(in srgb, ${K.colors[i]} 14%, var(--panel))`, stroke: K.colors[i] }); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 40, y: 210, "font-size": 12, class: "muted" }, "本 notebook 讲的四代架构（年份与层数取自作者文字）");
+        K.svg(svg, "text", { x: 545, y: 105, "font-size": 12, class: "muted" }, "训练好的权重");
+        K.svg(svg, "text", { x: 545, y: 123, "font-size": 12, class: "muted" }, "= 预训练模型");
+        ctx.tween(1200, (t) => tiles.forEach((e, i) => (e.style.opacity = K.clamp(t * 120 - i, 0, 1) * 0.8)))
+          .then((ok) => ok && ctx.tween(500, (t) => (ar.style.opacity = box.style.opacity = t)))
+          .then(async (ok) => { if (!ok) return; for (const g of items) if (!(await ctx.tween(350, (t) => (g.style.opacity = t)))) return; });
+      },
+    },
+    {
+      title: "VGG16：13 个卷积 + 3 个全连接", kicker: "第 1 格 · 架构 1",
+      html: `<p>作者用 Keras 函数式 API 把 VGG16 一层层写出来：5 组卷积（每组 2 或 3 个 3×3 卷积），组与组之间 2×2 最大池化把图缩小一半；卷积核个数 64 → 128 → 256 → 512 → 512 逐渐增加。最后 Flatten，接 4096、4096、1000 三个全连接层。</p><p>“16” = 13 个卷积层 + 3 个全连接层，只数有权重的层。作者指出它的缺点：训练慢、模型文件很大。</p>`,
+      cells: [1], highlight: ["MaxPooling2D((2, 2))", "Dense(4096", "Dense(1000"],
+      draw(svg, ctx) {
+        const groups = [[64, 2, 224], [128, 2, 112], [256, 3, 56], [512, 3, 28], [512, 3, 14]];
+        const els = []; let x = 24, n = 0;
+        const cnt = K.svg(svg, "text", { x: 24, y: 320, "font-size": 15, "font-weight": 700 }, "");
+        groups.forEach((g) => {
+          for (let k = 0; k < g[1]; k++) {
+            const h = 40 + g[2] * 0.75, w = 6 + g[0] / 64 * 3;
+            const e = K.svg(svg, "rect", { x, y: 150 - h / 2, width: w, height: h, rx: 2, fill: "color-mix(in srgb, var(--c1) 35%, var(--panel))", stroke: "var(--c1)" });
+            els.push({ e, conv: true }); x += w + 4; n++;
+          }
+          K.svg(svg, "text", { x: x - 20, y: 290, "text-anchor": "middle", "font-size": 11, class: "muted" }, g[0]);
+          const p = K.svg(svg, "rect", { x, y: 150 - 20, width: 6, height: 40, fill: "var(--c4)" }); els.push({ e: p }); x += 18;
+        });
+        [[4096, 120], [4096, 120], [1000, 70]].forEach((d, i) => { const e = K.node(svg, x + i * 62, 150 - d[1] / 2, 50, d[1], String(d[0]), { fs: 11, fill: "color-mix(in srgb, var(--c2) 22%, var(--panel))", stroke: "var(--c2)" }); els.push({ e, fc: true }); });
+        K.svg(svg, "text", { x: 24, y: 40, "font-size": 12, fill: "var(--c1)" }, "■ 3×3 卷积（高度 ∝ 特征图边长：224→112→56→28→14）");
+        K.svg(svg, "text", { x: 24, y: 60, "font-size": 12, fill: "var(--c4)" }, "■ 2×2 最大池化");
+        K.svg(svg, "text", { x: 400, y: 60, "font-size": 12, fill: "var(--c2)" }, "■ 全连接层");
+        K.svg(svg, "text", { x: 24, y: 290, "font-size": 11, class: "muted", "text-anchor": "start" }, "");
+        fade(els.map((d) => d.e), 0);
+        (async () => {
+          let c = 0, f = 0;
+          for (const d of els) {
+            if (!(await ctx.tween(150, (t) => (d.e.style.opacity = t)))) return;
+            if (d.conv) c++; if (d.fc) f++;
+            cnt.textContent = `卷积层 ${c} 个 + 全连接层 ${f} 个 = ${c + f} 层有权重`;
+          }
+        })();
+      },
+    },
+    {
+      title: "直接用预训练模型预测", kicker: "第 2–5 格 · 预测",
+      notes: {4: "三步：从 keras.applications 导入架构、加载权重、预测" },
+      html: `<p>Keras 提供现成的架构，加载保存好的权重就能用：图片缩放到 224×224 → <code>preprocess_input</code> 做和训练时一样的预处理 → <code>model.predict</code> 输出 1000 类的概率 → <code>decode_predictions(top=3)</code> 取前三名并换成类名。</p><p>作者对一只猫、一只狗、一朵向日葵、一根香蕉做了预测，再对 VGG19、InceptionV3、ResNet50 重复一遍。条形长度和类名是示意，作者的真实输出在运行结果里。</p>`,
+      cells: [3, 5], at: 2, highlight: ["decode_predictions", "preprocess_input", "top=3"],
+      draw(svg, ctx) {
+        const kinds = [["cat", "猫"], ["dog", "狗"], ["flower", "向日葵"], ["banana", "香蕉"]];
+        const names = { cat: ["虎斑猫", "埃及猫", "老虎猫"], dog: ["金毛", "拉布拉多", "其他犬种"], flower: ["雏菊类", "向日葵相关", "其他花"], banana: ["香蕉", "柠檬", "其他水果"] };
+        kinds.forEach((k, i) => {
+          const x = 24 + i * 176;
+          const im = img(svg, x + 30, 24, 110, pic(k[0], 56, { seed: i + 3 }));
+          K.svg(svg, "text", { x: x + 85, y: 152, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, k[1]);
+          const lens = [0.8, 0.12, 0.05].map((v, j) => v * (1 - 0.2 * ((i + j) % 2)));
+          lens.forEach((L, j) => {
+            const y = 170 + j * 40;
+            K.svg(svg, "text", { x, y: y + 12, "font-size": 11, class: "muted" }, `Top-${j + 1} ${names[k[0]][j]}（示意）`);
+            const b = K.svg(svg, "rect", { x, y: y + 18, width: 0, height: 12, rx: 3, fill: j === 0 ? "var(--accent)" : "var(--ink-3)" });
+            ctx.wait(300 + i * 250).then((ok) => ok && ctx.tween(700, (t) => b.setAttribute("width", 150 * L * t)));
+          });
+        });
+      },
+    },
+    {
+      title: "VGG19 与“小卷积核堆叠”", kicker: "第 6–7 格 · 架构 1 续",
+      notes: {7: "VGG19 同样加载权重，对同样 4 张图做预测" },
+      html: `<p>VGG19 比 VGG16 多 3 个卷积层（16 卷积 + 3 全连接）。作者强调 VGG 的关键设计：全部用<b>步长 1 的 3×3 卷积</b>堆起来。</p><p>动画演示为什么：最上层的 1 个点，往下一层对应 3×3，再往下 5×5，再往下 7×7。所以三层 3×3 的“视野”（感受野）和一个 7×7 卷积一样大，但参数只有 3×9 = 27 份，而 7×7 要 49 份，还多了两次非线性。</p>`,
+      cells: [6],
+      draw(svg, ctx) {
+        const N = 9, c = 22, layers = [[40, 170, "输入"], [250, 170, "第 1 层 3×3"], [460, 170, "第 2 层 3×3"]];
+        const grids = layers.map((L) => {
+          K.svg(svg, "text", { x: L[0] + (N * c) / 2, y: L[1] - (N * c) / 2 - 10, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, L[2]);
+          const cells = [];
+          for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) cells.push(K.svg(svg, "rect", { x: L[0] + i * c, y: L[1] - (N * c) / 2 + j * c, width: c - 2, height: c - 2, rx: 2, fill: "var(--panel-2)", stroke: "var(--line)" }));
+          return cells;
+        });
+        const top = K.node(svg, 660, 150, 44, 44, "输出\n1 点", { fs: 11, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const lab = K.svg(svg, "text", { x: 40, y: 310, "font-size": 14, "font-weight": 700 }, "");
+        const paint = (g, half, col) => { for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) { const on = Math.abs(i - 4) <= half && Math.abs(j - 4) <= half; g[j * N + i].style.fill = on ? col : "var(--panel-2)"; } };
+        (async () => {
+          if (!(await ctx.wait(500))) return;
+          paint(grids[2], 1, "color-mix(in srgb, var(--accent) 45%, var(--panel))"); lab.textContent = "输出的 1 个点 ← 第 2 层的 3×3";
+          if (!(await ctx.wait(1100))) return;
+          paint(grids[1], 2, "color-mix(in srgb, var(--c2) 45%, var(--panel))"); lab.textContent = "第 2 层的 3×3 ← 第 1 层的 5×5";
+          if (!(await ctx.wait(1100))) return;
+          paint(grids[0], 3, "color-mix(in srgb, var(--c3) 45%, var(--panel))"); lab.textContent = "第 1 层的 5×5 ← 输入的 7×7：三层 3×3 的感受野 = 7×7";
+          if (!(await ctx.wait(1300))) return;
+          lab.textContent = "参数（通道都为 C）：3 × 9C² = 27C²　vs　一个 7×7：49C²";
+        })();
+      },
+    },
+    {
+      title: "Inception：几种卷积并排算，再拼起来", kicker: "第 8–9 格 · 架构 2",
+      html: `<p>GoogLeNet（Inception）共 22 层，是 2014 年 ImageNet 冠军。它的基本单元是 <b>Inception 模块</b>：同一个输入同时走 1×1、3×3、5×5 卷积和 3×3 池化几条分支，结果在通道方向拼接（concat），相当于让网络自己挑合适的“视野大小”。</p><p>关键技巧是 <b>1×1 卷积</b>：不改变长宽，只把通道数压下来（降维），这样 3×3、5×5 分支不至于算不动。作者随后用预训练的 InceptionV3 做了同样的预测。</p>`,
+      cells: [8, 9], highlight: ["InceptionV3"],
+      draw(svg, ctx) {
+        K.node(svg, 300, 14, 120, 40, "上一层输出", { fs: 12, bold: true });
+        const br = [["1×1 卷积", null, "var(--c1)"], ["1×1 降维", "3×3 卷积", "var(--c2)"], ["1×1 降维", "5×5 卷积", "var(--c3)"], ["3×3 池化", "1×1 卷积", "var(--c4)"]];
+        const slabs = [];
+        br.forEach((b, i) => {
+          const x = 40 + i * 168;
+          K.arrow(svg, 360, 54, x + 70, 84);
+          K.node(svg, x, 86, 140, 38, b[0], { fs: 12, fill: `color-mix(in srgb, ${b[2]} 16%, var(--panel))`, stroke: b[2] });
+          if (b[1]) { K.arrow(svg, x + 70, 124, x + 70, 142); K.node(svg, x, 144, 140, 38, b[1], { fs: 12, fill: `color-mix(in srgb, ${b[2]} 28%, var(--panel))`, stroke: b[2] }); }
+          const s = K.svg(svg, "rect", { x: x + 55, y: 200, width: 30, height: 60, rx: 3, fill: b[2], opacity: 0.85 }); s.style.opacity = 0;
+          slabs.push({ s, x0: x + 55 });
+        });
+        const cat = K.svg(svg, "rect", { x: 280, y: 270, width: 160, height: 60, rx: 4, fill: "none", stroke: "var(--ink)", "stroke-dasharray": "5 3" });
+        K.svg(svg, "text", { x: 450, y: 305, "font-size": 12 }, "按通道拼接（concat）");
+        cat.style.opacity = 0;
+        ctx.wait(400).then((ok) => ok && ctx.tween(700, (t) => slabs.forEach((d) => (d.s.style.opacity = t))))
+          .then((ok) => ok && ctx.tween(1300, (t) => { cat.style.opacity = t; slabs.forEach((d, i) => K.set(d.s, { x: K.lerp(d.x0, 285 + i * 38, t), y: K.lerp(200, 270, t), height: 60 })); }));
+      },
+    },
+    {
+      title: "ResNet：跳连让“什么都不做”变得容易", kicker: "第 10–11 格 · 架构 3",
+      html: `<p>网络一味加深会难以优化，梯度消失或爆炸，甚至出现“越深越差”的退化问题。ResNet 加了<b>跳连</b>：把浅层的激活 A1 直接加到两层之后。</p><p>作者的推导：没有跳连时 A3 = relu(W2·A2 + b2)；有跳连时 A3 = relu(W2·A2 + b2 + <b>A1</b>)。如果权重衰减把 W2、b2 压到 0，就得到 A3 = relu(A1) = A1：新加的层最坏也只是“原样传递”，不会拖后腿；学到有用的东西则更好。动画把 W2、b2 逐渐压到 0。</p>`,
+      cells: [10, 11], highlight: ["ResNet50"],
+      draw(svg, ctx) {
+        const y = 150;
+        K.node(svg, 30, y - 25, 80, 50, "A1", { bold: true, fill: "color-mix(in srgb, var(--c3) 18%, var(--panel))", stroke: "var(--c3)" });
+        K.node(svg, 160, y - 25, 90, 50, "层 L1", {}); K.node(svg, 300, y - 25, 80, 50, "A2", { bold: true });
+        const L2 = K.node(svg, 430, y - 25, 110, 50, "层 L2\nW2·A2 + b2", { fs: 12 });
+        K.node(svg, 620, y - 25, 80, 50, "A3", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        [[110, 160], [250, 300], [380, 430], [540, 620]].forEach((d) => K.arrow(svg, d[0], y, d[1], y));
+        K.svg(svg, "path", { d: `M70,${y - 25} C70,40 580,40 580,${y - 6}`, fill: "none", stroke: "var(--c2)", "stroke-width": 3, "stroke-dasharray": "7 5" });
+        K.svg(svg, "text", { x: 325, y: 58, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--c2)" }, "跳连：+ A1");
+        const wl = K.svg(svg, "text", { x: 485, y: y + 50, "text-anchor": "middle", "font-size": 13, "font-family": "var(--mono)" }, "");
+        const f = K.svg(svg, "text", { x: 360, y: 260, "text-anchor": "middle", "font-size": 18, "font-weight": 700 }, "A3 = relu(W2·A2 + b2 + A1)");
+        const f2 = K.svg(svg, "text", { x: 360, y: 296, "text-anchor": "middle", "font-size": 13, class: "muted" }, "");
+        const rect = L2.querySelector("rect");
+        ctx.wait(800).then((ok) => ok && ctx.tween(2200, (t) => {
+          const w = (1 - t).toFixed(2); wl.textContent = `|W2|, |b2| × ${w}`; rect.style.opacity = 1 - 0.8 * t;
+          if (t > 0.98) { f.textContent = "A3 = relu(0 + 0 + A1) = A1"; f2.textContent = "A1 来自 ReLU，本身非负，所以 relu(A1) = A1：新加的两层退化成“恒等映射”"; }
+        }));
+      },
+    },
+    {
+      title: "Xception：深度可分离卷积", kicker: "第 12–13 格 · 架构 4",
+      html: `<p>Xception 是 Inception 的延伸，把 Inception 模块换成<b>深度可分离卷积</b>，拆成两步：</p><ul class="tight"><li><b>逐通道卷积</b>（depthwise）：每个输入通道单独用自己的一个 3×3 卷积核，只看空间，不混通道；</li><li><b>逐点卷积</b>（pointwise）：再用 1×1 卷积把各通道线性混合成新通道。</li></ul><p>普通卷积一步同时处理“空间 + 通道”，参数是 k²·C_in·C_out；拆开后是 k²·C_in + C_in·C_out，通常省很多（实验 A 可以算）。</p>`,
+      cells: [12, 13], highlight: ["Xception"],
+      draw(svg, ctx) {
+        const cols = ["var(--c6)", "var(--c3)", "var(--c1)"];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "输入 3 个通道");
+        const ins = cols.map((c, i) => K.svg(svg, "rect", { x: 30 + i * 14, y: 60 + i * 14, width: 100, height: 100, fill: `color-mix(in srgb, ${c} 30%, var(--panel))`, stroke: c }));
+        K.svg(svg, "text", { x: 250, y: 30, "font-size": 13, "font-weight": 700 }, "① 每个通道各用一个 3×3 核");
+        const dw = cols.map((c, i) => { const g = K.svg(svg, "g"); K.svg(g, "rect", { x: 230 + i * 70, y: 70, width: 30, height: 30, fill: c, opacity: 0.8 }); K.arrow(g, 245 + i * 70, 104, 245 + i * 70, 130); K.svg(g, "rect", { x: 220 + i * 70, y: 134, width: 50, height: 50, fill: `color-mix(in srgb, ${c} 30%, var(--panel))`, stroke: c }); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 500, y: 30, "font-size": 13, "font-weight": 700 }, "② 1×1 卷积混合通道");
+        const pw = [0, 1, 2, 3, 4].map((i) => { const g = K.svg(svg, "g"); [0, 1, 2].forEach((k) => K.svg(g, "line", { x1: 270 + k * 70, y1: 160, x2: 530 + i * 34, y2: 120, stroke: "var(--ink-3)", opacity: 0.5 })); K.svg(g, "rect", { x: 516 + i * 34, y: 80, width: 28, height: 40, fill: `color-mix(in srgb, var(--c4) ${30 + i * 10}%, var(--panel))`, stroke: "var(--c4)" }); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 30, y: 250, "font-size": 13 }, "例：C_in = 3、C_out = 5、k = 3");
+        K.svg(svg, "text", { x: 30, y: 276, "font-size": 13, "font-family": "var(--mono)" }, "普通卷积：3×3×3×5 = 135 个权重");
+        const sep = K.svg(svg, "text", { x: 30, y: 302, "font-size": 13, "font-family": "var(--mono)", fill: "var(--good)" }, "深度可分离：3×3×3 + 3×5 = 27 + 15 = 42 个权重"); sep.style.opacity = 0;
+        (async () => {
+          for (const g of dw) if (!(await ctx.tween(400, (t) => (g.style.opacity = t)))) return;
+          for (const g of pw) if (!(await ctx.tween(250, (t) => (g.style.opacity = t)))) return;
+          await ctx.tween(400, (t) => (sep.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "去掉顶层，把网络当“特征提取器”", kicker: "第 14–19 格 · 迁移学习 第 1 步",
+      notes: {16: "下一步：把一张图送进去，看看提出来的特征", 18: "flatten 拉成一条长向量；squeeze 去掉批次维度，保留 3 维形状" },
+      html: `<p>加载 <code>ResNet50(weights='imagenet', include_top=False)</code>：<code>include_top=False</code> 表示<b>去掉最后的 1000 类分类层</b>，只留卷积主干。一张图送进去，出来的不是类别，而是一个三维特征图。</p><p>按 ResNet50 的结构，224×224 的输入会得到 7×7×2048 的特征。作者演示了两种整理方式：<code>flatten()</code> 拉成一条长向量（7×7×2048 = 100,352 维），<code>squeeze()</code> 只去掉批次维度，保留 (7, 7, 2048) 的形状。</p>`,
+      cells: [15, 17, 19], at: 14, highlight: ["include_top=False", "flatten()", "squeeze()"],
+      draw(svg, ctx) {
+        img(svg, 20, 100, 110, pic("dog", 56, { seed: 4 }));
+        K.svg(svg, "text", { x: 75, y: 232, "text-anchor": "middle", "font-size": 12 }, "224×224×3");
+        K.arrow(svg, 135, 155, 170, 155);
+        const trunk = K.node(svg, 172, 90, 210, 130, "ResNet50 卷积主干\nImageNet 权重\n（冻结，不再训练）", { fs: 12, fill: "color-mix(in srgb, var(--c1) 16%, var(--panel))", stroke: "var(--c1)" });
+        const top = K.node(svg, 400, 240, 120, 50, "1000 类分类层", { fs: 12, fill: "var(--panel-2)" });
+        const x1 = K.svg(svg, "line", { x1: 400, y1: 240, x2: 520, y2: 290, stroke: "var(--bad)", "stroke-width": 3 }), x2 = K.svg(svg, "line", { x1: 520, y1: 240, x2: 400, y2: 290, stroke: "var(--bad)", "stroke-width": 3 });
+        K.svg(svg, "text", { x: 460, y: 310, "text-anchor": "middle", "font-size": 12, fill: "var(--bad)" }, "include_top=False：去掉");
+        fade([x1, x2], 0);
+        K.arrow(svg, 384, 155, 420, 155);
+        const fm = K.svg(svg, "g");
+        for (let k = 5; k >= 0; k--) K.svg(fm, "rect", { x: 425 + k * 6, y: 110 - k * 6, width: 70, height: 70, fill: `color-mix(in srgb, var(--c2) ${20 + k * 8}%, var(--panel))`, stroke: "var(--c2)" });
+        K.svg(fm, "text", { x: 470, y: 205, "text-anchor": "middle", "font-size": 12 }, "7×7×2048");
+        fm.style.opacity = 0;
+        const vec = K.svg(svg, "g");
+        for (let i = 0; i < 40; i++) K.svg(vec, "rect", { x: 555 + (i % 4) * 36, y: 40 + Math.floor(i / 4) * 18, width: 34, height: 16, fill: K.heat(Math.abs(Math.sin(i * 1.7))), stroke: "var(--line)" });
+        K.svg(vec, "text", { x: 627, y: 236, "text-anchor": "middle", "font-size": 12 }, "flatten → 100,352 维");
+        vec.style.opacity = 0;
+        ctx.wait(500).then((ok) => ok && ctx.tween(500, (t) => fade([x1, x2], t)))
+          .then((ok) => ok && ctx.tween(600, (t) => (fm.style.opacity = t)))
+          .then((ok) => ok && ctx.tween(700, (t) => (vec.style.opacity = t)));
+      },
+    },
+    {
+      title: "准备小数据：香蕉、草莓各 10 张", kicker: "第 20–23 格 · 迁移学习 第 2 步",
+      html: `<p>作者从 fruits-360 数据集里取香蕉和草莓<b>各 10 张</b>作训练集，再各取 1 张（第 12 张）作测试图，一共只有 22 张图。</p><p>然后逐张调用上一步的 <code>_get_features</code>，把每张图变成一条展平的特征向量，存进字典。</p>`,
+      cells: [21, 23], at: 20, highlight: ["class1[:10]", "class2[:10]", "class1[11], class2[11]"],
+      draw(svg, ctx) {
+        const els = [];
+        ["banana", "strawberry"].forEach((k, row) => {
+          K.svg(svg, "text", { x: 20, y: 60 + row * 110, "font-size": 13, "font-weight": 700 }, row ? "草莓 ×10" : "香蕉 ×10");
+          for (let i = 0; i < 10; i++) els.push(img(svg, 100 + i * 54, 30 + row * 110, 48, pic(k, 40, { seed: 20 + i + row * 30, rot: (i - 5) * 6, jitter: 0.06 })));
+        });
+        K.svg(svg, "text", { x: 20, y: 290, "font-size": 13, "font-weight": 700, fill: "var(--accent)" }, "测试 ×2");
+        const t1 = img(svg, 100, 250, 56, pic("banana", 40, { seed: 77, rot: 20 })), t2 = img(svg, 170, 250, 56, pic("strawberry", 40, { seed: 78, rot: -10 }));
+        els.push(t1, t2);
+        K.svg(svg, "text", { x: 250, y: 284, "font-size": 12, class: "muted" }, "训练 20 张 + 测试 2 张（示意图）");
+        fade(els, 0);
+        ctx.tween(1600, (t) => els.forEach((e, i) => (e.style.opacity = K.clamp(t * 22 - i, 0, 1))));
+      },
+    },
+    {
+      title: "方差筛选 + 多层感知机", kicker: "第 24–29 格 · 迁移学习 第 3 步",
+      notes: {25: "把特征字典整理成一张 DataFrame：每行一张图", 27: "取出特征 X 和标签 y，去掉测试用的那两行" },
+      html: `<p>特征整理成 DataFrame：每行一张图，每列一个特征，最后一列是标签。维度极高、样本极少，作者先用 <code>VarianceThreshold()</code> 去掉<b>在所有样本上取值都一样</b>的列（方差为 0，对区分类别毫无帮助），作者也提到可以改用 PCA / SVD 降维。</p><p>再用 sklearn 的 <code>MLPClassifier(hidden_layer_sizes=(100, 10))</code>（两个隐藏层：100 个和 10 个神经元）训练，两步装进一个 <code>Pipeline</code>。</p>`,
+      cells: [29], at: 24, highlight: ["VarianceThreshold()", "MLPClassifier(hidden_layer_sizes=(100, 10))", "Pipeline"],
+      draw(svg, ctx) {
+        const r = K.rng(6), rows = 8, colsN = 18, cw = 16, ch = 22, x0 = 20, y0 = 50;
+        const zero = new Set([2, 5, 6, 9, 13, 16]);
+        const cells = [];
+        for (let j = 0; j < rows; j++) for (let i = 0; i < colsN; i++) cells.push({ i, e: K.svg(svg, "rect", { x: x0 + i * cw, y: y0 + j * ch, width: cw - 2, height: ch - 2, fill: zero.has(i) ? "var(--panel-2)" : K.heat(0.2 + r() * 0.8), stroke: "var(--line)" }) });
+        for (let j = 0; j < rows; j++) K.svg(svg, "text", { x: x0 + colsN * cw + 8, y: y0 + j * ch + 15, "font-size": 11, fill: j < 4 ? "var(--c5)" : "var(--c6)" }, j < 4 ? "香蕉" : "草莓");
+        K.svg(svg, "text", { x: x0, y: 36, "font-size": 12, class: "muted" }, "特征表（示意：灰色列 = 所有样本取值相同）");
+        const lab = K.svg(svg, "text", { x: x0, y: 250, "font-size": 13, "font-weight": 700, fill: "var(--warn)" }, "");
+        const net = K.svg(svg, "g"); net.style.opacity = 0;
+        const L = [[6, 400, "输入"], [7, 490, "100"], [4, 580, "10"], [2, 660, "2 类"]];
+        const P = L.map((d) => Array.from({ length: d[0] }, (_, i) => [d[1], 150 + (i - (d[0] - 1) / 2) * 30]));
+        for (let l = 0; l < 3; l++) P[l].forEach((a) => P[l + 1].forEach((b) => K.svg(net, "line", { x1: a[0], y1: a[1], x2: b[0], y2: b[1], stroke: "var(--line)" })));
+        P.forEach((ps, l) => { ps.forEach((p) => K.svg(net, "circle", { cx: p[0], cy: p[1], r: 8, fill: "var(--panel-2)", stroke: "var(--ink-3)" })); K.svg(net, "text", { x: L[l][1], y: 270, "text-anchor": "middle", "font-size": 12 }, L[l][2]); });
+        K.svg(net, "text", { x: 530, y: 300, "text-anchor": "middle", "font-size": 12, class: "muted" }, "MLPClassifier(hidden_layer_sizes=(100, 10))");
+        ctx.wait(800).then((ok) => { if (ok) lab.textContent = "VarianceThreshold：去掉方差为 0 的列"; return ok && ctx.tween(1000, (t) => cells.forEach((c) => { if (zero.has(c.i)) c.e.style.opacity = 1 - t; })); })
+          .then((ok) => ok && ctx.tween(800, (t) => (net.style.opacity = t)));
+      },
+    },
+    {
+      title: "预测两张新图", kicker: "第 30–32 格 · 结果",
+      html: `<p>对两张测试图的特征调用 <code>pipeline.predict</code>，把预测结果写在图上。作者的结论：<b>只用 20 行训练数据的简单神经网络，就正确分类了测试集里的两张图</b>。</p><p>这说明 ImageNet 学到的通用特征对“香蕉 vs 草莓”已经足够好分。但 2 张测试图不足以衡量准确率，严格的做法见讨论题。</p>`,
+      cells: [31, 32], at: 30, highlight: ["pipeline.predict"],
+      draw(svg, ctx) {
+        const L = [["banana", "Predicted: banana", 77, 20], ["strawberry", "Predicted: strawberry", 78, -10]];
+        L.forEach((d, i) => {
+          const x = 90 + i * 300;
+          img(svg, x, 30, 200, pic(d[0], 64, { seed: d[2], rot: d[3] }));
+          const tag = K.svg(svg, "g"); K.svg(tag, "rect", { x: x + 10, y: 196, width: 180, height: 26, rx: 4, fill: "var(--bad)", opacity: 0.85 }); K.svg(tag, "text", { x: x + 100, y: 214, "text-anchor": "middle", "font-size": 13, fill: "#fff" }, d[1]); tag.style.opacity = 0;
+          const ok = K.svg(svg, "text", { x: x + 100, y: 270, "text-anchor": "middle", "font-size": 26, "font-weight": 700, fill: "var(--good)" }, "✓"); ok.style.opacity = 0;
+          ctx.wait(500 + i * 700).then((k) => k && ctx.tween(400, (t) => (tag.style.opacity = ok.style.opacity = t)));
+        });
+        K.svg(svg, "text", { x: 360, y: 318, "text-anchor": "middle", "font-size": 13, class: "muted" }, "示意图；作者原 notebook 也是在图片左下角用红底标出预测结果");
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：参数量 / 乘加次数计算器 ---------- */
+  const fmtN = (x) => (x >= 1e9 ? (x / 1e9).toFixed(2) + " G" : x >= 1e6 ? (x / 1e6).toFixed(2) + " M" : x >= 1e3 ? (x / 1e3).toFixed(1) + " K" : String(Math.round(x)));
+  const CH = [3, 16, 32, 64, 128, 256, 512, 1024, 2048];
+  K.lab(document.getElementById("lab1"), {
+    width: 660, height: 330,
+    controls: [
+      { id: "ci", label: "输入通道 C_in", min: 0, max: 8, step: 1, value: 5, fmt: (v) => CH[v] },
+      { id: "co", label: "输出通道 C_out", min: 0, max: 8, step: 1, value: 5, fmt: (v) => CH[v] },
+      { id: "k", label: "卷积核大小 k", min: 3, max: 7, step: 2, value: 5, fmt: (v) => v + "×" + v },
+      { id: "r", label: "1×1 降维到几个通道（Inception 分支）", min: 0, max: 8, step: 1, value: 2, fmt: (v) => CH[v] },
+      { id: "hw", label: "特征图边长 H = W", min: 7, max: 224, step: 1, value: 28 },
+    ],
+    note: "参数量含偏置；乘加次数 = 每个输出位置的乘法数 × H × W（padding='same'）。“3×3 堆叠”指用 (k−1)/2 层 3×3 卷积代替一个 k×k 卷积（感受野相同），这里假设中间层通道数都等于 C_out。横条按对数刻度画。",
+    render(svg, v) {
+      const ci = CH[v.ci], co = CH[v.co], k = v.k, r = CH[v.r], HW = v.hw * v.hw, n33 = (k - 1) / 2;
+      const rows = [
+        ["普通 k×k 卷积", k * k * ci * co + co, HW * k * k * ci * co, "var(--c6)"],
+        ["深度可分离（Xception）", k * k * ci + ci + ci * co + co, HW * (k * k * ci + ci * co), "var(--c3)"],
+        ["1×1 降维后再 k×k（Inception）", ci * r + r + k * k * r * co + co, HW * (ci * r + k * k * r * co), "var(--c2)"],
+        [`${n33} 层 3×3 堆叠（VGG）`, 9 * ci * co + co + (n33 - 1) * (9 * co * co + co), HW * (9 * ci * co + (n33 - 1) * 9 * co * co), "var(--c1)"],
+      ];
+      const maxP = Math.max(...rows.map((d) => d[1])), maxM = Math.max(...rows.map((d) => d[2]));
+      const lg = (x, m) => Math.max(0.02, Math.log10(x + 1) / Math.log10(m + 1));
+      K.svg(svg, "text", { x: 240, y: 22, "font-size": 13, "font-weight": 700 }, "参数量");
+      K.svg(svg, "text", { x: 470, y: 22, "font-size": 13, "font-weight": 700 }, "乘加次数");
+      rows.forEach((d, i) => {
+        const y = 40 + i * 66;
+        K.svg(svg, "text", { x: 10, y: y + 22, "font-size": 13 }, d[0]);
+        const wP = 160 * lg(d[1], maxP), wM = 160 * lg(d[2], maxM);
+        K.svg(svg, "rect", { x: 240, y: y + 8, width: wP, height: 22, rx: 3, fill: d[3] });
+        K.svg(svg, "text", { x: 244 + wP, y: y + 24, "font-size": 12, "font-family": "var(--mono)" }, fmtN(d[1]));
+        K.svg(svg, "rect", { x: 470, y: y + 8, width: wM * 0.75, height: 22, rx: 3, fill: d[3], opacity: 0.7 });
+        K.svg(svg, "text", { x: 474 + wM * 0.75, y: y + 24, "font-size": 12, "font-family": "var(--mono)" }, fmtN(d[2]));
+        K.svg(svg, "text", { x: 10, y: y + 42, "font-size": 11, class: "muted" }, `是普通卷积参数的 ${((d[1] / rows[0][1]) * 100).toFixed(1)}%`);
+      });
+      K.svg(svg, "text", { x: 10, y: 318, "font-size": 12, class: "muted" }, `感受野：一个 ${k}×${k} = ${n33} 层 3×3（每层只多看一圈）`);
+      return { readout: [
+        { k: "深度可分离 / 普通（参数）", v: ((rows[1][1] / rows[0][1]) * 100).toFixed(1) + "%", color: "var(--c3)" },
+        { k: "1×1 降维 / 普通（参数）", v: ((rows[2][1] / rows[0][1]) * 100).toFixed(1) + "%", color: "var(--c2)" },
+        { k: "3×3 堆叠 / 普通（参数）", v: ((rows[3][1] / rows[0][1]) * 100).toFixed(1) + "%", color: "var(--c1)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：原始像素 vs 固定特征提取器 + 小分类器 ---------- */
+  const S = 24;
+  function makeSet(n, seed, var_, clutter) {
+    const r = K.rng(seed), out = [];
+    for (let i = 0; i < 2 * n; i++) {
+      const kind = i % 2 ? "strawberry" : "banana";
+      const m = pic(kind, S, { seed: seed * 1000 + i, rot: (r() - 0.5) * 120 * var_, dx: (r() - 0.5) * 0.4 * var_, dy: (r() - 0.5) * 0.4 * var_, scale: 1 + (r() - 0.5) * 0.5 * var_, jitter: 0.12, clutter: clutter * r() });
+      out.push({ m, y: i % 2 });
+    }
+    return out;
+  }
+  /* 固定的“特征提取器”：不看位置的颜色直方图 + 边缘方向直方图（替身，不是真正的 ResNet） */
+  const SX = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], SY = [[-1, -2, -1], [0, 0, 0], [1, 2, 1]];
+  function feats(m) {
+    const n = S * S, f = new Array(8 + 3 + 8).fill(0);
+    for (let i = 0; i < n; i++) {
+      const R = m.rgb[0][i], G = m.rgb[1][i], B = m.rgb[2][i], mx = Math.max(R, G, B), mn = Math.min(R, G, B), sat = mx - mn;
+      let h = 0; if (sat > 1e-6) { if (mx === R) h = ((G - B) / sat) % 6; else if (mx === G) h = (B - R) / sat + 2; else h = (R - G) / sat + 4; }
+      h = (h + 6) % 6; f[Math.floor((h / 6) * 8) % 8] += sat / n;
+      f[8] += R / n; f[9] += G / n; f[10] += B / n;
+    }
+    const gray = PX.grid(S, S, (x, y) => (m.rgb[0][y * S + x] + m.rgb[1][y * S + x] + m.rgb[2][y * S + x]) / 3);
+    const gx = PX.conv(gray, SX), gy = PX.conv(gray, SY);
+    for (let i = 0; i < n; i++) { const a = Math.atan2(gy.a[i], gx.a[i]), mag = Math.hypot(gx.a[i], gy.a[i]); f[11 + (Math.floor(((a + Math.PI) / (2 * Math.PI)) * 8) % 8)] += mag / n; }
+    return f;
+  }
+  const pixels = (m) => { const f = []; for (let c = 0; c < 3; c++) for (const v of m.rgb[c]) f.push(v); return f; };
+  function standardize(Xtr, Xte) {
+    const d = Xtr[0].length, mu = new Array(d).fill(0), sd = new Array(d).fill(0);
+    Xtr.forEach((x) => x.forEach((v, j) => (mu[j] += v / Xtr.length)));
+    Xtr.forEach((x) => x.forEach((v, j) => (sd[j] += (v - mu[j]) ** 2 / Xtr.length)));
+    const f = (x) => x.map((v, j) => (v - mu[j]) / (Math.sqrt(sd[j]) + 1e-6));
+    return [Xtr.map(f), Xte.map(f)];
+  }
+  function fitPredict(Xtr, ytr, Xte, method) {
+    const d = Xtr[0].length;
+    if (method === "nc") {
+      const c = [new Array(d).fill(0), new Array(d).fill(0)], n = [0, 0];
+      Xtr.forEach((x, i) => { n[ytr[i]]++; x.forEach((v, j) => (c[ytr[i]][j] += v)); });
+      c.forEach((cc, k) => cc.forEach((_, j) => (cc[j] /= n[k] || 1)));
+      return Xte.map((x) => { let a = 0, b = 0; x.forEach((v, j) => { a += (v - c[0][j]) ** 2; b += (v - c[1][j]) ** 2; }); return a <= b ? 0 : 1; });
+    }
+    let w = new Array(d).fill(0), b = 0; const lr = 0.1, lam = 0.01;
+    for (let it = 0; it < 200; it++) {
+      const g = new Array(d).fill(0); let gb = 0;
+      Xtr.forEach((x, i) => { let z = b; for (let j = 0; j < d; j++) z += w[j] * x[j]; const e = K.sigmoid(z) - ytr[i]; for (let j = 0; j < d; j++) g[j] += e * x[j]; gb += e; });
+      for (let j = 0; j < d; j++) w[j] -= lr * (g[j] / Xtr.length + lam * w[j]); b -= (lr * gb) / Xtr.length;
+    }
+    return Xte.map((x) => { let z = b; for (let j = 0; j < d; j++) z += w[j] * x[j]; return z > 0 ? 1 : 0; });
+  }
+  let testCache = {};
+  K.lab(document.getElementById("lab2"), {
+    width: 660, height: 330,
+    controls: [
+      { id: "n", label: "每类训练样本数（作者用 10）", min: 1, max: 30, step: 1, value: 5 },
+      { id: "var", label: "位置 / 角度 / 大小的随机程度", min: 0, max: 1, step: 0.05, value: 0.8, fmt: (v) => v.toFixed(2) },
+      { id: "cl", label: "背景杂乱程度", min: 0, max: 1, step: 0.05, value: 0.6, fmt: (v) => v.toFixed(2) },
+      { id: "clf", label: "小分类器", value: "lr", options: [["lr", "逻辑回归（L2 正则）"], ["nc", "最近类中心"]] },
+      { id: "seed", label: "重新抽一批训练图", button: true },
+    ],
+    note: "每次在浏览器里生成训练图和 200 张测试图（香蕉、草莓各半，24×24 彩色）。“原始像素”直接用 1,728 个像素值；“固定特征”用一个手写的、和位置无关的提取器：8 格色相直方图 + 平均 RGB + 8 格 Sobel 边缘方向直方图，共 19 维。它只是预训练网络的简化替身，用来体会“好特征 + 少样本”的效果。",
+    render(svg, v) {
+      const key = v.var + "|" + v.cl;
+      if (!testCache[key]) { const te = makeSet(100, 999, v.var, v.cl); testCache = { [key]: { te, F: te.map((d) => feats(d.m)), P: te.map((d) => pixels(d.m)) } }; }
+      const T = testCache[key], tr = makeSet(v.n, 7 + v.seed * 11, v.var, v.cl), ytr = tr.map((d) => d.y), yte = T.te.map((d) => d.y);
+      const acc = (pred) => pred.filter((p, i) => p === yte[i]).length / yte.length;
+      const [a1, b1] = standardize(tr.map((d) => pixels(d.m)), T.P);
+      const [a2, b2] = standardize(tr.map((d) => feats(d.m)), T.F);
+      const accP = acc(fitPredict(a1, ytr, b1, v.clf)), accF = acc(fitPredict(a2, ytr, b2, v.clf));
+      K.svg(svg, "text", { x: 10, y: 20, "font-size": 13, "font-weight": 700 }, `训练图（前 ${Math.min(10, tr.length)} 张）`);
+      tr.slice(0, 10).forEach((d, i) => img(svg, 10 + (i % 5) * 54, 30 + Math.floor(i / 5) * 54, 50, d.m));
+      K.svg(svg, "text", { x: 10, y: 160, "font-size": 13, "font-weight": 700 }, "测试图（前 10 张，共 200 张）");
+      T.te.slice(0, 10).forEach((d, i) => img(svg, 10 + (i % 5) * 54, 170 + Math.floor(i / 5) * 54, 50, d.m));
+      const bx = 320, bw = 300;
+      K.svg(svg, "text", { x: bx, y: 40, "font-size": 13, "font-weight": 700 }, "测试准确率（200 张）");
+      [["原始像素 1,728 维", accP, "var(--c6)"], ["固定特征 19 维", accF, "var(--c3)"]].forEach((d, i) => {
+        const y = 70 + i * 80;
+        K.svg(svg, "text", { x: bx, y, "font-size": 13 }, d[0]);
+        K.svg(svg, "rect", { x: bx, y: y + 10, width: bw, height: 30, rx: 4, fill: "var(--panel-2)" });
+        K.svg(svg, "rect", { x: bx, y: y + 10, width: bw * d[1], height: 30, rx: 4, fill: d[2] });
+        K.svg(svg, "text", { x: bx + bw * d[1] - 6, y: y + 31, "text-anchor": "end", "font-size": 14, "font-weight": 700, fill: "#fff" }, (d[1] * 100).toFixed(1) + "%");
+      });
+      K.svg(svg, "line", { x1: bx + bw / 2, x2: bx + bw / 2, y1: 70, y2: 230, stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+      K.svg(svg, "text", { x: bx + bw / 2 + 4, y: 246, "font-size": 11, class: "muted" }, "50% = 瞎猜");
+      K.svg(svg, "text", { x: bx, y: 290, "font-size": 12, class: "muted" }, "试试：把每类样本数调到 1–3，");
+      K.svg(svg, "text", { x: bx, y: 308, "font-size": 12, class: "muted" }, "再把随机程度和背景杂乱调高；多点几次“重新抽”。");
+      return { readout: [
+        { k: "训练样本总数", v: 2 * v.n },
+        { k: "原始像素", v: (accP * 100).toFixed(1) + "%", color: "var(--c6)" },
+        { k: "固定特征", v: (accF * 100).toFixed(1) + "%", color: "var(--c3)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

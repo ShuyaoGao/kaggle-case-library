@@ -1,0 +1,570 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>胸片肺炎定位</title>
+<meta name="description" content="Kaggle 案例拆解：RSNA 肺炎检测比赛，不只判断有没有肺炎，还要在胸片上用方框框出可疑的肺部阴影。Mask R-CNN + COCO 预训练权重迁移学习、锚框、非极大值抑制、三段式训练。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">胸部 X 光片 · 目标检测 · 迁移学习</div>
+  <h1>胸片肺炎定位：不光说“有肺炎”，还要把阴影框出来</h1>
+  <p class="en">Mask-RCNN and COCO transfer learning LB:0.155</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">目标检测</span><span class="tag method">Mask R-CNN</span><span class="tag method">ResNet50 主干</span>
+    <span class="tag method">COCO 预训练迁移</span><span class="tag method">锚框</span><span class="tag method">IoU</span>
+    <span class="tag method">非极大值抑制 NMS</span><span class="tag method">imgaug 轻量增强</span><span class="tag method">三段式训练</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Henrique Mendonça</b></span>
+    <span>Kaggle 点赞 <b>1,201</b>（2026-11 抓取）</span>
+    <span>比赛 <b>rsna-pneumonia-detection-challenge</b></span>
+    <span><a href="https://www.kaggle.com/code/hmendonca/mask-rcnn-and-coco-transfer-learning-lb-0-155" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">1024×1024 的胸部 X 光片（DICOM）</div><p>标注表里每一行是一个框：病人编号、框左上角 x、y、宽、高，以及 Target（这张片子有没有肺炎阴影）。<span data-cell="14">出处</span> <span data-cell="18">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">肺部“阴影”在哪里，用方框框出来</div><p>每个框要带一个把握分数。没有阴影的片子就什么框都不输出。这是<b>目标检测</b>，比只判断“有 / 没有”多了“在哪里”。<span data-cell="46">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">Mask R-CNN + COCO 预训练权重</div><p>借用在日常物体照片（COCO 数据集）上训练好的检测模型，只换掉最后几层；图片缩到 256×256；先训练头部，再训练全部，再降低学习率。<span data-cell="0">出处</span> <span data-cell="31">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">公开榜 0.155</div><p>标题写着 LB:0.155（比赛公开排行榜分数）。作者说这是当时公开 notebook 里最好的成绩，而且能在 Kaggle 6 小时限制内训练完。<span data-cell="0">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">北美放射学会（RSNA）组织的比赛，图片是 DICOM 格式的胸部正位 X 光片。作者读的是第二阶段（stage_2）的数据。<span data-cell="6">出处</span></p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">原始图片尺寸</div><div class="v">1024×1024</div></div>
+        <div class="stat-tile"><div class="k">模型输入尺寸</div><div class="v">256×256</div></div>
+        <div class="stat-tile"><div class="k">验证集</div><div class="v">1,500 张</div></div>
+        <div class="stat-tile"><div class="k">类别</div><div class="v">背景 + 肺部阴影</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">原图尺寸见第 18 格 <span data-cell="18">出处</span>，输入尺寸和类别见第 11 格 <span data-cell="11">出处</span>，验证集大小见第 20 格 <span data-cell="20">出处</span>。训练图片总数在运行输出里打印，作者文字没写，这里不列。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">stage_2_train_labels.csv 每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>patientId</code></td><td>病人编号，同时也是 .dcm 文件名</td><td>文字</td></tr>
+        <tr><td><code>x</code>, <code>y</code></td><td>框左上角的坐标（像素，原图 1024 尺度）</td><td>数值（没有框时为空）</td></tr>
+        <tr><td><code>width</code>, <code>height</code></td><td>框的宽和高</td><td>数值</td></tr>
+        <tr><td><code>Target</code></td><td><b>要预测的答案</b>：1 = 这一行是一个肺炎阴影框，0 = 这张片子没有阴影</td><td>0 / 1</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">一张片子可能有 0 个、1 个或几个框，每个框占一行。框的格式见第 23 格的说明 <span data-cell="23">出处</span>，列的用法见第 12 格 <span data-cell="12">出处</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="11">
+    <h3>动手试试 A · 锚框与 IoU：哪些候选框算“对上了” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labA"></div>
+  </div>
+  <div data-at="46">
+    <h3>动手试试 B · 置信度门槛 + 非极大值抑制：留下哪些框 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labB"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>公开排行榜得分 0.155（写在 notebook 标题里）</td><td>标题 · <span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>当时公开 notebook 中表现最好，并能在 Kaggle 6 小时限制内训练完</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>配置参数是为了缩短运行时间选的，“并不是最优”</td><td><span data-cell="11">第 11 格</span></td></tr>
+        <tr><td>检测最低置信度 0.78 是为了“匹配目标分布”</td><td><span data-cell="11">第 11 格</span></td></tr>
+      </table></div>
+      <p class="callout">0.155 是比赛的公开榜分数，比赛按预测框和医生标的框的重叠程度、在多个重叠门槛下综合打分，所以这个数字不能当成“准确率 15.5%”理解。验证损失等其他数字在运行输出里，这里不列。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li>第 30 格和第 42 格的文字说“只训练了一轮，仅作演示”，但代码实际分三段一共训练到第 16 轮，说明文字是旧版本留下的。<span data-cell="30">出处</span> <span data-cell="35">出处</span></li>
+        <li>配置里检测门槛是 0.78，写提交文件时又用 <code>min_conf=0.95</code> 再筛一遍，实际起作用的是 0.95，两处说法不一致。<span data-cell="11">出处</span> <span data-cell="46">出处</span></li>
+        <li>NMS 门槛设成 0.01，意思是两个框只要有一点点重叠，就只留分数高的那个；两个挨得很近的真实病灶可能被合并成一个。<span data-cell="11">出处</span></li>
+        <li>第 39 格出错时引用了不存在的 <code>self.model_dir</code>，真走到那一步会报另一个错。<span data-cell="39">出处</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一张胸片，输出若干个“可疑阴影框”和把握分数；医生打开片子时，可疑区域已经被框好，重点看框里。</li>
+        <li><b>同类问题：</b>乳腺钼靶找肿块、CT 找肺结节、骨折定位、病理切片里找有丝分裂细胞，以及非医学的车辆、行人检测。</li>
+        <li><b>可迁移的套路：</b>只有框没有轮廓时，把框画成矩形掩膜交给 Mask R-CNN → 借用 COCO 权重、换掉分类和回归头 → 先练头、后练全身、再降学习率 → 用置信度门槛和 NMS 控制输出框数 → 坐标按缩放比例还原。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>框架：Matterport 的 Mask R-CNN（Keras） <span data-cell="4">第 4 格</span></li>
+        <li>配置：ResNet50 主干、256 输入、锚框 16/32/64/128、每图最多 3 个检测 <span data-cell="11">第 11 格</span></li>
+        <li>数据：框 → 矩形掩膜 <span data-cell="12">第 12 格</span>；随机留 1500 张验证 <span data-cell="20">第 20 格</span></li>
+        <li>增强：imgaug 轻微仿射 / 分段仿射、亮度对比度、模糊锐化 <span data-cell="29">第 29 格</span></li>
+        <li>训练：COCO 权重排除最后 4 层；heads 2 轮 → all 到第 6 轮 → 降学习率到第 16 轮 <span data-cell="31">第 31 格</span> <span data-cell="33">第 33 格</span></li>
+        <li>推理：挑验证损失最低的一轮；置信度 &gt; 0.95 的框写入提交 <span data-cell="38">第 38 格</span> <span data-cell="46">第 46 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>COCO 数据集里是人、车、猫狗、香蕉这些日常物体，没有一张胸片。为什么用它的权重做起点，仍然比从零训练好？</li>
+      <li>比赛只给了框，作者却把框涂成实心矩形当“掩膜”交给 Mask R-CNN。这样做有什么好处？模型学到的“轮廓”有意义吗？</li>
+      <li>图片从 1024 缩到 256，边长缩小 4 倍。小的病灶会怎样？为什么作者还是这么做？</li>
+      <li>置信度门槛定 0.95 和定 0.5，会分别多出哪一种错误？对肺炎筛查，你倾向哪种？</li>
+      <li>NMS 门槛 0.01 几乎不允许两个框有重叠。如果一侧肺里有两块挨着的阴影，会发生什么？</li>
+      <li>数据增强只用了很小的幅度（旋转 ±2°），而皮肤镜照片可以随便转。为什么胸片要这么“小心”？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Henrique Mendonça（在 Kaggle 官方 Mask R-CNN 入门代码基础上修改），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意，图中的“胸片”是用代码画的示意图，不是真实病人影像。比赛数据：RSNA Pneumonia Detection Challenge。
+</footer>
+</main>
+
+<script src="nb/rsna-pneumonia-mask-rcnn.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  if (/[?&]fast/.test(location.search)) { K.tween = (ms, fn, ctx) => { if (ctx && !ctx.alive()) return Promise.resolve(false); fn(1, 1); return Promise.resolve(true); }; K.wait = (ms, ctx) => Promise.resolve(!ctx || ctx.alive()); }
+  if (/[?&]fold/.test(location.search)) document.head.appendChild(Object.assign(document.createElement("style"), { textContent: ".walk .ch-cells > .cell, .walk .cell-note { display: none !important; }" }));
+  /* ===== 页面专用：像素图工具（用代码生成小图，在浏览器里真算卷积、模糊、池化、几何变换） ===== */
+  const PX = (function () {
+    function rgbOf(name, fb) {
+      let s = (K.css(name) || fb || "#888888").trim();
+      if (s[0] !== "#") return [128, 128, 128];
+      if (s.length === 4) s = "#" + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+      return [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
+    }
+    function grid(W, H, f) { const a = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) a[y * W + x] = f(x, y); return { W, H, a }; }
+    /* 彩色图：{W,H,rgb:[R,G,B]}，每个通道取值 0–1 */
+    function rgbGrid(W, H, f) { const R = new Float32Array(W * H), G = new Float32Array(W * H), B = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const c = f(x, y), i = y * W + x; R[i] = c[0]; G[i] = c[1]; B[i] = c[2]; } return { W, H, rgb: [R, G, B] }; }
+    const chan = (m, c) => ({ W: m.W, H: m.H, a: m.rgb[c] });
+    const fromChans = (ch) => ({ W: ch[0].W, H: ch[0].H, rgb: ch.map((c) => c.a) });
+    const gray = (m) => (m.rgb ? grid(m.W, m.H, (x, y) => { const i = y * m.W + x; return 0.299 * m.rgb[0][i] + 0.587 * m.rgb[1][i] + 0.114 * m.rgb[2][i]; }) : m);
+    function at(m, x, y) { return m.a[y * m.W + x]; }
+    function atClamp(m, x, y) { x = x < 0 ? 0 : x >= m.W ? m.W - 1 : x; y = y < 0 ? 0 : y >= m.H ? m.H - 1 : y; return m.a[y * m.W + x]; }
+    function atZero(m, x, y) { return x < 0 || y < 0 || x >= m.W || y >= m.H ? 0 : m.a[y * m.W + x]; }
+    /* padding='same'：边界外按 0 补 */
+    function conv(m, k) { const n = k.length, r = (n - 1) / 2; return grid(m.W, m.H, (x, y) => { let s = 0; for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) s += k[j][i] * atZero(m, x + i - r, y + j - r); return s; }); }
+    function map(m, f) { if (m.rgb) return { W: m.W, H: m.H, rgb: m.rgb.map((a) => { const o = new Float32Array(a.length); for (let i = 0; i < a.length; i++) o[i] = f(a[i], i); return o; }) }; const o = { W: m.W, H: m.H, a: new Float32Array(m.a.length) }; for (let i = 0; i < m.a.length; i++) o.a[i] = f(m.a[i], i); return o; }
+    const relu = (m) => map(m, (v) => (v > 0 ? v : 0));
+    function pool(m, s) { s = s || 2; const W = Math.ceil(m.W / s), H = Math.ceil(m.H / s); return grid(W, H, (x, y) => { let b = -Infinity; for (let j = 0; j < s; j++) for (let i = 0; i < s; i++) { const xx = x * s + i, yy = y * s + j; if (xx < m.W && yy < m.H) b = Math.max(b, at(m, xx, yy)); } return b; }); }
+    function range(m) { let lo = Infinity, hi = -Infinity; for (const v of m.a) { if (v < lo) lo = v; if (v > hi) hi = v; } return [lo, hi]; }
+    /* 可分离高斯模糊（边界用最近像素），彩色图逐通道做 */
+    function blur(m, sigma) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => blur(chan(m, c), sigma)));
+      if (sigma <= 0.01) return m;
+      const r = Math.max(1, Math.ceil(sigma * 3)), w = [];
+      let s = 0;
+      for (let i = -r; i <= r; i++) { const v = Math.exp((-i * i) / (2 * sigma * sigma)); w.push(v); s += v; }
+      for (let i = 0; i < w.length; i++) w[i] /= s;
+      const t = grid(m.W, m.H, (x, y) => { let a = 0; for (let i = -r; i <= r; i++) a += w[i + r] * atClamp(m, x + i, y); return a; });
+      return grid(m.W, m.H, (x, y) => { let a = 0; for (let i = -r; i <= r; i++) a += w[i + r] * atClamp(t, x, y + i); return a; });
+    }
+    function bilinear(m, x, y) {
+      const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+      return (atClamp(m, x0, y0) * (1 - fx) + atClamp(m, x0 + 1, y0) * fx) * (1 - fy) + (atClamp(m, x0, y0 + 1) * (1 - fx) + atClamp(m, x0 + 1, y0 + 1) * fx) * fy;
+    }
+    /* 绕中心旋转/缩放/平移/翻转；fill：'nearest' 用最近像素，数字表示边界外填这个值 */
+    function affine(m, p) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => affine(chan(m, c), p)));
+      const th = ((p.rot || 0) * Math.PI) / 180, c = Math.cos(th), s = Math.sin(th), z = p.zoom || 1;
+      const cx = (m.W - 1) / 2, cy = (m.H - 1) / 2, tx = (p.tx || 0) * m.W, ty = (p.ty || 0) * m.H;
+      return grid(m.W, m.H, (x, y) => {
+        let u = x - cx - tx, v = y - cy - ty;
+        if (p.flip) u = -u;
+        if (p.vflip) v = -v;
+        const a = (c * u + s * v) / z + cx, b = (-s * u + c * v) / z + cy;
+        if (p.fill != null && p.fill !== "nearest" && (a < -0.5 || b < -0.5 || a > m.W - 0.5 || b > m.H - 0.5)) return p.fill;
+        return bilinear(m, a, b);
+      });
+    }
+    function resize(m, W, H) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => resize(chan(m, c), W, H)));
+      return grid(W, H, (x, y) => bilinear(m, ((x + 0.5) * m.W) / W - 0.5, ((y + 0.5) * m.H) / H - 0.5));
+    }
+    function toURL(m, mode, lo, hi) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      if (m.rgb) {
+        for (let i = 0; i < m.W * m.H; i++) { for (let c = 0; c < 3; c++) d[i * 4 + c] = Math.max(0, Math.min(1, m.rgb[c][i])) * 255; d[i * 4 + 3] = 255; }
+      } else {
+        const P = rgbOf("--panel", "#ffffff"), A = rgbOf("--c1"), B = rgbOf("--c6");
+        if (lo == null || hi == null) { const r = range(m); if (lo == null) lo = r[0]; if (hi == null) hi = r[1]; }
+        const span = hi - lo || 1, amax = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+        for (let i = 0; i < m.a.length; i++) {
+          const v = m.a[i]; let r, gg, b;
+          if (mode === "div") { const t = Math.max(-1, Math.min(1, v / amax)), C = t >= 0 ? B : A, k = Math.abs(t); r = P[0] + (C[0] - P[0]) * k; gg = P[1] + (C[1] - P[1]) * k; b = P[2] + (C[2] - P[2]) * k; }
+          else if (mode === "heat") { const k = Math.max(0, Math.min(1, (v - lo) / span)); r = P[0] + (B[0] - P[0]) * k; gg = P[1] + (B[1] - P[1]) * k; b = P[2] + (B[2] - P[2]) * k; }
+          else { const k = Math.max(0, Math.min(1, (v - lo) / span)) * 255; r = gg = b = k; }
+          d[i * 4] = r; d[i * 4 + 1] = gg; d[i * 4 + 2] = b; d[i * 4 + 3] = 255;
+        }
+      }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    function draw(svg, x, y, w, h, m, mode, lo, hi, smooth) {
+      const e = K.svg(svg, "image", { x, y, width: w, height: h, preserveAspectRatio: "none" });
+      if (!smooth) e.style.imageRendering = "pixelated";
+      e.setAttribute("href", toURL(m, mode, lo, hi));
+      K.svg(svg, "rect", { x, y, width: w, height: h, fill: "none", stroke: "var(--line)" });
+      return e;
+    }
+    function update(e, m, mode, lo, hi) { e.setAttribute("href", toURL(m, mode, lo, hi)); }
+    function lines(svg, x, y, w, h, W, H, op) {
+      const g = K.svg(svg, "g");
+      for (let i = 0; i <= W; i++) K.svg(g, "line", { x1: x + (w * i) / W, x2: x + (w * i) / W, y1: y, y2: y + h, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      for (let j = 0; j <= H; j++) K.svg(g, "line", { y1: y + (h * j) / H, y2: y + (h * j) / H, x1: x, x2: x + w, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      return g;
+    }
+    const smooth = (e0, e1, x) => { const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+    const blob = (x, y, cx, cy, sx, sy) => Math.exp(-(((x - cx) * (x - cx)) / (2 * sx * sx) + ((y - cy) * (y - cy)) / (2 * sy * sy)));
+    /* 平滑噪声：几层不同频率的随机网格插值叠加，用来做纹理 */
+    function noise(W, H, seed, cells) {
+      const r = K.rng(seed || 1), n = cells || 6, g0 = grid(n + 1, n + 1, () => r());
+      return grid(W, H, (x, y) => bilinear(g0, (x / W) * n, (y / H) * n));
+    }
+    return { grid, rgbGrid, chan, fromChans, gray, at, atClamp, conv, map, relu, pool, range, blur, bilinear, affine, resize, toURL, draw, update, lines, smooth, blob, noise, rgbOf };
+  })();
+
+  /* ===== 示意胸片（灰度 0–1）。ops：阴影列表 [cx, cy, rx, ry]，坐标 0–1 ===== */
+  function cxr(N, ops, seed) {
+    const tex = PX.noise(N, N, (seed || 3) + 2, 12);
+    return PX.grid(N, N, (px, py) => {
+      const x = px / N, y = py / N, t = tex.a[py * N + px];
+      let v = 0.75 + 0.1 * t;
+      const lungL = Math.pow((x - 0.3) / 0.16, 2) + Math.pow((y - 0.48) / 0.3, 2), lungR = Math.pow((x - 0.7) / 0.16, 2) + Math.pow((y - 0.48) / 0.3, 2);
+      if (lungL < 1 || lungR < 1) v = 0.18 + 0.12 * t;
+      for (let k = 0; k < 9; k++) { const ry = 0.24 + k * 0.055, d = Math.abs(y - ry - 0.12 * Math.pow(Math.abs(x - 0.5) * 2, 2)); if (d < 0.008 && Math.abs(x - 0.5) > 0.06 && Math.abs(x - 0.5) < 0.38) v += 0.18; }
+      if (Math.abs(x - 0.5) < 0.06 && y > 0.12) v = 0.85 + 0.1 * t;
+      if (Math.pow((x - 0.56) / 0.12, 2) + Math.pow((y - 0.66) / 0.12, 2) < 1) v = Math.max(v, 0.8);
+      (ops || []).forEach(([cx, cy, rx, ry]) => { const d = Math.pow((x - cx) / rx, 2) + Math.pow((y - cy) / ry, 2); if (d < 1.4) v += 0.4 * (1 - PX.smooth(0.5, 1.4, d)) * (0.7 + 0.5 * t); });
+      return K.clamp(v, 0, 1);
+    });
+  }
+  const iou = (a, b) => { const ix = Math.max(0, Math.min(a[0] + a[2], b[0] + b[2]) - Math.max(a[0], b[0])), iy = Math.max(0, Math.min(a[1] + a[3], b[1] + b[3]) - Math.max(a[1], b[1])), I = ix * iy; return I / (a[2] * a[3] + b[2] * b[3] - I); };
+  const OPS = [[0.28, 0.6, 0.09, 0.12], [0.72, 0.42, 0.07, 0.09]];
+  const GT = OPS.map(([cx, cy, rx, ry]) => [cx - rx, cy - ry, 2 * rx, 2 * ry]);
+  function box(svg, X, Y, S, b, color, dash, w) { return K.svg(svg, "rect", { x: X + b[0] * S, y: Y + b[1] * S, width: b[2] * S, height: b[3] * S, fill: "none", stroke: color, "stroke-width": w || 2, "stroke-dasharray": dash || null }); }
+
+  const steps = [
+    {
+      at: 0, title: "任务：在胸片上把肺炎阴影框出来", kicker: "第 0 格 · 任务",
+      html: `<p>肺炎在 X 光片上常表现为肺里一片发白的“阴影”（医学上叫肺部不透明影）。比赛要求不光判断有没有，还要<b>框出位置</b>。这就是<b>目标检测</b>：输出若干个方框，每个框带一个把握分数。</p><p>作者在 Matterport 版 Mask R-CNN 官方示例的基础上，借用在 COCO 日常物体照片上训练好的权重做<b>迁移学习</b>。他说这是当时公开 notebook 里成绩最好的，而且能在 Kaggle 的 6 小时限制内练完。<span data-cell="0">出处</span></p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        const N = 128, img = cxr(N, OPS, 3), S = 250;
+        PX.draw(svg, 40, 40, S, S, img, null, 0, 1, true);
+        PX.draw(svg, 420, 40, S, S, img, null, 0, 1, true);
+        K.svg(svg, "text", { x: 165, y: 30, "text-anchor": "middle", "font-size": 13 }, "分类：这张片子“有肺炎”");
+        K.svg(svg, "text", { x: 545, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "检测：阴影在哪里");
+        K.arrow(svg, 305, 165, 405, 165);
+        const bs = GT.map((b, i) => { const r = box(svg, 420, 40, S, b, "var(--c6)", null, 3); const t = K.svg(svg, "text", { x: 420 + b[0] * S, y: 40 + b[1] * S - 5, "font-size": 12, fill: "var(--c6)", "font-weight": 700 }, ["0.97", "0.96"][i]); r.style.opacity = t.style.opacity = 0; return [r, t]; });
+        K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 12, class: "muted" }, "示意胸片：两侧黑色是肺，中间白色是纵隔和心脏，发白的团块是“阴影”");
+        (async () => { for (const [r, t] of bs) { if (!(await ctx.wait(400))) return; if (!(await ctx.tween(500, (k) => { r.style.opacity = k; t.style.opacity = k; }))) return; } })();
+      },
+    },
+    {
+      title: "装上 Mask R-CNN，下载 COCO 预训练权重", kicker: "第 1–8 格 · 准备工具",
+      html: `<p>从 GitHub 克隆 Matterport 写的 Mask R-CNN 代码，再下载它在 <b>COCO</b> 上训练好的权重文件。<span data-cell="4">出处</span> <span data-cell="8">出处</span></p><p>COCO 是一个大型日常照片数据集，标注了人、汽车、猫、杯子等 80 类物体的位置和轮廓。在它上面练过的检测模型，已经很会“在图里找东西、画框、描边”，只是还不认识肺炎。</p>`,
+      cells: [4, 8], highlight: ["git clone", "mask_rcnn_coco.h5"],
+      draw(svg, ctx) {
+        const items = ["人", "汽车", "猫", "杯子", "香蕉", "椅子"];
+        const els = items.map((n, i) => { const g = K.node(svg, 30 + (i % 3) * 100, 50 + Math.floor(i / 3) * 90, 86, 70, n, { fs: 14, fill: "color-mix(in srgb, var(--c" + (1 + (i % 5)) + ") 16%, var(--panel))" }); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 170, y: 36, "text-anchor": "middle", "font-size": 13 }, "COCO：80 类日常物体");
+        const brain = K.node(svg, 360, 110, 130, 80, "会找物体、\n会画框和轮廓\n的检测模型", { fs: 12, fill: "var(--accent-soft)", stroke: "var(--accent)" }); brain.style.opacity = 0;
+        const tgt = K.node(svg, 560, 110, 130, 80, "胸片上的\n肺部阴影", { fs: 13, stroke: "var(--c6)" }); tgt.style.opacity = 0;
+        const a1 = K.arrow(svg, 330, 150, 358, 150), a2 = K.arrow(svg, 492, 150, 558, 150); a1.style.opacity = a2.style.opacity = 0;
+        K.svg(svg, "text", { x: 525, y: 230, "text-anchor": "middle", "font-size": 12, class: "muted" }, "迁移：换掉最后几层，再用胸片微调");
+        (async () => {
+          for (const e of els) if (!(await ctx.tween(150, (k) => (e.style.opacity = k)))) return;
+          if (!(await ctx.tween(400, (k) => { a1.style.opacity = k; brain.style.opacity = k; }))) return;
+          await ctx.tween(400, (k) => { a2.style.opacity = k; tgt.style.opacity = k; });
+        })();
+      },
+    },
+    {
+      title: "配置：小图、ResNet50、锚框与门槛", kicker: "第 9–11 格 · 配置",
+      html: `<p>作者说这些参数是为了<b>缩短运行时间</b>选的，并不是最优。<span data-cell="11">出处</span> 关键几项：</p><ul class="tight"><li>主干 ResNet50；图片缩到 256×256；每批 8 张。</li><li>两个类别：背景 + 肺部阴影。</li><li><b>锚框</b>尺寸 16、32、64、128 像素：模型先在图上铺满各种大小的候选框，再判断哪些框里有东西、该怎么挪。</li><li>每张图最多输出 3 个框；置信度低于 0.78 的不要（作者注释“匹配目标分布”）；NMS 门槛 0.01。</li></ul>`,
+      cells: [10, 11], highlight: ["BACKBONE = 'resnet50'", "IMAGE_MIN_DIM = 256", "RPN_ANCHOR_SCALES", "DETECTION_MIN_CONFIDENCE = 0.78", "DETECTION_NMS_THRESHOLD = 0.01"],
+      draw(svg, ctx) {
+        const S = 260, X = 40, Y = 30, img = cxr(96, OPS, 3);
+        PX.draw(svg, X, Y, S, S, img, null, 0, 1, true);
+        const g = K.svg(svg, "g"), sizes = [16, 32, 64, 128], cols = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)"];
+        K.svg(svg, "text", { x: 330, y: 50, "font-size": 13, "font-weight": 700 }, "锚框：在每个位置放几种大小、几种形状");
+        sizes.forEach((s, i) => { K.svg(svg, "rect", { x: 340 + i * 85, y: 80 + (64 - s / 2.2) / 2, width: s / 2.2, height: s / 2.2, fill: "none", stroke: cols[i], "stroke-width": 2 }); K.svg(svg, "text", { x: 340 + i * 85, y: 150, "font-size": 12 }, s + " 像素"); });
+        K.svg(svg, "text", { x: 330, y: 200, "font-size": 12, class: "muted" }, "（示意：256 图上的锚框，每格中心放一组）");
+        K.svg(svg, "text", { x: 330, y: 240, "font-size": 13 }, "每图最多 3 个框 · 置信度 ≥ 0.78 · NMS 0.01");
+        ctx.tween(1800, (t) => {
+          while (g.firstChild) g.removeChild(g.firstChild);
+          const n = Math.floor(t * 36);
+          for (let k = 0; k < n; k++) { const cx = (k % 6 + 0.5) / 6, cy = (Math.floor(k / 6) + 0.5) / 6, s = sizes[k % 4] / 256; box(g, X, Y, S, [cx - s / 2, cy - s / 2, s, s], cols[k % 4], null, 1); }
+        });
+      },
+    },
+    {
+      title: "只有框，没有轮廓：把框涂成实心矩形当掩膜", kicker: "第 12 格 · 数据集类",
+      html: `<p>Mask R-CNN 训练时需要每个物体的<b>掩膜</b>（逐像素轮廓），而比赛只给了方框。作者的办法很直接：把每个 Target=1 的框在一张空白图上<b>涂成实心矩形</b>，当作掩膜。<span data-cell="12">出处</span></p><p>没有阴影的片子，就给一张全 0 的掩膜、类别 0（背景）。读图时把灰度图复制成 3 个通道，因为 COCO 权重是按彩色图训练的。</p>`,
+      cells: [12], highlight: ["cv2.rectangle(mask_instance, (x, y), (x+w, y+h), 255, -1)", "np.stack((image,) * 3, -1)"],
+      draw(svg, ctx) {
+        const S = 220, img = cxr(96, OPS, 3);
+        PX.draw(svg, 30, 50, S, S, img, null, 0, 1, true);
+        GT.forEach((b) => box(svg, 30, 50, S, b, "var(--c6)", null, 2.5));
+        K.svg(svg, "text", { x: 140, y: 40, "text-anchor": "middle", "font-size": 13 }, "标注：两个框");
+        const masks = GT.map((b, i) => {
+          const X = 300 + i * 200;
+          K.svg(svg, "rect", { x: X, y: 50, width: 170, height: 170, fill: "#000", stroke: "var(--line)" });
+          K.svg(svg, "text", { x: X + 85, y: 40, "text-anchor": "middle", "font-size": 13 }, "掩膜 " + (i + 1));
+          return K.svg(svg, "rect", { x: X + b[0] * 170, y: 50 + b[1] * 170, width: 0, height: b[3] * 170, fill: "#fff" });
+        });
+        K.svg(svg, "text", { x: 470, y: 260, "text-anchor": "middle", "font-size": 12, class: "muted" }, "每个框一张掩膜：框里涂白（255），框外全黑");
+        ctx.wait(400).then((ok) => ok && ctx.tween(1000, (t) => masks.forEach((m, i) => m.setAttribute("width", GT[i][2] * 170 * t))));
+      },
+    },
+    {
+      title: "读标注：一张片子 0 个、1 个或几个框", kicker: "第 13–18 格 · 读数据",
+      html: `<p>读入 <code>stage_2_train_labels.csv</code>，用 <code>parse_dataset</code> 把每一行按病人编号归到对应的 DICOM 文件下：没有阴影的片子只有一行（Target=0），有阴影的片子每个框一行。<span data-cell="15">出处</span></p><p>再读一个 DICOM 看看文件头信息，确认原图尺寸是 1024×1024。<span data-cell="18">出处</span></p>`,
+      cells: [14, 15, 18], highlight: ["parse_dataset", "ORIG_SIZE = 1024"],
+      draw(svg, ctx) {
+        const rows = [["病人 A", "", "", "", "", "0"], ["病人 B", "264", "152", "213", "379", "1"], ["病人 B", "562", "152", "256", "453", "1"], ["病人 C", "323", "577", "160", "104", "1"]];
+        const hdr = ["patientId", "x", "y", "width", "height", "Target"], xs = [70, 170, 240, 310, 390, 470];
+        hdr.forEach((h, i) => K.svg(svg, "text", { x: xs[i], y: 40, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, h));
+        const els = rows.map((r, j) => { const g = K.svg(svg, "g"); g.style.opacity = 0; K.svg(g, "rect", { x: 20, y: 52 + j * 40, width: 490, height: 32, rx: 4, fill: r[5] === "1" ? "color-mix(in srgb, var(--c6) 14%, var(--panel))" : "var(--panel-2)", stroke: "var(--line)" }); r.forEach((v, i) => K.svg(g, "text", { x: xs[i], y: 73 + j * 40, "text-anchor": "middle", "font-size": 12 }, v || "（空）")); return g; });
+        K.svg(svg, "text", { x: 20, y: 240, "font-size": 12, class: "muted" }, "表中数字为示意；同一个病人有几个框就有几行");
+        const grp = [["A.dcm", "[ ] 没有框"], ["B.dcm", "[框1, 框2]"], ["C.dcm", "[框1]"]].map(([f, a], i) => { const g = K.node(svg, 550, 50 + i * 60, 150, 46, f + "\n" + a, { fs: 12 }); g.style.opacity = 0; return g; });
+        (async () => { for (const e of els) if (!(await ctx.tween(250, (k) => (e.style.opacity = k)))) return; for (const e of grp) if (!(await ctx.tween(250, (k) => (e.style.opacity = k)))) return; })();
+      },
+    },
+    {
+      title: "切出 1500 张验证，看一张带框的片子", kicker: "第 19–27 格 · 切分与检查",
+      html: `<p>把所有片子打乱（固定随机种子 42），前 1500 张做验证，其余做训练。<span data-cell="20">出处</span> 然后用 <code>DetectorDataset</code> 分别包装成训练集和验证集。</p><p>作者随机挑一张有框的训练片子，左边画原图，右边只保留框里的像素，确认框和图对得上。<span data-cell="27">出处</span> 框的格式是左上角 (x, y) 加宽和高。<span data-cell="23">出处</span></p>`,
+      cells: [20, 22, 24, 25, 27], highlight: ["val_size = 1500"],
+      draw(svg, ctx) {
+        const S = 220, img = cxr(96, OPS, 5);
+        PX.draw(svg, 60, 50, S, S, img, null, 0, 1, true);
+        const masked = PX.map(img, (v, i) => { const x = (i % 96) / 96, y = Math.floor(i / 96) / 96; return GT.some((b) => x >= b[0] && x <= b[0] + b[2] && y >= b[1] && y <= b[1] + b[3]) ? v : 0; });
+        const m = PX.draw(svg, 420, 50, S, S, masked, null, 0, 1, true); m.style.opacity = 0;
+        K.svg(svg, "text", { x: 170, y: 40, "text-anchor": "middle", "font-size": 13 }, "原图");
+        K.svg(svg, "text", { x: 530, y: 40, "text-anchor": "middle", "font-size": 13 }, "只看框里的像素");
+        K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 12, class: "muted" }, "检查标注有没有对齐：这一步能提前发现坐标搞反、尺寸算错之类的低级错误");
+        ctx.wait(400).then((ok) => ok && ctx.tween(800, (t) => (m.style.opacity = t)));
+      },
+    },
+    {
+      title: "数据增强：只做很轻微的变化", kicker: "第 28–29 格 · 增强",
+      html: `<p>用 imgaug 库，每次从三组里各随机选一种：<span data-cell="29">出处</span></p><ul class="tight"><li>几何：轻微缩放（±2～4%）、平移（±2～4%）、旋转 ±2°、剪切 ±1°，或者分段仿射（局部轻微扭曲）。</li><li>亮度乘 0.9～1.1，或对比度 0.9～1.1。</li><li>轻微模糊，或轻微锐化。</li></ul><p>幅度都很小。胸片的拍摄姿势比较标准，心脏在左、肝在右，大幅旋转或翻转会造出“不存在的胸片”。</p>`,
+      cells: [29], highlight: ["rotate=(-2, 2)", "PiecewiseAffine", "ContrastNormalization", "GaussianBlur"],
+      draw(svg, ctx) {
+        const base = cxr(96, OPS, 3), r = K.rng(7), ims = [];
+        for (let i = 0; i < 8; i++) {
+          let m = PX.affine(base, { rot: (r() * 2 - 1) * 2, zoom: 1 + (r() * 2 - 1) * 0.03, tx: (r() * 2 - 1) * 0.03, ty: (r() * 2 - 1) * 0.04, fill: 0 });
+          const mul = 0.9 + r() * 0.2; m = PX.map(m, (v) => K.clamp(v * mul, 0, 1));
+          if (r() < 0.5) m = PX.blur(m, 0.6);
+          const e = PX.draw(svg, 30 + (i % 4) * 170, 20 + Math.floor(i / 4) * 160, 140, 140, m, null, 0, 1, true); e.style.opacity = 0; ims.push(e);
+        }
+        K.svg(svg, "text", { x: 360, y: 330, "text-anchor": "middle", "font-size": 12, class: "muted" }, "同一张示意胸片的 8 个增强版本：变化很小，几乎看不出来");
+        (async () => { for (const e of ims) if (!(await ctx.tween(160, (k) => (e.style.opacity = k)))) return; })();
+      },
+    },
+    {
+      title: "迁移学习：换掉最后 4 层", kicker: "第 30–32 格 · 建模型",
+      html: `<p>建一个训练模式的 Mask R-CNN，加载 COCO 权重，但<b>排除</b>最后 4 层：分类层、框回归的两层、掩膜层。<span data-cell="31">出处</span> 原因是 COCO 有 81 个类别（含背景），这里只有 2 个，这几层的形状对不上，只能重新学。</p><p>Mask R-CNN 的结构：主干（ResNet50 + 特征金字塔）提取特征 → 候选区域网络（RPN）从锚框里挑出可能有东西的区域 → 每个区域分别做分类、修正框的位置、画掩膜。</p>`,
+      cells: [31], highlight: ["exclude=[", "\"mrcnn_class_logits\"", "\"mrcnn_mask\""],
+      draw(svg, ctx) {
+        const parts = [["主干\nResNet50+FPN", 30, "keep"], ["RPN\n挑候选区域", 190, "keep"], ["分类层", 380, "new"], ["框回归", 380, "new"], ["掩膜层", 380, "new"]];
+        const els = [];
+        els.push(K.node(svg, 30, 120, 130, 70, "主干\nResNet50 + FPN", { fs: 12, fill: "color-mix(in srgb, var(--c1) 20%, var(--panel))", stroke: "var(--c1)" }));
+        els.push(K.node(svg, 200, 120, 130, 70, "RPN\n从锚框挑候选", { fs: 12, fill: "color-mix(in srgb, var(--c1) 20%, var(--panel))", stroke: "var(--c1)" }));
+        const heads = ["分类：背景 / 阴影", "框回归：修正位置", "掩膜：画轮廓"].map((n, i) => K.node(svg, 400, 50 + i * 85, 170, 60, n, { fs: 12, fill: "color-mix(in srgb, var(--c6) 18%, var(--panel))", stroke: "var(--c6)" }));
+        K.arrow(svg, 160, 155, 198, 155); heads.forEach((h, i) => K.arrow(svg, 330, 155, 398, 80 + i * 85));
+        K.svg(svg, "text", { x: 180, y: 230, "text-anchor": "middle", "font-size": 13, fill: "var(--c1)", "font-weight": 700 }, "沿用 COCO 权重");
+        const lab = K.svg(svg, "text", { x: 485, y: 310, "text-anchor": "middle", "font-size": 13, fill: "var(--c6)", "font-weight": 700 }, "COCO 81 类 → 这里 2 类：重新学");
+        void parts; void els;
+        heads.forEach((h) => (h.style.opacity = 0)); lab.style.opacity = 0;
+        (async () => { for (const h of heads) if (!(await ctx.tween(350, (k) => (h.style.opacity = k)))) return; await ctx.tween(300, (k) => (lab.style.opacity = k)); })();
+      },
+    },
+    {
+      title: "三段式训练：先练头，再练全身，再放慢", kicker: "第 33–35 格 · 训练",
+      html: `<p>训练分三段（Matterport 的 <code>epochs</code> 是“练到第几轮为止”）：<span data-cell="33">出处</span> <span data-cell="34">出处</span> <span data-cell="35">出处</span></p><ol class="tight"><li>只训练新换的头部（layers='heads'），学习率 0.012，练到第 2 轮，不加增强。</li><li>解冻全部层，学习率 0.006，加增强，练到第 6 轮。</li><li>学习率降到 0.0012，继续练到第 16 轮。</li></ol><p>每段结束后把损失记录接到一起，方便画完整曲线。</p>`,
+      cells: [33, 34, 35], highlight: ["layers='heads'", "layers='all'", "LEARNING_RATE/5", "epochs=16"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 600, h: 230 }, [0, 16], [0, 0.013], { xticks: 8, yfmt: (v) => (v * 1000).toFixed(0), xlabel: "轮次", ylabel: "学习率 ×10⁻³" });
+        const segs = [[0, 2, 0.012, "var(--c2)", "只练头部"], [2, 6, 0.006, "var(--c1)", "全部 + 增强"], [6, 16, 0.0012, "var(--c3)", "全部，学习率 ÷5"]];
+        const rs = segs.map(([a, b, lr, c, n]) => { const r = K.svg(svg, "rect", { x: ax.sx(a), y: ax.sy(lr), width: 0, height: ax.sy(0) - ax.sy(lr), fill: c, opacity: 0.75 }); const t = K.svg(svg, "text", { x: ax.sx((a + b) / 2), y: ax.sy(lr) - 8, "text-anchor": "middle", "font-size": 12 }, n); t.style.opacity = 0; return [r, t, a, b]; });
+        (async () => { for (const [r, t, a, b] of rs) if (!(await ctx.tween(600, (k) => { r.setAttribute("width", (ax.sx(b) - ax.sx(a)) * k); t.style.opacity = k; }))) return; })();
+      },
+    },
+    {
+      title: "看损失曲线，挑验证损失最低的一轮", kicker: "第 36–39 格 · 选模型",
+      html: `<p>把 16 轮的各项损失做成表格、画成曲线：总损失、分类损失、框回归损失，训练和验证各一条。<span data-cell="37">出处</span></p><p>然后找<b>验证总损失最低</b>的那一轮，到保存模型的文件夹里取出那一轮的权重文件。<span data-cell="38">出处</span> <span data-cell="39">出处</span></p>`,
+      cells: [36, 37, 38, 39], highlight: ["np.argmin(history[\"val_loss\"])", "checkpoints[best_epoch]"],
+      draw(svg, ctx) {
+        const tr = [], va = [];
+        for (let e = 1; e <= 16; e++) { tr.push(1.9 * Math.exp(-e / 3.5) + 0.75 - 0.01 * e); va.push(1.8 * Math.exp(-e / 3.2) + 0.95 + 0.012 * Math.pow(Math.max(0, e - 10), 1.6)); }
+        const best = va.indexOf(Math.min(...va));
+        const ax = K.axes(svg, { x: 70, y: 30, w: 600, h: 230 }, [1, 16], [0, 2.6], { xticks: 15, xfmt: (v) => String(Math.round(v)), xlabel: "轮次", ylabel: "损失（示意）" });
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 }), p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 520, y: 50, "font-size": 12, fill: "var(--c1)" }, "— 训练损失"); K.svg(svg, "text", { x: 520, y: 70, "font-size": 12, fill: "var(--c6)" }, "— 验证损失");
+        const star = K.svg(svg, "circle", { cx: ax.sx(best + 1), cy: ax.sy(va[best]), r: 0, fill: "none", stroke: "var(--good)", "stroke-width": 3 });
+        const st = K.svg(svg, "text", { x: ax.sx(best + 1), y: ax.sy(va[best]) + 30, "text-anchor": "middle", "font-size": 12, fill: "var(--good)", "font-weight": 700 }, "最低点 → 用这一轮"); st.style.opacity = 0;
+        ctx.tween(2000, (t) => { const n = Math.max(1, Math.round(t * 16)); let a = "", b = ""; for (let e = 0; e < n; e++) { a += (e ? "L" : "M") + ax.sx(e + 1) + "," + ax.sy(tr[e]); b += (e ? "L" : "M") + ax.sx(e + 1) + "," + ax.sy(va[e]); } p1.setAttribute("d", a); p2.setAttribute("d", b); }).then((ok) => ok && ctx.tween(500, (t) => { star.setAttribute("r", 10 * t); st.style.opacity = t; }));
+      },
+    },
+    {
+      title: "推理：预测框和医生的框放在一起比", kicker: "第 40–44 格 · 验证可视化",
+      html: `<p>重新建一个<b>推理模式</b>的模型（每批 1 张），加载选好的权重。<span data-cell="40">出处</span> 从验证集随机挑 6 张，左边画医生标的框，右边画模型预测的框和把握分数。<span data-cell="43">出处</span></p><p>动画里模型一开始给出很多候选框，低于门槛的被丢掉，互相重叠的只留分数最高的那个（NMS），最后剩下的和医生的框比较重叠程度（IoU）。</p>`,
+      cells: [40, 43], highlight: ["mode='inference'", "model.detect"],
+      draw(svg, ctx) {
+        const S = 260, X = 230, Y = 30, img = cxr(96, OPS, 3);
+        PX.draw(svg, X, Y, S, S, img, null, 0, 1, true);
+        GT.forEach((b) => box(svg, X, Y, S, b, "var(--c3)", "6 4", 2.5));
+        const r = K.rng(5), cands = [];
+        GT.forEach((g, gi) => { for (let k = 0; k < 5; k++) { const j = 0.04; cands.push({ b: [g[0] + (r() - 0.5) * j * 2, g[1] + (r() - 0.5) * j * 2, g[2] * (0.85 + r() * 0.3), g[3] * (0.85 + r() * 0.3)], s: 0.8 + r() * 0.19 - (k === 0 ? 0 : 0.05) }); } });
+        for (let k = 0; k < 6; k++) cands.push({ b: [0.1 + r() * 0.6, 0.15 + r() * 0.6, 0.08 + r() * 0.1, 0.08 + r() * 0.1], s: 0.3 + r() * 0.5 });
+        const els = cands.map((c) => { const e = box(svg, X, Y, S, c.b, "var(--c6)", null, 1.5); e.style.opacity = 0; return e; });
+        const info = K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 30, y: 60, "font-size": 12, fill: "var(--c3)" }, "绿虚线 = 医生的框");
+        K.svg(svg, "text", { x: 30, y: 80, "font-size": 12, fill: "var(--c6)" }, "红实线 = 模型的框");
+        (async () => {
+          info.textContent = "第 1 步：模型给出一堆候选框";
+          if (!(await ctx.tween(700, (t) => els.forEach((e) => (e.style.opacity = t))))) return;
+          if (!(await ctx.wait(500))) return;
+          info.textContent = "第 2 步：去掉把握分数低的框";
+          if (!(await ctx.tween(600, (t) => cands.forEach((c, i) => { if (c.s < 0.78) els[i].style.opacity = 1 - t; })))) return;
+          if (!(await ctx.wait(400))) return;
+          info.textContent = "第 3 步：NMS，重叠的框只留分数最高的";
+          const keep = []; cands.map((c, i) => i).filter((i) => cands[i].s >= 0.78).sort((a, b) => cands[b].s - cands[a].s).forEach((i) => { if (keep.every((j) => iou(cands[i].b, cands[j].b) <= 0.01)) keep.push(i); });
+          if (!(await ctx.tween(600, (t) => cands.forEach((c, i) => { if (c.s >= 0.78 && !keep.includes(i)) els[i].style.opacity = 1 - t; else if (keep.includes(i)) els[i].style.strokeWidth = 1.5 + 1.5 * t; })))) return;
+          info.textContent = "留下 " + keep.length + " 个框，和医生的框比较重叠程度";
+        })();
+      },
+    },
+    {
+      title: "提交：把握 > 0.95 的框，坐标放大回 1024", kicker: "第 45–50 格 · 提交",
+      html: `<p>对每张测试片子：读 DICOM、复制成 3 通道、缩到 256、检测；把握分数大于 <b>0.95</b> 的框写进提交文件，格式是“分数 x y 宽 高”。<span data-cell="46">出处</span></p><p>因为模型看的是 256 的小图，坐标要乘以 1024 / 256 = <b>4</b> 才能还原到原图。没有框的片子只写病人编号，后面留空。最后随机画几张测试片子的检测结果看看。<span data-cell="49">出处</span></p>`,
+      cells: [46, 47, 49], highlight: ["min_conf=0.95", "resize_factor = ORIG_SIZE / config.IMAGE_SHAPE[0]"],
+      draw(svg, ctx) {
+        const img = cxr(96, OPS, 3);
+        PX.draw(svg, 40, 90, 120, 120, img, null, 0, 1, true);
+        const b = GT[0];
+        box(svg, 40, 90, 120, b, "var(--c6)", null, 2);
+        K.svg(svg, "text", { x: 100, y: 80, "text-anchor": "middle", "font-size": 13 }, "256×256");
+        const big = PX.draw(svg, 300, 20, 280, 280, img, null, 0, 1, true);
+        void big;
+        const bb = box(svg, 300, 20, 280, b, "var(--c6)", null, 3); bb.style.opacity = 0;
+        K.svg(svg, "text", { x: 440, y: 316, "text-anchor": "middle", "font-size": 13 }, "1024×1024（坐标 × 4）");
+        const a = K.arrow(svg, 175, 150, 290, 150); a.style.opacity = 0;
+        const x1 = Math.round(b[0] * 256), y1 = Math.round(b[1] * 256), w = Math.round(b[2] * 256), h = Math.round(b[3] * 256);
+        const t1 = K.svg(svg, "text", { x: 20, y: 250, "font-size": 12, "font-family": "var(--mono)" }, `小图: ${x1} ${y1} ${w} ${h}`);
+        const t2 = K.svg(svg, "text", { x: 20, y: 272, "font-size": 12, "font-family": "var(--mono)", fill: "var(--c6)" }, `提交: 0.97 ${x1 * 4} ${y1 * 4} ${w * 4} ${h * 4}`); t2.style.opacity = 0;
+        void t1;
+        ctx.wait(400).then((ok) => ok && ctx.tween(800, (t) => { a.style.opacity = t; bb.style.opacity = t; t2.style.opacity = t; }));
+        K.svg(svg, "text", { x: 20, y: 300, "font-size": 11, class: "muted" }, "数字为示意");
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：锚框与 IoU ---------- */
+  K.lab(document.getElementById("labA"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "scale", label: "锚框边长（像素，256 图上）", value: "64", options: [["16", "16"], ["32", "32"], ["64", "64"], ["128", "128"]] },
+      { id: "ratio", label: "锚框形状（高 : 宽）", value: "1", options: [["0.5", "扁的 1:2"], ["1", "方的 1:1"], ["2", "高的 2:1"]] },
+      { id: "stride", label: "锚框间隔（像素）", min: 8, max: 32, step: 4, value: 16 },
+      { id: "thr", label: "算作“正样本”的 IoU 门槛", min: 0.3, max: 0.9, step: 0.05, value: 0.5, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "在 256×256 的示意胸片上，每隔“间隔”个像素放一个锚框中心，浏览器逐个算它和医生的两个框的 IoU（交集面积 ÷ 并集面积）。IoU 超过门槛的锚框（亮红色）在训练时被当作“这里有阴影”，模型要学会把它们挪到正确位置。试试锚框选 16：太小了，没有一个能和大阴影对上。",
+    render(svg, v) {
+      const S = 280, X = 20, Y = 20, img = cxr(96, OPS, 3);
+      PX.draw(svg, X, Y, S, S, img, null, 0, 1, true);
+      GT.forEach((b) => box(svg, X, Y, S, b, "var(--c3)", "6 4", 2.5));
+      const sc = +v.scale / 256, rt = +v.ratio, w = sc / Math.sqrt(rt), h = sc * Math.sqrt(rt), st = v.stride / 256;
+      let n = 0, pos = 0, best = 0;
+      for (let cy = st / 2; cy < 1; cy += st) for (let cx = st / 2; cx < 1; cx += st) {
+        const a = [cx - w / 2, cy - h / 2, w, h]; n++;
+        const m = Math.max(...GT.map((g) => iou(a, g))); best = Math.max(best, m);
+        if (m >= v.thr) { pos++; box(svg, X, Y, S, a, "var(--c6)", null, 1.5); }
+        else if (m > 0.1 && n % 3 === 0) box(svg, X, Y, S, a, "var(--ink-3)", "2 2", 0.6);
+      }
+      K.svg(svg, "text", { x: 330, y: 50, "font-size": 13 }, "绿虚线 = 医生的框");
+      K.svg(svg, "text", { x: 330, y: 72, "font-size": 13, fill: "var(--c6)" }, "红框 = IoU 达到门槛的锚框");
+      K.svg(svg, "text", { x: 330, y: 94, "font-size": 13, class: "muted" }, "灰虚线 = 沾边但不够的锚框（只画一部分）");
+      const dw = (+v.scale) * 0.9 / Math.sqrt(rt), dh = (+v.scale) * 0.9 * Math.sqrt(rt);
+      K.svg(svg, "rect", { x: 480 - dw / 2, y: 200 - dh / 2, width: dw, height: dh, fill: "none", stroke: "var(--c6)", "stroke-width": 2 });
+      K.svg(svg, "text", { x: 480, y: 300, "text-anchor": "middle", "font-size": 12 }, "当前锚框的大小（按 256 图比例）");
+      return { readout: [
+        { k: "锚框总数", v: String(n) },
+        { k: "正样本锚框", v: String(pos), color: pos ? "var(--good)" : "var(--bad)" },
+        { k: "最好的 IoU", v: best.toFixed(2) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：置信度门槛 + NMS ---------- */
+  K.lab(document.getElementById("labB"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "conf", label: "置信度门槛（作者提交用 0.95）", min: 0.3, max: 0.99, step: 0.01, value: 0.95, fmt: (v) => v.toFixed(2) },
+      { id: "nms", label: "NMS 门槛（重叠超过它就删掉分低的；作者 0.01）", min: 0.01, max: 0.9, step: 0.01, value: 0.01, fmt: (v) => v.toFixed(2) },
+      { id: "close", label: "示意片子", value: "two", options: [["two", "两侧各一块阴影"], ["near", "同侧两块挨着的阴影"]] },
+      { id: "seed", label: "换一批模型候选框", button: true },
+    ],
+    note: "模拟模型的原始输出：每块真实阴影附近有 5 个分数较高、位置略有偏差的候选框，另有 8 个分数较低的乱框。浏览器先按门槛丢掉低分框，再做 NMS（按分数从高到低，和已留下的框 IoU 超过门槛的就删掉），最后最多留 3 个框（作者配置），并和医生的框按 IoU ≥ 0.5 配对统计。试试“同侧两块挨着的阴影”配 NMS 0.01。",
+    render(svg, v) {
+      const ops = v.close === "near" ? [[0.3, 0.42, 0.07, 0.08], [0.3, 0.62, 0.07, 0.08]] : OPS;
+      const gt = ops.map(([cx, cy, rx, ry]) => [cx - rx, cy - ry, 2 * rx, 2 * ry]);
+      const S = 280, X = 20, Y = 20, img = cxr(96, ops, 3), r = K.rng(31 + v.seed * 17), cands = [];
+      PX.draw(svg, X, Y, S, S, img, null, 0, 1, true);
+      gt.forEach((g) => { for (let k = 0; k < 5; k++) cands.push({ b: [g[0] + (r() - 0.5) * 0.07, g[1] + (r() - 0.5) * 0.07, g[2] * (0.8 + r() * 0.5), g[3] * (0.8 + r() * 0.5)], s: 0.86 + r() * 0.13 }); });
+      for (let k = 0; k < 8; k++) cands.push({ b: [0.08 + r() * 0.7, 0.12 + r() * 0.7, 0.07 + r() * 0.12, 0.07 + r() * 0.12], s: 0.3 + r() * 0.62 });
+      const order = cands.map((c, i) => i).filter((i) => cands[i].s >= v.conf).sort((a, b) => cands[b].s - cands[a].s), keep = [];
+      order.forEach((i) => { if (keep.length < 3 && keep.every((j) => iou(cands[i].b, cands[j].b) <= v.nms)) keep.push(i); });
+      cands.forEach((c, i) => { if (!keep.includes(i)) box(svg, X, Y, S, c.b, c.s >= v.conf ? "var(--warn)" : "var(--ink-3)", "3 3", 0.8); });
+      gt.forEach((b) => box(svg, X, Y, S, b, "var(--c3)", "6 4", 2.5));
+      keep.forEach((i) => { box(svg, X, Y, S, cands[i].b, "var(--c6)", null, 2.5); K.svg(svg, "text", { x: X + cands[i].b[0] * S, y: Y + cands[i].b[1] * S - 4, "font-size": 11, fill: "var(--c6)", "font-weight": 700 }, cands[i].s.toFixed(2)); });
+      const used = new Set(); let tp = 0;
+      keep.forEach((i) => { let bj = -1, bv = 0.5; gt.forEach((g, j) => { const q = iou(cands[i].b, g); if (!used.has(j) && q >= bv) { bv = q; bj = j; } }); if (bj >= 0) { used.add(bj); tp++; } });
+      K.svg(svg, "text", { x: 330, y: 50, "font-size": 13, fill: "var(--c3)" }, "绿虚线 = 医生的框");
+      K.svg(svg, "text", { x: 330, y: 72, "font-size": 13, fill: "var(--c6)" }, "红实线 = 最后留下的框（带分数）");
+      K.svg(svg, "text", { x: 330, y: 94, "font-size": 13, fill: "var(--warn)" }, "黄虚线 = 过了门槛但被 NMS 删掉");
+      K.svg(svg, "text", { x: 330, y: 116, "font-size": 13, class: "muted" }, "灰虚线 = 分数不够，直接丢掉");
+      return { readout: [
+        { k: "过门槛的框", v: String(order.length) },
+        { k: "最后留下", v: String(keep.length) },
+        { k: "找到的阴影", v: tp + " / " + gt.length, color: tp === gt.length ? "var(--good)" : "var(--bad)" },
+        { k: "多余的框", v: String(keep.length - tp), color: keep.length - tp ? "var(--warn)" : "var(--good)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

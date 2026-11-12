@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>颅内出血识别</title>
+<meta name="description" content="Kaggle 案例拆解：RSNA 颅内出血比赛，把头部 CT 的 HU 值用三个“窗”变成三通道图，交给 InceptionV3 同时判断 5 种出血和“是否有出血”，加权对数损失、欠采样、按轮次加权平均。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">头部 CT · 多标签分类 · 加窗预处理</div>
+  <h1>颅内出血识别：一张头部 CT，有没有出血、是哪几种出血？</h1>
+  <p class="en">[RSNA] InceptionV3 Keras + TF1.14.0</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">DICOM 与 HU 值</span><span class="tag method">CT 加窗（脑窗 / 硬膜下窗 / 软组织窗）</span><span class="tag method">坏数据修正</span>
+    <span class="tag method">每轮随机欠采样</span><span class="tag method">InceptionV3 迁移学习</span><span class="tag method">多标签 sigmoid</span>
+    <span class="tag method">加权对数损失</span><span class="tag method">学习率指数衰减</span><span class="tag method">按轮次加权平均</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Alex（akensert）</b></span>
+    <span>Kaggle 点赞 <b>819</b>（2026-11 抓取）</span>
+    <span>比赛 <b>rsna-intracranial-hemorrhage-detection</b></span>
+    <span><a href="https://www.kaggle.com/code/akensert/rsna-inceptionv3-keras-tf1-14-0" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">一张张头部 CT 切片（DICOM 文件）</div><p>DICOM 是医院影像的标准格式，里面除了像素，还存着把像素换算成 HU 值的参数。<span data-cell="3">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">6 个“是 / 否”：有没有出血 + 5 种出血类型</div><p>硬膜外、脑实质内、脑室内、蛛网膜下腔、硬膜下，以及总的 any。一张图可以同时有好几种，所以是多标签。<span data-cell="3">出处</span> <span data-cell="15">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">三种窗口拼成彩色图 + InceptionV3</div><p>脑窗、硬膜下窗、软组织窗分别放进红绿蓝三个通道，缩到 256×256；预训练 InceptionV3 + 6 个 sigmoid 输出；每轮随机欠采样，训练 5 轮。<span data-cell="3">出处</span> <span data-cell="19">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一个改了 8 版的基线</div><p>作者把每次改动写进开头的更新记录，第 6 版还注明“没有比第 5 版更好”。<span data-cell="0">出处</span> 分数在运行输出里，这里不列。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">北美放射学会（RSNA）组织的比赛。训练标签表里，每张图片有 6 行，ID 写成“图片编号_出血类型”，Label 是 0 或 1。作者把它变成“一张图一行、6 列”的宽表。<span data-cell="15">出处</span></p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">每张图的标签</div><div class="v">6 个</div></div>
+        <div class="stat-tile"><div class="k">模型输入</div><div class="v">256×256×3</div></div>
+        <div class="stat-tile"><div class="k">验证集比例</div><div class="v">10%</div></div>
+        <div class="stat-tile"><div class="k">删除的重复行</div><div class="v">24 行</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">输入尺寸和 10% 验证见第 19 格 <span data-cell="19">出处</span>；作者在第 15 格手工删掉 24 行重复记录（4 张图 × 6 个标签）<span data-cell="15">出处</span>。图片总数作者没有在文字里写，这里不列。用的是比赛第二阶段（stage_2）的数据 <span data-cell="1">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">宽表的每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>Image</code>（索引）</td><td>图片编号，如 ID_5c8b5d701，对应一个 .dcm 文件</td><td>文字</td></tr>
+        <tr><td><code>any</code></td><td><b>答案之一</b>：有没有任何一种出血</td><td>0 / 1</td></tr>
+        <tr><td><code>epidural</code></td><td>硬膜外出血：颅骨和硬脑膜之间</td><td>0 / 1</td></tr>
+        <tr><td><code>intraparenchymal</code></td><td>脑实质内出血：脑组织内部</td><td>0 / 1</td></tr>
+        <tr><td><code>intraventricular</code></td><td>脑室内出血：脑中间充满脑脊液的腔里</td><td>0 / 1</td></tr>
+        <tr><td><code>subarachnoid</code></td><td>蛛网膜下腔出血：脑表面的沟回里</td><td>0 / 1</td></tr>
+        <tr><td><code>subdural</code></td><td>硬膜下出血：硬脑膜和脑之间，常呈月牙形</td><td>0 / 1</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">作者在第 3 格注释里抄了一张图的真实标签：ID_5c8b5d701 同时有脑实质内、蛛网膜下腔、硬膜下出血，any = 1 <span data-cell="3">出处</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="3">
+    <h3>动手试试 A · CT 加窗：同一组 HU 数字，换个窗口看 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labA"></div>
+  </div>
+  <div data-at="11">
+    <h3>动手试试 B · 加权对数损失：猜错“有没有出血”罚得更重 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labB"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的说法</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>说法</th><th>出处</th></tr>
+        <tr><td>第 6 版（回到原始 HU + 一个 sigmoid 卷积层）没有比第 5 版（sigmoid 加窗）更好</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>第 7 版改用 appian42 方案的加窗，并参考 Jeremy Howard 的方法清洗数据</td><td><span data-cell="0">第 0 格</span> <span data-cell="2">第 2 格</span></td></tr>
+        <tr><td>评估指标用 any 权重 2、其余权重 1 的加权对数损失，和比赛官方指标非常接近</td><td><span data-cell="11">第 11 格</span></td></tr>
+        <tr><td>为了节省时间，验证集预测被注释掉了</td><td><span data-cell="13">第 13 格</span> <span data-cell="18">第 18 格</span></td></tr>
+        <tr><td>可以继续改进：图像增强、学习率计划、更大输入、更长训练、更多正则化、更好的加窗</td><td><span data-cell="22">第 22 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">训练损失和指标打印在运行输出里；验证集预测在这一版被注释掉了，所以连作者自己也没在这一版里算验证分数。文字里没有写具体数值，这里不列分数。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li>数据生成器用 <code>np.empty</code> 先开一个“整批大小”的数组。最后一批不满 32 张时，剩下几行是没初始化的随机内容，训练时这几行的图片和<b>标签</b>都是垃圾数据。<span data-cell="9">出处</span></li>
+        <li>第 11 格定义了加权损失 <code>weighted_log_loss</code>，但第 13 格编译模型时用的是普通 <code>binary_crossentropy</code>，加权版只用来当监控指标。<span data-cell="13">出处</span></li>
+        <li>验证集用 <code>ShuffleSplit</code> 按图片随机抽取，没有按病人分组，同一个病人相邻的切片可能一边一个（这一版没算验证分数，所以没有造成误导）。<span data-cell="19">出处</span></li>
+        <li>读图失败时 <code>_read</code> 悄悄返回全 0 图，不报错也不记录，坏文件会混进训练。<span data-cell="7">出处</span></li>
+        <li>第 19 格注释写成“train set (00%)”，应为 90%。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一张头部 CT 切片，输出 6 个概率：有没有出血、各类出血的可能性。急诊里可以把“疑似出血”的片子自动排到放射科医生队列最前面。</li>
+        <li><b>同类问题：</b>胸部 CT 找肺栓塞、腹部 CT 找外伤出血、胸片多标签疾病识别。凡是 CT，都可以用“加窗变成多通道”的思路。</li>
+        <li><b>可迁移的套路：</b>DICOM → HU → 多个窗口拼通道 → 预训练 CNN → 多标签 sigmoid → 对关键标签加权 → 欠采样平衡阴阳性 → 多轮预测加权平均。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>预处理：坏 DICOM 修正、三窗口（40/80、80/200、40/380） <span data-cell="3">第 3 格</span></li>
+        <li>数据：Keras Sequence 生成器，每轮欠采样（无出血保留 35%、有出血保留 50%） <span data-cell="9">第 9 格</span></li>
+        <li>损失与指标：（加权）二元交叉熵，any 权重 2 <span data-cell="11">第 11 格</span></li>
+        <li>模型：InceptionV3（ImageNet 预训练）+ 全局平均池化 + 6 个 sigmoid <span data-cell="13">第 13 格</span></li>
+        <li>训练：Adam，学习率 5e-4，每轮乘 0.8，5 轮，批量 32 <span data-cell="19">第 19 格</span></li>
+        <li>提交：5 轮测试预测按权重 0、1、2、4、6 加权平均 <span data-cell="21">第 21 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>人眼只能分辨几十到一百级灰度，CT 的 HU 值却从 −1000 到 +3000。为什么“加窗”对人有用？对神经网络也有用吗？（可以去看 Jeremy Howard 的“不要像放射科医生一样看”那篇 notebook 的观点）</li>
+      <li>作者把三个不同的窗口放进红、绿、蓝三个通道。可 InceptionV3 是在普通彩色照片上预训练的，它的“红色”经验对“脑窗”有用吗？</li>
+      <li>为什么 any 这个标签权重是 2，其他是 1？如果你是急诊医生，最在乎的是哪个标签？</li>
+      <li>每轮随机欠采样：无出血的图只留 35%，有出血的留 50%。这会让模型给出的概率偏高还是偏低？提交前要不要修正？</li>
+      <li>测试预测按轮次加权平均，第 1 轮权重为 0、第 5 轮权重为 6。为什么越后面的轮权重越大？</li>
+      <li>最后一批不满时混进了随机“垃圾数据”。你觉得这会造成多大影响？怎么改最简单？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Alex（Kaggle 用户名 akensert），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布；作者注明加窗和清洗方法参考了 Ryan Epp、appian42、Jeremy Howard 等人的工作。本页为教学解读，动画与实验中的数据均为模拟示意，图中的“头部 CT”是用代码按大致 HU 范围画的示意图，不是真实病人影像。比赛数据：RSNA Intracranial Hemorrhage Detection。
+</footer>
+</main>
+
+<script src="nb/rsna-hemorrhage-inceptionv3.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  if (/[?&]fast/.test(location.search)) { K.tween = (ms, fn, ctx) => { if (ctx && !ctx.alive()) return Promise.resolve(false); fn(1, 1); return Promise.resolve(true); }; K.wait = (ms, ctx) => Promise.resolve(!ctx || ctx.alive()); }
+  if (/[?&]fold/.test(location.search)) document.head.appendChild(Object.assign(document.createElement("style"), { textContent: ".walk .ch-cells > .cell, .walk .cell-note { display: none !important; }" }));
+  /* ===== 页面专用：像素图工具（用代码生成小图，在浏览器里真算卷积、模糊、池化、几何变换） ===== */
+  const PX = (function () {
+    function rgbOf(name, fb) {
+      let s = (K.css(name) || fb || "#888888").trim();
+      if (s[0] !== "#") return [128, 128, 128];
+      if (s.length === 4) s = "#" + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+      return [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
+    }
+    function grid(W, H, f) { const a = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) a[y * W + x] = f(x, y); return { W, H, a }; }
+    /* 彩色图：{W,H,rgb:[R,G,B]}，每个通道取值 0–1 */
+    function rgbGrid(W, H, f) { const R = new Float32Array(W * H), G = new Float32Array(W * H), B = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const c = f(x, y), i = y * W + x; R[i] = c[0]; G[i] = c[1]; B[i] = c[2]; } return { W, H, rgb: [R, G, B] }; }
+    const chan = (m, c) => ({ W: m.W, H: m.H, a: m.rgb[c] });
+    const fromChans = (ch) => ({ W: ch[0].W, H: ch[0].H, rgb: ch.map((c) => c.a) });
+    const gray = (m) => (m.rgb ? grid(m.W, m.H, (x, y) => { const i = y * m.W + x; return 0.299 * m.rgb[0][i] + 0.587 * m.rgb[1][i] + 0.114 * m.rgb[2][i]; }) : m);
+    function at(m, x, y) { return m.a[y * m.W + x]; }
+    function atClamp(m, x, y) { x = x < 0 ? 0 : x >= m.W ? m.W - 1 : x; y = y < 0 ? 0 : y >= m.H ? m.H - 1 : y; return m.a[y * m.W + x]; }
+    function atZero(m, x, y) { return x < 0 || y < 0 || x >= m.W || y >= m.H ? 0 : m.a[y * m.W + x]; }
+    /* padding='same'：边界外按 0 补 */
+    function conv(m, k) { const n = k.length, r = (n - 1) / 2; return grid(m.W, m.H, (x, y) => { let s = 0; for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) s += k[j][i] * atZero(m, x + i - r, y + j - r); return s; }); }
+    function map(m, f) { if (m.rgb) return { W: m.W, H: m.H, rgb: m.rgb.map((a) => { const o = new Float32Array(a.length); for (let i = 0; i < a.length; i++) o[i] = f(a[i], i); return o; }) }; const o = { W: m.W, H: m.H, a: new Float32Array(m.a.length) }; for (let i = 0; i < m.a.length; i++) o.a[i] = f(m.a[i], i); return o; }
+    const relu = (m) => map(m, (v) => (v > 0 ? v : 0));
+    function pool(m, s) { s = s || 2; const W = Math.ceil(m.W / s), H = Math.ceil(m.H / s); return grid(W, H, (x, y) => { let b = -Infinity; for (let j = 0; j < s; j++) for (let i = 0; i < s; i++) { const xx = x * s + i, yy = y * s + j; if (xx < m.W && yy < m.H) b = Math.max(b, at(m, xx, yy)); } return b; }); }
+    function range(m) { let lo = Infinity, hi = -Infinity; for (const v of m.a) { if (v < lo) lo = v; if (v > hi) hi = v; } return [lo, hi]; }
+    /* 可分离高斯模糊（边界用最近像素），彩色图逐通道做 */
+    function blur(m, sigma) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => blur(chan(m, c), sigma)));
+      if (sigma <= 0.01) return m;
+      const r = Math.max(1, Math.ceil(sigma * 3)), w = [];
+      let s = 0;
+      for (let i = -r; i <= r; i++) { const v = Math.exp((-i * i) / (2 * sigma * sigma)); w.push(v); s += v; }
+      for (let i = 0; i < w.length; i++) w[i] /= s;
+      const t = grid(m.W, m.H, (x, y) => { let a = 0; for (let i = -r; i <= r; i++) a += w[i + r] * atClamp(m, x + i, y); return a; });
+      return grid(m.W, m.H, (x, y) => { let a = 0; for (let i = -r; i <= r; i++) a += w[i + r] * atClamp(t, x, y + i); return a; });
+    }
+    function bilinear(m, x, y) {
+      const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+      return (atClamp(m, x0, y0) * (1 - fx) + atClamp(m, x0 + 1, y0) * fx) * (1 - fy) + (atClamp(m, x0, y0 + 1) * (1 - fx) + atClamp(m, x0 + 1, y0 + 1) * fx) * fy;
+    }
+    /* 绕中心旋转/缩放/平移/翻转；fill：'nearest' 用最近像素，数字表示边界外填这个值 */
+    function affine(m, p) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => affine(chan(m, c), p)));
+      const th = ((p.rot || 0) * Math.PI) / 180, c = Math.cos(th), s = Math.sin(th), z = p.zoom || 1;
+      const cx = (m.W - 1) / 2, cy = (m.H - 1) / 2, tx = (p.tx || 0) * m.W, ty = (p.ty || 0) * m.H;
+      return grid(m.W, m.H, (x, y) => {
+        let u = x - cx - tx, v = y - cy - ty;
+        if (p.flip) u = -u;
+        if (p.vflip) v = -v;
+        const a = (c * u + s * v) / z + cx, b = (-s * u + c * v) / z + cy;
+        if (p.fill != null && p.fill !== "nearest" && (a < -0.5 || b < -0.5 || a > m.W - 0.5 || b > m.H - 0.5)) return p.fill;
+        return bilinear(m, a, b);
+      });
+    }
+    function resize(m, W, H) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => resize(chan(m, c), W, H)));
+      return grid(W, H, (x, y) => bilinear(m, ((x + 0.5) * m.W) / W - 0.5, ((y + 0.5) * m.H) / H - 0.5));
+    }
+    function toURL(m, mode, lo, hi) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      if (m.rgb) {
+        for (let i = 0; i < m.W * m.H; i++) { for (let c = 0; c < 3; c++) d[i * 4 + c] = Math.max(0, Math.min(1, m.rgb[c][i])) * 255; d[i * 4 + 3] = 255; }
+      } else {
+        const P = rgbOf("--panel", "#ffffff"), A = rgbOf("--c1"), B = rgbOf("--c6");
+        if (lo == null || hi == null) { const r = range(m); if (lo == null) lo = r[0]; if (hi == null) hi = r[1]; }
+        const span = hi - lo || 1, amax = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+        for (let i = 0; i < m.a.length; i++) {
+          const v = m.a[i]; let r, gg, b;
+          if (mode === "div") { const t = Math.max(-1, Math.min(1, v / amax)), C = t >= 0 ? B : A, k = Math.abs(t); r = P[0] + (C[0] - P[0]) * k; gg = P[1] + (C[1] - P[1]) * k; b = P[2] + (C[2] - P[2]) * k; }
+          else if (mode === "heat") { const k = Math.max(0, Math.min(1, (v - lo) / span)); r = P[0] + (B[0] - P[0]) * k; gg = P[1] + (B[1] - P[1]) * k; b = P[2] + (B[2] - P[2]) * k; }
+          else { const k = Math.max(0, Math.min(1, (v - lo) / span)) * 255; r = gg = b = k; }
+          d[i * 4] = r; d[i * 4 + 1] = gg; d[i * 4 + 2] = b; d[i * 4 + 3] = 255;
+        }
+      }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    function draw(svg, x, y, w, h, m, mode, lo, hi, smooth) {
+      const e = K.svg(svg, "image", { x, y, width: w, height: h, preserveAspectRatio: "none" });
+      if (!smooth) e.style.imageRendering = "pixelated";
+      e.setAttribute("href", toURL(m, mode, lo, hi));
+      K.svg(svg, "rect", { x, y, width: w, height: h, fill: "none", stroke: "var(--line)" });
+      return e;
+    }
+    function update(e, m, mode, lo, hi) { e.setAttribute("href", toURL(m, mode, lo, hi)); }
+    function lines(svg, x, y, w, h, W, H, op) {
+      const g = K.svg(svg, "g");
+      for (let i = 0; i <= W; i++) K.svg(g, "line", { x1: x + (w * i) / W, x2: x + (w * i) / W, y1: y, y2: y + h, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      for (let j = 0; j <= H; j++) K.svg(g, "line", { y1: y + (h * j) / H, y2: y + (h * j) / H, x1: x, x2: x + w, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      return g;
+    }
+    const smooth = (e0, e1, x) => { const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+    const blob = (x, y, cx, cy, sx, sy) => Math.exp(-(((x - cx) * (x - cx)) / (2 * sx * sx) + ((y - cy) * (y - cy)) / (2 * sy * sy)));
+    /* 平滑噪声：几层不同频率的随机网格插值叠加，用来做纹理 */
+    function noise(W, H, seed, cells) {
+      const r = K.rng(seed || 1), n = cells || 6, g0 = grid(n + 1, n + 1, () => r());
+      return grid(W, H, (x, y) => bilinear(g0, (x / W) * n, (y / H) * n));
+    }
+    return { grid, rgbGrid, chan, fromChans, gray, at, atClamp, conv, map, relu, pool, range, blur, bilinear, affine, resize, toURL, draw, update, lines, smooth, blob, noise, rgbOf };
+  })();
+
+  /* ===== 示意头部 CT（单位 HU）。bleed: "subdural" | "intra" | "none" ===== */
+  function headCT(N, bleed, seed) {
+    const r = K.rng(seed || 2), tex = PX.noise(N, N, (seed || 2) + 1, 10), tex2 = PX.noise(N, N, (seed || 2) + 9, 22);
+    return PX.grid(N, N, (px, py) => {
+      const x = px / N - 0.5, y = py / N - 0.5, t = tex.a[py * N + px], t2 = tex2.a[py * N + px];
+      const e = Math.pow(x / 0.4, 2) + Math.pow(y / 0.46, 2);
+      if (e > 1.12) return -1000 + 10 * t;
+      if (e > 1.0) return -90 + 40 * t;            // 头皮脂肪
+      if (e > 0.86) return 900 + 500 * t;          // 颅骨
+      let v = 32 + 10 * (t2 - 0.5) * 2;            // 脑组织（灰质 / 白质起伏）
+      const vent = Math.pow((Math.abs(x) - 0.07) / 0.045, 2) + Math.pow((y + 0.02) / 0.13, 2);
+      if (vent < 1) v = 6 + 4 * t;                 // 脑室（脑脊液）
+      if (bleed === "subdural" && e > 0.7 && e < 0.86 && x < -0.05 && y < 0.25) v = 72 + 10 * t;
+      if (bleed === "intra" && Math.hypot(x - 0.14, y - 0.12) < 0.07 + 0.015 * Math.sin(Math.atan2(y - 0.12, x - 0.14) * 3)) v = 68 + 12 * t;
+      return v + (r() - 0.5) * 6;
+    });
+  }
+  function win(m, c, w) { const lo = c - w / 2; return PX.map(m, (v) => K.clamp((v - lo) / w, 0, 1)); }
+  function bsb(m) { return PX.fromChans([win(m, 40, 80), win(m, 80, 200), win(m, 40, 380)]); }
+
+  const steps = [
+    {
+      at: 0, title: "一个改了 8 版的基线模型", kicker: "第 0–1 格 · 更新记录",
+      html: `<p>作者开门见山：这是一个用 Keras 搭的深度卷积网络，对头部 CT 做<b>多标签分类</b>。<span data-cell="0">出处</span></p><p>这个 notebook 最有教学价值的地方是开头的<b>更新记录</b>：从 ResNet50 换到 InceptionV3，加权损失加了又去、去了又加，加窗方式换了三次，轮数在 3 到 6 之间来回调。第 6 版他还老实写上“没有比第 5 版更好”。真实的建模就是这样一次次试出来的。</p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        const v = [["1", "4 轮 · 批量 16\n加权 BCE"], ["2", "比赛指标\n加欠采样"], ["3", "去掉加窗\n学习率 5e-4"], ["4", "换 InceptionV3\nHU 截到 −50~450"], ["5", "sigmoid 加窗\n（脑+硬膜下+骨）"], ["6", "原始 HU\n没变好 ✗"], ["7", "appian42 加窗\n+ 数据清洗"], ["8", "去掉多余\n全连接层"]];
+        K.svg(svg, "line", { x1: 40, y1: 170, x2: 690, y2: 170, stroke: "var(--ink-3)", "stroke-width": 2 });
+        const els = v.map(([n, t], i) => {
+          const x = 60 + i * 86, up = i % 2 === 0, g = K.svg(svg, "g"); g.style.opacity = 0;
+          K.svg(g, "circle", { cx: x, cy: 170, r: 12, fill: i === 5 ? "var(--bad)" : i === 7 ? "var(--good)" : "var(--c1)" });
+          K.svg(g, "text", { x, y: 175, "text-anchor": "middle", "font-size": 12, fill: "#fff", "font-weight": 700 }, n);
+          t.split("\n").forEach((ln, j) => K.svg(g, "text", { x, y: (up ? 110 : 215) + j * 16, "text-anchor": "middle", "font-size": 11 }, ln));
+          return g;
+        });
+        K.svg(svg, "text", { x: 40, y: 40, "font-size": 13, "font-weight": 700 }, "作者的更新记录（第 0 格）：一版一版地试");
+        (async () => { for (const e of els) if (!(await ctx.tween(260, (k) => (e.style.opacity = k)))) return; })();
+      },
+    },
+    {
+      title: "CT 加窗：三种“看法”叠成一张彩色图", kicker: "第 2–3 格 · 预处理",
+      html: `<p>CT 测的是每个点挡住 X 光的程度，换算成 <b>HU（亨氏单位）</b>：空气约 −1000，水是 0，脑组织三四十，新鲜血液更高一点，骨头几百到上千。</p><p>血和脑只差几十 HU，直接显示整个范围根本看不出来。放射科医生会“<b>加窗</b>”：只盯一段 HU 范围（窗位 = 中心，窗宽 = 宽度），低于下限全黑、高于上限全白，中间拉开对比。<span data-cell="3">出处</span></p><p>作者用了三个窗：<b>脑窗</b>（40/80）、<b>硬膜下窗</b>（80/200）、<b>软组织窗</b>（40/380），各自缩放到 0～1，分别放进红、绿、蓝三个通道，拼成一张“彩色”图。</p>`,
+      cells: [3], highlight: ["def window_image", "def bsb_window", "window_image(dcm, 40, 80)", "window_image(dcm, 80, 200)", "window_image(dcm, 40, 380)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 40, w: 620, h: 40 }, [-200, 450], [0, 1], { xticks: 13, yticks: 0, xlabel: "HU 值" });
+        const marks = [[-100, "脂肪"], [0, "水"], [8, "脑脊液"], [35, "脑"], [70, "新鲜血"], [400, "骨→"]];
+        marks.forEach(([h, n], i) => { K.svg(svg, "line", { x1: ax.sx(h), x2: ax.sx(h), y1: 40, y2: 80, stroke: "var(--ink-3)" }); K.svg(svg, "text", { x: ax.sx(h), y: 32 - (i % 2) * 12, "text-anchor": "middle", "font-size": 11 }, n); });
+        const ws = [[40, 80, "#e0443e", "脑窗 40/80 → 红"], [80, 200, "#3fae49", "硬膜下窗 80/200 → 绿"], [40, 380, "#3b6fe0", "软组织窗 40/380 → 蓝"]];
+        const bars = ws.map(([c, w, col, n], i) => { const g = K.svg(svg, "g"); g.style.opacity = 0; K.svg(g, "rect", { x: ax.sx(c - w / 2), y: 130 + i * 34, width: ax.sx(c + w / 2) - ax.sx(c - w / 2), height: 22, rx: 4, fill: col, opacity: 0.75 }); K.svg(g, "text", { x: ax.sx(c + w / 2) + 8, y: 146 + i * 34, "font-size": 12 }, n); return g; });
+        const ct = headCT(80, "subdural", 4);
+        const imgs = [win(ct, 40, 80), win(ct, 80, 200), win(ct, 40, 380)].map((m, i) => { const e = PX.draw(svg, 60 + i * 100, 245, 85, 85, m, null, 0, 1, true); e.style.opacity = 0; return e; });
+        const comb = PX.draw(svg, 420, 235, 100, 100, bsb(ct), null, null, null, true); comb.style.opacity = 0;
+        const eq = K.svg(svg, "text", { x: 370, y: 292, "font-size": 20, "text-anchor": "middle" }, "→"); eq.style.opacity = 0;
+        K.svg(svg, "text", { x: 540, y: 290, "font-size": 12 }, "三窗拼成 RGB（示意 CT）");
+        (async () => {
+          for (let i = 0; i < 3; i++) if (!(await ctx.tween(400, (k) => { bars[i].style.opacity = k; imgs[i].style.opacity = k; }))) return;
+          await ctx.tween(500, (k) => { comb.style.opacity = k; eq.style.opacity = k; });
+        })();
+      },
+    },
+    {
+      title: "修正一批“坏”DICOM", kicker: "第 4–5 格 · 数据清洗",
+      html: `<p>有一部分 DICOM 文件存储方式不一样（12 位、无符号、截距大于 −100），直接换算 HU 会出错，脑子里的数值整体“绕了一圈”。作者参考 Jeremy Howard 的清洗方法：像素先加 1000，超过 4096 的减去 4096，再把截距改成 −1000。<span data-cell="3">出处</span></p><p>第 5 格拿一张坏图做对比：左边不修正，右边修正后，能看出明显区别。<span data-cell="5">出处</span></p><p>HU 的换算公式是：<code>HU = 像素值 × RescaleSlope + RescaleIntercept</code>，这两个参数都写在 DICOM 文件头里。</p>`,
+      cells: [5], highlight: ["def correct_dcm", "px_mode = 4096", "RescaleIntercept = -1000"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 40, w: 580, h: 200 }, [0, 4096], [0, 1], { xticks: 4, yticks: 0, xlabel: "存储的像素值（12 位：0–4095）" });
+        const pts = [[0, "空气"], [980, "脂肪"], [1030, "脑"], [1060, "血"], [2200, "骨"]];
+        const dots = pts.map(([v, n], i) => { const c = K.svg(svg, "circle", { cx: ax.sx(v), cy: 120 + i * 18, r: 6, fill: "var(--c" + (i + 1) + ")" }); const t = K.svg(svg, "text", { x: ax.sx(v) + 10, y: 124 + i * 18, "font-size": 11 }, n); return [c, t, v, i]; });
+        const lab = K.svg(svg, "text", { x: 70, y: 28, "font-size": 13, "font-weight": 700 }, "坏文件：按错误的方式存储（示意）");
+        ctx.wait(700).then((ok) => ok && ctx.tween(1600, (k) => {
+          lab.textContent = k < 1 ? "修正中：+1000，超过 4096 的绕回去…" : "修正后：截距统一为 −1000，HU 恢复正常";
+          dots.forEach(([c, t, v, i]) => { let nv = v + 1000 * k; if (nv >= 4096) nv -= 4096 * k; const x = ax.sx(Math.min(nv, 4096)); c.setAttribute("cx", x); t.setAttribute("x", x + 10); });
+        }));
+        K.svg(svg, "text", { x: 70, y: 290, "font-size": 12, class: "muted" }, "点的位置只是示意“整体平移再绕回”的过程，不是真实像素值");
+      },
+    },
+    {
+      title: "读图与数据生成器：每轮重新欠采样", kicker: "第 6–9 格 · 数据管道",
+      html: `<p><code>_read</code> 读一个 DICOM，做三窗变换，缩放到 256×256；读失败就返回全 0 图。<span data-cell="7">出处</span></p><p><code>DataGenerator</code> 继承 Keras 的 Sequence，一批一批地读图。关键在 <code>on_epoch_end</code>：每一轮开始前<b>随机欠采样</b>，没有出血（any=0）的图每张只有 35% 的机会被选中，有出血的有 50%，再打乱顺序。<span data-cell="9">出处</span></p><p>好处：每轮训练的图更少、阴阳性更平衡；而且每轮抽到的是不同的一批，几轮下来大部分图都见过。</p>`,
+      cells: [7, 9], highlight: ["keep_prob = self.labels.iloc[:, 0].map({0: 0.35, 1: 0.5})", "np.empty((self.batch_size"],
+      draw(svg, ctx) {
+        const r = K.rng(12), dots = [];
+        for (let i = 0; i < 160; i++) { const pos = r() < 0.18; dots.push({ pos, e: K.svg(svg, "circle", { cx: 40 + (i % 32) * 20, cy: 60 + Math.floor(i / 32) * 22, r: 6, fill: pos ? "var(--c6)" : "var(--c1)" }) }); }
+        K.svg(svg, "text", { x: 40, y: 36, "font-size": 13 }, "训练图（示意：红 = 有出血，蓝 = 无出血）");
+        const info = K.svg(svg, "text", { x: 40, y: 200, "font-size": 14, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 40, y: 290, "font-size": 12, class: "muted" }, "每一轮：无出血的保留 35%，有出血的保留 50%，被选中的亮起来");
+        (async () => {
+          for (let ep = 1; ep <= 3; ep++) {
+            const rr = K.rng(ep * 7); let kp = 0, kn = 0, np_ = 0, nn = 0;
+            const keep = dots.map((d) => { const k = rr() < (d.pos ? 0.5 : 0.35); if (d.pos) { np_++; if (k) kp++; } else { nn++; if (k) kn++; } return k; });
+            if (!(await ctx.tween(700, (t) => dots.forEach((d, i) => (d.e.style.opacity = keep[i] ? 1 : 1 - 0.85 * t))))) return;
+            info.textContent = `第 ${ep} 轮：有出血 ${kp}/${np_}，无出血 ${kn}/${nn}，共 ${kp + kn} 张参与训练`;
+            if (!(await ctx.wait(900))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "多标签损失：any 的权重是 2", kicker: "第 10–11 格 · 损失与指标",
+      html: `<p>一张图有 6 个答案，每个都是独立的“是 / 否”，所以每个输出各算一个<b>二元交叉熵</b>（猜得越离谱，罚得越重；把有出血说成 0.01，罚分会非常大）。</p><p>比赛官方指标给 any 权重 2、另外 5 个权重 1，再求加权平均。作者写了三个版本：训练用的加权损失、Keras 里监控用的 <code>weighted_loss</code>、numpy 版的验证指标。<span data-cell="11">出处</span></p><p>注意：后面编译模型时，损失函数其实用的是普通 BCE，加权版只用来监控。</p>`,
+      cells: [11], highlight: ["class_weights = np.array([2., 1., 1., 1., 1., 1.])", "def weighted_loss", "np.average(loss, axis=1, weights=class_weights)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 300, h: 240 }, [0, 1], [0, 5], { xticks: 4, xlabel: "模型给“有出血”的概率 p（真实答案 = 有）", ylabel: "罚分 = −log p" });
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        const names = ["any ×2", "硬膜外 ×1", "实质内 ×1", "脑室内 ×1", "蛛网膜下 ×1", "硬膜下 ×1"];
+        names.forEach((n, i) => K.node(svg, 440, 30 + i * 42, 120, 34, n, { fs: 12, fill: i === 0 ? "color-mix(in srgb, var(--c6) 22%, var(--panel))" : "var(--panel-2)", stroke: i === 0 ? "var(--c6)" : "var(--line)" }));
+        K.svg(svg, "text", { x: 580, y: 160, "font-size": 12 }, "加权平均");
+        K.svg(svg, "text", { x: 580, y: 178, "font-size": 12 }, "= 一张图的分数");
+        ctx.tween(1600, (t) => { let d = ""; for (let p = 0.01; p <= 0.01 + 0.99 * t; p += 0.01) d += (d ? "L" : "M") + ax.sx(p) + "," + ax.sy(Math.min(5, -Math.log(p))); path.setAttribute("d", d); });
+      },
+    },
+    {
+      title: "模型：InceptionV3 + 6 个 sigmoid", kicker: "第 12–13 格 · 搭模型",
+      html: `<p>模型分三段：<span data-cell="12">出处</span></p><ul class="tight"><li><b>引擎</b>：在 ImageNet 上预训练的 InceptionV3，去掉顶部。Inception 的特点是同一层里并排放 1×1、3×3、5×5 等不同大小的卷积，同时看细节和大范围。</li><li>全局平均池化，把每张特征图压成一个数。</li><li>一个 6 输出的全连接层，每个输出接 <b>sigmoid</b>，各自给出一个 0～1 的概率。</li></ul><p><code>PredictionCheckpoint</code> 回调在<b>每轮结束时</b>都对测试集预测一次并存下来，最后把 5 轮的结果合起来。<span data-cell="13">出处</span> 学习率按 <code>lr × 0.8^轮次</code> 衰减。</p>`,
+      cells: [13], highlight: ["GlobalAveragePooling2D", "Dense(6, activation=\"sigmoid\"", "PredictionCheckpoint", "LearningRateScheduler"],
+      draw(svg, ctx) {
+        const ct = headCT(64, "intra", 7);
+        PX.draw(svg, 20, 110, 90, 90, bsb(ct), null, null, null, true);
+        K.svg(svg, "text", { x: 65, y: 220, "text-anchor": "middle", "font-size": 11 }, "256×256×3");
+        const branches = ["1×1", "3×3", "5×5", "池化"];
+        const g = K.svg(svg, "g"); g.style.opacity = 0;
+        branches.forEach((b, i) => { K.node(g, 170, 60 + i * 52, 70, 40, b, { fs: 12, fill: "color-mix(in srgb, var(--c" + (i + 1) + ") 20%, var(--panel))" }); K.arrow(g, 120, 155, 168, 80 + i * 52); K.arrow(g, 240, 80 + i * 52, 288, 155); });
+        K.node(g, 290, 135, 70, 40, "拼接", { fs: 12 });
+        K.svg(g, "text", { x: 210, y: 40, "text-anchor": "middle", "font-size": 12 }, "Inception 模块（重复很多次）");
+        const gap = K.node(svg, 390, 135, 90, 40, "全局平均池化", { fs: 11 }); gap.style.opacity = 0;
+        const outs = ["any", "硬膜外", "实质内", "脑室内", "蛛网膜下", "硬膜下"], probs = [0.92, 0.04, 0.81, 0.12, 0.33, 0.07];
+        const bars = outs.map((n, i) => { K.svg(svg, "text", { x: 560, y: 70 + i * 36, "text-anchor": "end", "font-size": 12 }, n); return K.svg(svg, "rect", { x: 568, y: 58 + i * 36, width: 0, height: 16, rx: 3, fill: probs[i] > 0.5 ? "var(--c6)" : "var(--c1)" }); });
+        K.svg(svg, "text", { x: 600, y: 290, "text-anchor": "middle", "font-size": 11, class: "muted" }, "6 个独立的 sigmoid 概率（示意）");
+        (async () => {
+          if (!(await ctx.tween(500, (k) => (g.style.opacity = k)))) return;
+          if (!(await ctx.tween(300, (k) => (gap.style.opacity = k)))) return;
+          await ctx.tween(900, (k) => bars.forEach((b, i) => b.setAttribute("width", probs[i] * 130 * k)));
+        })();
+      },
+    },
+    {
+      title: "读标签表：一张图 6 行变成 1 行", kicker: "第 14–17 格 · 读表",
+      html: `<p>原始标签表里 ID 是“图片编号_类型”。作者用字符串切片拆出前 12 个字符（图片编号）和后面的类型，再用 <code>unstack</code> 把 6 行转成 6 列。<span data-cell="15">出处</span></p><p>训练表里有 4 张图重复出现，作者按行号手工删掉这 24 行。测试集用 sample_submission 做同样的转换，得到一张“待填空”的表。</p>`,
+      cells: [15], highlight: ["str.slice(stop=12)", "unstack(level=-1)", "duplicates_to_remove"],
+      draw(svg, ctx) {
+        const rows = ["ID_5c8b5d701_epidural  0", "ID_5c8b5d701_intraparenchymal  1", "ID_5c8b5d701_intraventricular  0", "ID_5c8b5d701_subarachnoid  1", "ID_5c8b5d701_subdural  1", "ID_5c8b5d701_any  1"];
+        const els = rows.map((r, i) => { const g = K.svg(svg, "g"); K.svg(g, "rect", { x: 20, y: 40 + i * 34, width: 300, height: 28, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" }); K.svg(g, "text", { x: 30, y: 59 + i * 34, "font-size": 11, "font-family": "var(--mono)" }, r); return g; });
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 12, class: "muted" }, "长表：6 行（第 3 格注释里的真实例子）");
+        const cols = ["any", "epi", "intrap", "intrav", "subar", "subdu"], vals = [1, 0, 1, 0, 1, 1];
+        const wide = K.svg(svg, "g"); wide.style.opacity = 0;
+        K.svg(wide, "text", { x: 370, y: 100, "font-size": 12, class: "muted" }, "宽表：1 行 6 列");
+        K.svg(wide, "text", { x: 370, y: 150, "font-size": 11, "font-family": "var(--mono)" }, "ID_5c8b5d701");
+        cols.forEach((c, i) => { K.svg(wide, "text", { x: 480 + i * 38, y: 125, "text-anchor": "middle", "font-size": 10 }, c); K.node(wide, 464 + i * 38, 133, 32, 28, String(vals[i]), { fs: 13, fill: vals[i] ? "color-mix(in srgb, var(--c6) 30%, var(--panel))" : "var(--panel-2)" }); });
+        ctx.wait(500).then((ok) => ok && ctx.tween(1000, (t) => { els.forEach((g) => (g.style.opacity = 1 - 0.6 * t)); wide.style.opacity = t; }));
+      },
+    },
+    {
+      title: "训练：90% 的图，5 轮，学习率每轮 ×0.8", kicker: "第 18–19 格 · 训练",
+      html: `<p>用 <code>ShuffleSplit</code> 随机分出 10% 做验证，只用第一种划分。模型：InceptionV3，输入 256×256×3，批量 32，学习率 5e-4，每轮乘 0.8，训练 5 轮。<span data-cell="19">出处</span></p><p>作者原本打算把各轮的验证预测做指数加权平均，但这一版为了节省时间注释掉了。<span data-cell="18">出处</span></p><p>动画把五轮串起来：每轮先随机欠采样，再训练，最后对测试集预测一次存档。</p>`,
+      cells: [19], highlight: ["ShuffleSplit(n_splits=10, test_size=0.1", "learning_rate=5e-4", "num_epochs=5", "decay_rate=0.8"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 40, w: 280, h: 200 }, [0.5, 5.5], [0, 5.5e-4], { xticks: 5, xfmt: (v) => String(Math.round(v)), yfmt: (v) => (v * 1e4).toFixed(1), xlabel: "轮次", ylabel: "学习率 ×10⁻⁴" });
+        const bars = []; for (let e = 1; e <= 5; e++) bars.push([K.svg(svg, "rect", { x: ax.sx(e) - 18, y: ax.sy(0), width: 36, height: 0, rx: 3, fill: "var(--c1)" }), 5e-4 * Math.pow(0.8, e - 1)]);
+        const snaps = []; for (let e = 1; e <= 5; e++) { const n = K.node(svg, 420 + ((e - 1) % 3) * 95, 60 + Math.floor((e - 1) / 3) * 90, 85, 60, "第 " + e + " 轮\n测试预测", { fs: 12 }); n.style.opacity = 0; snaps.push(n); }
+        K.svg(svg, "text", { x: 540, y: 40, "text-anchor": "middle", "font-size": 12, class: "muted" }, "PredictionCheckpoint 每轮存一份");
+        (async () => {
+          for (let e = 0; e < 5; e++) {
+            const [b, v] = bars[e];
+            if (!(await ctx.tween(450, (t) => { const h = (ax.sy(0) - ax.sy(v)) * t; b.setAttribute("y", ax.sy(0) - h); b.setAttribute("height", h); snaps[e].style.opacity = t; }))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "提交：5 轮预测按权重 0、1、2、4、6 平均", kicker: "第 20–22 格 · 提交与改进方向",
+      html: `<p>5 轮各自的测试预测按权重 <b>0、1、2、4、6</b> 加权平均：第 1 轮还没学好，直接不要；越往后的轮权重越大。<span data-cell="21">出处</span> 然后把宽表还原成“图片编号_类型”的长表，写出提交文件。</p><p>作者最后列出可以改进的方向：图像增强、学习率计划、更大输入、更长训练、更多正则化、更好的加窗。<span data-cell="22">出处</span></p>`,
+      cells: [21], highlight: ["weights=[0, 1, 2, 4, 6]"],
+      draw(svg, ctx) {
+        const w = [0, 1, 2, 4, 6], p = [0.35, 0.62, 0.71, 0.76, 0.78];
+        const ax = K.axes(svg, { x: 70, y: 40, w: 330, h: 220 }, [0.5, 5.5], [0, 7], { xticks: 5, xfmt: (v) => "第" + Math.round(v) + "轮", ylabel: "权重" });
+        const bars = w.map((v, i) => K.svg(svg, "rect", { x: ax.sx(i + 1) - 20, y: ax.sy(0), width: 40, height: 0, rx: 3, fill: "var(--c2)" }));
+        const avg = p.reduce((s, v, i) => s + v * w[i], 0) / w.reduce((a, b) => a + b, 0);
+        K.svg(svg, "text", { x: 460, y: 80, "font-size": 13 }, "某张图 any 的 5 轮预测（示意）：");
+        K.svg(svg, "text", { x: 460, y: 104, "font-size": 13, "font-family": "var(--mono)" }, p.join("  "));
+        const res = K.svg(svg, "text", { x: 460, y: 150, "font-size": 15, "font-weight": 700, fill: "var(--good)" }, "");
+        K.svg(svg, "text", { x: 460, y: 180, "font-size": 12, class: "muted" }, "加权平均 = Σ(预测×权重) / Σ权重");
+        ctx.tween(1200, (t) => { bars.forEach((b, i) => { const h = (ax.sy(0) - ax.sy(w[i])) * t; b.setAttribute("y", ax.sy(0) - h); b.setAttribute("height", h); }); res.textContent = "最终提交 = " + (avg * t).toFixed(3); });
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：加窗 ---------- */
+  const PRE = { full: [500, 3000], brain: [40, 80], subdural: [80, 200], soft: [40, 380], bone: [600, 2800] };
+  let lastPre = null;
+  const labA = K.lab(document.getElementById("labA"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "bleed", label: "示意 CT 里的出血", value: "subdural", options: [["subdural", "左侧硬膜下出血（月牙形）"], ["intra", "右侧脑实质内出血（团块）"], ["none", "没有出血"]] },
+      { id: "pre", label: "预设窗口", value: "brain", options: [["brain", "脑窗 40 / 80"], ["subdural", "硬膜下窗 80 / 200"], ["soft", "软组织窗 40 / 380"], ["full", "不加窗（全范围）"], ["bone", "骨窗 600 / 2800"], ["custom", "自定义（用下面两个滑块）"]] },
+      { id: "c", label: "窗位（中心 HU）——选“自定义”后生效", min: -200, max: 800, step: 5, value: 40 },
+      { id: "w", label: "窗宽（HU）——选“自定义”后生效", min: 10, max: 3000, step: 10, value: 80 },
+    ],
+    note: "示意 CT 的每个像素存的是 HU 值（空气 −1000、脑约 30–40、血约 70、骨上千）。浏览器按作者 window_image 的做法现场计算：低于“窗位 − 窗宽/2”的变黑，高于“窗位 + 窗宽/2”的变白，中间线性拉开。右边是作者的三窗合成图。看看“不加窗”时出血还能不能看见。",
+    render(svg, v) {
+      const ct = headCT(110, v.bleed, 4);
+      const [c, w] = v.pre === "custom" ? [v.c, v.w] : PRE[v.pre];
+      const g = win(ct, c, w);
+      PX.draw(svg, 20, 30, 250, 250, g, null, 0, 1, true);
+      PX.draw(svg, 370, 30, 250, 250, bsb(ct), null, null, null, true);
+      K.svg(svg, "text", { x: 145, y: 20, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, `单窗：窗位 ${c} / 窗宽 ${w}`);
+      K.svg(svg, "text", { x: 495, y: 20, "text-anchor": "middle", "font-size": 13 }, "作者的三窗合成（R 脑 / G 硬膜下 / B 软组织）");
+      const lo = c - w / 2;
+      const disp = (h) => K.clamp((h - lo) / w, 0, 1);
+      const contrast = Math.round(Math.abs(disp(72) - disp(35)) * 255);
+      let blk = 0, wht = 0; for (const x of ct.a) { if (x <= lo) blk++; else if (x >= lo + w) wht++; }
+      return { readout: [
+        { k: "显示的 HU 范围", v: `${Math.round(lo)} ~ ${Math.round(lo + w)}` },
+        { k: "血(70) 与 脑(35) 的灰度差", v: contrast + " / 255", color: contrast > 60 ? "var(--good)" : contrast < 15 ? "var(--bad)" : "var(--warn)" },
+        { k: "全黑 / 全白像素", v: Math.round((blk / ct.a.length) * 100) + "% / " + Math.round((wht / ct.a.length) * 100) + "%" },
+      ] };
+    },
+  });
+  void labA; void lastPre;
+
+  /* ---------- 实验 B：加权对数损失 ---------- */
+  const CASES = { none: [0, 0, 0, 0, 0, 0], sub: [1, 0, 0, 0, 0, 1], multi: [1, 0, 1, 0, 1, 1] };
+  const NAMES = ["any", "硬膜外", "实质内", "脑室内", "蛛网膜下", "硬膜下"], WTS = [2, 1, 1, 1, 1, 1];
+  K.lab(document.getElementById("labB"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "truth", label: "这张图的真实答案", value: "multi", options: [["multi", "实质内 + 蛛网膜下 + 硬膜下（第 3 格的真实例子）"], ["sub", "只有硬膜下出血"], ["none", "没有出血"]] },
+      { id: "pany", label: "模型给 any（有没有出血）的概率", min: 0.01, max: 0.99, step: 0.01, value: 0.7, fmt: (v) => v.toFixed(2) },
+      { id: "ppos", label: "模型给“真的有”的那几种类型的概率", min: 0.01, max: 0.99, step: 0.01, value: 0.6, fmt: (v) => v.toFixed(2) },
+      { id: "pneg", label: "模型给“其实没有”的那几种类型的概率", min: 0.01, max: 0.99, step: 0.01, value: 0.1, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "按作者 weighted_log_loss_metric 的公式现场计算：每个标签算 −[y·log p + (1−y)·log(1−p)]，再按权重 2、1、1、1、1、1 求加权平均。柱子是每个标签的罚分，柱子上方写着它的权重。试试把 any 拖到 0.05：它一个标签就能把总分拉高很多。",
+    render(svg, v) {
+      const y = CASES[v.truth], p = y.map((t, i) => (i === 0 ? v.pany : t ? v.ppos : v.pneg));
+      const L = y.map((t, i) => -(t * Math.log(p[i]) + (1 - t) * Math.log(1 - p[i])));
+      const wavg = L.reduce((s, l, i) => s + l * WTS[i], 0) / WTS.reduce((a, b) => a + b, 0), avg = L.reduce((a, b) => a + b, 0) / 6;
+      const top = Math.max(2, ...L) * 1.1;
+      const ax = K.axes(svg, { x: 60, y: 30, w: 560, h: 210 }, [0, 6], [0, top], { xticks: 0, ylabel: "罚分" });
+      L.forEach((l, i) => {
+        const x = ax.sx(i + 0.15), wd = ax.sx(0.7) - ax.sx(0);
+        K.svg(svg, "rect", { x, y: ax.sy(l), width: wd, height: ax.sy(0) - ax.sy(l), rx: 3, fill: i === 0 ? "var(--c6)" : "var(--c1)", opacity: 0.85 });
+        K.svg(svg, "text", { x: x + wd / 2, y: ax.sy(l) - 6, "text-anchor": "middle", "font-size": 11 }, "×" + WTS[i] + "  " + l.toFixed(2));
+        K.svg(svg, "text", { x: x + wd / 2, y: 258, "text-anchor": "middle", "font-size": 12 }, NAMES[i]);
+        K.svg(svg, "text", { x: x + wd / 2, y: 276, "text-anchor": "middle", "font-size": 11, class: "muted" }, `真=${y[i]} 猜=${p[i].toFixed(2)}`);
+      });
+      return { readout: [
+        { k: "加权平均（比赛指标）", v: wavg.toFixed(3), color: "var(--c6)" },
+        { k: "不加权平均", v: avg.toFixed(3) },
+        { k: "any 一项占总罚分", v: Math.round(((L[0] * 2) / L.reduce((s, l, i) => s + l * WTS[i], 0)) * 100) + "%" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

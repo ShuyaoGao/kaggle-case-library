@@ -1,0 +1,603 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>新冠疫情预测</title>
+<meta name="description" content="Kaggle 案例拆解：用 SIR 传染病模型理解疫情机制，再用对数线性回归、滞后特征、逻辑斯蒂曲线和 ARIMA 预测各国新冠确诊数。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">时间序列 · 流行病预测 · 机制模型 vs 数据模型</div>
+  <h1>新冠疫情预测：传染病方程和回归模型谁更靠谱</h1>
+  <p class="en">COVID Global Forecast: SIR model + ML regressions</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span><span class="tag method">统计建模</span>
+    <span class="tag method">SIR 传染病模型</span><span class="tag method">龙格-库塔数值解</span><span class="tag method">曲线拟合</span>
+    <span class="tag method">对数线性回归</span><span class="tag method">滞后 / 趋势特征</span><span class="tag method">逻辑斯蒂曲线</span><span class="tag method">ARIMA</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Patrick Sánchez（saga21）</b></span>
+    <span>Kaggle 点赞 <b>2,012</b>（2026-11 抓取）</span>
+    <span>数据 <b>COVID19 Global Forecasting（比赛，第 4 周）</b> + tanuprabhu/population-by-country-2020</span>
+    <span><a href="https://www.kaggle.com/code/saga21/covid-global-forecast-sir-model-ml-regressions" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">2020 年春天各国每天的累计确诊和死亡数</div><p>Kaggle 在疫情初期每周开一场预测赛，给出各国家 / 省份每天的累计确诊 <code>ConfirmedCases</code> 和累计死亡 <code>Fatalities</code>。<span data-cell="3">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">接下来几周每个地区的累计确诊与死亡</div><p>这是一个“往后外推”的时间序列问题：只能用某个日期之前的数据，预测之后的每一天。<span data-cell="44">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">先讲机制（SIR），再用数据回归</div><p>用龙格-库塔法解 SIR 微分方程；对数变换后的线性回归；加入滞后特征逐日递推；疫情后期改用逻辑斯蒂 S 形曲线和 ARIMA。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">短期外推可以，算不出峰值</div><p>作者写明：只用最近一段数据的线性回归，第 2 周比赛得分 1.19681；用全部历史数据反而变差到 1.62190（越小越好）。<span data-cell="70">出处</span> <span data-cell="73">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛数据是一张“地区 × 日期”的长表：每一行是某个国家（或省份）在某一天的累计数字。作者还接入了一份各国人口资料表，补充人口、密度、年龄中位数等国家特征。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">国家 / 地区数</div><div class="v">163</div></div>
+        <div class="stat-tile"><div class="k">时间跨度</div><div class="v">约 2 个月</div></div>
+        <div class="stat-tile"><div class="k">每行代表</div><div class="v" style="font-size:16px">某地某天</div></div>
+        <div class="stat-tile"><div class="k">要预测的列</div><div class="v" style="font-size:16px;color:var(--c6)">确诊 + 死亡</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">“163 个国家、近两个月”是作者在第 4 格写的 <span data-cell="4">出处</span>。这句话写于比赛早期，代码后来改读第 4 周的数据（第 3 格），实际天数会更多，以运行输出为准。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>Id</code> / <code>ForecastId</code></td><td>训练集行号 / 测试集（要提交预测的）行号</td><td>编号</td></tr>
+        <tr><td><code>Country_Region</code></td><td>国家或地区</td><td>类别</td></tr>
+        <tr><td><code>Province_State</code></td><td>省 / 州，只有部分国家有，其余作者填成 "None"</td><td>类别</td></tr>
+        <tr><td><code>Date</code></td><td>日期</td><td>日期</td></tr>
+        <tr><td><code>ConfirmedCases</code></td><td><b>要预测的答案之一</b>：截至当天的累计确诊数</td><td>数值</td></tr>
+        <tr><td><code>Fatalities</code></td><td><b>要预测的答案之二</b>：截至当天的累计死亡数</td><td>数值</td></tr>
+        <tr><td>人口表：<code>Population</code>、<code>Density</code>、<code>Med Age</code>、<code>Urban Pop</code> 等</td><td>2020 年人口、人口密度、年龄中位数、城市人口比例（第 43 格接入）</td><td>数值</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">列名来自作者代码 <span data-cell="3">第 3 格</span>、<span data-cell="35">第 35 格</span>、<span data-cell="43">第 43 格</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="28">
+    <h3>动手试试 A · SIR 模型：传染率和康复率决定疫情曲线 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="54">
+    <h3>动手试试 B · 训练窗口选多长？直线外推 vs S 形曲线 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>按国家分别训练、只用最近一段数据的线性回归（方法 1），第 2 周比赛 RMSLE = <b>1.19681</b></td><td><span data-cell="70">第 70 格</span></td></tr>
+        <tr><td>改用“从第一例确诊起的全部数据”训练（方法 2），RMSLE 变差为 <b>1.62190</b>，作者不再采用</td><td><span data-cell="73">第 73 格</span></td></tr>
+        <tr><td>对数后的线性回归能抓住早期的指数增长，但越往后外推越不准；数据少的国家容易给出离谱的预测</td><td><span data-cell="67">第 67 格</span></td></tr>
+        <tr><td>加入滞后特征后，数据多的国家（西班牙、意大利、德国）预测“非常接近实际”，数据少的国家可能很糟</td><td><span data-cell="86">第 86 格</span></td></tr>
+        <tr><td>SIR 参数拟合作者自己不满意，没能很好地复现曲线</td><td><span data-cell="32">第 32 格</span></td></tr>
+        <tr><td>这些回归模型只适合短期预测，不能告诉你峰值哪天到来，也不能替代专家建议</td><td><span data-cell="121">第 121 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">RMSLE（对数均方根误差）是比赛的评分方式，越小越好。除了上面两个作者用文字写出的分数，其他模型（滞后回归、逻辑斯蒂、ARIMA）的效果只在运行输出的图里，Kaggle 下载的源码不带输出，这里不列数字。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给定一个地区到今天为止的累计病例，外推未来一两周的数字，供医院准备床位、口罩、检测试剂。</li>
+        <li><b>同类问题：</b>流感季病例预测、新产品用户数增长、谣言在社交网络上的扩散、新功能的渗透率（都有“先指数、后饱和”的 S 形）。</li>
+        <li><b>可迁移的套路：</b>先用机制模型理解“为什么会这样涨”，再用数据模型做短期预测；对指数增长的量先取对数；训练窗口要贴近当前阶段；递推预测时把预测值当成下一天的输入。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>SIR 方程 + 4 阶龙格-库塔数值解 <span data-cell="24">第 24 格</span></li>
+        <li>SIR 参数拟合：<code>odeint</code> + <code>curve_fit</code> <span data-cell="31">第 31 格</span></li>
+        <li>特征：滞后、趋势、国家人口资料 <span data-cell="39">第 39 格</span> <span data-cell="43">第 43 格</span></li>
+        <li>对数线性回归（逐国训练） <span data-cell="49">第 49 格</span></li>
+        <li>带滞后的逐日递推回归 <span data-cell="77">第 77 格</span></li>
+        <li>逻辑斯蒂曲线拟合 <span data-cell="93">第 93 格</span>、ARIMA（auto_arima） <span data-cell="109">第 109 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者说训练数据只取“最近 10 天左右”效果更好。为什么在疫情里“旧数据”反而会拖后腿？这和天气预报有什么相似之处？</li>
+      <li>SIR 模型能说出“峰值大概什么时候来”，线性回归却说不出。那为什么比赛里大家更多用回归？两类模型各自擅长什么？</li>
+      <li>确诊数受检测数量影响很大（作者也提到英国确诊少可能是因为检测少）。模型预测的到底是“感染人数”还是“被检测出来的人数”？</li>
+      <li>作者在第 19 格写意大利“超过 2% 的人口被感染”，但按他自己给的数字（约 12 万确诊、6049 万人口）算只有约 0.2%。你会怎样检查这类数量级错误？</li>
+      <li>逐日递推时，第一天的预测误差会被当成第二天的输入。误差会越滚越大还是越来越小？有什么办法缓解？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Patrick Sánchez（Kaggle 用户 saga21），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Kaggle COVID19 Global Forecasting 比赛；国家人口资料来自 tanuprabhu/population-by-country-2020。
+</footer>
+</main>
+
+<script src="nb/covid-sir-forecast.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* 折线：xs, ys 为数据，返回 path 元素 */
+  function line(svg, ax, xs, ys, color, opt) {
+    opt = opt || {};
+    let d = "";
+    xs.forEach((x, i) => { if (ys[i] == null || !isFinite(ys[i])) return; d += (d ? "L" : "M") + ax.sx(x).toFixed(1) + "," + ax.sy(ys[i]).toFixed(1); });
+    return K.svg(svg, "path", { d, fill: "none", stroke: color, "stroke-width": opt.w || 2, "stroke-dasharray": opt.dash || null, opacity: opt.op == null ? 1 : opt.op });
+  }
+  /* SIR 方程，4 阶龙格-库塔（和作者第 24 格同一个算法），变量是人口比例 */
+  function sirRK4(beta, gamma, i0, hs, T) {
+    let s = 1 - i0, i = i0, r = 0;
+    const S = [s], I = [i], R = [r], t = [0];
+    const f = (s, i) => [-beta * s * i, beta * s * i - gamma * i, gamma * i];
+    const n = Math.round(T / hs);
+    for (let k = 1; k <= n; k++) {
+      const k1 = f(s, i), k2 = f(s + k1[0] * hs / 2, i + k1[1] * hs / 2), k3 = f(s + k2[0] * hs / 2, i + k2[1] * hs / 2), k4 = f(s + k3[0] * hs, i + k3[1] * hs);
+      s += hs * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]) / 6;
+      i += hs * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]) / 6;
+      r += hs * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2]) / 6;
+      if (k % Math.max(1, Math.round(0.5 / hs)) === 0) { S.push(s); I.push(i); R.push(r); t.push(k * hs); }
+    }
+    return { S, I, R, t };
+  }
+  /* 模拟的累计确诊曲线（逻辑斯蒂 + 乘性噪声），只用于示意 */
+  function fakeCountry(seed, K0, r0, t0, days) {
+    const r = K.rng(seed), y = [];
+    let prev = 0;
+    for (let t = 0; t < days; t++) {
+      const base = K0 / (1 + Math.exp(-r0 * (t - t0)));
+      const v = Math.max(prev, Math.round(base * Math.exp(K.randn(r) * 0.04)));
+      y.push(v); prev = v;
+    }
+    return y;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "开场：每周换一次题的比赛", kicker: "第 0–2 格 · 背景与导入",
+      html: `<p>2020 年 3 月起，Kaggle 每周开一场新冠预测赛（第 1 周、第 2 周……），数据每天更新。作者说这份 notebook 会跟着比赛一周周搬家，所以代码读的是第 4 周的数据，而一些文字还是早期写的。<span data-cell="0">第 0 格</span></p><p>导入的工具里，<code>scipy.integrate</code> 和 <code>optimize</code> 用来解方程、拟合曲线，<code>sklearn.linear_model</code> 用来做线性回归。</p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        const weeks = ["第 1 周", "第 2 周", "第 3 周", "第 4 周"];
+        K.svg(svg, "text", { x: 30, y: 34, "font-size": 14, "font-weight": 700 }, "每周一场新比赛，训练数据越来越长（示意）");
+        const bars = weeks.map((w, i) => {
+          K.svg(svg, "text", { x: 40, y: 92 + i * 60, "font-size": 13 }, w);
+          const r = K.svg(svg, "rect", { x: 110, y: 74 + i * 60, width: 0, height: 26, rx: 4, fill: "var(--c1)", opacity: 0.75 });
+          const f = K.svg(svg, "rect", { x: 110, y: 74 + i * 60, width: 0, height: 26, rx: 4, fill: "var(--c6)", opacity: 0.6 });
+          return { r, f, len: 300 + i * 70 };
+        });
+        K.svg(svg, "text", { x: 470, y: 300, "font-size": 12, fill: "var(--c1)" }, "■ 已知数据（训练）");
+        K.svg(svg, "text", { x: 600, y: 300, "font-size": 12, fill: "var(--c6)" }, "■ 要预测");
+        (async () => {
+          for (let i = 0; i < 4; i++) {
+            const b = bars[i];
+            if (!(await ctx.tween(500, (t) => { b.r.setAttribute("width", b.len * t); }))) return;
+            b.f.setAttribute("x", 110 + b.len);
+            if (!(await ctx.tween(300, (t) => { b.f.setAttribute("width", 120 * t); }))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "读数据：每一行是某地某天的累计数", kicker: "第 3–4 格 · 认识数据",
+      html: `<p>作者读入 train、test 两张表，把空着的省份填成 "None"，然后打印国家数、日期范围、哪些国家有省份细分。</p><p>要注意<b>累计</b>两个字：<code>ConfirmedCases</code> 是“到今天为止一共确诊多少”，所以它只会涨不会跌。每天新增的人数要用今天减昨天才能得到。动画里，每天的新增（柱子）一根根摞起来，就成了累计曲线。</p>`,
+      cells: [3], highlight: ["fillna(\"None\", inplace=True)", "nunique()"],
+      draw(svg, ctx) {
+        const daily = [1, 1, 2, 3, 5, 8, 11, 16, 22, 28, 33, 36, 35, 31, 26, 20, 15, 10, 7, 5];
+        const cum = []; daily.reduce((a, b, i) => (cum[i] = a + b), 0);
+        const ax1 = K.axes(svg, { x: 50, y: 40, w: 280, h: 240 }, [0, 20], [0, 40], { xticks: 4, yticks: 4, xlabel: "天" });
+        const ax2 = K.axes(svg, { x: 410, y: 40, w: 280, h: 240 }, [0, 20], [0, 340], { xticks: 4, yticks: 4, xlabel: "天" });
+        K.svg(svg, "text", { x: 60, y: 26, "font-size": 13, "font-weight": 700 }, "每天新增（今天 − 昨天）");
+        K.svg(svg, "text", { x: 420, y: 26, "font-size": 13, "font-weight": 700, fill: "var(--c6)" }, "累计确诊 ConfirmedCases");
+        const rs = daily.map((v, i) => K.svg(svg, "rect", { x: ax1.sx(i) + 1, y: ax1.sy(0), width: 11, height: 0, fill: "var(--c1)", opacity: 0.8 }));
+        const dots = cum.map((v, i) => K.svg(svg, "circle", { cx: ax2.sx(i + 0.5), cy: ax2.sy(v), r: 0, fill: "var(--c6)" }));
+        K.svg(svg, "text", { x: 60, y: 330, "font-size": 12, class: "muted" }, "示意数字，不是真实疫情数据");
+        (async () => {
+          for (let i = 0; i < daily.length; i++) {
+            if (!(await ctx.tween(110, (t) => { const h = ax1.sy(0) - ax1.sy(daily[i] * t); rs[i].setAttribute("y", ax1.sy(0) - h); rs[i].setAttribute("height", h); dots[i].setAttribute("r", 4 * t); }))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "全球曲线：中国那级“台阶”", kicker: "第 5–12 格 · 探索",
+      html: `<p>作者先把所有国家按日期加总，画出全球确诊和死亡曲线。他发现曲线上有一个突然的跳跃：中国在 2020-02-11 前后<b>修改了确诊标准</b>，一下子多算进很多病例。<span data-cell="6">第 6 格</span></p><p>所以他把中国单独拿出来分析。去掉中国之后，其余国家的曲线“干净”多了，形状很像流行病学里的 SIR 模型；中国的曲线则已经接近平台期。<span data-cell="9">第 9 格</span> <span data-cell="12">第 12 格</span></p>`,
+      cells: [5, 8, 11],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [0, 60], [0, 1], { xticks: 0, yticks: 0, xlabel: "日期 →（示意）" });
+        const xs = [], china = [], rest = [];
+        for (let t = 0; t <= 60; t++) {
+          xs.push(t);
+          let c = 0.55 / (1 + Math.exp(-0.25 * (t - 14)));
+          if (t >= 21) c += 0.2;
+          china.push(Math.min(c, 0.78));
+          rest.push(0.9 / (1 + Math.exp(-0.22 * (t - 50))));
+        }
+        const p1 = line(svg, ax, xs, china, "var(--c6)", { w: 2.5 });
+        const p2 = line(svg, ax, xs, rest, "var(--c1)", { w: 2.5 });
+        [p1, p2].forEach((p) => { const L = p.getTotalLength(); p.style.strokeDasharray = L; p.style.strokeDashoffset = L; p._L = L; });
+        K.svg(svg, "text", { x: 70, y: 24, "font-size": 13, fill: "var(--c6)", "font-weight": 700 }, "中国累计确诊");
+        K.svg(svg, "text", { x: 200, y: 24, "font-size": 13, fill: "var(--c1)", "font-weight": 700 }, "其他国家累计确诊");
+        const note = K.svg(svg, "text", { x: ax.sx(21) + 8, y: ax.sy(0.62), "font-size": 12, fill: "var(--warn)", "font-weight": 700 }, "← 确诊标准修改，曲线跳一级");
+        note.style.opacity = 0;
+        ctx.tween(1800, (t) => { p1.style.strokeDashoffset = p1._L * (1 - t); })
+          .then((ok) => ok && ctx.tween(400, (t) => (note.style.opacity = t)))
+          .then((ok) => ok && ctx.tween(1800, (t) => { p2.style.strokeDashoffset = p2._L * (1 - t); }));
+      },
+    },
+    {
+      title: "四个国家，按人口比例比一比", kicker: "第 13–19 格 · 国家对比",
+      html: `<p>作者挑了意大利、西班牙、英国、新加坡，先画累计确诊，再除以各国人口，换算成“百分之几的人确诊了”。<span data-cell="16">第 16 格</span></p><p>动画用的是作者第 19 格文字里给出的大致确诊数和第 16 格的人口数。按这些数字算，意大利约 0.2%、西班牙约 0.26%；而作者文字写成了“超过 2%”“3%”，<b>差了 10 倍</b>。<span data-cell="19">第 19 格</span></p>`,
+      cells: [14, 16], highlight: ["pop_italy = 60486683.", "total_date_Italy.Fatalities = total_date_Italy.ConfirmedCases/pop_italy*100."],
+      notes: { 16: "注意：这一格把 Fatalities 也赋值成了 ConfirmedCases 除以人口，复制粘贴时把“死亡”写成了“确诊”，所以画出来的死亡比例其实是确诊比例。" },
+      draw(svg, ctx) {
+        const d = [["意大利", 120000, 60486683], ["西班牙", 120000, 46749696], ["英国", 40000, 67784927], ["新加坡", 1000, 5837230]];
+        K.svg(svg, "text", { x: 30, y: 28, "font-size": 13, "font-weight": 700 }, "累计确诊（人）");
+        K.svg(svg, "text", { x: 380, y: 28, "font-size": 13, "font-weight": 700 }, "占总人口的百分比");
+        const b1 = K.bars(svg, { x: 20, y: 44, w: 330, h: 240 }, d.map((r, i) => ({ label: r[0], value: r[1], color: K.colors[i] })), { horizontal: true, labelWidth: 60, fmt: (v) => v.toLocaleString() });
+        const pct = d.map((r) => (r[1] / r[2]) * 100);
+        const b2 = K.bars(svg, { x: 370, y: 44, w: 330, h: 240 }, d.map((r, i) => ({ label: r[0], value: pct[i], color: K.colors[i] })), { horizontal: true, labelWidth: 60, max: 0.3, fmt: (v) => v.toFixed(2) + "%" });
+        K.svg(svg, "text", { x: 30, y: 318, "font-size": 12, class: "muted" }, "确诊数取自作者第 19 格的文字（约数，新加坡写的是“>1000”），人口取自第 16 格代码");
+        const all = b1.concat(b2), W = all.map((e) => +e.rect.getAttribute("width"));
+        all.forEach((e) => { e.rect.setAttribute("width", 0); e.text.style.opacity = 0; });
+        ctx.tween(1100, (t) => b1.forEach((e, i) => e.rect.setAttribute("width", W[i] * t)))
+          .then((ok) => ok && ctx.tween(1100, (t) => b2.forEach((e, i) => e.rect.setAttribute("width", W[i + 4] * t))))
+          .then((ok) => ok && all.forEach((e) => (e.text.style.opacity = 1)));
+      },
+    },
+    {
+      title: "SIR 模型：每个人只有三种状态", kicker: "第 20–23 格 · 传染病机制",
+      html: `<p>SIR 把人群分成三格：<b>S 易感者</b>（还没得过、可能被传染）、<b>I 感染者</b>、<b>R 移出者</b>（康复获得免疫，或去世）。人只能从 S 走到 I，再从 I 走到 R。</p><p>两个参数决定一切：<b>β 传染率</b>（感染者每天能把病传给多少易感者），<b>γ 移出率</b>（感染者每天有多大比例康复或去世）。作者把三条微分方程写成了三个 Python 函数。<span data-cell="22">第 22 格</span></p>`,
+      cells: [22],
+      draw(svg, ctx) {
+        const n = 120, cols = 15, r = K.rng(4), st = new Array(n).fill(0);
+        st[52] = 1;
+        const dots = [];
+        for (let k = 0; k < n; k++) dots.push(K.svg(svg, "circle", { cx: 40 + (k % cols) * 24, cy: 50 + Math.floor(k / cols) * 30, r: 8, fill: "var(--c1)" }));
+        const col = ["var(--c1)", "var(--c6)", "var(--ink-3)"];
+        const lab = [K.svg(svg, "text", { x: 440, y: 70, "font-size": 15, "font-weight": 700, fill: "var(--c1)" }, ""), K.svg(svg, "text", { x: 440, y: 100, "font-size": 15, "font-weight": 700, fill: "var(--c6)" }, ""), K.svg(svg, "text", { x: 440, y: 130, "font-size": 15, "font-weight": 700, fill: "var(--ink-3)" }, "")];
+        K.node(svg, 430, 180, 70, 44, "S", { fill: "color-mix(in srgb, var(--c1) 20%, var(--panel))", stroke: "var(--c1)", bold: true });
+        K.node(svg, 540, 180, 70, 44, "I", { fill: "color-mix(in srgb, var(--c6) 20%, var(--panel))", stroke: "var(--c6)", bold: true });
+        K.node(svg, 650, 180, 60, 44, "R", { bold: true });
+        K.arrow(svg, 500, 202, 538, 202); K.arrow(svg, 610, 202, 648, 202);
+        K.svg(svg, "text", { x: 519, y: 250, "text-anchor": "middle", "font-size": 13 }, "β 传染");
+        K.svg(svg, "text", { x: 629, y: 250, "text-anchor": "middle", "font-size": 13 }, "γ 移出");
+        K.svg(svg, "text", { x: 430, y: 300, "font-size": 12, class: "muted" }, "示意：β = 0.35，γ = 0.12，每帧一天");
+        const show = () => { const c = [0, 0, 0]; st.forEach((s) => c[s]++); lab[0].textContent = "易感 S：" + c[0]; lab[1].textContent = "感染 I：" + c[1]; lab[2].textContent = "移出 R：" + c[2]; dots.forEach((d, k) => d.style.fill = col[st[k]]); };
+        show();
+        (async () => {
+          for (let day = 0; day < 60; day++) {
+            if (!(await ctx.wait(160))) return;
+            const nI = st.filter((s) => s === 1).length;
+            const p = 1 - Math.exp(-0.35 * nI / n);
+            for (let k = 0; k < n; k++) {
+              if (st[k] === 0 && r() < p) st[k] = 3;
+              else if (st[k] === 1 && r() < 0.12) st[k] = 2;
+            }
+            for (let k = 0; k < n; k++) if (st[k] === 3) st[k] = 1;
+            show();
+            if (!st.includes(1)) break;
+          }
+        })();
+      },
+    },
+    {
+      title: "龙格-库塔：一小步一小步算出曲线", kicker: "第 23–29 格 · 数值求解",
+      html: `<p>微分方程只告诉你“此刻变化有多快”，要得到整条曲线，就得从起点出发一步步往前走。作者手写了 <b>4 阶龙格-库塔法</b>：每走一步，先在起点、半路（两次）、终点各估一次斜率，再加权平均，比“只看起点斜率”准得多。<span data-cell="24">第 24 格</span></p><p>作者用全世界 78 亿人、1 个初始感染者、β = 0.7、γ = 0.2、步长 0.1 跑了 1 万步。<span data-cell="28">第 28 格</span> 注意第 27 格的文字写的是 β = 0.3、γ = 0.5，和代码不一致；按文字的参数 β/γ &lt; 1，疫情根本传不起来。</p>`,
+      cells: [24, 26, 28], highlight: ["a = a + (a1 + 2*(a2 + a3) + a4)/6", "beta = 0.7", "gamma = 0.2"],
+      notes: { 27: "文字写 β=0.3、γ=0.5，但下一格代码用的是 β=0.7、γ=0.2；以代码为准。" },
+      draw(svg, ctx) {
+        const sim = sirRK4(0.7, 0.2, 1 / 7.8e9, 0.1, 100);
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [0, 100], [0, 1], { xticks: 5, yticks: 4, xlabel: "时间（步长 0.1 × 1000 步）", ylabel: "人口比例" });
+        const ps = [[sim.S, "var(--c1)", "S 易感"], [sim.I, "var(--c6)", "I 感染"], [sim.R, "var(--ink-3)", "R 移出"]].map((a, k) => {
+          K.svg(svg, "text", { x: 470 + k * 70, y: 22, "font-size": 12, fill: a[1], "font-weight": 700 }, a[2]);
+          const p = line(svg, ax, sim.t, a[0], a[1], { w: 2.5 });
+          const L = p.getTotalLength(); p.style.strokeDasharray = L; p.style.strokeDashoffset = L; p._L = L;
+          return p;
+        });
+        const cur = K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(0), y1: 30, y2: 280, stroke: "var(--warn)", "stroke-dasharray": "4 3" });
+        ctx.tween(3200, (t) => { ps.forEach((p) => (p.style.strokeDashoffset = p._L * (1 - t))); cur.setAttribute("x1", ax.sx(100 * t)); cur.setAttribute("x2", ax.sx(100 * t)); });
+      },
+    },
+    {
+      title: "用西班牙的数据反推 β 和 γ", kicker: "第 30–32 格 · 参数拟合",
+      html: `<p>理论模型要能预测，必须知道真实的 β 和 γ。作者取西班牙每日新增确诊（累计数做差分），用 <code>odeint</code> 解方程、<code>curve_fit</code> 不断调 β、γ，让模型曲线尽量贴近数据点。<span data-cell="31">第 31 格</span></p><p>作者坦白：“我对拟合结果不满意”，曲线没复现好，于是转向以数据为中心的方法。<span data-cell="32">第 32 格</span> 一个可能的原因：代码拿“每日新增确诊”去对 SIR 里的“当前感染人数 I”，这两个量本来就不是一回事。</p>`,
+      cells: [31], highlight: ["optimize.curve_fit(fit_odeint, xdata, ydata)", "diff()"],
+      draw(svg, ctx) {
+        const r = K.rng(8), xs = [], ys = [];
+        for (let t = 0; t < 40; t++) { xs.push(t); ys.push(Math.max(0, 8000 * Math.exp(-((t - 22) ** 2) / 90) * (1 + K.randn(r) * 0.18))); }
+        const ax = K.axes(svg, { x: 70, y: 30, w: 590, h: 250 }, [0, 40], [0, 11000], { xticks: 4, yticks: 4, xlabel: "天（示意数据）", ylabel: "每日新增" });
+        ys.forEach((y, i) => K.svg(svg, "circle", { cx: ax.sx(xs[i]), cy: ax.sy(y), r: 3.5, fill: "var(--c1)", opacity: 0.8 }));
+        const lab = K.svg(svg, "text", { x: 80, y: 20, "font-size": 12, "font-family": "var(--mono)" }, "");
+        let p = null;
+        const tries = [[0.25, 0.2, 2], [0.45, 0.2, 5], [0.55, 0.32, 7], [0.5, 0.3, 8]];
+        (async () => {
+          for (const [b, g, sc] of tries) {
+            const sim = sirRK4(b, g, 0.001, 0.1, 40);
+            const peak = Math.max(...sim.I);
+            const yy = sim.I.map((v) => (v / peak) * 1000 * sc);
+            if (p) p.remove();
+            p = line(svg, ax, sim.t, yy, "var(--c6)", { w: 2.5 });
+            lab.textContent = `curve_fit 尝试：beta = ${b.toFixed(2)}，gamma = ${g.toFixed(2)}`;
+            if (!(await ctx.wait(800))) return;
+          }
+          lab.textContent += "  → 仍然贴不太好（作者原话：not happy）";
+        })();
+      },
+    },
+    {
+      title: "合并训练集和测试集，清理缺失", kicker: "第 33–37 格 · 数据准备",
+      html: `<p>为了后面方便算滞后特征，作者把训练集和测试集上下拼成一张大表 <code>all_data</code>：去掉两者重叠的日期，测试期的确诊数先填 0，并加一列 <code>Day_num</code>（从第一天开始数第几天）。<span data-cell="35">第 35 格</span></p><p>作者自己也提醒：用 0 填缺失“可能有危险”，要记住这些 0 不是真的 0。</p>`,
+      cells: [35], highlight: ["pd.concat([train2, test], axis = 0, sort=False)", "le.fit_transform(all_data.Date)"],
+      draw(svg, ctx) {
+        const mk = (x, y, w, h, t, c) => K.node(svg, x, y, w, h, t, { fill: `color-mix(in srgb, ${c} 16%, var(--panel))`, stroke: c });
+        const tr = mk(60, 50, 240, 120, "train\n已知确诊、死亡", "var(--c1)");
+        const te = mk(60, 190, 240, 90, "test\n确诊、死亡未知", "var(--c6)");
+        const ov = K.svg(svg, "rect", { x: 60, y: 140, width: 240, height: 30, fill: "var(--warn)", opacity: 0.35 });
+        const ovt = K.svg(svg, "text", { x: 310, y: 160, "font-size": 12, fill: "var(--warn)" }, "← 重叠日期，从 train 删掉");
+        const out = mk(450, 60, 230, 200, "all_data\n+ Day_num 第几天\n测试期确诊先填 0", "var(--c3)");
+        out.style.opacity = 0;
+        const a = K.arrow(svg, 300, 160, 448, 160); a.style.opacity = 0;
+        ctx.wait(600).then((ok) => ok && ctx.tween(600, (t) => { ov.style.opacity = 0.35 * (1 - t); ovt.style.opacity = 1 - t; }))
+          .then((ok) => ok && ctx.tween(600, (t) => { te.setAttribute("transform", `translate(0,${-30 * t})`); }))
+          .then((ok) => ok && ctx.tween(700, (t) => { a.style.opacity = t; out.style.opacity = t; }));
+      },
+    },
+    {
+      title: "滞后、趋势和国家资料", kicker: "第 38–43 格 · 特征工程",
+      html: `<p><b>滞后特征</b>：把“昨天、前天……的确诊数”作为今天这一行的新列，<code>ConfirmedCases_1</code> 就是前一天的值。<b>趋势特征</b>：(今天 − n 天前) ÷ n 天前，相当于增长率。<span data-cell="39">第 39 格</span></p><p>文字里说滞后取 14 天、趋势取 7 天，但代码写的是 <code>range(1,7)</code>，实际只算了 1–6 天。<span data-cell="38">第 38 格</span> 之后又按国家名接上人口表，加入人口、密度、年龄中位数、城市人口比例，并把国家名编成数字。<span data-cell="43">第 43 格</span></p>`,
+      cells: [39, 43], highlight: ["shift(lag, fill_value=0)", "range(1,7)"],
+      draw(svg, ctx) {
+        const vals = [3, 5, 9, 14, 22, 35, 51];
+        const cols = ["日期", "确诊", "滞后1", "滞后2", "趋势1"];
+        cols.forEach((c, j) => K.svg(svg, "text", { x: 90 + j * 110, y: 40, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, c));
+        const cells = [];
+        vals.forEach((v, i) => {
+          const y = 66 + i * 34;
+          K.svg(svg, "text", { x: 90, y, "text-anchor": "middle", "font-size": 13 }, "第 " + (i + 1) + " 天");
+          K.svg(svg, "text", { x: 200, y, "text-anchor": "middle", "font-size": 13, fill: "var(--c6)" }, v);
+          const l1 = K.svg(svg, "text", { x: 310, y, "text-anchor": "middle", "font-size": 13, fill: "var(--c1)" }, i >= 1 ? vals[i - 1] : 0);
+          const l2 = K.svg(svg, "text", { x: 420, y, "text-anchor": "middle", "font-size": 13, fill: "var(--c2)" }, i >= 2 ? vals[i - 2] : 0);
+          const tr = K.svg(svg, "text", { x: 530, y, "text-anchor": "middle", "font-size": 13, fill: "var(--c3)" }, i >= 1 ? ((v - vals[i - 1]) / vals[i - 1]).toFixed(2) : "0");
+          [l1, l2, tr].forEach((e) => (e.style.opacity = 0));
+          cells.push([l1, l2, tr]);
+        });
+        K.svg(svg, "text", { x: 30, y: 320, "font-size": 12, class: "muted" }, "滞后 = 确诊列往下错一格；第 1 天没有“昨天”，代码用 0 填（fill_value=0）。示意数字");
+        (async () => {
+          for (let j = 0; j < 3; j++) for (let i = 0; i < vals.length; i++) {
+            if (!(await ctx.tween(90, (t) => (cells[i][j].style.opacity = t)))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "取对数：指数增长变成直线", kicker: "第 44–67 格 · 对数线性回归",
+      html: `<p>疫情早期的累计确诊大致是<b>指数增长</b>：每天乘以差不多同一个倍数。直线没法拟合指数曲线，但取对数之后，“每天乘 1.3”就变成了“每天加 log1.3”，曲线被拉直。<span data-cell="47">第 47 格</span></p><p>作者对每个国家单独训练一个线性回归（目标是 <code>log1p(确诊)</code>），预测完再用 <code>expm1</code> 变回来。他特别强调：只取<b>最近 10 天左右</b>的数据训练，因为指数增长只在早期成立，旧数据会把预测带偏。<span data-cell="48">第 48 格</span></p>`,
+      cells: [46, 49, 53], highlight: ["np.log1p(x)", "linear_model.LinearRegression()", "np.expm1(predicted_data)"],
+      draw(svg, ctx) {
+        const xs = [], ys = [];
+        for (let t = 0; t <= 10; t++) { xs.push(t); ys.push(50 * Math.pow(1.35, t)); }
+        const ax = K.axes(svg, { x: 70, y: 30, w: 560, h: 250 }, [0, 10], [0, 1100], { xticks: 5, yticks: 0, xlabel: "天" });
+        const ylab = K.svg(svg, "text", { x: 80, y: 24, "font-size": 13, "font-weight": 700 }, "累计确诊（原始）：越涨越快");
+        const pts = ys.map((y, i) => K.svg(svg, "circle", { cx: ax.sx(xs[i]), cy: ax.sy(y), r: 5, fill: "var(--c6)" }));
+        const lo = Math.log(50), hi = Math.log(50 * Math.pow(1.35, 10));
+        const fit = K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0), x2: ax.sx(10), y2: ax.sy(0), stroke: "var(--c1)", "stroke-width": 2.5 });
+        fit.style.opacity = 0;
+        ctx.wait(1000).then((ok) => ok && ctx.tween(1600, (t) => {
+          ylab.textContent = t < 0.5 ? "累计确诊（原始）：越涨越快" : "log(累计确诊)：变成一条直线";
+          pts.forEach((p, i) => { const yl = ((Math.log(ys[i]) - lo) / (hi - lo)) * 1000 + 50; p.setAttribute("cy", K.lerp(ax.sy(ys[i]), ax.sy(yl), t)); });
+        })).then((ok) => { if (!ok) return; fit.setAttribute("y1", ax.sy(50)); fit.setAttribute("y2", ax.sy(1050)); return ctx.tween(600, (t) => (fit.style.opacity = t)); });
+      },
+    },
+    {
+      title: "推广到所有国家：训练窗口怎么选", kicker: "第 68–73 格 · 两种方法对比",
+      html: `<p>方法 1：每个国家（有省份就按省份）各训练一个线性回归，只用固定起点之后的数据。方法 2：从这个国家第一例确诊开始，用全部历史数据训练。<span data-cell="69">第 69 格</span> <span data-cell="72">第 72 格</span></p><p>作者在第 2 周比赛上提交的成绩：方法 1 得 1.19681，方法 2 得 1.62190。分数是 <b>RMSLE</b>（对数误差的均方根），越小越好。方法 2 更差，原因是很多国家刚开始有一段“确诊很少、几乎不涨”的过渡期，把直线的斜率拉歪了。<span data-cell="73">第 73 格</span></p>`,
+      cells: [69, 72],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 40, y: 34, "font-size": 14, "font-weight": 700 }, "第 2 周比赛 RMSLE（作者原文，越小越好）");
+        const bs = K.bars(svg, { x: 40, y: 60, w: 620, h: 130 }, [{ label: "方法 1：最近一段", value: 1.19681, color: "var(--good)" }, { label: "方法 2：全部历史", value: 1.6219, color: "var(--bad)" }], { horizontal: true, labelWidth: 150, max: 1.8, fmt: (v) => v.toFixed(5) });
+        const W = bs.map((e) => +e.rect.getAttribute("width"));
+        bs.forEach((e) => { e.rect.setAttribute("width", 0); e.text.style.opacity = 0; });
+        K.svg(svg, "text", { x: 40, y: 240, "font-size": 13 }, "RMSLE = √ 平均[ (log(预测+1) − log(真实+1))² ]");
+        K.svg(svg, "text", { x: 40, y: 266, "font-size": 12, class: "muted" }, "取对数后再比：把 100 猜成 200，和把 10000 猜成 20000，扣的分一样多");
+        ctx.tween(1200, (t) => bs.forEach((e, i) => e.rect.setAttribute("width", W[i] * t))).then((ok) => ok && bs.forEach((e) => (e.text.style.opacity = 1)));
+      },
+    },
+    {
+      title: "带滞后特征，一天一天往后推", kicker: "第 74–90 格 · 递推预测",
+      html: `<p>用滞后特征有个麻烦：预测第 2 天时，需要“第 1 天的确诊数”，可第 1 天也是未来，不知道。作者的办法是<b>递推</b>：先预测明天 → 把预测值当成已知 → 重新算滞后列 → 再预测后天……一直推到最后一天。<span data-cell="74">第 74 格</span> <span data-cell="77">第 77 格</span></p><p>结论：西班牙、意大利、德国这类数据多的国家预测“非常接近实际”；数据少的国家可能“灾难性”地离谱。所以作者把数据少的地区换回方法 1 的结果。<span data-cell="86">第 86 格</span> <span data-cell="89">第 89 格</span></p>`,
+      cells: [75, 77], highlight: ["for d in list(range(start_fcst, end_fcst+1)):", "# Recompute lags"],
+      notes: { 88: "这一格和第 90 格整段放在三引号里，等于被注释掉了，作者运行时没有执行。" },
+      draw(svg, ctx) {
+        const known = [10, 14, 19, 26, 35], N = 10;
+        const ax = K.axes(svg, { x: 60, y: 40, w: 600, h: 220 }, [0, N], [0, 260], { xticks: 0, yticks: 0, xlabel: "天 →" });
+        K.svg(svg, "line", { x1: ax.sx(4.5), x2: ax.sx(4.5), y1: 40, y2: 260, stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+        K.svg(svg, "text", { x: ax.sx(4.5) - 6, y: 54, "text-anchor": "end", "font-size": 12, class: "muted" }, "已知");
+        K.svg(svg, "text", { x: ax.sx(4.5) + 6, y: 54, "font-size": 12, class: "muted" }, "要预测");
+        known.forEach((v, i) => K.svg(svg, "rect", { x: ax.sx(i) + 8, y: ax.sy(v), width: 40, height: ax.sy(0) - ax.sy(v), fill: "var(--c1)", rx: 3 }));
+        const msg = K.svg(svg, "text", { x: 60, y: 326, "font-size": 13 }, "");
+        const seq = known.slice();
+        (async () => {
+          for (let d = 5; d < N; d++) {
+            const v = Math.round(seq[d - 1] * (seq[d - 1] / seq[d - 2]));
+            const arcs = [1, 2, 3].map((k) => K.svg(svg, "path", { d: `M${ax.sx(d - k) + 28},${ax.sy(seq[d - k]) - 4} Q${(ax.sx(d - k) + ax.sx(d)) / 2 + 28},${ax.sy(seq[d - k]) - 50} ${ax.sx(d) + 28},${ax.sy(v) - 4}`, fill: "none", stroke: "var(--warn)", "stroke-dasharray": "3 3" }));
+            msg.textContent = `用前 3 天（滞后 1–3）预测第 ${d + 1} 天 → 预测值写回表里，再预测下一天`;
+            const rr = K.svg(svg, "rect", { x: ax.sx(d) + 8, y: ax.sy(0), width: 40, height: 0, fill: "none", stroke: "var(--c6)", "stroke-width": 2, rx: 3 });
+            if (!(await ctx.tween(500, (t) => { rr.setAttribute("y", ax.sy(v * t)); rr.setAttribute("height", ax.sy(0) - ax.sy(v * t)); }))) return;
+            seq.push(v);
+            if (!(await ctx.wait(350))) return;
+            arcs.forEach((a) => a.remove());
+          }
+          msg.textContent = "空心柱 = 预测值。前面的误差会被带进后面的预测（示意）";
+        })();
+      },
+    },
+    {
+      title: "疫情后期：S 形的逻辑斯蒂曲线", kicker: "第 91–105 格 · 曲线拟合",
+      html: `<p>随着封城、隔离，增长会放慢，指数直线开始高估。作者改用<b>逻辑斯蒂函数</b> <code>a / (1 + e^(−c(x−d))) + b</code>：先像指数一样涨，到中点 d 后放慢，最后停在上限 a 附近。<span data-cell="93">第 93 格</span></p><p>拟合时给参数加了边界：上限 a 最大 50 万。对意大利、德国、中国湖北等地分别拟合并外推，再推广到所有国家。<span data-cell="105">第 105 格</span> 第 122 格作者留了一个“南非被严重高估”的排查记录。</p>`,
+      cells: [93, 95, 105], highlight: ["def logistic_function(x, a, b, c, d):", "bounds=(0, [500000., 10., 1000., 1000., ])"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [0, 80], [0, 1.2], { xticks: 4, yticks: 0, xlabel: "天" });
+        const r = K.rng(12), xs = [], ys = [];
+        for (let t = 0; t <= 50; t += 2) { xs.push(t); ys.push(1 / (1 + Math.exp(-0.15 * (t - 40))) * (1 + K.randn(r) * 0.03)); }
+        ys.forEach((y, i) => K.svg(svg, "circle", { cx: ax.sx(xs[i]), cy: ax.sy(y), r: 4, fill: "var(--c1)" }));
+        const tx = []; for (let t = 0; t <= 80; t++) tx.push(t);
+        const ex = line(svg, ax, tx, tx.map((t) => Math.min(1.12, 0.0025 * Math.exp(0.15 * t))), "var(--bad)", { dash: "6 4" });
+        const lg = line(svg, ax, tx, tx.map((t) => 1 / (1 + Math.exp(-0.15 * (t - 40)))), "var(--good)", { w: 2.5 });
+        [ex, lg].forEach((p) => { const L = p.getTotalLength(); p.style.strokeDasharray = p === ex ? "6 4" : L; if (p === lg) { p.style.strokeDashoffset = L; p._L = L; } p.style.opacity = p === ex ? 0 : 1; });
+        K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(80), y1: ax.sy(1), y2: ax.sy(1), stroke: "var(--ink-3)", "stroke-dasharray": "2 4" });
+        K.svg(svg, "text", { x: ax.sx(2), y: ax.sy(1) - 6, "font-size": 12, class: "muted" }, "上限 a");
+        K.svg(svg, "text", { x: 470, y: 230, "font-size": 12, fill: "var(--bad)" }, "--- 指数外推：冲出天际");
+        K.svg(svg, "text", { x: 470, y: 250, "font-size": 12, fill: "var(--good)" }, "—— 逻辑斯蒂：慢慢封顶");
+        ctx.tween(800, (t) => (ex.style.opacity = t)).then((ok) => ok && ctx.tween(1800, (t) => (lg.style.strokeDashoffset = lg._L * (1 - t))));
+      },
+    },
+    {
+      title: "ARIMA 与作者的声明", kicker: "第 106–122 格 · 经典时间序列",
+      html: `<p>最后一个模型是 <b>ARIMA</b>：AR 用过去几天的值做回归，I 先做差分（今天减昨天）让序列平稳，MA 用过去几天的预测误差来修正。作者用 <code>auto_arima</code> 自动挑参数，固定做 2 次差分（d=2）。<span data-cell="106">第 106 格</span> <span data-cell="109">第 109 格</span></p><p>结尾作者强调：这些机器学习模型只是在“当前阶段”做短期外推，和真正的流行病学模型不是一回事，<b>预测结果不代表未来一定会这样</b>，更不能代替专家建议。<span data-cell="121">第 121 格</span></p>`,
+      cells: [107, 109], highlight: ["d=2", "auto_arima"],
+      notes: { 107: "pyramid.arima 是 pmdarima 的旧名字，现在要装 pmdarima；这一格在今天的环境里多半跑不通。" },
+      draw(svg, ctx) {
+        const cum = [], N = 24;
+        for (let t = 0; t < N; t++) cum.push(1000 / (1 + Math.exp(-0.3 * (t - 14))));
+        const d1 = cum.map((v, i) => (i ? v - cum[i - 1] : 0)), d2 = d1.map((v, i) => (i > 1 ? v - d1[i - 1] : 0));
+        const rows = [[cum, "原序列：累计确诊", "var(--c1)", 1000], [d1, "一次差分：每日新增", "var(--c2)", 80], [d2, "二次差分：新增的变化（d=2）", "var(--c3)", 25]];
+        rows.forEach(([ys, lab, c, m], k) => {
+          const ax = K.axes(svg, { x: 220, y: 20 + k * 105, w: 470, h: 80 }, [0, N], [k === 2 ? -m : 0, m], { xticks: 0, yticks: 0 });
+          K.svg(svg, "text", { x: 20, y: 64 + k * 105, "font-size": 13, fill: c, "font-weight": 700 }, lab);
+          const p = line(svg, ax, ys.map((_, i) => i), ys, c, { w: 2.5 });
+          const L = p.getTotalLength(); p.style.strokeDasharray = L; p.style.strokeDashoffset = L;
+          ctx.wait(k * 900).then((ok) => ok && ctx.tween(900, (t) => (p.style.strokeDashoffset = L * (1 - t))));
+        });
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：SIR ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "b", label: "β 传染率（每天）", min: 0.05, max: 1, step: 0.01, value: 0.7, fmt: (v) => v.toFixed(2) },
+      { id: "g", label: "γ 移出率（每天）", min: 0.05, max: 0.6, step: 0.01, value: 0.2, fmt: (v) => v.toFixed(2) },
+      { id: "i0", label: "一开始的感染比例", min: -9, max: -2, step: 0.5, value: -6, fmt: (v) => "10^" + v },
+      { id: "T", label: "模拟多少天", min: 40, max: 300, step: 10, value: 100, fmt: (v) => v + " 天" },
+    ],
+    note: "和作者第 24 格一样，用 4 阶龙格-库塔法（步长 0.1）现场解 SIR 方程。默认值是作者代码里的 β=0.7、γ=0.2。试试把 β 降到 γ 以下：基本再生数 R0 = β/γ < 1，疫情起不来；把 β 降一点（相当于戴口罩、保持距离），看峰值怎样变低、变晚。",
+    render(svg, v) {
+      const sim = sirRK4(v.b, v.g, Math.pow(10, v.i0), 0.1, v.T);
+      const ax = K.axes(svg, { x: 50, y: 20, w: 560, h: 260 }, [0, v.T], [0, 1], { xticks: 5, yticks: 4, xlabel: "天", yfmt: (x) => Math.round(x * 100) + "%" });
+      line(svg, ax, sim.t, sim.S, "var(--c1)", { w: 2.5 });
+      line(svg, ax, sim.t, sim.I, "var(--c6)", { w: 2.5 });
+      line(svg, ax, sim.t, sim.R, "var(--ink-3)", { w: 2.5 });
+      let pk = 0; sim.I.forEach((x, k) => { if (x > sim.I[pk]) pk = k; });
+      if (sim.I[pk] > 0.002) {
+        K.svg(svg, "circle", { cx: ax.sx(sim.t[pk]), cy: ax.sy(sim.I[pk]), r: 5, fill: "none", stroke: "var(--c6)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: ax.sx(sim.t[pk]) + 8, y: ax.sy(sim.I[pk]) - 6, "font-size": 12, fill: "var(--c6)" }, "峰值");
+      }
+      K.svg(svg, "text", { x: 60, y: 330, "font-size": 12, fill: "var(--c1)" }, "■ S 易感");
+      K.svg(svg, "text", { x: 140, y: 330, "font-size": 12, fill: "var(--c6)" }, "■ I 感染");
+      K.svg(svg, "text", { x: 220, y: 330, "font-size": 12, fill: "var(--ink-3)" }, "■ R 康复或去世");
+      const R0 = v.b / v.g;
+      return { readout: [
+        { k: "基本再生数 R0 = β/γ", v: R0.toFixed(2), color: R0 > 1 ? "var(--bad)" : "var(--good)" },
+        { k: "同时在病的最高比例", v: (sim.I[pk] * 100).toFixed(1) + "%" },
+        { k: "峰值出现在", v: sim.I[pk] > 0.002 ? "第 " + Math.round(sim.t[pk]) + " 天" : "没有明显峰值" },
+        { k: "模拟结束时累计感染过", v: ((1 - sim.S[sim.S.length - 1]) * 100).toFixed(1) + "%" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：训练窗口与外推 ---------- */
+  function fitLogLinear(xs, ys) {
+    const ly = ys.map((y) => Math.log1p(y)), n = xs.length;
+    const mx = xs.reduce((a, b) => a + b, 0) / n, my = ly.reduce((a, b) => a + b, 0) / n;
+    let sxy = 0, sxx = 0;
+    xs.forEach((x, i) => { sxy += (x - mx) * (ly[i] - my); sxx += (x - mx) * (x - mx); });
+    const b = sxx ? sxy / sxx : 0, a = my - b * mx;
+    return (x) => Math.expm1(a + b * x);
+  }
+  function fitLogistic(xs, ys) {
+    let best = null;
+    for (let r = 0.05; r <= 0.6; r += 0.01) for (let t0 = xs[0] - 10; t0 <= xs[xs.length - 1] + 60; t0 += 0.5) {
+      let num = 0, den = 0;
+      const s = xs.map((x) => 1 / (1 + Math.exp(-r * (x - t0))));
+      s.forEach((q, i) => { num += q * ys[i]; den += q * q; });
+      const Kc = Math.min(den ? num / den : 0, 5e6);
+      let e = 0; s.forEach((q, i) => { const d = Math.log1p(Kc * q) - Math.log1p(ys[i]); e += d * d; });
+      if (!best || e < best.e) best = { e, r, t0, Kc };
+    }
+    return (x) => best.Kc / (1 + Math.exp(-best.r * (x - best.t0)));
+  }
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "cut", label: "训练截止日（第几天之前的数据已知）", min: 20, max: 70, step: 1, value: 34 },
+      { id: "win", label: "训练窗口：截止日前取多少天", min: 4, max: 60, step: 1, value: 10, fmt: (v) => v + " 天" },
+      { id: "model", label: "模型", value: "lin", options: [["lin", "对数后的直线（作者第 4 节）"], ["logi", "逻辑斯蒂 S 形曲线（作者第 5 节）"]] },
+      { id: "seed", label: "换一个模拟国家", button: true },
+    ],
+    note: "灰点是一个模拟国家的累计确诊（S 形，示意），深色点是被选进训练窗口的天数。模型现场拟合后外推 14 天，用比赛同款 RMSLE 打分。试试：截止日放在第 30 天左右（还在指数期）时，短窗口的直线就很准；截止日往后挪到拐点附近，直线开始严重高估，换成 S 形曲线会好很多；窗口拉长到包含开头的“平静期”，直线也会变差（对应作者的方法 2）。",
+    render(svg, v) {
+      const rr = K.rng(300 + v.seed * 13);
+      const K0 = 60000 + rr() * 140000, r0 = 0.16 + rr() * 0.1, t0 = 42 + rr() * 10, days = 90;
+      const y = fakeCountry(500 + v.seed, K0, r0, t0, days);
+      const cut = v.cut, st = Math.max(0, cut - v.win);
+      const xs = [], ys = [];
+      for (let t = st; t < cut; t++) { xs.push(t); ys.push(y[t]); }
+      const f = v.model === "lin" ? fitLogLinear(xs, ys) : fitLogistic(xs, ys);
+      const ymax = Math.max(...y) * 1.6;
+      const ax = K.axes(svg, { x: 64, y: 16, w: 550, h: 290 }, [0, days], [0, ymax], { xticks: 6, yticks: 4, xlabel: "天", yfmt: (q) => (q >= 1000 ? Math.round(q / 1000) + "k" : Math.round(q)) });
+      K.svg(svg, "rect", { x: ax.sx(st), y: 16, width: ax.sx(cut) - ax.sx(st), height: 290, fill: "var(--c1)", opacity: 0.08 });
+      K.svg(svg, "line", { x1: ax.sx(cut), x2: ax.sx(cut), y1: 16, y2: 306, stroke: "var(--ink)", "stroke-dasharray": "5 3" });
+      K.svg(svg, "text", { x: ax.sx(cut) + 4, y: 30, "font-size": 12 }, "截止日");
+      y.forEach((q, t) => K.svg(svg, "circle", { cx: ax.sx(t), cy: ax.sy(q), r: t >= st && t < cut ? 3.6 : 2.4, fill: t >= st && t < cut ? "var(--c1)" : "var(--ink-3)", opacity: t >= st && t < cut ? 1 : 0.45 }));
+      const fx = [], fy = [];
+      for (let t = st; t <= Math.min(days - 1, cut + 14); t += 0.5) { fx.push(t); fy.push(Math.min(f(t), ymax)); }
+      line(svg, ax, fx, fy, v.model === "lin" ? "var(--c6)" : "var(--good)", { w: 2.5 });
+      let e = 0, n = 0;
+      for (let t = cut; t < Math.min(days, cut + 14); t++) { const d = Math.log1p(Math.max(0, f(t))) - Math.log1p(y[t]); e += d * d; n++; }
+      const rmsle = Math.sqrt(e / n), last = Math.min(days - 1, cut + 13);
+      K.svg(svg, "text", { x: 70, y: 372, "font-size": 12, class: "muted" }, "彩色线：拟合 + 外推 14 天。纵轴超出画面的部分被截断。");
+      return { readout: [
+        { k: "未来 14 天 RMSLE（越小越好）", v: rmsle.toFixed(3), color: rmsle < 0.2 ? "var(--good)" : rmsle > 0.6 ? "var(--bad)" : "var(--warn)" },
+        { k: `第 ${last} 天预测`, v: Math.round(f(last)).toLocaleString() },
+        { k: `第 ${last} 天实际（模拟）`, v: y[last].toLocaleString() },
+        { k: "训练用了几天", v: xs.length + " 天" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

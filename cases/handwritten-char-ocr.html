@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>手写字逐字识别</title>
+<meta name="description" content="Kaggle 案例拆解：离线手写文字识别的“先切后认”思路——用 CNN 学会 35 类手写字符，再用 OpenCV 轮廓把手写名字切成单个字母，逐个分类拼成单词。">
+<link rel="stylesheet" href="../assets/case.css">
+<style>.pixi { image-rendering: pixelated; }</style>
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">手写字符与单词图像 · 字符分类 + 字符切分 · OCR 入门</div>
+  <h1>手写字逐字识别：先把单词切成字母，再一个个认出来</h1>
+  <p class="en">Offline Handwritten Text OCR</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">离线手写识别</span><span class="tag method">CNN 字符分类（35 类）</span><span class="tag method">LabelBinarizer 独热</span>
+    <span class="tag method">二值化 + 膨胀</span><span class="tag method">轮廓检测与排序</span><span class="tag method">Otsu 阈值</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Aman Kumar</b></span>
+    <span>Kaggle 点赞 <b>1,708</b>（2026-11 抓取）</span>
+    <span>数据集 <b>vaibhao/handwritten-characters · landlord/handwriting-recognition</b></span>
+    <span><a href="https://www.kaggle.com/code/aman10kr/offline-handwritten-text-ocr" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">单个手写字符 + 手写姓名照片</div><p>一份是 32×32 的手写字母、数字图片（按类别分文件夹），另一份是 40 多万张手写姓名的扫描图。<span data-cell="5">出处</span> <span data-cell="27">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">图片里写的是什么单词</div><p>“离线”指识别已经写在纸上的字，区别于用触控笔实时书写时记录笔迹的“在线”识别。<span data-cell="1">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">先切后认，三步走</div><p>① 训练一个认 0–9 和 A–Z 的 CNN；② 用 OpenCV 找轮廓把单词切成单个字符；③ 逐个分类后拼成单词。<span data-cell="2">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">能读出分开书写的大写名字</div><p>作者总结了局限：轮廓找不到字就失败，连笔草书不适用，手写风格多变需要更多数据。具体准确率在运行输出里。<span data-cell="32">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">两份数据集各管一段：字符数据集用来训练分类器，姓名数据集用来演示整词识别。以下信息来自两份数据集的说明页和作者代码。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">字符数据集 HandWritten_Character</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">原始类别</div><div class="v">39</div></div>
+        <div class="stat-tile"><div class="k">作者用到</div><div class="v">35 类</div></div>
+        <div class="stat-tile"><div class="k">图片尺寸</div><div class="v">32×32 黑白</div></div>
+        <div class="stat-tile"><div class="k">每类上限</div><div class="v">训练 4000 / 验证 1000</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">数据集说明：基于 EMNIST 改造，26 个字母（大小写合并成一类）+ 数字 1–9（数字 0 并入字母 O，避免混淆）+ 4 个特殊符号 @ # $ &amp;，共 39 类。作者去掉 4 个符号，剩 35 类 <span data-cell="5">出处</span> <span data-cell="17">出处</span>；每类最多取 4000 / 1000 张 <span data-cell="5">出处</span> <span data-cell="7">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">姓名数据集 Handwriting Recognition</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>项目</th><th>内容</th></tr>
+        <tr><td>规模</td><td>40 多万张手写姓名：名 206,799、姓 207,024</td></tr>
+        <tr><td>划分</td><td>训练 331,059 / 测试 41,382 / 验证 41,382</td></tr>
+        <tr><td>来源</td><td>慈善项目中收集的手写姓名</td></tr>
+        <tr><td>本 notebook 用法</td><td>只取 5 张图片（训练 3、验证 1、测试 1）演示切分 + 识别 <span data-cell="27">出处</span></td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">以上规模来自数据集说明页。</p>
+      <p class="callout">本页的“手写”字母和单词都是用电脑字体加随机变形画出来的示意，不是数据集里的真实笔迹。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="20">
+    <h3>动手试试 A · 哪些字符最容易认混？ <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="25">
+    <h3>动手试试 B · 把单词切成字母：阈值、膨胀与字距 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>思路：先分类单个字符，再切分单词，最后逐个识别拼词</td><td><span data-cell="2">第 2 格</span></td></tr>
+        <tr><td>识别依赖轮廓检测；OpenCV 找不到字符轮廓时方法就会失败</td><td><span data-cell="32">第 32 格</span></td></tr>
+        <tr><td>同一个字母的手写风格差别很大，需要多得多的训练样本</td><td><span data-cell="32">第 32 格</span></td></tr>
+        <tr><td>不适用于连笔的草书单词</td><td><span data-cell="32">第 32 格</span></td></tr>
+        <tr><td>受运行时间限制只用了部分数据；整段文字可按“行 → 词 → 字符 → 分类 → 后处理”的流程扩展</td><td><span data-cell="33">第 33 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">训练 / 验证准确率曲线和 5 个示例的识别结果都在运行输出里，作者文字中没有写具体数字，源码不带输出，这里不列分数。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li><b>缩进错误</b>：第 25 格里 <code>if cv2.contourArea(c) &gt; 10:</code> 只管住了画框那一行，后面的裁剪和识别不在 if 里。面积很小的噪点轮廓会沿用<b>上一个</b>字母的 x、y、w、h 再识别一次，单词里就会多出重复字母；如果第一个轮廓就是噪点，变量还没定义，会直接报错 <span data-cell="25">第 25 格</span>。</li>
+        <li>第 12 格对验证集标签又调用了一次 <code>LB.fit_transform</code>，等于重新“学”了一遍类别顺序。只要训练和验证类别完全相同就碰巧没问题，规范写法是验证集只用 <code>transform</code> <span data-cell="12">第 12 格</span>。</li>
+        <li>第 25 格用 <code>[x] = ypred</code> 把预测结果存进了变量 <code>x</code>，和上面表示坐标的 <code>x</code> 同名，容易混淆。</li>
+        <li>切分时用固定阈值 127 二值化，纸张发黄、光线不均时容易失败；单个字符再用 Otsu 自动阈值，两处做法不一致。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>分开书写的大写字母和数字，例如表格里一格一字填写的姓名、编号、邮编。</li>
+        <li><b>同类问题：</b>快递单手写邮编、银行支票金额、考试答题卡的学号、车牌（印刷体）。</li>
+        <li><b>局限与进阶：</b>连笔字、字母粘连时“先切后认”会失效。现代手写识别多用 CRNN + CTC 或 Transformer，<b>不切字</b>，直接从整行图像读出文字序列。</li>
+        <li><b>可迁移的套路：</b>分类器和切分器分开开发、分开测试；切分用简单规则（阈值、膨胀、轮廓、排序），认字用 CNN；最后按位置排序拼接。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>读字符图片（跳过 4 个特殊符号）：<span data-cell="5">第 5 格</span></li>
+        <li>独热编码、归一化：<span data-cell="12">第 12 格</span> <span data-cell="13">第 13 格</span></li>
+        <li>CNN 与训练：<span data-cell="17">第 17 格</span> <span data-cell="20">第 20 格</span></li>
+        <li>轮廓排序：<span data-cell="24">第 24 格</span></li>
+        <li>阈值、膨胀、切分、逐字识别：<span data-cell="25">第 25 格</span></li>
+        <li>示例识别：<span data-cell="27">第 27 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>数据集把数字 0 并进了字母 O、大小写字母合并成一类。这样做省了什么麻烦？在识别车牌或密码时又会带来什么问题？</li>
+      <li>“先切后认”遇到连笔字为什么会失败？你能想到不需要切字的识别办法吗？</li>
+      <li>第 25 格的缩进错误会让单词里多出字母。你会设计什么样的测试图片来发现这个 bug？</li>
+      <li>分类器是在 EMNIST 风格的单个字符上训练的，却用在另一份姓名数据集的整词照片上。两份数据的差别可能影响哪些环节？</li>
+      <li>手写姓名属于个人信息。如果要用这类数据训练模型，收集和使用时应注意什么？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Aman Kumar，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的字符、单词和识别结果均为模拟示意。数据集：vaibhao/handwritten-characters（基于 EMNIST）、landlord/handwriting-recognition。
+</footer>
+</main>
+
+<script src="nb/handwritten-char-ocr.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  const HAND = ["'Segoe Print'", "'Ink Free'", "'Comic Sans MS'", "'Segoe Script'", "cursive"];
+  const cv = document.createElement("canvas");
+  /* 用字体 + 随机变形画一个“手写”字符，返回 S×S 的 0–1 数组（1 = 墨迹） */
+  function charImg(ch, S, seed, distort) {
+    const r = K.rng(seed);
+    cv.width = S; cv.height = S;
+    const g = cv.getContext("2d");
+    g.setTransform(1, 0, 0, 1, 0, 0); g.fillStyle = "#fff"; g.fillRect(0, 0, S, S);
+    g.translate(S / 2 + (r() - 0.5) * S * 0.15 * distort, S / 2 + (r() - 0.5) * S * 0.12 * distort);
+    g.rotate((r() - 0.5) * 0.5 * distort);
+    g.transform(1, 0, (r() - 0.5) * 0.5 * distort, 1, 0, 0);
+    const sc = 1 + (r() - 0.5) * 0.3 * distort; g.scale(sc, sc);
+    g.fillStyle = "#000"; g.font = `${Math.round(S * 0.78)}px ${HAND[Math.floor(r() * HAND.length)]}`; g.textAlign = "center"; g.textBaseline = "middle";
+    g.fillText(ch, 0, S * 0.04);
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    const d = g.getImageData(0, 0, S, S).data, a = new Float32Array(S * S);
+    for (let i = 0; i < S * S; i++) a[i] = 1 - d[i * 4] / 255;
+    return a;
+  }
+  function draw(svg, a, S, x, y, w, opt) {
+    opt = opt || {};
+    cv.width = S; cv.height = S;
+    const g = cv.getContext("2d"), im = g.createImageData(S, S);
+    for (let i = 0; i < S * S; i++) { const v = opt.invert ? a[i] * 255 : 255 - a[i] * 255; im.data[i * 4] = im.data[i * 4 + 1] = im.data[i * 4 + 2] = v; im.data[i * 4 + 3] = 255; }
+    g.putImageData(im, 0, 0);
+    return K.svg(svg, "image", { x, y, width: w, height: w, href: cv.toDataURL(), class: "pixi", preserveAspectRatio: "none" });
+  }
+  /* 一行“手写”单词：返回宽 W、高 H 的灰度（0 白 1 黑）和每个字母的真实框 */
+  function wordImg(word, H, gap, seed, specks) {
+    const r = K.rng(seed), cw = H * 0.7, W = Math.round(word.length * (cw + gap) + 20);
+    cv.width = W; cv.height = H;
+    const g = cv.getContext("2d");
+    g.fillStyle = "#fff"; g.fillRect(0, 0, W, H);
+    const boxes = [];
+    let x = 10;
+    for (const ch of word) {
+      g.save(); g.translate(x + cw / 2, H / 2 + (r() - 0.5) * H * 0.08); g.rotate((r() - 0.5) * 0.18);
+      g.fillStyle = "#111"; g.font = `${Math.round(H * 0.72)}px ${HAND[2]}`; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(ch, 0, 0); g.restore();
+      boxes.push([x, x + cw]); x += cw + gap;
+    }
+    for (let k = 0; k < specks; k++) { g.fillStyle = "#222"; g.fillRect(10 + r() * (W - 20), 4 + r() * (H - 8), 1.5, 1.5); }
+    const d = g.getImageData(0, 0, W, H).data, a = new Float32Array(W * H);
+    for (let i = 0; i < W * H; i++) a[i] = 1 - d[i * 4] / 255;
+    return { a, W, H, boxes };
+  }
+  function imgWH(svg, a, W, H, x, y, sc, invert) {
+    cv.width = W; cv.height = H;
+    const g = cv.getContext("2d"), im = g.createImageData(W, H);
+    for (let i = 0; i < W * H; i++) { const v = invert ? a[i] * 255 : 255 - a[i] * 255; im.data[i * 4] = im.data[i * 4 + 1] = im.data[i * 4 + 2] = v; im.data[i * 4 + 3] = 255; }
+    g.putImageData(im, 0, 0);
+    return K.svg(svg, "image", { x, y, width: W * sc, height: H * sc, href: cv.toDataURL(), class: "pixi", preserveAspectRatio: "none" });
+  }
+  /* 二值化、膨胀、连通域外框 */
+  function segment(img, W, H, thr, dil) {
+    let b = new Uint8Array(W * H);
+    for (let i = 0; i < W * H; i++) b[i] = img[i] > thr ? 1 : 0;
+    for (let it = 0; it < dil; it++) { const nb = b.slice(); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (!b[y * W + x]) { for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < W && yy < H && b[yy * W + xx]) { nb[y * W + x] = 1; dy = 2; break; } } } b = nb; }
+    const lab = new Int32Array(W * H).fill(-1), comps = [];
+    for (let i = 0; i < W * H; i++) if (b[i] && lab[i] < 0) {
+      const st = [i]; lab[i] = comps.length; let x0 = W, x1 = 0, y0 = H, y1 = 0, n = 0;
+      while (st.length) { const p = st.pop(), x = p % W, y = (p / W) | 0; n++; x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < W && yy < H) { const q = yy * W + xx; if (b[q] && lab[q] < 0) { lab[q] = comps.length; st.push(q); } } } }
+      comps.push({ x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1, area: n });
+    }
+    comps.sort((a, b2) => a.x - b2.x);
+    return { b, comps };
+  }
+
+  const steps = [
+    {
+      at: 0, title: "离线手写识别是什么", kicker: "第 0–2 格 · 开场",
+      html: `<p><b>离线手写识别</b>：把已经写在纸上、拍成照片的手写字，自动转成电脑里的文字。之所以叫“离线”，是相对于“在线”识别——用触控笔、Apple Pencil 书写时，设备能实时记下笔画的顺序和轨迹，信息多得多；离线识别只有一张静态图片。</p><p>作者的思路分三步：① 用 CNN 训练一个能认 0–9 和 A–Z 的字符分类器；② 把手写单词图片切成单个字符；③ 逐个分类后拼成单词。</p>`,
+      cells: [1, 2],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 180, y: 28, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "在线：记录笔迹轨迹");
+        K.svg(svg, "text", { x: 540, y: 28, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "离线：只有一张图片");
+        const path = K.svg(svg, "path", { d: "M70,190 C80,90 120,90 130,190 M100,150 L120,150 M160,100 L160,190 C200,190 210,150 160,145 C210,140 200,100 160,100 M260,110 C230,90 210,120 215,150 C220,190 260,195 275,175", fill: "none", stroke: "var(--c1)", "stroke-width": 5, "stroke-linecap": "round" });
+        const L = path.getTotalLength ? path.getTotalLength() : 800; path.style.strokeDasharray = L; path.style.strokeDashoffset = L;
+        const pen = K.svg(svg, "circle", { cx: 70, cy: 190, r: 6, fill: "var(--warn)" });
+        const w = wordImg("ABC", 60, 6, 3, 0);
+        imgWH(svg, w.a, w.W, w.H, 430, 110, 1.6);
+        K.svg(svg, "text", { x: 180, y: 250, "text-anchor": "middle", "font-size": 12, class: "muted" }, "知道每一笔从哪里起、往哪走");
+        K.svg(svg, "text", { x: 540, y: 250, "text-anchor": "middle", "font-size": 12, class: "muted" }, "只知道每个像素是黑是白");
+        ctx.tween(2500, (t) => { path.style.strokeDashoffset = L * (1 - t); if (path.getPointAtLength) { const p = path.getPointAtLength(L * t); K.set(pen, { cx: p.x, cy: p.y }); } });
+      },
+    },
+    {
+      at: 3, title: "导入工具", kicker: "第 3–4 格 · 准备",
+      html: `<p>先装 <code>imutils</code>（OpenCV 的小工具包，用来统一不同版本 <code>findContours</code> 的返回值），然后导入 OpenCV、Keras、scikit-learn 的 <code>LabelBinarizer</code> 等。</p><p>有两类工具：Keras 负责“认字”的神经网络；OpenCV + imutils 负责“切字”的传统图像处理。</p>`,
+      cells: [4], highlight: ["import cv2", "import imutils", "LabelBinarizer"],
+      draw(svg, ctx) {
+        const a = K.node(svg, 60, 80, 260, 70, "Keras / TensorFlow\n认字：CNN 分类器", { fs: 13, fill: "color-mix(in srgb, var(--c3) 12%, var(--panel))", stroke: "var(--c3)" });
+        const b = K.node(svg, 400, 80, 260, 70, "OpenCV + imutils\n切字：阈值、膨胀、轮廓", { fs: 13, fill: "color-mix(in srgb, var(--c1) 12%, var(--panel))", stroke: "var(--c1)" });
+        const c = K.node(svg, 230, 210, 260, 60, "scikit-learn\nLabelBinarizer：标签独热", { fs: 13 });
+        [a, b, c].forEach((e, i) => { e.style.opacity = 0; ctx.wait(i * 400).then((ok) => ok && ctx.tween(400, (t) => (e.style.opacity = t))); });
+      },
+    },
+    {
+      at: 5, title: "读入字符图片：每类最多 4000 张", kicker: "第 5–6 格 · 训练数据",
+      html: `<p><code>Train/</code> 下每个文件夹是一类字符。作者跳过 4 个特殊符号文件夹 <code># $ &amp; @</code>，其余每类最多读 4000 张，以灰度方式读入并缩放到 32×32，和类别名一起放进 <code>train_data</code>。</p><p>数据集里大小写字母已经合并成一类，数字 0 并入了字母 O，所以剩下 26 个字母 + 9 个数字 = <b>35 类</b>。每类封顶 4000 张，一方面限制运行时间，另一方面让各类数量更接近。</p>`,
+      cells: [5], highlight: ["non_chars = [\"#\",\"$\",\"&\",\"@\"]", "if count > 4000:", "cv2.resize(img,(img_size,img_size))"],
+      draw(svg, ctx) {
+        const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456789".split("");
+        const S = 28, els = [];
+        chars.forEach((ch, i) => { const e = draw(svg, charImg(ch, S, 10 + i, 0.8), S, 20 + (i % 12) * 56, 30 + Math.floor(i / 12) * 64, 48); e.style.opacity = 0; els.push(e); K.svg(svg, "text", { x: 44 + (i % 12) * 56, y: 92 + Math.floor(i / 12) * 64, "text-anchor": "middle", "font-size": 11, class: "muted" }, ch === "O" ? "O/0" : ch); });
+        ["#", "$", "&", "@"].forEach((ch, i) => { const t = K.svg(svg, "text", { x: 470 + i * 50, y: 236, "font-size": 24, fill: "var(--bad)" }, ch); K.svg(svg, "line", { x1: 462 + i * 50, y1: 230, x2: 490 + i * 50, y2: 212, stroke: "var(--bad)", "stroke-width": 2 }); });
+        K.svg(svg, "text", { x: 470, y: 270, "font-size": 12, fill: "var(--bad)" }, "4 个特殊符号被跳过");
+        K.svg(svg, "text", { x: 20, y: 300, "font-size": 12, class: "muted" }, "35 类（字形为示意）：大小写合并，0 并入 O");
+        ctx.tween(1600, (t) => els.forEach((e, i) => (e.style.opacity = K.clamp(t * 35 - i, 0, 1))));
+      },
+    },
+    {
+      at: 7, title: "验证集：每类最多 1000 张", kicker: "第 7–8 格 · 验证数据",
+      html: `<p>验证集来自数据集自带的 <code>Validation/</code> 文件夹，处理方式和训练集一样，只是每类最多取 1000 张。</p><p>验证集的作用是“平时小测”：模型训练时从不用它来调整参数，只用来看看模型在没见过的图上表现如何，判断有没有过拟合。</p>`,
+      cells: [7], highlight: ["if count > 1000:"],
+      draw(svg, ctx) {
+        const bars = [["训练：每类 ≤ 4000", 4000, "var(--c1)"], ["验证：每类 ≤ 1000", 1000, "var(--c3)"]];
+        const els = bars.map(([n, v, c], i) => { K.svg(svg, "text", { x: 40, y: 100 + i * 80, "font-size": 14 }, n); return K.svg(svg, "rect", { x: 220, y: 80 + i * 80, width: 0, height: 34, rx: 4, fill: c }); });
+        ctx.tween(1200, (t) => els.forEach((e, i) => e.setAttribute("width", (bars[i][1] / 4000) * 440 * t)));
+        K.svg(svg, "text", { x: 40, y: 280, "font-size": 12, class: "muted" }, "两个都是“上限”，某类图片不够多时就全取");
+      },
+    },
+    {
+      at: 9, title: "打乱，再拆成图片和标签", kicker: "第 9–11 格 · 整理",
+      html: `<p>读进来的数据是按文件夹顺序排的：先全是 A，再全是 B……作者先用 <code>random.shuffle</code> 打乱，再把每一对 <code>[图片, 标签]</code> 拆成两个列表 <code>train_X</code>、<code>train_Y</code>（验证集同理）。</p><p>打乱很重要：如果按顺序喂给网络，它会连续几百步只看到 A，学着学着就偏了。</p>`,
+      cells: [9, 10], highlight: ["random.shuffle(train_data)"],
+      draw(svg, ctx) {
+        const seq = "AAAABBBBCCCCDDDD".split(""), r = K.rng(5), perm = seq.map((_, i) => i).sort(() => r() - 0.5);
+        const els = seq.map((ch, i) => K.node(svg, 30 + i * 41, 80, 36, 40, ch, { fs: 15 }));
+        K.svg(svg, "text", { x: 30, y: 60, "font-size": 12, class: "muted" }, "读入时按文件夹顺序");
+        const lab = K.svg(svg, "text", { x: 30, y: 180, "font-size": 12, class: "muted" }, "");
+        ctx.wait(700).then((ok) => ok && ctx.tween(1200, (t) => els.forEach((e, i) => { const j = perm.indexOf(i); e.setAttribute("transform", `translate(${(j - i) * 41 * t},${Math.sin(t * Math.PI) * (i % 2 ? 40 : -40)})`); }))).then((ok) => { if (!ok) return; lab.textContent = "random.shuffle 之后：各类混在一起"; K.svg(svg, "text", { x: 30, y: 230, "font-size": 14, "font-family": "var(--mono)" }, "train_X = [图, 图, 图, …]"); K.svg(svg, "text", { x: 30, y: 260, "font-size": 14, "font-family": "var(--mono)" }, "train_Y = [" + perm.map((i) => seq[i]).slice(0, 8).join(", ") + ", …]"); });
+      },
+    },
+    {
+      at: 12, title: "标签变独热，像素除以 255", kicker: "第 12–16 格 · 预处理",
+      html: `<p><code>LabelBinarizer</code> 把字母标签变成 35 维的独热向量（如 C → 第 3 位是 1，其余是 0）。图片除以 255 缩放到 0–1，再变形成 <code>(张数, 32, 32, 1)</code>，最后打印形状核对。</p><p class="callout">第 12 格对验证集又调用了一次 <code>fit_transform</code>，相当于重新排了一次类别顺序。训练和验证类别完全一样时，排出来的顺序也一样，所以碰巧没出错；规范写法是验证集只用 <code>transform</code>，保证两边“编号规则”一致。</p>`,
+      cells: [12, 13, 14], highlight: ["val_Y = LB.fit_transform(val_Y)", "/255.0", "reshape(-1,32,32,1)"],
+      draw(svg, ctx) {
+        const labs = ["A", "B", "C", "D", "E", "…", "9"];
+        K.svg(svg, "text", { x: 30, y: 40, "font-size": 14 }, "标签 “C” →");
+        const cells = labs.map((l, i) => { K.svg(svg, "text", { x: 160 + i * 52 + 22, y: 30, "text-anchor": "middle", "font-size": 11, class: "muted" }, l); return K.svg(svg, "rect", { x: 160 + i * 52, y: 40, width: 44, height: 36, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" }); });
+        const nums = labs.map((l, i) => K.svg(svg, "text", { x: 182 + i * 52, y: 64, "text-anchor": "middle", "font-size": 15, "font-family": "var(--mono)" }, ""));
+        ctx.wait(500).then((ok) => { if (!ok) return; nums.forEach((n, i) => (n.textContent = i === 5 ? "…" : i === 2 ? "1" : "0")); K.set(cells[2], { fill: "var(--good)" }); });
+        K.svg(svg, "text", { x: 30, y: 140, "font-size": 14 }, "像素 0–255 → 除以 255 → 0–1");
+        const S = 16, a = charImg("C", S, 3, 0.4);
+        draw(svg, a, S, 60, 160, 120);
+        const vals = K.svg(svg, "text", { x: 220, y: 230, "font-size": 14, "font-family": "var(--mono)" }, "");
+        ctx.wait(1200).then((ok) => ok && ctx.tween(1000, (t) => (vals.textContent = `例：${Math.round(255 * t)} → ${(t).toFixed(2)}`)));
+        K.svg(svg, "text", { x: 220, y: 270, "font-size": 13, "font-family": "var(--mono)" }, "形状 (张数, 32, 32, 1)");
+      },
+    },
+    {
+      at: 17, title: "三层卷积的 35 类分类器", kicker: "第 17–20 格 · 建模与训练",
+      html: `<p>CNN 结构很经典：</p><ul class="tight"><li>卷积 32 → 池化 → 卷积 64 → 池化 → 卷积 128 → 池化 → Dropout 0.25；</li><li>摊平 → 128 个神经元 → Dropout 0.2 → <b>35 类 softmax</b>。</li></ul><p>用 Adam 优化器、交叉熵损失，训练 50 轮、每批 32 张，一边训练一边看验证集准确率。</p>`,
+      cells: [17, 19, 20], highlight: ["Dense(35, activation='softmax')", "epochs=50"],
+      draw(svg, ctx) {
+        const S = 32, a = charImg("R", S, 7, 0.6);
+        draw(svg, a, S, 20, 110, 90);
+        const L = [["卷积 32\n池化", 150], ["卷积 64\n池化", 260], ["卷积 128\n池化", 370], ["Dense 128", 480], ["softmax\n35 类", 590]];
+        L.forEach(([t, x], i) => { const n = K.node(svg, x - 10, 120, 90, 70, t, { fs: 12, fill: i === 4 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 4 ? "var(--accent)" : "var(--line)" }); n.style.opacity = 0; ctx.wait(i * 250).then((ok) => ok && (n.style.opacity = 1)); K.arrow(svg, x - 30, 155, x - 10, 155); });
+        const top = [["R", 0.81], ["P", 0.09], ["K", 0.05], ["B", 0.02]];
+        top.forEach(([c, p], i) => { const b = K.svg(svg, "rect", { x: 560, y: 220 + i * 24, width: 0, height: 18, fill: i ? "var(--ink-3)" : "var(--good)" }); K.svg(svg, "text", { x: 550, y: 234 + i * 24, "text-anchor": "end", "font-size": 13 }, c); ctx.wait(1400).then((ok) => ok && ctx.tween(600, (t) => b.setAttribute("width", p * 140 * t))); });
+        K.svg(svg, "text", { x: 20, y: 300, "font-size": 12, class: "muted" }, "输出概率为示意");
+      },
+    },
+    {
+      at: 21, title: "看学习曲线", kicker: "第 21–22 格 · 训练过程",
+      html: `<p>作者画了两张图：训练准确率 vs 验证准确率，训练损失 vs 验证损失。两条线贴得近，说明学到的本事在没见过的图上也管用；如果训练越来越好而验证停滞甚至变差，就是过拟合，应该早点停或加更多正则。</p><p>具体数值在作者的运行输出里，这里只示意曲线该怎么读。</p>`,
+      cells: [21, 22], highlight: ["val_accuracy", "val_loss"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 230 }, [0, 50], [0, 1], { xlabel: "轮次", ylabel: "准确率（示意）", yticks: 4 });
+        const r = K.rng(2); let d1 = "", d2 = "";
+        for (let e = 0; e <= 50; e++) { const a = 0.95 - 0.6 * Math.exp(-e / 5), b = 0.9 - 0.55 * Math.exp(-e / 5) - (e > 25 ? (e - 25) * 0.002 : 0) + (r() - 0.5) * 0.02; d1 += (e ? "L" : "M") + ax.sx(e) + "," + ax.sy(a); d2 += (e ? "L" : "M") + ax.sx(e) + "," + ax.sy(b); }
+        const p1 = K.svg(svg, "path", { d: d1, fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 }), p2 = K.svg(svg, "path", { d: d2, fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        [p1, p2].forEach((p) => { const L = p.getTotalLength ? p.getTotalLength() : 900; p.style.strokeDasharray = L; p.style.strokeDashoffset = L; ctx.tween(2000, (t) => (p.style.strokeDashoffset = L * (1 - t))); });
+        K.svg(svg, "text", { x: 70, y: 320, "font-size": 12, fill: "var(--c1)" }, "— 训练"); K.svg(svg, "text", { x: 140, y: 320, "font-size": 12, fill: "var(--c6)" }, "— 验证（后期略降 = 开始过拟合的信号）");
+      },
+    },
+    {
+      at: 23, title: "从左到右给轮廓排队", kicker: "第 23–24 格 · 后处理准备",
+      html: `<p><code>findContours</code> 找到的轮廓顺序是乱的，不一定从左到右。<code>sort_contours</code> 先给每个轮廓算外接矩形 <code>(x, y, w, h)</code>，再按 x（从左到右）或 y（从上到下）排序；方向写成 right-to-left 或 bottom-to-top 时倒过来排。</p><p>读一个横写的单词，只需要按 x 从小到大排。</p>`,
+      cells: [24], highlight: ["cv2.boundingRect(c)", "key=lambda b:b[1][i]"],
+      draw(svg, ctx) {
+        const w = wordImg("HELLO", 70, 14, 21, 0);
+        imgWH(svg, w.a, w.W, w.H, 30, 60, 1.6);
+        const order = [3, 0, 4, 1, 2];
+        const tags = w.boxes.map((b, i) => { K.svg(svg, "rect", { x: 30 + b[0] * 1.6, y: 66, width: (b[1] - b[0]) * 1.6, height: 100, fill: "none", stroke: "var(--c1)", "stroke-width": 2 }); return K.svg(svg, "text", { x: 30 + (b[0] + b[1]) * 0.8, y: 196, "text-anchor": "middle", "font-size": 16, "font-weight": 700, fill: "var(--warn)" }, "#" + (order.indexOf(i) + 1)); });
+        const lab = K.svg(svg, "text", { x: 30, y: 240, "font-size": 13 }, "findContours 给出的顺序（乱的）");
+        ctx.wait(1500).then((ok) => { if (!ok) return; tags.forEach((t, i) => { t.textContent = "#" + (i + 1); t.style.fill = "var(--good)"; }); lab.textContent = "按 x 从小到大排序后：H → E → L → L → O"; });
+      },
+    },
+    {
+      at: 25, title: "切出每个字母，逐个认", kicker: "第 25–26 格 · 切分与识别",
+      html: `<p><code>get_letters</code> 是整个识别的核心：</p><ol class="tight"><li>读图转灰度，用固定阈值 127 <b>反转二值化</b>（字变白、纸变黑）；</li><li><b>膨胀</b> 2 次：让笔画变粗，同一个字母断开的几笔粘成一块；</li><li>找外轮廓、从左到右排序；对每个轮廓取外接框，在原灰度图上裁出来，用 Otsu 自动阈值再二值化，缩放到 32×32、除以 255，交给 CNN；</li><li><code>get_word</code> 把所有字母拼成字符串。</li></ol><p class="callout warn">缩进有问题：<code>if cv2.contourArea(c) &gt; 10:</code> 下面只缩进了画框那一行。面积很小的噪点照样往下走，用的是<b>上一个字母</b>的 x、y、w、h，于是同一个字母被识别两次，单词里多出字母。</p>`,
+      cells: [25, 26], highlight: ["cv2.threshold(gray ,127,255,cv2.THRESH_BINARY_INV)", "cv2.dilate(thresh1, None, iterations=2)", "if cv2.contourArea(c) > 10:", "THRESH_OTSU"],
+      draw(svg, ctx) {
+        const w = wordImg("MARIA", 64, 10, 33, 4);
+        const s1 = imgWH(svg, w.a, w.W, w.H, 30, 30, 1.4);
+        const seg = segment(w.a, w.W, w.H, 0.5, 2);
+        const binA = Float32Array.from(seg.b);
+        const s2 = imgWH(svg, binA, w.W, w.H, 30, 150, 1.4, true); s2.style.opacity = 0;
+        K.svg(svg, "text", { x: 30, y: 22, "font-size": 12 }, "原图");
+        const t2 = K.svg(svg, "text", { x: 30, y: 142, "font-size": 12 }, "");
+        const boxes = seg.comps.map((c) => { const e = K.svg(svg, "rect", { x: 30 + c.x * 1.4, y: 30 + c.y * 1.4, width: c.w * 1.4, height: c.h * 1.4, fill: "none", stroke: c.area > 60 ? "var(--good)" : "var(--bad)", "stroke-width": 2 }); e.style.opacity = 0; return e; });
+        const out = K.svg(svg, "text", { x: 30, y: 300, "font-size": 18, "font-family": "var(--mono)", "font-weight": 700 }, "");
+        (async () => {
+          if (!(await ctx.wait(600))) return;
+          t2.textContent = "反转二值化 + 膨胀 2 次"; s2.style.opacity = 1;
+          if (!(await ctx.wait(900))) return;
+          let s = "", prev = "";
+          for (let k = 0; k < boxes.length; k++) { boxes[k].style.opacity = 1; const c = seg.comps[k]; const center = c.x + c.w / 2; const idx = w.boxes.findIndex((b) => center >= b[0] - 4 && center <= b[1] + 4); if (c.area > 60 && idx >= 0) { prev = "MARIA"[idx]; s += prev; } else s += prev; out.textContent = "识别：" + s; if (!(await ctx.wait(350))) return; }
+          K.svg(svg, "text", { x: 330, y: 300, "font-size": 12, fill: "var(--bad)" }, "红框 = 噪点：示意作者原版沿用上一个框，字母重复");
+        })();
+      },
+    },
+    {
+      at: 27, title: "在 5 张手写姓名上试一试", kicker: "第 27–31 格 · 演示",
+      html: `<p>作者从姓名数据集里挑了 5 张图：训练集 3 张、验证集 1 张、测试集 1 张，每张都调用 <code>get_letters</code> 切字、识别，打印拼出来的单词，并显示画了绿框的图片。</p><p>注意：字符分类器是在<b>另一份</b>数据集（EMNIST 风格的单个字符）上训练的，这里的姓名图片来自不同的人、不同的纸张和扫描条件，相当于“跨数据集”测试。姓名图片多为分开书写的大写字母，正好适合“先切后认”。</p>`,
+      cells: [27, 31], highlight: ["get_letters(\"../input/handwriting-recognition"],
+      draw(svg, ctx) {
+        const names = ["ANNA", "LEO", "SOFIA", "TOM", "JULES"];
+        names.forEach((n, i) => {
+          const w = wordImg(n, 34, 8, 60 + i, 0), y = 20 + i * 62;
+          const e = imgWH(svg, w.a, w.W, w.H, 30, y, 1.3);
+          e.style.opacity = 0;
+          const res = K.svg(svg, "text", { x: 330, y: y + 28, "font-size": 16, "font-family": "var(--mono)" }, "");
+          ctx.wait(i * 450).then((ok) => { if (!ok) return; e.style.opacity = 1; res.textContent = "→ " + n + "（示意）"; });
+        });
+        K.svg(svg, "text", { x: 520, y: 160, "font-size": 12, class: "muted" }, "真实识别结果");
+        K.svg(svg, "text", { x: 520, y: 180, "font-size": 12, class: "muted" }, "在作者运行输出里");
+      },
+    },
+    {
+      at: 32, title: "局限与改进方向", kicker: "第 32–35 格 · 总结",
+      html: `<p>作者在最后列出了三个缺点：</p><ul class="tight"><li>识别依赖轮廓检测，OpenCV 找不到字符轮廓（比如字母粘连、笔画断开）就会失败；</li><li>同一个字母的手写风格变化很大，需要更多训练数据；</li><li>不适用于连笔的草书。</li></ul><p>改进方向：用完整数据训练；处理整段文字时按“行切分 → 词切分 → 字符切分 → 分类 → 后处理”的流程逐层拆开。</p>`,
+      cells: [32, 33],
+      draw(svg, ctx) {
+        const flow = ["整页", "切行", "切词", "切字符", "分类", "后处理"];
+        flow.forEach((t, i) => { const n = K.node(svg, 20 + i * 115, 60, 95, 50, t, { fs: 13, fill: i === 4 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 4 ? "var(--accent)" : "var(--line)" }); n.style.opacity = 0; ctx.wait(i * 300).then((ok) => ok && (n.style.opacity = 1)); if (i) K.arrow(svg, i * 115, 85, 20 + i * 115, 85); });
+        K.svg(svg, "text", { x: 20, y: 170, "font-size": 13, "font-weight": 700, fill: "var(--bad)" }, "“先切后认”最怕：");
+        const w1 = wordImg("cursive", 50, -16, 9, 0);
+        imgWH(svg, w1.a, w1.W, w1.H, 20, 190, 1.2);
+        K.svg(svg, "text", { x: 20, y: 270, "font-size": 12, class: "muted" }, "字母挤在一起、连笔 → 轮廓连成一块，切不开（示意）");
+        K.svg(svg, "text", { x: 420, y: 210, "font-size": 13 }, "现代做法：CRNN + CTC 或 Transformer，");
+        K.svg(svg, "text", { x: 420, y: 234, "font-size": 13 }, "不切字，直接整行读出文字序列");
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：字符混淆 ---------- */
+  const CH = "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456789".split(""), SA = 16;
+  const cent = {};
+  function centroids(dist) {
+    const key = dist.toFixed(2);
+    if (cent[key]) return cent[key];
+    return (cent[key] = CH.map((c, k) => { const acc = new Float32Array(SA * SA); for (let s = 0; s < 8; s++) charImg(c, SA, 1000 + k * 31 + s, dist).forEach((v, i) => (acc[i] += v / 8)); return acc; }));
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "dist", label: "书写变形程度（歪斜、错切、缩放、换字体）", min: 0, max: 1.6, step: 0.1, value: 0.5, fmt: (v) => v.toFixed(1) },
+      { id: "n", label: "每类训练样本数", min: 2, max: 20, step: 1, value: 8 },
+      { id: "seed", label: "换一批测试样本", button: true },
+    ],
+    note: "浏览器里现场生成 35 类 16×16 的“手写”字符（几种手写风格字体 + 随机变形），用“最近类中心”分类器（每类样本取平均当模板，看测试图离哪个模板最近）代替作者的 CNN。测试每类 6 张，列出最常见的混淆对。",
+    render(svg, v) {
+      const C = CH.map((c, k) => { const acc = new Float32Array(SA * SA); for (let s = 0; s < v.n; s++) charImg(c, SA, 1000 + k * 31 + s, v.dist).forEach((x, i) => (acc[i] += x / v.n)); return acc; });
+      const conf = {}; let ok = 0, tot = 0; const ex = [];
+      CH.forEach((c, k) => { for (let s = 0; s < 6; s++) { const a = charImg(c, SA, 50000 + v.seed * 997 + k * 13 + s, v.dist); let best = 0, bd = Infinity; C.forEach((t, j) => { let d = 0; for (let i = 0; i < a.length; i++) d += (a[i] - t[i]) ** 2; if (d < bd) { bd = d; best = j; } }); tot++; if (best === k) ok++; else { const key = c + "→" + CH[best]; conf[key] = (conf[key] || 0) + 1; if (ex.length < 10) ex.push([a, c, CH[best]]); } } });
+      const pairs = Object.entries(conf).sort((a, b) => b[1] - a[1]).slice(0, 8);
+      K.svg(svg, "text", { x: 20, y: 20, "font-size": 12 }, "每类的模板（训练样本的平均）");
+      C.forEach((t, k) => draw(svg, t, SA, 20 + (k % 12) * 26, 28 + Math.floor(k / 12) * 26, 24));
+      K.svg(svg, "text", { x: 20, y: 130, "font-size": 12 }, "认错的例子（真实 → 认成）");
+      ex.forEach(([a, c, p], i) => { draw(svg, a, SA, 20 + (i % 5) * 62, 140 + Math.floor(i / 5) * 78, 40); K.svg(svg, "text", { x: 40 + (i % 5) * 62, y: 196 + Math.floor(i / 5) * 78, "text-anchor": "middle", "font-size": 12, fill: "var(--bad)" }, `${c}→${p}`); });
+      K.svg(svg, "text", { x: 370, y: 20, "font-size": 12 }, "最常见的混淆");
+      const mx = pairs.length ? pairs[0][1] : 1;
+      pairs.forEach(([k, n], i) => { K.svg(svg, "text", { x: 370, y: 48 + i * 30, "font-size": 14, "font-family": "var(--mono)" }, k); K.svg(svg, "rect", { x: 430, y: 34 + i * 30, width: (n / mx) * 180, height: 18, rx: 3, fill: "var(--warn)" }); K.svg(svg, "text", { x: 436 + (n / mx) * 180, y: 48 + i * 30, "font-size": 12 }, n); });
+      if (!pairs.length) K.svg(svg, "text", { x: 370, y: 50, "font-size": 13, fill: "var(--good)" }, "这一批全部认对");
+      return { readout: [
+        { k: "测试准确率", v: ((ok / tot) * 100).toFixed(1) + "%", color: ok / tot > 0.85 ? "var(--good)" : ok / tot > 0.6 ? "var(--warn)" : "var(--bad)" },
+        { k: "测试样本", v: `${tot}（35 类 × 6）` },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：切字 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "gap", label: "字母之间的间距（像素，负数 = 挤在一起）", min: -14, max: 16, step: 1, value: 6 },
+      { id: "dil", label: "膨胀次数（作者用 2）", min: 0, max: 6, step: 1, value: 2 },
+      { id: "thr", label: "二值化阈值（作者用 127，即 0.5）", min: 0.1, max: 0.9, step: 0.05, value: 0.5, fmt: (v) => v.toFixed(2) },
+      { id: "specks", label: "纸上的小噪点个数", min: 0, max: 20, step: 1, value: 6 },
+      { id: "bug", label: "小轮廓怎么处理", value: "bug", options: [["bug", "作者原版（缩进错误：沿用上一个框）"], ["fix", "修正：面积 ≤ 10 的直接跳过"]] },
+    ],
+    note: "现场生成一个“手写”单词，按作者的流程做：反转二值化 → 3×3 膨胀 → 找连通区域 → 按 x 从左到右排序。每个区域按中心落在哪个真实字母里来“认字”（假设分类器认得完全正确），只看切分本身会出什么错。",
+    render(svg, v) {
+      const word = "HARPER", w = wordImg(word, 60, v.gap, 77, v.specks);
+      const seg = segment(w.a, w.W, w.H, v.thr, v.dil);
+      const sc = Math.min(1.8, 600 / w.W);
+      imgWH(svg, w.a, w.W, w.H, 20, 20, sc);
+      imgWH(svg, Float32Array.from(seg.b), w.W, w.H, 20, 40 + w.H * sc, sc, true);
+      K.svg(svg, "text", { x: 20, y: 14, "font-size": 11, class: "muted" }, "原图"); K.svg(svg, "text", { x: 20, y: 34 + w.H * sc, "font-size": 11, class: "muted" }, "二值化 + 膨胀后");
+      let out = "", last = null;
+      seg.comps.forEach((c) => {
+        const small = c.area <= 10;
+        let box = c;
+        if (small) { if (v.bug === "fix") { K.svg(svg, "rect", { x: 20 + c.x * sc, y: 20 + c.y * sc, width: c.w * sc, height: c.h * sc, fill: "none", stroke: "var(--ink-3)", "stroke-dasharray": "2 2" }); return; } box = last; if (!box) { out += "✗"; return; } }
+        else last = c;
+        const cx = box.x + box.w / 2, idx = w.boxes.findIndex((b) => cx >= b[0] - 3 && cx <= b[1] + 3);
+        const covers = w.boxes.filter((b) => box.x < b[1] - 4 && box.x + box.w > b[0] + 4).length;
+        const noise = !small && c.area < 60;
+        out += noise ? "?" : covers > 1 ? "■" : idx >= 0 ? word[idx] : "?";
+        K.svg(svg, "rect", { x: 20 + c.x * sc, y: 20 + c.y * sc, width: c.w * sc, height: c.h * sc, fill: "none", stroke: small || noise ? "var(--bad)" : covers > 1 ? "var(--warn)" : "var(--good)", "stroke-width": 2 });
+      });
+      const okWord = out === word;
+      K.svg(svg, "text", { x: 20, y: 300, "font-size": 20, "font-family": "var(--mono)", "font-weight": 700, fill: okWord ? "var(--good)" : "var(--bad)" }, "读出：" + out);
+      K.svg(svg, "text", { x: 20, y: 322, "font-size": 11, class: "muted" }, "■ = 框里粘了几个字母　? = 膨胀后的噪点被当成字符　膨胀为 0 时，面积 ≤ 10 的噪点触发缩进 bug");
+      return { readout: [
+        { k: "找到的区域", v: String(seg.comps.length) },
+        { k: "真实字母数", v: String(word.length) },
+        { k: "结果", v: okWord ? "完全正确" : "有错", color: okWord ? "var(--good)" : "var(--bad)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

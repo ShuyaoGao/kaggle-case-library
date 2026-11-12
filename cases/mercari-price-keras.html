@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>二手商品定价</title>
+<meta name="description" content="Kaggle 案例拆解：Mercari 二手交易平台商品定价。把商品标题、描述、品牌、类目一起喂给 Keras 神经网络：Embedding 嵌入 + GRU 读文字 + 全连接回归。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">文本 + 表格混合数据 · 回归 · 深度学习</div>
+  <h1>二手商品定价：读懂标题和描述，给出建议售价</h1>
+  <p class="en">A simple nn solution with Keras (~0.48611 PL)</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">缺失值填充</span><span class="tag method">LabelEncoder</span><span class="tag method">Tokenizer 分词编号</span>
+    <span class="tag method">pad_sequences</span><span class="tag method">Embedding 嵌入</span><span class="tag method">GRU 循环网络</span><span class="tag method">多输入 Keras 模型</span><span class="tag method">log + MinMax 目标</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>noobhound（knowledgegrappler）</b></span>
+    <span>Kaggle 点赞 <b>936</b>（2026-11 抓取）</span>
+    <span>数据集 <b>Mercari Price Suggestion Challenge</b>（Kaggle 竞赛）</span>
+    <span><a href="https://www.kaggle.com/code/knowledgegrappler/a-simple-nn-solution-with-keras-0-48611-pl" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">日本二手交易 App Mercari 美国站的商品挂单</div><p>每件商品有标题、卖家写的描述、品牌、三级类目、成色（1–5）、是否包邮，以及成交价（竞赛数据说明）。</p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这件二手商品值多少钱（price）</div><p>回归问题，按 RMSLE 评分。难点是最重要的信息藏在<b>自由文本</b>里：同样是“毛衣”，写着 “Lululemon” 和不写品牌的价格差很多。<span data-cell="1">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">一个多输入的 Keras 神经网络</div><p>标题、描述先分词编号，经 Embedding 和 GRU 读成向量；品牌、类目、成色经 Embedding；再和是否包邮拼在一起，过两层全连接输出价格。<span data-cell="14">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">公榜 RMSLE 约 0.486</div><p>作者在 notebook 标题里写明公榜（PL）分数约 0.48611。验证集分数在运行输出里，源码不带。（出处：notebook 标题 “~0.48611 PL”）</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">竞赛数据 <b>Mercari Price Suggestion Challenge</b>（2017–2018，日本最大的二手社区交易平台 Mercari 主办）。数据是用制表符分隔的 train.tsv 和 test.tsv。规模与字段来自竞赛数据说明；作者在第 2 格读入并打印了形状 <span data-cell="2">出处</span>。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">训练集商品数</div><div class="v">1,482,535</div></div>
+        <div class="stat-tile"><div class="k">训练集字段</div><div class="v">8 列</div></div>
+        <div class="stat-tile"><div class="k">成色等级</div><div class="v">1 – 5</div></div>
+        <div class="stat-tile"><div class="k">评估指标</div><div class="v" style="font-size:18px">RMSLE</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">每一行是一件在 Mercari 上架的二手商品：一段标题、一段卖家写的描述，加上类目、品牌、成色、是否包邮这些结构化字段，要预测的是售价。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>train_id</code> / <code>test_id</code></td><td>商品编号</td><td>编号</td></tr>
+        <tr><td><code>name</code></td><td>商品标题</td><td>短文本</td></tr>
+        <tr><td><code>item_condition_id</code></td><td>卖家填的成色，1–5</td><td>有序类别</td></tr>
+        <tr><td><code>category_name</code></td><td>三级类目，如 Women/Tops &amp; Blouses/T-Shirts；可能为空</td><td>类别</td></tr>
+        <tr><td><code>brand_name</code></td><td>品牌；很多商品为空</td><td>类别</td></tr>
+        <tr><td><code>shipping</code></td><td>1 = 卖家包邮，0 = 买家付运费</td><td>0/1</td></tr>
+        <tr><td><code>item_description</code></td><td>卖家写的商品描述</td><td>长文本</td></tr>
+        <tr><td><code>price</code></td><td><b>要预测的答案</b>：成交价（美元），仅训练集</td><td>数值</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="13">
+    <h3>动手试试 A · 分词编号 + 补齐截断 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="15">
+    <h3>动手试试 B · Embedding：让网络自己学出“品牌坐标” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>这个简单的神经网络在公榜上的 RMSLE 约 0.48611</td><td>notebook 标题</td></tr>
+        <tr><td>根据长度直方图，标题截取 10 个词、描述截取 75 个词</td><td><span data-cell="10">第 10 格</span></td></tr>
+        <tr><td>模型：标题 GRU(8)、描述 GRU(16)，品牌/类目嵌入 10 维、成色嵌入 5 维，全连接 128 → 64 → 1，Dropout 0.1</td><td><span data-cell="14">第 14 格</span></td></tr>
+        <tr><td>训练：批大小 20000，5 轮，Adam 优化 MSE，验证集为 1% 的训练数据</td><td><span data-cell="15">第 15 格</span></td></tr>
+        <tr><td>作者自评只是“神经网络能解决这个问题的一个例子”，建议改进：加大嵌入维度、减小批大小、加 BatchNorm、试 LSTM / 双向 / 堆叠 RNN、加深全连接层</td><td><span data-cell="19">第 19 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">第 16 格验证集 RMSLE 打印在运行输出里，源码不带，这里不列。另外该格把预测还原成价格时写成了 <code>np.exp(...) + 1</code>，而目标是 log(price + 1)，正确还原应为 <code>np.exp(...) − 1</code>（第 17 格做对了），所以第 16 格的验证分数会略有偏差。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>卖家上传商品标题和描述后，自动给出建议售价；平台也能据此发现标价明显异常的商品。</li>
+        <li><b>同类问题：</b>闲鱼、eBay 等二手平台定价，房源描述 → 租金，招聘启事 → 薪资，酒店评论 + 设施 → 房价。凡是“文本 + 表格”一起决定一个数值的问题都适用。</li>
+        <li><b>可迁移的套路：</b>类别列用 LabelEncoder + Embedding；文本列用 Tokenizer + pad_sequences + Embedding + RNN；多路输入拼接后接全连接；目标取对数再缩放；用 Keras 函数式 API 搭多输入模型。</li>
+        <li><b>对比：</b>同一比赛里，基于 TF-IDF 稀疏特征 + Ridge 或浅层 MLP 的方案也很强。神经网络的优势在于自动学习词和品牌的表示，代价是训练更慢、调参更多。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>缺失值填 "missing" <span data-cell="3">第 3 格</span></li>
+        <li>品牌、类目 LabelEncoder <span data-cell="5">第 5 格</span></li>
+        <li>Keras Tokenizer 文本转序号 <span data-cell="6">第 6 格</span></li>
+        <li>目标 log(1+price) 后 MinMax 到 [−1, 1] <span data-cell="11">第 11 格</span></li>
+        <li>pad_sequences 补齐截断 <span data-cell="13">第 13 格</span></li>
+        <li>Embedding + GRU + Dense 多输入模型 <span data-cell="14">第 14 格</span></li>
+        <li>批量训练与验证 <span data-cell="15">第 15 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>品牌被 LabelEncoder 编成 0、1、2……的整数。如果直接把这个整数当数值喂给全连接层会有什么问题？Embedding 是怎么解决的？</li>
+      <li>标题只保留 10 个词、描述只保留 75 个词。pad_sequences 默认从<b>前面</b>截断，也就是丢掉开头保留结尾。对商品描述来说，这样合理吗？</li>
+      <li>Tokenizer 只用训练集的文本建词表。测试集里出现训练集没见过的新词（比如新款手机型号），会被怎样处理？对定价有什么影响？</li>
+      <li>批大小 20000、只训练 5 轮。作者自己建议“减小批大小”。批大小对训练速度和最终效果各有什么影响？</li>
+      <li>第 16 格把 exp 还原写成了 +1 而不是 −1。这种“前后变换不对称”的错误为什么很难发现？你会怎样写代码来避免？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 noobhound（Kaggle 用户 knowledgegrappler），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：Kaggle 竞赛 Mercari Price Suggestion Challenge（Mercari, Inc.）。
+</footer>
+</main>
+
+<script src="nb/mercari-price-keras.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  function histo(vals, lo, hi, nb) { const c = new Array(nb).fill(0); vals.forEach((v) => { const k = Math.floor(((v - lo) / (hi - lo)) * nb); if (k >= 0 && k < nb) c[k]++; }); return c; }
+  function tcell(svg, x, y, w, h, txt, opt) {
+    opt = opt || {};
+    const r = K.svg(svg, "rect", { x, y, width: w, height: h, fill: opt.fill || "var(--panel)", stroke: "var(--line)" });
+    const t = K.svg(svg, "text", { x: x + w / 2, y: y + h / 2 + 4, "text-anchor": "middle", "font-size": opt.fs || 12, "font-family": "var(--mono)", "font-weight": opt.bold ? 700 : 400, fill: opt.color || "var(--ink)" }, txt);
+    return { r, t };
+  }
+
+  const steps = [
+    {
+      title: "开场：评分标准 RMSLE", kicker: "第 0–1 格 · 导入与评分函数", at: 0, cells: [1],
+      highlight: ["math.log(y_pred[i] + 1) - math.log(y[i] + 1)"],
+      html: `<p>这本 notebook 没有任何文字说明，全靠代码和注释。第一件事是写比赛的评分函数 <b>RMSLE</b>：对预测价格和真实价格都取 log(1+x)，求差的平方的平均，再开根号。</p><p>它衡量的是<b>相对误差</b>：5 美元的商品估成 10 美元，和 500 美元的商品估成 1000 美元，罚分一样。这决定了后面要在对数尺度上训练模型。</p>`,
+      draw(svg, ctx) {
+        const pairs = [[5, 10, "5 美元的发卡 → 估成 10"], [500, 1000, "500 美元的包 → 估成 1000"], [500, 505, "500 美元的包 → 估成 505"]];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 14, "font-weight": 700 }, "log(1+预测) − log(1+真实)：看的是“差了几倍”");
+        const bars = pairs.map((p, i) => { K.svg(svg, "text", { x: 30, y: 90 + i * 80, "font-size": 14 }, p[2]); return K.svg(svg, "rect", { x: 330, y: 72 + i * 80, width: 0, height: 26, rx: 4, fill: i === 2 ? "var(--good)" : "var(--warn)" }); });
+        const vals = pairs.map((p) => Math.abs(Math.log1p(p[1]) - Math.log1p(p[0])));
+        const tx = pairs.map((p, i) => K.svg(svg, "text", { x: 340, y: 120 + i * 80, "font-size": 12, "font-family": "var(--mono)" }, ""));
+        ctx.wait(400).then((ok) => ok && ctx.tween(1200, (t) => bars.forEach((b, i) => b.setAttribute("width", 400 * vals[i] * t))))
+          .then((ok) => { if (ok) tx.forEach((t, i) => (t.textContent = `|log 差| = ${vals[i].toFixed(3)}`)); });
+      },
+    },
+    {
+      title: "读数据，空值填 \"missing\"", kicker: "第 2–4 格 · 读入与缺失值", at: 2, cells: [2, 3],
+      highlight: ["read_table", "fillna(value=\"missing\""],
+      html: `<p>用 <code>read_table</code> 读入制表符分隔的 train.tsv 和 test.tsv，打印形状。</p><p>三列有缺失：类目、品牌、描述。作者不删行，统一填成字符串 <code>"missing"</code>，把“没填”当作一个单独的类别。对品牌来说这很合理：很多便宜货本来就不写品牌，“没品牌”本身就是价格线索。</p>`,
+      draw(svg, ctx) {
+        const H = ["name", "brand_name", "category_name", "item_description"], W = [170, 130, 200, 170];
+        const rows = [["Reds T Shirt XL", "NaN", "Men/Tops/T-shirts", "No description yet"], ["BlackWidow Keyboard", "Razer", "Electronics/...", "This keyboard is..."], ["Leggings Size S", "NaN", "Women/Athletic...", "NaN"], ["Vintage mug", "NaN", "NaN", "Cute mug, no chips"]];
+        let x = 20; const X = W.map((w) => { const v = x; x += w; return v; });
+        H.forEach((h, j) => tcell(svg, X[j], 40, W[j], 30, h, { fill: "var(--panel-2)", bold: true, fs: 11 }));
+        const C = rows.map((r, i) => r.map((v, j) => tcell(svg, X[j], 70 + i * 40, W[j], 40, v, { fs: 11, color: v === "NaN" ? "var(--bad)" : "var(--ink)" })));
+        K.svg(svg, "text", { x: 20, y: 270, "font-size": 12, class: "muted" }, "示意行。红色 NaN = 缺失");
+        (async () => {
+          if (!(await ctx.wait(700))) return;
+          for (let i = 0; i < rows.length; i++) for (let j = 0; j < 4; j++) if (rows[i][j] === "NaN") { if (!(await ctx.wait(260))) return; C[i][j].t.textContent = "missing"; C[i][j].t.style.fill = "var(--warn)"; C[i][j].r.style.fill = "color-mix(in srgb, var(--warn) 14%, var(--panel))"; }
+          K.svg(svg, "text", { x: 20, y: 300, "font-size": 13, "font-weight": 700, fill: "var(--warn)" }, "“没填”变成了一个正常的类别，网络可以学习它的含义");
+        })();
+      },
+    },
+    {
+      title: "品牌、类目编成整数", kicker: "第 5 格 · LabelEncoder", at: 5, cells: [5],
+      highlight: ["LabelEncoder()", "np.hstack([train.category_name, test.category_name])"],
+      html: `<p>把训练集和测试集的品牌（类目同理）放在一起，用 <code>LabelEncoder</code> 给每个不同的名字发一个整数编号。</p><p>这些编号<b>本身没有大小意义</b>（编号 120 的品牌不比编号 3 的“贵”），它们只是后面 Embedding 层的“查表索引”。合并训练和测试一起拟合，是为了保证测试集里出现的品牌也有编号。</p>`,
+      draw(svg, ctx) {
+        const brands = ["Nike", "missing", "Apple", "Razer", "Nike", "Lululemon", "missing"];
+        const uniq = [...new Set(brands)].sort();
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "brand_name");
+        const L = brands.map((b, i) => tcell(svg, 30, 40 + i * 38, 150, 38, b));
+        K.svg(svg, "text", { x: 260, y: 30, "font-size": 13, "font-weight": 700 }, "编号表（按字母序）");
+        const D = uniq.map((u, i) => { const c = tcell(svg, 260, 40 + i * 38, 200, 38, `${u} → ${i}`); c.r.style.opacity = c.t.style.opacity = 0; return c; });
+        K.svg(svg, "text", { x: 540, y: 30, "font-size": 13, "font-weight": 700 }, "编码后");
+        const R = brands.map((b, i) => tcell(svg, 540, 40 + i * 38, 100, 38, ""));
+        (async () => {
+          for (const d of D) if (!(await ctx.tween(200, (t) => (d.r.style.opacity = d.t.style.opacity = t)))) return;
+          for (let i = 0; i < brands.length; i++) { if (!(await ctx.wait(220))) return; R[i].t.textContent = String(uniq.indexOf(brands[i])); R[i].t.style.fill = "var(--accent)"; L[i].r.style.fill = "color-mix(in srgb, var(--accent) 12%, var(--panel))"; }
+        })();
+      },
+    },
+    {
+      title: "文字变数字：Tokenizer", kicker: "第 6 格 · 分词编号", at: 6, cells: [6],
+      highlight: ["Tokenizer()", "fit_on_texts", "texts_to_sequences"],
+      html: `<p>神经网络不认识单词，只认识数字。作者把训练集所有描述和标题转成小写，交给 Keras 的 <code>Tokenizer</code>：</p><ol class="tight"><li><code>fit_on_texts</code>：统计每个词出现的次数，<b>越常见的词编号越小</b>（the 可能是 1 号）</li><li><code>texts_to_sequences</code>：把每句话按词换成编号序列</li></ol><p>于是 “brand new nike shoes” 变成了类似 [12, 3, 57, 240] 的整数列表。标题和描述共用同一个词表。</p>`,
+      draw(svg, ctx) {
+        const words = ["brand", "new", "nike", "running", "shoes", "size", "9"];
+        const idx = { brand: 12, new: 3, nike: 57, running: 412, shoes: 240, size: 8, 9: 35 };
+        K.svg(svg, "text", { x: 30, y: 40, "font-size": 13, "font-weight": 700 }, "商品标题（示意）");
+        const W = words.map((w, i) => tcell(svg, 30 + i * 92, 54, 88, 36, w, { fs: 13 }));
+        K.svg(svg, "text", { x: 30, y: 140, "font-size": 13, "font-weight": 700 }, "词表：按出现频率排名编号（示意）");
+        const dict = [["new", 3], ["size", 8], ["brand", 12], ["9", 35], ["nike", 57], ["shoes", 240], ["running", 412]];
+        dict.forEach((d, i) => tcell(svg, 30 + i * 92, 152, 88, 30, `${d[0]}:${d[1]}`, { fs: 11, fill: "var(--panel-2)" }));
+        K.svg(svg, "text", { x: 30, y: 232, "font-size": 13, "font-weight": 700 }, "序列");
+        const S = words.map((w, i) => tcell(svg, 30 + i * 92, 246, 88, 40, "", { fs: 15, bold: true }));
+        (async () => {
+          for (let i = 0; i < words.length; i++) {
+            if (!(await ctx.wait(300))) return;
+            W[i].r.style.fill = "color-mix(in srgb, var(--accent) 20%, var(--panel))";
+            S[i].t.textContent = String(idx[words[i]]); S[i].t.style.fill = "var(--accent)";
+          }
+        })();
+      },
+    },
+    {
+      title: "序列长短不一：截到 10 和 75", kicker: "第 7–10 格 · 序列长度分析", at: 7, cells: [7, 8, 9, 10],
+      highlight: ["MAX_NAME_SEQ = 10", "MAX_ITEM_DESC_SEQ = 75", "MAX_TEXT"],
+      html: `<p>每个标题、描述的长度都不一样，但神经网络要求同一批输入长度一致。作者先算最长长度，再画长度直方图：大部分标题很短，大部分描述也集中在较短的一段，只有少数特别长。</p><p>据此取<b>标题 10 个词、描述 75 个词</b>：覆盖绝大多数样本，又不会因为少数超长描述让计算量暴涨。同时记下词表大小、品牌数、类目数、成色数，作为 Embedding 层的“表格行数”。</p>`,
+      draw(svg, ctx) {
+        const r = K.rng(3), L = []; for (let i = 0; i < 2000; i++) L.push(Math.max(1, Math.round(Math.exp(3.2 + K.randn(r) * 0.85))));
+        const ax = K.axes(svg, { x: 60, y: 30, w: 620, h: 240 }, [0, 250], [0, 1], { xlabel: "描述的词数（模拟）", yticks: 0 });
+        const nb = 50, c = histo(L, 0, 250, nb), mx = Math.max(...c), bw = 620 / nb;
+        const bars = c.map((v, i) => K.svg(svg, "rect", { x: 60 + i * bw + 1, y: ax.sy(0), width: bw - 2, height: 0, fill: (i + 0.5) * 5 <= 75 ? "var(--c1)" : "var(--ink-3)" }));
+        const cut = K.svg(svg, "line", { x1: ax.sx(75), x2: ax.sx(75), y1: ax.sy(0), y2: ax.sy(0), stroke: "var(--warn)", "stroke-width": 2.5, "stroke-dasharray": "6 4" });
+        const lab = K.svg(svg, "text", { x: ax.sx(75) + 8, y: 60, "font-size": 13, "font-weight": 700, fill: "var(--warn)" }, "");
+        const cover = L.filter((v) => v <= 75).length / L.length;
+        ctx.tween(1200, (t) => bars.forEach((b, i) => { const h = (ax.sy(0) - ax.sy(c[i] / mx)) * t; b.setAttribute("y", ax.sy(0) - h); b.setAttribute("height", h); }))
+          .then((ok) => ok && ctx.tween(600, (t) => cut.setAttribute("y2", K.lerp(ax.sy(0), 30, t))))
+          .then((ok) => { if (ok) lab.textContent = `截断长度 75：模拟数据中 ${(cover * 100).toFixed(0)}% 的描述不用截`; });
+      },
+    },
+    {
+      title: "目标：log(1+价格)，再缩放到 [−1, 1]", kicker: "第 11 格 · 目标变换", at: 11, cells: [11],
+      highlight: ["np.log(train.price+1)", "MinMaxScaler(feature_range=(-1, 1))"],
+      html: `<p>两步处理价格：</p><ol class="tight"><li><b>log(price + 1)</b>：压缩右偏的价格分布，同时让训练用的 MSE 损失等价于比赛的 RMSLE</li><li><b>MinMaxScaler 缩放到 [−1, 1]</b>：让输出层要拟合的数值范围小而对称，训练更稳</li></ol><p>预测时要按相反顺序还原：先 <code>inverse_transform</code>，再 <code>exp(·) − 1</code>。</p>`,
+      draw(svg, ctx) {
+        const prices = [3, 10, 25, 52, 120, 400, 2000];
+        const ys = [60, 170, 280], labs = ["price（美元）", "log(price + 1)", "缩放到 [−1, 1]"];
+        const lo = Math.log(4), hi = Math.log(2001);
+        const axes = [K.scale(0, 2000, 130, 690), K.scale(Math.log(1), Math.log(2001), 130, 690), K.scale(-1, 1, 130, 690)];
+        ys.forEach((y, k) => { K.svg(svg, "line", { x1: 130, x2: 690, y1: y, y2: y, stroke: "var(--ink-3)" }); K.svg(svg, "text", { x: 120, y: y + 4, "text-anchor": "end", "font-size": 12, "font-weight": 700 }, labs[k]); });
+        [[0, "0"], [1000, "1000"], [2000, "2000"]].forEach(([v, t]) => K.svg(svg, "text", { x: axes[0](v), y: ys[0] + 18, "text-anchor": "middle", "font-size": 10, class: "muted" }, t));
+        [[-1, "−1"], [0, "0"], [1, "1"]].forEach(([v, t]) => K.svg(svg, "text", { x: axes[2](v), y: ys[2] + 18, "text-anchor": "middle", "font-size": 10, class: "muted" }, t));
+        const dots = prices.map((p, i) => ({ p, c: K.svg(svg, "circle", { cx: axes[0](p), cy: ys[0], r: 6, fill: K.colors[i % 6] }), t: K.svg(svg, "text", { x: axes[0](p), y: ys[0] - 12, "text-anchor": "middle", "font-size": 10, "font-family": "var(--mono)" }, "$" + p) }));
+        const lgv = (p) => Math.log(p + 1), sc = (p) => -1 + 2 * (lgv(p) - lgv(0)) / (lgv(2000) - lgv(0));
+        ctx.wait(700)
+          .then((ok) => ok && ctx.tween(1200, (t) => dots.forEach((d) => { const x = K.lerp(axes[0](d.p), axes[1](lgv(d.p)), t), y = K.lerp(ys[0], ys[1], t); d.c.setAttribute("cx", x); d.c.setAttribute("cy", y); d.t.setAttribute("x", x); d.t.setAttribute("y", y - 12); })))
+          .then((ok) => ok && ctx.wait(500))
+          .then((ok) => ok && ctx.tween(1200, (t) => dots.forEach((d) => { const x = K.lerp(axes[1](lgv(d.p)), axes[2](sc(d.p)), t), y = K.lerp(ys[1], ys[2], t); d.c.setAttribute("cx", x); d.c.setAttribute("cy", y); d.t.setAttribute("x", x); d.t.setAttribute("y", y - 12); })));
+      },
+    },
+    {
+      title: "留 1% 当验证集", kicker: "第 12 格 · 验证集", at: 12, cells: [12],
+      highlight: ["train_size=0.99"],
+      html: `<p>用 <code>train_test_split</code> 切出 <b>1%</b> 的训练数据当验证集（dev set），其余 99% 用来训练。</p><p>一百四十多万条数据的 1% 也有一万多条，足够稳定地估计误差；同时尽量把数据留给训练。这是大数据集上常见的做法，小数据集上则通常留 10%–30%。</p>`,
+      draw(svg, ctx) {
+        const N = 100, cols = 20, cells = [];
+        for (let i = 0; i < N; i++) cells.push(K.svg(svg, "rect", { x: 40 + (i % cols) * 32, y: 40 + Math.floor(i / cols) * 40, width: 28, height: 34, rx: 4, fill: "var(--c1)", opacity: 0 }));
+        const lab = K.svg(svg, "text", { x: 40, y: 270, "font-size": 14, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 40, y: 300, "font-size": 12, class: "muted" }, "每格代表 1% 的训练数据（约 1.5 万条）");
+        ctx.tween(900, (t) => cells.forEach((c, i) => (c.style.opacity = K.clamp(t * 1.5 - i / N * 0.5, 0, 1) * 0.8)))
+          .then((ok) => ok && ctx.tween(600, (t) => { cells[57].style.fill = "var(--c3)"; cells[57].setAttribute("y", 40 + 2 * 40 - 20 * t); }))
+          .then((ok) => { if (ok) { lab.textContent = "绿色那 1% → 验证集；其余 99% → 训练"; lab.style.fill = "var(--c3)"; } });
+      },
+    },
+    {
+      title: "整理成 6 路输入，序列补齐", kicker: "第 13 格 · pad_sequences", at: 13, cells: [13],
+      highlight: ["pad_sequences(dataset.seq_name, maxlen=MAX_NAME_SEQ)", "'num_vars'"],
+      html: `<p>把每条数据整理成一个字典，6 个键对应模型的 6 个输入口：标题序列、描述序列、品牌编号、类目编号、成色编号、是否包邮。</p><p><code>pad_sequences</code> 把序列变成固定长度：不够长的在<b>前面补 0</b>，太长的从<b>前面截掉</b>（Keras 默认 padding='pre'、truncating='pre'）。所以描述超过 75 个词时，保留的是最后 75 个词。下面的实验 A 可以亲手试。</p>`,
+      draw(svg, ctx) {
+        const seqs = [[12, 3, 57, 240], [5, 88, 14, 9, 120, 44, 7, 63, 201, 18, 33, 2], [76, 41]];
+        const L = 10, cw = 46, x0 = 150;
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, "font-weight": 700 }, "标题序列补齐到长度 10（示意）");
+        const rowsEl = seqs.map((s, i) => { const y = 50 + i * 70; K.svg(svg, "text", { x: 20, y: y + 24, "font-size": 12 }, `原长 ${s.length}`); return { y, s }; });
+        const cells = rowsEl.map(({ y, s }) => s.map((v, j) => tcell(svg, x0 + j * cw, y, cw - 4, 36, String(v), { fs: 12 })));
+        const lab = K.svg(svg, "text", { x: 20, y: 280, "font-size": 13, "font-weight": 700, fill: "var(--accent)" }, "");
+        const lab2 = K.svg(svg, "text", { x: 20, y: 304, "font-size": 12, class: "muted" }, "");
+        ctx.wait(800).then((ok) => ok && ctx.tween(1200, (t) => rowsEl.forEach(({ s }, i) => {
+          const n = s.length, keep = Math.min(n, L), pad = L - keep;
+          cells[i].forEach((c, j) => {
+            const newj = n > L ? j - (n - L) : j + pad;
+            const x = K.lerp(x0 + j * cw, x0 + newj * cw, t);
+            c.r.setAttribute("x", x); c.t.setAttribute("x", x + (cw - 4) / 2);
+            if (newj < 0) { c.r.style.opacity = c.t.style.opacity = 1 - t; }
+          });
+        }))).then((ok) => {
+          if (!ok) return;
+          rowsEl.forEach(({ y, s }, i) => { const pad = L - Math.min(s.length, L); for (let j = 0; j < pad; j++) { const z = tcell(svg, x0 + j * cw, y, cw - 4, 36, "0", { fs: 12, color: "var(--ink-3)", fill: "var(--panel-2)" }); } });
+          lab.textContent = "短的在前面补 0；长的从前面截掉，只留最后 10 个";
+          lab2.textContent = "第二行原长 12：开头的 5 和 88 被丢掉了";
+        });
+      },
+    },
+    {
+      title: "模型结构：嵌入 + GRU + 全连接", kicker: "第 14 格 · 多输入神经网络", at: 14, cells: [14],
+      highlight: ["Embedding(MAX_TEXT, 50)", "GRU(16)", "GRU(8)", "concatenate", "Dense(128)", "Dropout(dr_r)", "activation=\"linear\""],
+      html: `<p>用 Keras 函数式 API 搭了一个 6 输入的网络：</p><ul class="tight"><li><b>Embedding（嵌入）</b>：把每个整数编号查表换成一个可学习的向量。词 → 50 维，品牌、类目 → 10 维，成色 → 5 维</li><li><b>GRU</b>：一种循环神经网络，按顺序逐词“读”序列，边读边更新一个记忆向量。描述用 GRU(16)，标题用 GRU(8)</li><li>把所有向量和“是否包邮”<b>拼接</b>，经 Dense(128) → Dense(64)（各带 10% Dropout）→ 1 个线性输出</li></ul><p>损失函数用 MSE；因为目标已经是缩放后的 log 价格，所以等价于在优化对数误差。</p>`,
+      width: 720, height: 360,
+      draw(svg, ctx) {
+        const ins = [["标题 ×10", "Emb 50 → GRU 8", "var(--c1)"], ["描述 ×75", "Emb 50 → GRU 16", "var(--c1)"], ["品牌", "Emb 10", "var(--c2)"], ["类目", "Emb 10", "var(--c2)"], ["成色", "Emb 5", "var(--c2)"], ["包邮 0/1", "直接用", "var(--c3)"]];
+        const nodes = [], mids = [];
+        ins.forEach((d, i) => {
+          const y = 20 + i * 54;
+          nodes.push(K.node(svg, 10, y, 110, 40, d[0], { fs: 12, stroke: d[2] }));
+          mids.push(K.node(svg, 160, y, 150, 40, d[1], { fs: 12, fill: `color-mix(in srgb, ${d[2]} 15%, var(--panel))`, stroke: d[2] }));
+          K.arrow(svg, 120, y + 20, 158, y + 20);
+          K.arrow(svg, 310, y + 20, 368, 175);
+        });
+        const cat = K.node(svg, 370, 140, 90, 70, "拼接\n concat", { fs: 12, bold: true });
+        const d1 = K.node(svg, 490, 140, 70, 70, "Dense\n128", { fs: 12 }), d2 = K.node(svg, 580, 140, 60, 70, "Dense\n64", { fs: 12 }), out = K.node(svg, 660, 150, 50, 50, "价格", { fs: 12, fill: "var(--accent-soft)", stroke: "var(--accent)", bold: true });
+        K.arrow(svg, 460, 175, 488, 175); K.arrow(svg, 560, 175, 578, 175); K.arrow(svg, 640, 175, 658, 175);
+        const pulse = K.svg(svg, "circle", { cx: 0, cy: 0, r: 7, fill: "var(--accent)", opacity: 0 });
+        // GRU 逐词读的小动画
+        const gx = 160, gy = 340, words = ["brand", "new", "nike", "shoes"];
+        K.svg(svg, "text", { x: 160, y: 352 - 22, "font-size": 11, class: "muted" }, "");
+        const wl = words.map((w, i) => K.svg(svg, "text", { x: 400 + i * 70, y: 345, "font-size": 12, "font-family": "var(--mono)", fill: "var(--ink-3)" }, w));
+        const memo = K.svg(svg, "text", { x: 400, y: 325, "font-size": 12, fill: "var(--c1)", "font-weight": 700 }, "GRU 逐词读描述：");
+        (async () => {
+          for (let i = 0; i < words.length; i++) { wl[i].style.fill = "var(--c1)"; wl[i].style.fontWeight = 700; memo.textContent = `GRU 逐词读描述：记忆已更新 ${i + 1} 次`; if (!(await ctx.wait(450))) return; }
+          const path = [[65, 95], [235, 95], [415, 175], [525, 175], [610, 175], [685, 175]];
+          pulse.style.opacity = 1;
+          for (let k = 0; k < path.length - 1; k++) if (!(await ctx.tween(380, (t) => { pulse.setAttribute("cx", K.lerp(path[k][0], path[k + 1][0], t)); pulse.setAttribute("cy", K.lerp(path[k][1], path[k + 1][1], t)); }))) return;
+          out.querySelector("rect").style.strokeWidth = 3;
+        })();
+      },
+    },
+    {
+      title: "训练：每批 2 万条，跑 5 轮", kicker: "第 15 格 · 训练", at: 15, cells: [15],
+      highlight: ["BATCH_SIZE = 20000", "epochs = 5", "validation_data"],
+      html: `<p>批大小 <b>20000</b>、训练 <b>5 轮</b>（每一轮把全部训练数据过一遍），用 Adam 优化器最小化 MSE，同时在 1% 验证集上监控误差。</p><p>批这么大是为了在 Kaggle Kernel 的时间限制内跑完：每一步更新看的样本多，梯度更稳、每轮更新次数少、速度快；代价是更新次数少，模型可能学得不够细。作者在最后的改进建议里第一条就提到“减小批大小”。</p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 600, h: 230 }, [0, 5], [0, 1], { xlabel: "训练轮数 epoch", ylabel: "MSE 损失（示意）", xticks: 5, yticks: 0 });
+        const trc = (e) => 0.75 * Math.exp(-e * 1.1) + 0.12, vac = (e) => 0.72 * Math.exp(-e * 1.0) + 0.15;
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 3 }), p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 3 });
+        K.svg(svg, "text", { x: 500, y: 60, "font-size": 13, fill: "var(--c1)", "font-weight": 700 }, "— 训练集");
+        K.svg(svg, "text", { x: 500, y: 82, "font-size": 13, fill: "var(--c6)", "font-weight": 700 }, "— 验证集（1%）");
+        const batch = K.svg(svg, "text", { x: 70, y: 310, "font-size": 13, "font-family": "var(--mono)" }, "");
+        const nb = 74;
+        ctx.tween(3000, (t) => {
+          const e = 5 * t; let a = "", b = "";
+          for (let x = 0; x <= e + 1e-9; x += 0.05) { a += (a ? "L" : "M") + ax.sx(x) + "," + ax.sy(trc(x)); b += (b ? "L" : "M") + ax.sx(x) + "," + ax.sy(vac(x)); }
+          p1.setAttribute("d", a); p2.setAttribute("d", b);
+          batch.textContent = `第 ${Math.min(5, Math.floor(e) + 1)} 轮 · 第 ${Math.min(nb, Math.floor((e % 1) * nb) + 1)} 批 / 约 ${nb} 批（每批 20000 条）`;
+        });
+      },
+    },
+    {
+      title: "在验证集上评估", kicker: "第 16 格 · 评估", at: 16, cells: [16],
+      highlight: ["inverse_transform", "np.exp(val_preds)+1"],
+      html: `<p>对验证集预测，然后按相反顺序还原：<code>inverse_transform</code> 撤销 [−1, 1] 缩放，再撤销对数，最后用自己写的 RMSLE 函数打分（作者注释写着 “What is it doing?”）。</p><p>这里有个小错误：目标是 log(price <b>+</b> 1)，还原应该是 exp(·) <b>−</b> 1，代码却写成了 <code>np.exp(val_preds)+1</code>，每个预测都多了 2 美元。对便宜商品影响不小，所以这一格打印的验证分数会偏差。下一格生成提交时作者写对了。</p>`,
+      draw(svg, ctx) {
+        const chain = [["网络输出", "0.12"], ["inverse_transform", "2.89"], ["exp(·) − 1  ✓", "17.0"], ["exp(·) + 1  ✗", "19.0"]];
+        const X = [30, 200, 400, 400], Y = [80, 80, 40, 150];
+        const nodes = chain.map((c, i) => { const g = K.node(svg, X[i], Y[i], 170, 60, `${c[0]}\n${c[1]}`, { fs: 13, stroke: i === 2 ? "var(--good)" : i === 3 ? "var(--bad)" : "var(--line)" }); g.style.opacity = 0; return g; });
+        const ar = [K.arrow(svg, 200, 110, 200, 110), K.arrow(svg, 370, 110, 398, 70), K.arrow(svg, 370, 110, 398, 180)];
+        ar.forEach((a) => (a.style.opacity = 0));
+        const note = K.svg(svg, "text", { x: 30, y: 270, "font-size": 13, "font-weight": 700, fill: "var(--bad)" }, "");
+        const note2 = K.svg(svg, "text", { x: 30, y: 294, "font-size": 12, class: "muted" }, "");
+        K.svg(svg, "text", { x: 600, y: 75, "font-size": 12, fill: "var(--good)" }, "第 17 格（提交）");
+        K.svg(svg, "text", { x: 600, y: 185, "font-size": 12, fill: "var(--bad)" }, "第 16 格（验证）");
+        (async () => {
+          for (let i = 0; i < 4; i++) { if (!(await ctx.tween(400, (t) => (nodes[i].style.opacity = t)))) return; if (i < 3) ar[Math.min(i, 2)].style.opacity = 1; }
+          ar.forEach((a) => (a.style.opacity = 1));
+          note.textContent = "数字为示意：同一个输出，两种还原方式差 2 美元";
+          note2.textContent = "一件 5 美元的商品被估成 7 美元，对数误差就是 0.29，不可忽视";
+        })();
+      },
+    },
+    {
+      title: "预测、提交，以及作者的改进清单", kicker: "第 17–19 格 · 提交与展望", at: 17, cells: [17, 19],
+      highlight: ["np.exp(preds)-1", "Try LSTM", "Decrease the batch size"],
+      html: `<p>对测试集预测，正确地还原成价格（<code>exp − 1</code>），写出提交文件并画出预测价格的直方图。notebook 标题里写明这个方案的公榜分数约 <b>0.48611</b>。</p><p>作者最后说这只是“神经网络能解决这个问题的一个例子”，并列出改进方向：加大嵌入维度、减小批大小、加 BatchNorm、试 LSTM / 双向 RNN / 堆叠 RNN、加更多全连接层或 RNN 输出，甚至换全新的结构。</p>`,
+      draw(svg, ctx) {
+        const ideas = ["加大嵌入维度", "减小批大小", "加 BatchNormalization", "试 LSTM / 双向 / 堆叠 RNN", "更多全连接层或 RNN 输出", "换一个全新的网络结构"];
+        K.svg(svg, "text", { x: 30, y: 34, "font-size": 15, "font-weight": 700 }, "公榜 RMSLE ≈ 0.48611（作者写在标题里）");
+        K.svg(svg, "text", { x: 30, y: 70, "font-size": 13, class: "muted" }, "作者列出的改进方向：");
+        const it = ideas.map((s, i) => { const g = K.node(svg, 30 + (i % 2) * 340, 86 + Math.floor(i / 2) * 74, 320, 56, s, { fs: 14 }); g.style.opacity = 0; return g; });
+        (async () => { for (const g of it) if (!(await ctx.tween(300, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：Tokenizer + pad_sequences ---------- */
+  const CORPUS = [
+    "brand new nike running shoes size 9 never worn",
+    "nike air max shoes good condition",
+    "new with tags lululemon leggings size 6",
+    "iphone 7 case brand new",
+    "vintage coffee mug no chips",
+    "brand new with tags nike hoodie size m",
+    "gently used iphone 7 32gb unlocked works great no scratches comes with charger and original box",
+    "free shipping bundle of 3 shirts size s",
+  ];
+  function buildVocab(texts) { const cnt = {}; texts.forEach((t) => t.split(" ").forEach((w) => (cnt[w] = (cnt[w] || 0) + 1))); const words = Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a] || a.localeCompare(b)); const idx = {}; words.forEach((w, i) => (idx[w] = i + 1)); return { idx, cnt, words }; }
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 400,
+    controls: [
+      { id: "s", label: "选一条商品描述（示意文本）", value: "6", options: CORPUS.map((t, i) => [String(i), t.length > 34 ? t.slice(0, 34) + "…" : t]) },
+      { id: "L", label: "maxlen（作者：标题 10，描述 75）", min: 3, max: 20, step: 1, value: 10 },
+      { id: "pad", label: "补齐 / 截断方向", value: "pre", options: [["pre", "pre（Keras 默认：前面补 0，截掉开头）"], ["post", "post（后面补 0，截掉结尾）"]] },
+    ],
+    note: "浏览器用上面 8 条示意描述现场建词表（出现越多编号越小，和 Keras Tokenizer 一样），再把选中的句子转成编号序列并补齐/截断。灰色 = 补的 0，划线 = 被截掉的词。",
+    render(svg, v) {
+      const V = buildVocab(CORPUS), text = CORPUS[+v.s].split(" "), seq = text.map((w) => V.idx[w]);
+      let out, cutIdx = new Set();
+      if (seq.length >= v.L) { if (v.pad === "pre") { for (let i = 0; i < seq.length - v.L; i++) cutIdx.add(i); out = seq.slice(seq.length - v.L); } else { for (let i = v.L; i < seq.length; i++) cutIdx.add(i); out = seq.slice(0, v.L); } }
+      else { const z = new Array(v.L - seq.length).fill(0); out = v.pad === "pre" ? z.concat(seq) : seq.concat(z); }
+      K.svg(svg, "text", { x: 10, y: 20, "font-size": 13, "font-weight": 700 }, "词表前 12 名（编号 : 词 · 出现次数）");
+      V.words.slice(0, 12).forEach((w, i) => K.svg(svg, "text", { x: 10 + (i % 4) * 158, y: 42 + Math.floor(i / 4) * 20, "font-size": 12, "font-family": "var(--mono)" }, `${V.idx[w]}:${w} ·${V.cnt[w]}`));
+      K.svg(svg, "text", { x: 10, y: 122, "font-size": 13, "font-weight": 700 }, "原句 → 编号");
+      const per = Math.min(36, 620 / Math.max(text.length, 1));
+      text.forEach((w, i) => {
+        const x = 10 + i * per, cut = cutIdx.has(i);
+        K.svg(svg, "text", { x: x + per / 2, y: 145, "text-anchor": "middle", "font-size": 10, fill: cut ? "var(--bad)" : "var(--ink)", transform: `rotate(-40 ${x + per / 2} 145)` }, w);
+        K.svg(svg, "rect", { x: x + 1, y: 170, width: per - 2, height: 26, rx: 3, fill: cut ? "color-mix(in srgb, var(--bad) 18%, var(--panel))" : "var(--panel-2)", stroke: "var(--line)" });
+        K.svg(svg, "text", { x: x + per / 2, y: 188, "text-anchor": "middle", "font-size": 11, "font-family": "var(--mono)", "text-decoration": cut ? "line-through" : null }, seq[i]);
+      });
+      K.svg(svg, "text", { x: 10, y: 240, "font-size": 13, "font-weight": 700 }, `pad_sequences(maxlen=${v.L}, padding/truncating='${v.pad}') 之后`);
+      const cw = Math.min(44, 620 / v.L);
+      out.forEach((n, i) => { K.svg(svg, "rect", { x: 10 + i * cw + 1, y: 254, width: cw - 2, height: 36, rx: 4, fill: n === 0 ? "var(--panel-2)" : "color-mix(in srgb, var(--accent) 22%, var(--panel))", stroke: n === 0 ? "var(--line)" : "var(--accent)" }); K.svg(svg, "text", { x: 10 + i * cw + cw / 2, y: 277, "text-anchor": "middle", "font-size": 13, "font-family": "var(--mono)", fill: n === 0 ? "var(--ink-3)" : "var(--ink)" }, n); });
+      const lost = [...cutIdx].map((i) => text[i]);
+      K.svg(svg, "text", { x: 10, y: 320, "font-size": 12, fill: lost.length ? "var(--bad)" : "var(--good)" }, lost.length ? `被截掉的词：${lost.join(" ")}` : "没有词被截掉");
+      K.svg(svg, "text", { x: 10, y: 344, "font-size": 12, class: "muted" }, "提示：选最长的那条 iphone 描述，对比 pre 和 post 丢掉的是哪一段");
+      return { readout: [{ k: "词表大小", v: String(V.words.length) }, { k: "原句词数", v: String(text.length) }, { k: "补的 0 / 截掉的词", v: `${out.filter((n) => n === 0).length} / ${cutIdx.size}` }] };
+    },
+  });
+
+  /* ---------- 实验 B：品牌 Embedding 训练 ---------- */
+  const BR = [["missing", 2.4], ["Forever21", 2.5], ["Old Navy", 2.6], ["H&M", 2.55], ["Nike", 3.3], ["Adidas", 3.25], ["Lululemon", 3.8], ["Apple", 4.6], ["Michael Kors", 4.0], ["Louis Vuitton", 5.6]];
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "ep", label: "训练轮数", min: 0, max: 200, step: 5, value: 60 },
+      { id: "lr", label: "学习率", min: 0.01, max: 0.5, step: 0.01, value: 0.1, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "重新初始化", button: true },
+    ],
+    note: "10 个品牌各配一个随机初始化的 2 维向量（嵌入），模型 = 向量 · w + b，预测 log 价格。浏览器用 2000 条模拟商品现场做梯度下降，同时学向量和 w、b。看各品牌的点怎样从乱糟糟变成按价格排开：贵的品牌聚到一边，便宜的聚到另一边。",
+    render(svg, v) {
+      const r = K.rng(11 + v.seed * 7), E = BR.map(() => [K.randn(r) * 0.5, K.randn(r) * 0.5]);
+      let w = [K.randn(r) * 0.3, K.randn(r) * 0.3], b = 3;
+      const dr = K.rng(99), data = []; for (let i = 0; i < 2000; i++) { const k = Math.floor(dr() * BR.length); data.push([k, BR[k][1] + K.randn(dr) * 0.35]); }
+      const loss = () => Math.sqrt(data.reduce((s, [k, y]) => s + (E[k][0] * w[0] + E[k][1] * w[1] + b - y) ** 2, 0) / data.length);
+      const hist = [loss()];
+      for (let e = 0; e < v.ep; e++) {
+        const gE = BR.map(() => [0, 0]), gw = [0, 0]; let gb = 0;
+        data.forEach(([k, y]) => { const d = E[k][0] * w[0] + E[k][1] * w[1] + b - y; gE[k][0] += d * w[0]; gE[k][1] += d * w[1]; gw[0] += d * E[k][0]; gw[1] += d * E[k][1]; gb += d; });
+        const n = data.length, nk = BR.length;
+        E.forEach((p, k) => { p[0] -= v.lr * gE[k][0] / n * nk; p[1] -= v.lr * gE[k][1] / n * nk; });
+        w[0] -= v.lr * gw[0] / n; w[1] -= v.lr * gw[1] / n; b -= v.lr * gb / n;
+        hist.push(loss());
+      }
+      const ext = Math.max(1.2, ...E.map((p) => Math.max(Math.abs(p[0]), Math.abs(p[1])))) * 1.15;
+      const ax = K.axes(svg, { x: 30, y: 20, w: 330, h: 330 }, [-ext, ext], [-ext, ext], { xticks: 0, yticks: 0 });
+      K.svg(svg, "text", { x: 30, y: 14, "font-size": 12, "font-weight": 700 }, "品牌嵌入向量（2 维）");
+      E.forEach((p, k) => { const t = (BR[k][1] - 2.4) / 3.2; K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 7, fill: K.heat(0.25 + 0.75 * t), stroke: "var(--ink)", "stroke-width": 1 }); K.svg(svg, "text", { x: ax.sx(p[0]) + 9, y: ax.sy(p[1]) + 4, "font-size": 11 }, BR[k][0]); });
+      const a2 = K.axes(svg, { x: 420, y: 30, w: 200, h: 200 }, [0, Math.max(1, v.ep)], [0, Math.max(...hist) * 1.05], { xticks: 2, yticks: 2, xlabel: "轮数", yfmt: (x) => x.toFixed(1) });
+      K.svg(svg, "text", { x: 420, y: 22, "font-size": 12, "font-weight": 700 }, "RMSE（log 价格）");
+      K.svg(svg, "path", { d: hist.map((h, i) => (i ? "L" : "M") + a2.sx(i) + "," + a2.sy(h)).join(""), fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+      K.svg(svg, "text", { x: 420, y: 290, "font-size": 12, class: "muted" }, "颜色越深 = 该品牌真实均价越高");
+      K.svg(svg, "text", { x: 420, y: 310, "font-size": 12, class: "muted" }, "噪声下限约 0.35");
+      return { readout: [{ k: "当前 RMSE", v: hist[hist.length - 1].toFixed(3), color: hist[hist.length - 1] < 0.45 ? "var(--good)" : "var(--ink)" }, { k: "训练轮数", v: String(v.ep) }] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

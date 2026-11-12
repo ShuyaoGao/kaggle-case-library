@@ -1,0 +1,614 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>肺部 CT 预处理</title>
+<meta name="description" content="Kaggle 案例拆解：肺纤维化（OSIC）等肺部 CT 比赛的 DICOM 预处理教程：切片排序成 3D、换算 HU、像素间距与切片厚度、3D 重建、重采样、阈值 + 连通区域 + 形态学分割肺、统一图像尺寸。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">胸部 CT 三维数据 · 预处理 · 传统图像处理</div>
+  <h1>肺部 CT 预处理：在训练模型之前，先把一堆 DICOM 整理成“干净的肺”</h1>
+  <p class="en">Pulmonary Dicom Preprocessing</p>
+  <div class="tags">
+    <span class="tag method">DICOM 切片排序</span><span class="tag method">HU 换算</span><span class="tag method">像素间距 / 切片厚度</span>
+    <span class="tag method">Marching Cubes 3D 重建</span><span class="tag method">体素重采样</span><span class="tag method">阈值分割</span>
+    <span class="tag method">连通区域标记</span><span class="tag method">形态学开 / 闭运算</span><span class="tag method">裁剪与缩放</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Laura Fink（allunia）</b></span>
+    <span>Kaggle 点赞 <b>1,257</b>（2026-11 抓取）</span>
+    <span>比赛 <b>osic-pulmonary-fibrosis-progression</b> 等 3 个</span>
+    <span><a href="https://www.kaggle.com/code/allunia/pulmonary-dicom-preprocessing" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">每个病人一整套胸部 CT 切片</div><p>主要是 OSIC 肺纤维化比赛的数据，也兼顾 RSNA 肺栓塞比赛和 SIIM 新冠比赛。每张切片是一个 DICOM 文件。<span data-cell="2">出处</span> <span data-cell="8">出处</span></p></div>
+    <div class="card panel"><h3>要做什么</h3><div class="big">不预测，而是把原始扫描变成模型能用的数据</div><p>排好顺序、换算成统一的 HU 单位、弄清每个像素多大、把肺单独分割出来、统一图片尺寸，最后生成一个预处理好的数据集。<span data-cell="4">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">传统图像处理，没有神经网络</div><p>阈值 −320、连通区域标记去掉背景、形态学运算去杂点；Marching Cubes 画 3D；scipy 重采样；PIL 裁剪缩放。思路来自 2017 年数据科学碗的经典预处理教程。<span data-cell="4">出处</span></p></div>
+    <div class="card panel"><h3>得到了什么</h3><div class="big">一个公开的预处理数据集 + 一串发现</div><p>发现不同病人像素间距差很多、图像尺寸五花八门、有的扫描把圈外设成“水”而不是“空气”。作者把处理好的 HU 数据集公开了。<span data-cell="2">出处</span> <span data-cell="55">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">一次 CT 扫描是几十到几百张横切片，每张存成一个 DICOM 文件。文件里除了像素，还有一个“说明书”（文件头），下面这些字段在本 notebook 里都用到了。<span data-cell="37">出处</span></p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的几个数字</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">OSIC 训练集病人</div><div class="v">176 位</div></div>
+        <div class="stat-tile"><div class="k">CT 灰度级</div><div class="v">约 4000 级</div></div>
+        <div class="stat-tile"><div class="k">常见切片尺寸</div><div class="v">512×512</div></div>
+        <div class="stat-tile"><div class="k">最大的切片</div><div class="v">约 1300×1300</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">176 位病人见第 129 格 <span data-cell="129">出处</span>；约 4000 个灰度值见第 23 格 <span data-cell="23">出处</span>；512×512 常见、但也有 1300×1300 的例外见第 42 格 <span data-cell="42">出处</span>。扫描圈外的原始值常被设为 −2000（其他比赛也见过 −3000）见第 27 格 <span data-cell="27">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">DICOM 文件头里用到的字段</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>字段</th><th>含义</th></tr>
+        <tr><td><code>pixel_array</code></td><td>原始像素值（还不是 HU）</td></tr>
+        <tr><td><code>RescaleSlope</code>、<code>RescaleIntercept</code></td><td>换算成 HU 的斜率和截距：HU = 像素 × 斜率 + 截距</td></tr>
+        <tr><td><code>PixelSpacing</code></td><td>一个像素在行、列方向上各代表多少毫米</td></tr>
+        <tr><td><code>SliceThickness</code></td><td>一张切片有多厚（毫米）</td></tr>
+        <tr><td><code>ImagePositionPatient</code></td><td>切片在人体中的位置，用来排序</td></tr>
+        <tr><td><code>Rows</code>、<code>Columns</code></td><td>切片的像素行数、列数</td></tr>
+        <tr><td><code>WindowCenter</code>、<code>WindowWidth</code></td><td>医院默认的显示窗位、窗宽</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">OSIC 比赛的表格本身还有每位病人的肺功能测量记录，但这份 notebook 只处理影像，不建模。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="76">
+    <h3>动手试试 A · 重采样：切片太厚时，3D 图像会被“压扁” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labA"></div>
+  </div>
+  <div data-at="84">
+    <h3>动手试试 B · 分割肺：阈值 + 去掉连通背景 + 形态学 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labB"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者的发现</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>发现</th><th>出处</th></tr>
+        <tr><td>不同病人的像素间距差别很大，两张图里肺看起来一样大，不代表实际一样大</td><td><span data-cell="34">第 34 格</span> <span data-cell="39">第 39 格</span></td></tr>
+        <tr><td>切片尺寸不全是 512×512，有很多例外，甚至有 1300×1300 的</td><td><span data-cell="42">第 42 格</span></td></tr>
+        <tr><td>有的扫描把圈外区域设成了“水”（HU 0），而不是“空气”，需要统一处理</td><td><span data-cell="55">第 55 格</span></td></tr>
+        <tr><td>3D 重建有的清楚、有的模糊，和整体 HU 分布不同有关，原因没完全查清</td><td><span data-cell="62">第 62 格</span> <span data-cell="73">第 73 格</span></td></tr>
+        <tr><td>形态学运算比 Guido 的“填肺”和“去气泡”方法效果好，但会丢掉肺里不少细节</td><td><span data-cell="104">第 104 格</span></td></tr>
+        <tr><td>大的方形图可缩放到 512 或 768 两个主要尺寸；非方形图做中心裁剪</td><td><span data-cell="125">第 125 格</span></td></tr>
+      </table></div>
+      <p class="callout">这是一份预处理和探索的 notebook，没有训练模型，也没有分数。作者把处理好的 HU 数据公开成了数据集 <code>allunia/osic-pulmonary-fibrosis-progression-huscans</code>。<span data-cell="126">出处</span></p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li>分割函数里的注释说“闭运算更好”，代码却用了<b>开运算</b> <code>opening</code>；而逐步讲解（第 98 格）用的是闭运算 <code>closing</code>。最终结果和讲解用的不是同一种运算。<span data-cell="84">出处</span></li>
+        <li>第 86 格文字说“小于等于 320”，代码是 <code>&gt; -320</code>，少了负号。<span data-cell="86">出处</span></li>
+        <li>重采样示例用的是 <code>max_hu_scans</code> 的图像，却传入了另一位病人 <code>scans</code> 的间距信息，算出的缩放比例不属于这套图像。<span data-cell="77">出处</span></li>
+        <li><code>crop_scan</code> 用 <code>shape[0]</code>（行数，即高度）去算左右边界，用 <code>shape[1]</code> 算上下边界，对非方形图像方向弄反了。<span data-cell="132">出处</span></li>
+        <li>批量生成数据时，尺寸恰好等于目标的病人走到 <code>continue</code>，<b>跳过了保存</b>；生成 512×512 数据集时，最常见的 512 尺寸病人反而一个都不会被存下来。<span data-cell="135">出处</span></li>
+        <li>第 8 格当前选的是 RSNA 肺栓塞比赛的路径，而后面不少文字结论（如 176 位病人）说的是 OSIC，读的时候要分清。<span data-cell="8">出处</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>把任何一套 CT 扫描变成统一单位（HU）、统一体素大小、统一尺寸、只保留肺的 3D 数组，交给后面的深度学习模型去预测肺功能下降、找肺栓塞或结节。</li>
+        <li><b>同类问题：</b>所有 CT / MRI 比赛的第一步：肝脏、肾脏、脑部、骨骼的分析，都要先读 DICOM、换算单位、统一间距。</li>
+        <li><b>可迁移的套路：</b>按位置排序 → 换算物理单位 → 检查元数据分布找异常 → 用阈值 + 连通区域 + 形态学先做“粗分割” → 统一尺寸 → 存成可复用的数据集。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>读取排序：pydicom，按 ImagePositionPatient 或文件编号 <span data-cell="16">第 16 格</span></li>
+        <li>HU 换算：圈外设空气，再乘斜率加截距 <span data-cell="29">第 29 格</span></li>
+        <li>元数据分析：像素间距、切片厚度、尺寸、物理面积 <span data-cell="37">第 37 格</span> <span data-cell="45">第 45 格</span></li>
+        <li>可视化：手动加窗（−700 / 255 的肺窗） <span data-cell="51">第 51 格</span>，Marching Cubes 3D <span data-cell="63">第 63 格</span></li>
+        <li>重采样：scipy.ndimage.zoom 到 1×1×1 毫米 <span data-cell="76">第 76 格</span></li>
+        <li>分割：阈值 −320、skimage 连通区域、disk(2) 形态学 <span data-cell="84">第 84 格</span></li>
+        <li>尺寸统一：PIL 裁剪与 LANCZOS 缩放 <span data-cell="131">第 131 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>两张 CT 都是 512×512 像素，一张每像素 0.6 毫米，一张 0.9 毫米。如果直接把它们缩放成同样大小喂给模型，会出什么问题？</li>
+      <li>为什么扫描圈外被设成“水”（0）而不是“空气”（−1000）会坏事？对阈值分割和神经网络各有什么影响？</li>
+      <li>作者说重采样不一定必要，因为可以用数据增强代替。你同意吗？什么情况下必须重采样？</li>
+      <li>阈值 −320 是从 2017 年的教程直接拿来的。对于肺纤维化病人（肺里有很多发白的纤维组织），这个阈值可能出什么问题？</li>
+      <li>作者诚实地写下“可能我有 bug”“这部分还要重做”。读别人的 notebook 时，这样的话对你有什么提示？</li>
+      <li>批量生成数据集时最常见尺寸的病人被跳过了。如果你直接用了这个数据集训练模型，会发生什么？怎么才能早点发现？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Laura Fink（Kaggle 用户名 allunia），大量思路和代码来自 Guido Zuidhof 的 2017 数据科学碗预处理教程，作者已注明。版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意，图中的“胸部 CT”是用代码按大致 HU 范围画的示意图，不是真实病人影像。比赛数据：OSIC Pulmonary Fibrosis Progression、RSNA STR Pulmonary Embolism Detection、SIIM-FISABIO-RSNA COVID-19 Detection。
+</footer>
+</main>
+
+<script src="nb/osic-ct-dicom-preprocessing.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  if (/[?&]fast/.test(location.search)) { K.tween = (ms, fn, ctx) => { if (ctx && !ctx.alive()) return Promise.resolve(false); fn(1, 1); return Promise.resolve(true); }; K.wait = (ms, ctx) => Promise.resolve(!ctx || ctx.alive()); }
+  if (/[?&]fold/.test(location.search)) document.head.appendChild(Object.assign(document.createElement("style"), { textContent: ".walk .ch-cells > .cell, .walk .cell-note { display: none !important; }" }));
+  /* ===== 页面专用：像素图工具（用代码生成小图，在浏览器里真算卷积、模糊、池化、几何变换） ===== */
+  const PX = (function () {
+    function rgbOf(name, fb) {
+      let s = (K.css(name) || fb || "#888888").trim();
+      if (s[0] !== "#") return [128, 128, 128];
+      if (s.length === 4) s = "#" + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+      return [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
+    }
+    function grid(W, H, f) { const a = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) a[y * W + x] = f(x, y); return { W, H, a }; }
+    /* 彩色图：{W,H,rgb:[R,G,B]}，每个通道取值 0–1 */
+    function rgbGrid(W, H, f) { const R = new Float32Array(W * H), G = new Float32Array(W * H), B = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const c = f(x, y), i = y * W + x; R[i] = c[0]; G[i] = c[1]; B[i] = c[2]; } return { W, H, rgb: [R, G, B] }; }
+    const chan = (m, c) => ({ W: m.W, H: m.H, a: m.rgb[c] });
+    const fromChans = (ch) => ({ W: ch[0].W, H: ch[0].H, rgb: ch.map((c) => c.a) });
+    const gray = (m) => (m.rgb ? grid(m.W, m.H, (x, y) => { const i = y * m.W + x; return 0.299 * m.rgb[0][i] + 0.587 * m.rgb[1][i] + 0.114 * m.rgb[2][i]; }) : m);
+    function at(m, x, y) { return m.a[y * m.W + x]; }
+    function atClamp(m, x, y) { x = x < 0 ? 0 : x >= m.W ? m.W - 1 : x; y = y < 0 ? 0 : y >= m.H ? m.H - 1 : y; return m.a[y * m.W + x]; }
+    function atZero(m, x, y) { return x < 0 || y < 0 || x >= m.W || y >= m.H ? 0 : m.a[y * m.W + x]; }
+    /* padding='same'：边界外按 0 补 */
+    function conv(m, k) { const n = k.length, r = (n - 1) / 2; return grid(m.W, m.H, (x, y) => { let s = 0; for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) s += k[j][i] * atZero(m, x + i - r, y + j - r); return s; }); }
+    function map(m, f) { if (m.rgb) return { W: m.W, H: m.H, rgb: m.rgb.map((a) => { const o = new Float32Array(a.length); for (let i = 0; i < a.length; i++) o[i] = f(a[i], i); return o; }) }; const o = { W: m.W, H: m.H, a: new Float32Array(m.a.length) }; for (let i = 0; i < m.a.length; i++) o.a[i] = f(m.a[i], i); return o; }
+    const relu = (m) => map(m, (v) => (v > 0 ? v : 0));
+    function pool(m, s) { s = s || 2; const W = Math.ceil(m.W / s), H = Math.ceil(m.H / s); return grid(W, H, (x, y) => { let b = -Infinity; for (let j = 0; j < s; j++) for (let i = 0; i < s; i++) { const xx = x * s + i, yy = y * s + j; if (xx < m.W && yy < m.H) b = Math.max(b, at(m, xx, yy)); } return b; }); }
+    function range(m) { let lo = Infinity, hi = -Infinity; for (const v of m.a) { if (v < lo) lo = v; if (v > hi) hi = v; } return [lo, hi]; }
+    /* 可分离高斯模糊（边界用最近像素），彩色图逐通道做 */
+    function blur(m, sigma) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => blur(chan(m, c), sigma)));
+      if (sigma <= 0.01) return m;
+      const r = Math.max(1, Math.ceil(sigma * 3)), w = [];
+      let s = 0;
+      for (let i = -r; i <= r; i++) { const v = Math.exp((-i * i) / (2 * sigma * sigma)); w.push(v); s += v; }
+      for (let i = 0; i < w.length; i++) w[i] /= s;
+      const t = grid(m.W, m.H, (x, y) => { let a = 0; for (let i = -r; i <= r; i++) a += w[i + r] * atClamp(m, x + i, y); return a; });
+      return grid(m.W, m.H, (x, y) => { let a = 0; for (let i = -r; i <= r; i++) a += w[i + r] * atClamp(t, x, y + i); return a; });
+    }
+    function bilinear(m, x, y) {
+      const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+      return (atClamp(m, x0, y0) * (1 - fx) + atClamp(m, x0 + 1, y0) * fx) * (1 - fy) + (atClamp(m, x0, y0 + 1) * (1 - fx) + atClamp(m, x0 + 1, y0 + 1) * fx) * fy;
+    }
+    /* 绕中心旋转/缩放/平移/翻转；fill：'nearest' 用最近像素，数字表示边界外填这个值 */
+    function affine(m, p) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => affine(chan(m, c), p)));
+      const th = ((p.rot || 0) * Math.PI) / 180, c = Math.cos(th), s = Math.sin(th), z = p.zoom || 1;
+      const cx = (m.W - 1) / 2, cy = (m.H - 1) / 2, tx = (p.tx || 0) * m.W, ty = (p.ty || 0) * m.H;
+      return grid(m.W, m.H, (x, y) => {
+        let u = x - cx - tx, v = y - cy - ty;
+        if (p.flip) u = -u;
+        if (p.vflip) v = -v;
+        const a = (c * u + s * v) / z + cx, b = (-s * u + c * v) / z + cy;
+        if (p.fill != null && p.fill !== "nearest" && (a < -0.5 || b < -0.5 || a > m.W - 0.5 || b > m.H - 0.5)) return p.fill;
+        return bilinear(m, a, b);
+      });
+    }
+    function resize(m, W, H) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => resize(chan(m, c), W, H)));
+      return grid(W, H, (x, y) => bilinear(m, ((x + 0.5) * m.W) / W - 0.5, ((y + 0.5) * m.H) / H - 0.5));
+    }
+    function toURL(m, mode, lo, hi) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      if (m.rgb) {
+        for (let i = 0; i < m.W * m.H; i++) { for (let c = 0; c < 3; c++) d[i * 4 + c] = Math.max(0, Math.min(1, m.rgb[c][i])) * 255; d[i * 4 + 3] = 255; }
+      } else {
+        const P = rgbOf("--panel", "#ffffff"), A = rgbOf("--c1"), B = rgbOf("--c6");
+        if (lo == null || hi == null) { const r = range(m); if (lo == null) lo = r[0]; if (hi == null) hi = r[1]; }
+        const span = hi - lo || 1, amax = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+        for (let i = 0; i < m.a.length; i++) {
+          const v = m.a[i]; let r, gg, b;
+          if (mode === "div") { const t = Math.max(-1, Math.min(1, v / amax)), C = t >= 0 ? B : A, k = Math.abs(t); r = P[0] + (C[0] - P[0]) * k; gg = P[1] + (C[1] - P[1]) * k; b = P[2] + (C[2] - P[2]) * k; }
+          else if (mode === "heat") { const k = Math.max(0, Math.min(1, (v - lo) / span)); r = P[0] + (B[0] - P[0]) * k; gg = P[1] + (B[1] - P[1]) * k; b = P[2] + (B[2] - P[2]) * k; }
+          else { const k = Math.max(0, Math.min(1, (v - lo) / span)) * 255; r = gg = b = k; }
+          d[i * 4] = r; d[i * 4 + 1] = gg; d[i * 4 + 2] = b; d[i * 4 + 3] = 255;
+        }
+      }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    function draw(svg, x, y, w, h, m, mode, lo, hi, smooth) {
+      const e = K.svg(svg, "image", { x, y, width: w, height: h, preserveAspectRatio: "none" });
+      if (!smooth) e.style.imageRendering = "pixelated";
+      e.setAttribute("href", toURL(m, mode, lo, hi));
+      K.svg(svg, "rect", { x, y, width: w, height: h, fill: "none", stroke: "var(--line)" });
+      return e;
+    }
+    function update(e, m, mode, lo, hi) { e.setAttribute("href", toURL(m, mode, lo, hi)); }
+    function lines(svg, x, y, w, h, W, H, op) {
+      const g = K.svg(svg, "g");
+      for (let i = 0; i <= W; i++) K.svg(g, "line", { x1: x + (w * i) / W, x2: x + (w * i) / W, y1: y, y2: y + h, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      for (let j = 0; j <= H; j++) K.svg(g, "line", { y1: y + (h * j) / H, y2: y + (h * j) / H, x1: x, x2: x + w, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      return g;
+    }
+    const smooth = (e0, e1, x) => { const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+    const blob = (x, y, cx, cy, sx, sy) => Math.exp(-(((x - cx) * (x - cx)) / (2 * sx * sx) + ((y - cy) * (y - cy)) / (2 * sy * sy)));
+    /* 平滑噪声：几层不同频率的随机网格插值叠加，用来做纹理 */
+    function noise(W, H, seed, cells) {
+      const r = K.rng(seed || 1), n = cells || 6, g0 = grid(n + 1, n + 1, () => r());
+      return grid(W, H, (x, y) => bilinear(g0, (x / W) * n, (y / H) * n));
+    }
+    return { grid, rgbGrid, chan, fromChans, gray, at, atClamp, conv, map, relu, pool, range, blur, bilinear, affine, resize, toURL, draw, update, lines, smooth, blob, noise, rgbOf };
+  })();
+
+  /* ===== 示意胸部 CT 横切片（单位 HU）。opt.outside: "air" | "water" | "raw"（圈外 −2000）；opt.fib: 是否加纤维化 ===== */
+  function chestCT(N, opt, seed) {
+    opt = opt || {};
+    const tex = PX.noise(N, N, (seed || 1) + 3, 14), tex2 = PX.noise(N, N, (seed || 1) + 11, 26), r = K.rng(seed || 1);
+    const vess = []; for (let i = 0; i < 26; i++) vess.push([0.2 + r() * 0.6, 0.3 + r() * 0.4, 0.006 + r() * 0.008]);
+    return PX.grid(N, N, (px, py) => {
+      const x = px / N - 0.5, y = py / N - 0.5, t = tex.a[py * N + px], t2 = tex2.a[py * N + px];
+      if (Math.hypot(x, y) > 0.49) return opt.outside === "raw" ? -2000 : opt.outside === "water" ? 0 : -1000 + 20 * t;
+      const body = Math.pow(x / 0.43, 2) + Math.pow((y - 0.02) / 0.3, 2);
+      if (body > 1) { if (y > 0.34 && y < 0.37 && Math.abs(x) < 0.45) return 300; return -1000 + 20 * t; }
+      let v = 35 + 20 * (t - 0.5);
+      if (body > 0.86) v = -90 + 30 * t;
+      const lungL = Math.pow((x + 0.17) / 0.13, 2) + Math.pow((y + 0.0) / 0.21, 2), lungR = Math.pow((x - 0.17) / 0.13, 2) + Math.pow((y + 0.0) / 0.21, 2);
+      if (lungL < 1 || lungR < 1) {
+        v = -840 + 80 * t;
+        if (vess.some(([vx, vy, vr]) => Math.hypot(x + 0.5 - vx, y + 0.5 - vy) < vr)) v = -60 + 60 * t;
+        const edge = lungL < 1 ? lungL : lungR;
+        if (opt.fib && edge > 0.55 && t2 > 0.55) v = -350 + 120 * t;
+      }
+      if (Math.hypot(x, y + 0.13) < 0.025) v = -950;            // 气管
+      if (Math.hypot(x, y - 0.2) < 0.05) v = 700 + 300 * t;      // 脊柱
+      return v;
+    });
+  }
+  const winImg = (m, c, w) => PX.map(m, (v) => K.clamp((v - (c - w / 2)) / w, 0, 1));
+  /* 连通区域标记（4 邻接） */
+  function label(bin, W, H) {
+    const lab = new Int32Array(W * H).fill(0); let n = 0; const st = [];
+    for (let i = 0; i < W * H; i++) {
+      if (lab[i]) continue; n++; const val = bin[i]; lab[i] = n; st.push(i);
+      while (st.length) { const j = st.pop(), x = j % W, y = (j / W) | 0; [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(([dx, dy]) => { const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) return; const k = yy * W + xx; if (!lab[k] && bin[k] === val) { lab[k] = n; st.push(k); } }); }
+    }
+    return { lab, n };
+  }
+  function morph(bin, W, H, r, dilate) {
+    const out = new Uint8Array(W * H), off = [];
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) if (dx * dx + dy * dy <= r * r) off.push([dx, dy]);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      let v = dilate ? 0 : 1;
+      for (const [dx, dy] of off) { const xx = K.clamp(x + dx, 0, W - 1), yy = K.clamp(y + dy, 0, H - 1), b = bin[yy * W + xx]; if (dilate && b) { v = 1; break; } if (!dilate && !b) { v = 0; break; } }
+      out[y * W + x] = v;
+    }
+    return out;
+  }
+  function segment(ct, thr, removeBorder, op, r) {
+    const W = ct.W, H = ct.H, bin = new Uint8Array(W * H);
+    for (let i = 0; i < W * H; i++) bin[i] = ct.a[i] > thr ? 0 : 1;       // 1 = 可能是肺（低密度）
+    let m = bin;
+    if (removeBorder) {
+      const { lab } = label(bin, W, H), bad = new Set();
+      for (let x = 0; x < W; x++) { bad.add(lab[x]); bad.add(lab[(H - 1) * W + x]); }
+      for (let y = 0; y < H; y++) { bad.add(lab[y * W]); bad.add(lab[y * W + W - 1]); }
+      m = bin.map((b, i) => (b && !bad.has(lab[i]) ? 1 : 0));
+    }
+    if (op !== "none" && r > 0) m = op === "open" ? morph(morph(m, W, H, r, false), W, H, r, true) : morph(morph(m, W, H, r, true), W, H, r, false);
+    return m;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "开场：一份写给后来者的 CT 预处理教程", kicker: "第 0–13 格 · 准备",
+      html: `<p>作者说，2017 年数据科学碗（肺癌检测）里有一份非常棒的预处理教程，作者是 Guido Zuidhof。她想把这些思路带到之后的肺部 CT 比赛里，加上更多解释，并最终生成一个预处理好的数据集给大家用。<span data-cell="4">出处</span></p><p>这份 notebook 同时照顾了三个比赛：OSIC 肺纤维化、RSNA 肺栓塞、SIIM 新冠，用 <code>basepath</code> 切换。<span data-cell="8">出处</span> 读入表格后，给每个病人拼出 DICOM 文件夹的路径。<span data-cell="13">出处</span></p>`,
+      cells: [8, 13], highlight: ["basepath"],
+      draw(svg, ctx) {
+        const steps = ["读 DICOM\n排序", "换算\nHU", "看间距\n与尺寸", "3D 重建\n重采样", "分割\n肺", "统一尺寸\n存数据集"];
+        const els = steps.map((s, i) => { const g = K.node(svg, 15 + i * 117, 130, 100, 70, s, { fs: 13, fill: "color-mix(in srgb, var(--c" + (1 + (i % 5)) + ") 15%, var(--panel))", stroke: "var(--c" + (1 + (i % 5)) + ")" }); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 360, y: 80, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "从原始扫描到“模型能吃的数据”");
+        K.svg(svg, "text", { x: 360, y: 250, "text-anchor": "middle", "font-size": 12, class: "muted" }, "整份 notebook 不训练模型：它做的是所有 CT 深度学习项目都绕不开的第一步");
+        (async () => { for (const e of els) if (!(await ctx.tween(260, (k) => (e.style.opacity = k)))) return; })();
+      },
+    },
+    {
+      title: "把一张张切片按位置排成 3D", kicker: "第 14–22 格 · 读取 DICOM",
+      html: `<p>一次扫描的切片是一堆单独的文件，文件夹里的顺序不一定对。要拼成完整的 3D 图像，得按每张切片在人体中的位置 <code>ImagePositionPatient</code> 的 z 坐标排序。<span data-cell="15">出处</span></p><p>OSIC 比赛的数据里这个位置信息有缺失，作者改为按文件名里的编号排序。<span data-cell="16">出处</span> 然后打开第一张切片的文件头看看里面都有什么。</p>`,
+      cells: [16, 17, 20], highlight: ["ImagePositionPatient[2]", "sorted_file_nums"],
+      draw(svg, ctx) {
+        const ct = chestCT(64, {}, 2), sl = [];
+        const order = [5, 1, 7, 3, 0, 6, 2, 4];
+        for (let i = 0; i < 8; i++) {
+          const g = K.svg(svg, "g");
+          const e = PX.draw(g, 0, 0, 70, 50, winImg(ct, -600, 1600), null, 0, 1, true); void e;
+          K.svg(g, "text", { x: 35, y: 64, "text-anchor": "middle", "font-size": 11 }, "z=" + order[i] * 5 + "mm");
+          sl.push({ g, z: order[i], x0: 20 + i * 86, y0: 40 });
+          g.setAttribute("transform", `translate(${20 + i * 86},40)`);
+        }
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 12, class: "muted" }, "文件夹里的顺序（乱的）");
+        K.svg(svg, "text", { x: 20, y: 160, "font-size": 12, class: "muted" }, "按 z 坐标排好，叠起来就是一个 3D 体积");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1600, (t) => sl.forEach((s) => { const x = K.lerp(s.x0, 200 + s.z * 30, t), y = K.lerp(s.y0, 230 - s.z * 12, t); s.g.setAttribute("transform", `translate(${x},${y})`); })));
+      },
+    },
+    {
+      title: "原始像素 → HU，扫描圈外设成空气", kicker: "第 23–32 格 · HU 换算",
+      html: `<p>作者先补了三点背景：CT 记录的是组织挡 X 光的能力；不同机器、不同电压测出来的原始值不一样，要换算成以水为 0、空气为 −1000 的 <b>HU</b> 才能互相比较；CT 有约 4000 个灰度级，人眼看不过来，所以要加窗显示。<span data-cell="23">出处</span></p><p>画出原始像素分布后，她发现有一堆值在 −2000：那是圆形扫描范围<b>外面</b>的默认值。<span data-cell="27">出处</span> 处理办法：原始值 ≤ −1000 的先设成 0（相当于空气），再按 <code>HU = 像素 × 斜率 + 截距</code> 换算。<span data-cell="29">出处</span></p>`,
+      cells: [26, 28, 29], highlight: ["raw_pixelarrays[raw_pixelarrays <= -1000] = 0", "RescaleIntercept", "RescaleSlope"],
+      draw(svg, ctx) {
+        const raw = chestCT(96, { outside: "raw" }, 3), fixed = chestCT(96, { outside: "air" }, 3);
+        const e = PX.draw(svg, 40, 50, 220, 220, winImg(raw, -500, 3000), null, 0, 1, true);
+        const lab = K.svg(svg, "text", { x: 150, y: 38, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "圈外 = −2000（比空气还“黑”）");
+        const ax = K.axes(svg, { x: 340, y: 50, w: 340, h: 200 }, [-2100, 1100], [0, 1], { xticks: 4, yticks: 0, xlabel: "HU（直方图示意）" });
+        const hist = (m) => { const b = new Array(32).fill(0); for (const v of m.a) b[K.clamp(Math.floor((v + 2100) / 100), 0, 31)]++; const mx = Math.max(...b); return b.map((c) => c / mx); };
+        const h1 = hist(raw), h2 = hist(fixed);
+        const bars = h1.map((v, i) => K.svg(svg, "rect", { x: ax.sx(-2100 + i * 100) + 1, y: ax.sy(v), width: 340 / 32 - 2, height: ax.sy(0) - ax.sy(v), fill: "var(--c1)" }));
+        ctx.wait(900).then((ok) => ok && ctx.tween(1200, (t) => {
+          bars.forEach((b, i) => { const v = K.lerp(h1[i], h2[i], t); K.set(b, { y: ax.sy(v), height: ax.sy(0) - ax.sy(v) }); });
+          if (t > 0.5) { PX.update(e, winImg(fixed, -500, 3000)); lab.textContent = "圈外设成空气（−1000）"; }
+        }));
+      },
+    },
+    {
+      title: "像素间距与切片厚度：一个体素到底多大", kicker: "第 33–47 格 · 元数据",
+      html: `<p><b>体素</b>就是 3D 的像素：长和宽由 <code>PixelSpacing</code> 决定，高由 <code>SliceThickness</code> 决定。<span data-cell="33">出处</span></p><p>作者统计了大量病人：像素间距差别很大，因为不同医院、不同医生、不同机器设置不同。所以两张图上肺一样大，<b>实际大小不一定一样</b>。<span data-cell="34">出处</span> 图像尺寸也不全是 512×512，还有不少例外，最大的到约 1300×1300。<span data-cell="42">出处</span></p><p>用“间距 × 像素数”算出每张切片覆盖的实际面积（平方厘米），再乘厚度得到体积，发现有些切片大得离谱。<span data-cell="45">出处</span> <span data-cell="47">出处</span></p>`,
+      cells: [37, 38, 41, 45, 46], highlight: ["dataset.PixelSpacing", "dataset.SliceThickness", "area_cm2", "slice_volume_cm3"],
+      draw(svg, ctx) {
+        const ct = chestCT(80, {}, 4);
+        K.svg(svg, "text", { x: 160, y: 30, "text-anchor": "middle", "font-size": 13 }, "病人甲：512 像素 × 0.6 mm");
+        K.svg(svg, "text", { x: 500, y: 30, "text-anchor": "middle", "font-size": 13 }, "病人乙：512 像素 × 0.9 mm");
+        const a = PX.draw(svg, 60, 45, 200, 200, winImg(ct, -600, 1600), null, 0, 1, true), b = PX.draw(svg, 400, 45, 200, 200, winImg(ct, -600, 1600), null, 0, 1, true);
+        const lab = K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "屏幕上一样大……");
+        ctx.wait(900).then((ok) => ok && ctx.tween(1200, (t) => {
+          const s1 = K.lerp(200, 200 * 0.6 / 0.9, t);
+          K.set(a, { width: s1, height: s1, x: 160 - s1 / 2, y: 145 - s1 / 2 });
+          lab.textContent = t > 0.5 ? "按实际毫米画：甲的视野只有乙的 2/3（307 mm vs 461 mm）" : "屏幕上一样大……";
+          void b;
+        }));
+      },
+    },
+    {
+      title: "最大和最小的切片：背景居然是“水”", kicker: "第 48–60 格 · 异常检查",
+      html: `<p>作者把面积最大、最小的两位病人拿出来，用肺窗（窗位 −700、窗宽 255）显示中间那张切片。<span data-cell="52">出处</span></p><p>发现两点：面积大的图里有很多没用的区域，可以裁掉；更奇怪的是，它的扫描圈外不是空气，而是一个中间值。看直方图才明白：被默认设成了<b>水</b>（HU 0）。<span data-cell="53">出处</span> <span data-cell="55">出处</span> 作者说：有时是“水”、有时是“空气”，这很糟糕，需要想办法统一。</p>`,
+      cells: [50, 51, 52, 54], highlight: ["def set_manual_window", "-700, 255"],
+      draw(svg, ctx) {
+        const A = chestCT(96, { outside: "air" }, 5), B = chestCT(96, { outside: "water" }, 6);
+        const show = (m) => winImg(m, -700, 255);
+        PX.draw(svg, 50, 50, 220, 220, show(A), null, 0, 1, true);
+        const eb = PX.draw(svg, 420, 50, 220, 220, winImg(B, -500, 3000), null, 0, 1, true);
+        K.svg(svg, "text", { x: 160, y: 38, "text-anchor": "middle", "font-size": 13 }, "圈外 = 空气（−1000）");
+        const t2 = K.svg(svg, "text", { x: 530, y: 38, "text-anchor": "middle", "font-size": 13 }, "圈外 = ?");
+        K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 12, class: "muted" }, "肺窗 −700 / 255：低于 −827 全黑，高于 −572 全白（示意图）");
+        ctx.wait(800).then((ok) => ok && ctx.tween(600, (t) => { if (t > 0.5) { PX.update(eb, show(B)); t2.textContent = "圈外 = 水（0）→ 肺窗下变成一片白"; } }));
+      },
+    },
+    {
+      title: "3D 重建：Marching Cubes 找出等值面", kicker: "第 61–73 格 · 3D 可视化",
+      html: `<p><code>plot_3d</code> 用 <b>Marching Cubes</b>（行进立方体）算法：在 3D 体积里找出“HU 正好等于某个阈值”的那一层表面，拼成三角形网格画出来。阈值 700 时画出来的就是骨头。<span data-cell="63">出处</span></p><p>作者发现有的病人重建得很清楚，有的模糊、还把扫描床也画了出来。比较两位病人的 HU 分布，确实差别很大，但她没继续深挖：“这对比赛本身不太重要”。<span data-cell="73">出处</span></p><p>动画是 2D 版的同一个想法：在一张切片上找出 HU = 阈值的轮廓线。</p>`,
+      cells: [63, 64, 68, 70], highlight: ["marching_cubes_lewiner", "threshold=700"],
+      draw(svg, ctx) {
+        const N = 72, ct = chestCT(N, {}, 7), S = 250, X = 40, Y = 40;
+        PX.draw(svg, X, Y, S, S, winImg(ct, -400, 2000), null, 0, 1, true);
+        const g = K.svg(svg, "g");
+        const lab = K.svg(svg, "text", { x: 480, y: 80, "font-size": 14, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 360, y: 130, "font-size": 12, class: "muted" }, "在每个 2×2 小格里，看四个角哪些高于阈值、");
+        K.svg(svg, "text", { x: 360, y: 150, "font-size": 12, class: "muted" }, "哪些低于，在边上插值出交点连成线段。");
+        K.svg(svg, "text", { x: 360, y: 170, "font-size": 12, class: "muted" }, "3D 版就是在每个小立方体里拼三角形。");
+        const contour = (thr) => {
+          while (g.firstChild) g.removeChild(g.firstChild);
+          const c = S / N, at = (x, y) => ct.a[y * N + x];
+          for (let y = 0; y < N - 1; y++) for (let x = 0; x < N - 1; x++) {
+            const v = [at(x, y), at(x + 1, y), at(x + 1, y + 1), at(x, y + 1)], p = [[x, y], [x + 1, y], [x + 1, y + 1], [x, y + 1]], pts = [];
+            for (let k = 0; k < 4; k++) { const a = v[k], b = v[(k + 1) % 4]; if ((a > thr) !== (b > thr)) { const u = (thr - a) / (b - a), A = p[k], B = p[(k + 1) % 4]; pts.push([X + (A[0] + (B[0] - A[0]) * u + 0.5) * c, Y + (A[1] + (B[1] - A[1]) * u + 0.5) * c]); } }
+            if (pts.length >= 2) K.svg(g, "line", { x1: pts[0][0], y1: pts[0][1], x2: pts[1][0], y2: pts[1][1], stroke: "var(--c6)", "stroke-width": 1.6 });
+          }
+        };
+        (async () => {
+          for (const thr of [700, -320]) {
+            lab.textContent = "阈值 = " + thr + " HU" + (thr === 700 ? "（骨头）" : "（肺的边界）");
+            contour(thr);
+            if (!(await ctx.wait(1600))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "重采样：把体素统一成 1×1×1 毫米", kicker: "第 74–79 格 · 重采样",
+      html: `<p>Guido 的教程会把每个病人的体积<b>重采样</b>成 1×1×1 毫米的体素，这样所有病人的“尺子”一样。<code>resample</code> 先算出每个方向的缩放比例 = 原间距 / 新间距，取整后用 <code>scipy.ndimage.zoom</code> 插值。<span data-cell="76">出处</span></p><p>作者自己不打算用：她认为缩放、裁剪、模糊、亮度变化这些数据增强已经能解决不少问题。<span data-cell="75">出处</span> 另外，示例里图像用的是 <code>max_hu_scans</code>，间距却取自另一位病人的 <code>scans</code>，这是个小 bug。<span data-cell="77">出处</span></p>`,
+      cells: [76, 77], highlight: ["resize_factor = spacing / new_spacing", "scipy.ndimage.interpolation.zoom"],
+      draw(svg, ctx) {
+        const f = (ymm, zmm) => { const d = Math.hypot((ymm - 150) / 110, (zmm - 150) / 140); return d < 1 ? (Math.hypot(ymm - 180, zmm - 120) < 25 ? 0.95 : 0.25) : 0.7; };
+        const mk = (dy, dz) => { const W = Math.round(300 / dy), H = Math.round(300 / dz); return PX.grid(W, H, (x, y) => f((x + 0.5) * dy, (y + 0.5) * dz)); };
+        const thick = mk(1, 10), iso = PX.resize(thick, 100, 100);
+        PX.draw(svg, 40, 120, 200, 60, thick, null, 0, 1, true);
+        K.svg(svg, "text", { x: 140, y: 100, "text-anchor": "middle", "font-size": 12 }, "体素 1×10 mm，当作方块显示：被压扁");
+        const out = PX.draw(svg, 440, 40, 200, 200, iso, null, 0, 1, true); out.style.opacity = 0;
+        K.svg(svg, "text", { x: 540, y: 30, "text-anchor": "middle", "font-size": 12 }, "重采样到 1×1 mm：比例恢复（但更糊）");
+        const a = K.arrow(svg, 255, 150, 425, 140); a.style.opacity = 0;
+        K.svg(svg, "text", { x: 340, y: 128, "text-anchor": "middle", "font-size": 12, class: "muted" }, "z 方向 ×10");
+        K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 12, class: "muted" }, "示意：纵切面上的一个圆形肺和一个结节");
+        ctx.wait(500).then((ok) => ok && ctx.tween(900, (t) => { a.style.opacity = t; out.style.opacity = t; }));
+      },
+    },
+    {
+      title: "分割肺（一）：阈值 −320，去掉连着边框的背景", kicker: "第 80–96 格 · 组织分割",
+      html: `<p>目标：只保留肺。第一步<b>阈值</b>：HU 大于 −320 的标 2（软组织、水），小于的标 1（肺约 −700、空气约 −1000）。<span data-cell="88">出处</span> 但这样肺外面的空气也被标成 1 了。</p><p>第二步<b>连通区域标记</b>：把相互连着的同值像素编成一组。凡是碰到图片四条边的组，一定是身体外面的空气，统统改成 2。<span data-cell="90">出处</span> <span data-cell="93">出处</span></p><p>剩下的 1 主要是肺，但身体里还散落着不少小杂点（如气管、肠道气体、噪声）。<span data-cell="96">出处</span> 下面的实验 B 可以一步步试。</p>`,
+      cells: [84, 89, 91, 93, 95], highlight: ["image[n] > -320", "measure.label", "bad_labels"],
+      draw(svg, ctx) {
+        const N = 96, ct = chestCT(N, {}, 8), S = 190;
+        const show = (m) => PX.grid(N, N, (x, y) => m[y * N + x]);
+        const bin = new Uint8Array(N * N); for (let i = 0; i < N * N; i++) bin[i] = ct.a[i] > -320 ? 0 : 1;
+        const rm = segment(ct, -320, true, "none", 0);
+        const titles = ["原图（肺窗）", "阈值：低于 −320 = 白", "去掉碰到边框的区域"];
+        const ims = [winImg(ct, -700, 800), show(bin), show(rm)];
+        const els = ims.map((m, i) => { const e = PX.draw(svg, 20 + i * 235, 50, S, S, m, null, 0, 1, true); K.svg(svg, "text", { x: 20 + i * 235 + S / 2, y: 40, "text-anchor": "middle", "font-size": 13 }, titles[i]); e.style.opacity = i ? 0 : 1; return e; });
+        K.svg(svg, "text", { x: 360, y: 280, "text-anchor": "middle", "font-size": 12, class: "muted" }, "示意 CT：第三张里还剩下气管等小气腔（中间的小白点）");
+        (async () => { for (let i = 1; i < 3; i++) { if (!(await ctx.wait(500))) return; if (!(await ctx.tween(600, (k) => (els[i].style.opacity = k)))) return; } })();
+      },
+    },
+    {
+      title: "分割肺（二）：形态学运算 vs. Guido 的填充法", kicker: "第 97–104 格 · 去杂点",
+      html: `<p>去杂点用<b>形态学运算</b>：拿一个半径 2 像素的小圆盘（<code>disk(2)</code>）在图上滑。</p><ul class="tight"><li><b>腐蚀</b>：圆盘里只要有一个黑点，中心就变黑，白色区域缩小一圈，小白点直接消失。</li><li><b>膨胀</b>：反过来，白色区域长大一圈。</li><li><b>开运算</b> = 先腐蚀后膨胀，去掉小白点；<b>闭运算</b> = 先膨胀后腐蚀，填上小黑洞。</li></ul><p>作者比较了三种方法：闭运算、Guido 的“填充肺结构”、Guido 的“去掉气泡”。她认为闭运算最好，但也会丢掉肺里不少细节；另外两种效果不好，她怀疑自己有 bug。<span data-cell="104">出处</span></p>`,
+      cells: [98, 100, 102, 103], highlight: ["disk(2)", "closing(binary_image_2, selem)", "fill_lungs", "largest_label_volume"],
+      draw(svg, ctx) {
+        const W = 24, H = 14, cs = 13, ox = 30, oy = 40, base = new Uint8Array(W * H);
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) base[y * W + x] = (Math.pow((x - 8) / 5.5, 2) + Math.pow((y - 7) / 5.5, 2) < 1 && !(x === 8 && y === 7)) || (x === 18 && y === 4) || (x === 20 && y === 10) ? 1 : 0;
+        const draw = (m, X, title) => { const g = K.svg(svg, "g"); K.svg(g, "text", { x: X + (W * cs) / 2, y: oy - 10, "text-anchor": "middle", "font-size": 12 }, title); for (let i = 0; i < W * H; i++) K.svg(g, "rect", { x: X + (i % W) * cs, y: oy + Math.floor(i / W) * cs, width: cs - 1, height: cs - 1, fill: m[i] ? "var(--c1)" : "var(--panel-2)" }); return g; };
+        draw(base, ox, "阈值后：有小杂点和一个小洞");
+        const steps2 = [["开运算（r=1）：杂点没了，洞还在", morph(morph(base, W, H, 1, false), W, H, 1, true)], ["闭运算（r=1）：洞补上了，杂点还在", morph(morph(base, W, H, 1, true), W, H, 1, false)]];
+        let cur = null; const lab = K.svg(svg, "text", { x: 360, y: 260, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "");
+        (async () => {
+          for (const [t, m] of steps2) {
+            if (cur) cur.remove(); cur = draw(m, 380, t); cur.style.opacity = 0; lab.textContent = "";
+            if (!(await ctx.tween(500, (k) => (cur.style.opacity = k)))) return;
+            if (!(await ctx.wait(1400))) return;
+          }
+          lab.textContent = "注意：作者最终函数里用的是开运算，讲解里用的是闭运算";
+        })();
+      },
+    },
+    {
+      title: "最终分割效果：2D 和 3D 都看一遍", kicker: "第 105–113 格 · 结果检查",
+      html: `<p>把分割结果当作“面具”乘回原图：肺里保留原来的 HU，肺外变成 0。<span data-cell="107">出处</span> 再对整位病人的所有切片做一遍，排成 6×5 的格子看，并画出 3D。<span data-cell="110">出处</span></p><p>作者发现肺外面还残留一些信号。<span data-cell="111">出处</span> 她打算生成两个版本的数据集：一个已经分割好，一个不分割，让大家在加载数据时自己决定要不要实时分割。<span data-cell="113">出处</span></p>`,
+      cells: [107, 109, 110, 112], highlight: ["segment_lung_mask(hu_scans)", "binary_image.copy() * image[n]"],
+      draw(svg, ctx) {
+        const els = [];
+        for (let i = 0; i < 10; i++) {
+          const ct = chestCT(64, { fib: true }, 20 + i), m = segment(ct, -320, true, "close", 1);
+          const masked = PX.grid(64, 64, (x, y) => (m[y * 64 + x] ? K.clamp((ct.a[y * 64 + x] + 1000) / 700, 0, 1) : 0));
+          const e = PX.draw(svg, 30 + (i % 5) * 135, 30 + Math.floor(i / 5) * 140, 120, 120, masked, "heat", 0, 1, true); e.style.opacity = 0; els.push(e);
+        }
+        K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 12, class: "muted" }, "示意：同一位病人不同切片分割后只剩肺（亮处是纤维化或血管）");
+        (async () => { for (const e of els) if (!(await ctx.tween(150, (k) => (e.style.opacity = k)))) return; })();
+      },
+    },
+    {
+      title: "图像尺寸五花八门：分组浏览", kicker: "第 114–125 格 · 尺寸统一",
+      html: `<p>要生成数据集，必须先面对尺寸问题。按（行数，列数）分组计数，作者发现 OSIC 有两大主要尺寸和一些例外，画在散点图上还能看到有一组行数固定是 888。<span data-cell="114">出处</span> <span data-cell="117">出处</span></p><p>她写了一个小工具 <code>ImageObserver</code>，每运行一次就显示某个尺寸组里的下一批图片，方便人工浏览。结论：大的方形图分辨率更高，可以缩放到 512 或 768；非方形图只是背景多一些，做中心裁剪就好。<span data-cell="125">出处</span></p>`,
+      cells: [115, 117, 119, 124], highlight: ["groupby([\"rows\", \"columns\"])", "class ImageObserver"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 330, h: 250 }, [400, 1400], [400, 1400], { xticks: 5, yticks: 5, xlabel: "rows", ylabel: "columns" });
+        const pts = [[512, 512, 40], [768, 768, 22], [632, 632, 6], [888, 733, 5], [888, 1020, 4], [1302, 1302, 3], [843, 888, 2]];
+        K.svg(svg, "line", { x1: ax.sx(400), y1: ax.sy(400), x2: ax.sx(1400), y2: ax.sy(1400), stroke: "var(--c4)", "stroke-dasharray": "5 4" });
+        const cs = pts.map(([r, c, n]) => K.svg(svg, "circle", { cx: ax.sx(r), cy: ax.sy(c), r: 0, fill: "var(--c1)", opacity: 0.7 }));
+        K.svg(svg, "text", { x: 70, y: 22, "font-size": 11, class: "muted" }, "点的大小 = 病人数（示意）；虚线 = 方形");
+        const rules = [["方形且较大", "→ 缩放到 512 或 768"], ["非方形", "→ 中心裁剪"], ["已经是 512×512", "→ 直接用"]];
+        rules.forEach(([a, b], i) => { K.node(svg, 450, 50 + i * 80, 120, 50, a, { fs: 12 }); K.svg(svg, "text", { x: 580, y: 80 + i * 80, "font-size": 12 }, b); });
+        ctx.tween(1200, (t) => cs.forEach((c, i) => c.setAttribute("r", Math.sqrt(pts[i][2]) * 3 * t)));
+      },
+    },
+    {
+      title: "批量生成预处理数据集（藏着两个 bug）", kicker: "第 126–140 格 · 生成数据",
+      html: `<p>PIL 一般处理 8 位图片，而 HU 是带负数的 16 位整数。作者的变通办法：先转成 32 位整数，用 PIL 的 "I" 模式做裁剪和 LANCZOS 缩放，再转回 16 位省内存。她自己也说“感觉不太好，有点困惑”。<span data-cell="127">出处</span></p><p><code>preprocess_to_hu_scans</code> 对每位病人：换算 HU → 方形就缩放、非方形就先中心裁成 512 再缩放 → 存成 .npy。<span data-cell="135">出处</span> 两个 bug：</p><ul class="tight"><li><code>crop_scan</code> 把行数当成宽度算左右边界，非方形图裁错方向。<span data-cell="132">出处</span></li><li>尺寸已经等于目标的病人走 <code>continue</code>，<b>没有保存</b>。</li></ul><p>四个开关（512、224、128、64）默认都是 False，这次运行实际没有生成。<span data-cell="137">出处</span></p>`,
+      cells: [131, 132, 133, 135, 137], highlight: ["mode=\"I\"", "left = (scan.shape[0]-512)/2", "continue", "np.save"],
+      draw(svg, ctx) {
+        const pats = [["病人 A", "512×512", "continue → 没存！", "var(--bad)"], ["病人 B", "768×768", "缩放 → 存", "var(--good)"], ["病人 C", "888×733", "裁剪（方向反了）→ 存", "var(--warn)"], ["病人 D", "512×512", "continue → 没存！", "var(--bad)"]];
+        K.svg(svg, "text", { x: 360, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "生成 512×512 数据集时会发生什么");
+        const els = pats.map(([p, s, r, c], i) => {
+          const g = K.svg(svg, "g"); g.style.opacity = 0;
+          K.node(g, 40, 50 + i * 62, 110, 46, p + "\n" + s, { fs: 12 });
+          K.arrow(g, 155, 73 + i * 62, 230, 73 + i * 62);
+          K.node(g, 235, 50 + i * 62, 230, 46, r, { fs: 12, stroke: c, color: c });
+          return g;
+        });
+        const folder = K.node(svg, 520, 120, 160, 90, "scans_512x512/\n只有 B、C", { fs: 13, fill: "var(--panel-2)" }); folder.style.opacity = 0;
+        (async () => { for (const e of els) if (!(await ctx.tween(350, (k) => (e.style.opacity = k)))) return; await ctx.tween(400, (k) => (folder.style.opacity = k)); })();
+      },
+    },
+    {
+      title: "顺带看看新冠比赛的 DICOM", kicker: "第 141–148 格 · 扩展",
+      html: `<p>最后作者打开了 SIIM 新冠检测比赛的一个 DICOM 文件。那里<b>每个病人好像只有一个文件</b>（一张胸片），所以没法做 3D 重建。<span data-cell="142">出处</span></p><p>她列出文件头里有意思的信息：病人编号和姓名、检查部位、性别、像素间距、行列数、光度解释（PhotometricInterpretation），并怀疑同一个病人会不会有多次检查。<span data-cell="144">出处</span> notebook 在“数一数每个病人有几个文件”处结束。</p>`,
+      cells: [143, 147], highlight: ["siim-covid19-detection"],
+      draw(svg, ctx) {
+        const items = [["PatientID / PatientName", "病人是谁（已匿名）"], ["BodyPartExamined", "拍的是哪个部位"], ["PatientSex", "性别"], ["PixelSpacing", "像素间距（没有切片厚度）"], ["Rows / Columns", "图像尺寸"], ["PhotometricInterpretation", "黑白怎么解释（MONOCHROME1 / 2）"]];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "一张胸片 DICOM 的文件头里");
+        const els = items.map(([k, v], i) => { const g = K.svg(svg, "g"); g.style.opacity = 0; K.svg(g, "rect", { x: 30, y: 45 + i * 42, width: 640, height: 34, rx: 5, fill: "var(--panel-2)", stroke: "var(--line)" }); K.svg(g, "text", { x: 45, y: 67 + i * 42, "font-size": 12, "font-family": "var(--mono)" }, k); K.svg(g, "text", { x: 330, y: 67 + i * 42, "font-size": 12 }, v); return g; });
+        (async () => { for (const e of els) if (!(await ctx.tween(220, (k) => (e.style.opacity = k)))) return; })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：重采样 ---------- */
+  K.lab(document.getElementById("labA"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "th", label: "切片厚度 SliceThickness（毫米）", min: 0.5, max: 10, step: 0.5, value: 5, fmt: (v) => v.toFixed(1) + " mm" },
+      { id: "ps", label: "像素间距 PixelSpacing（毫米）", min: 0.5, max: 1.5, step: 0.05, value: 0.7, fmt: (v) => v.toFixed(2) + " mm" },
+      { id: "nod", label: "结节直径（毫米）", min: 4, max: 40, step: 1, value: 12 },
+    ],
+    note: "一个 300 毫米见方的纵切面（上下是身体的 z 方向），里面有一个椭圆形的肺和一个圆形结节。浏览器先按“像素间距 × 切片厚度”采样，再像作者第 76 格那样按 原间距 / 1 mm 算缩放比例、取整、用线性插值缩放到 1×1 mm。左图把每个体素当正方形显示（没重采样），右图是重采样后。把切片厚度拉到 10 mm、结节调到 6 mm，看结节还在不在。",
+    render(svg, v) {
+      const f = (ymm, zmm) => { if (Math.hypot(ymm - 190, zmm - 130) < v.nod / 2) return 0.95; return Math.hypot((ymm - 150) / 110, (zmm - 150) / 135) < 1 ? 0.22 : 0.7; };
+      const W = Math.round(300 / v.ps), H = Math.round(300 / v.th);
+      const img = PX.grid(W, H, (x, y) => f((x + 0.5) * v.ps, (y + 0.5) * v.th));
+      const nw = Math.round(W * v.ps), nh = Math.round(H * v.th);
+      const res = PX.resize(img, nw, nh);
+      const dispH = Math.min(240, (240 * H) / W);
+      PX.draw(svg, 20, 30 + (240 - dispH) / 2, 240, dispH, img, null, 0, 1, false);
+      PX.draw(svg, 380, 30, 240, 240, res, null, 0, 1, true);
+      K.svg(svg, "text", { x: 140, y: 20, "text-anchor": "middle", "font-size": 12 }, `采样结果 ${W}×${H}（体素当方块显示）`);
+      K.svg(svg, "text", { x: 500, y: 20, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, `重采样到 1 mm：${nw}×${nh}`);
+      K.arrow(svg, 275, 150, 365, 150);
+      let peak = 0; for (let y = 0; y < nh; y++) for (let x = 0; x < nw; x++) if (Math.hypot(x - 190, y - 130) < 3) peak = Math.max(peak, res.a[y * nw + x]);
+      return { readout: [
+        { k: "缩放比例（z / y）", v: (nh / H).toFixed(1) + " / " + (nw / W).toFixed(2) },
+        { k: "形状变化", v: `${W}×${H} → ${nw}×${nh}` },
+        { k: "结节中心亮度（1 = 完整）", v: peak.toFixed(2), color: peak > 0.8 ? "var(--good)" : peak < 0.5 ? "var(--bad)" : "var(--warn)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：分割 ---------- */
+  K.lab(document.getElementById("labB"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "thr", label: "阈值（HU，作者用 −320）", min: -900, max: 100, step: 10, value: -320 },
+      { id: "border", label: "去掉碰到边框的区域", value: "1", options: [["1", "去掉（作者的做法）"], ["0", "不去掉"]] },
+      { id: "op", label: "形态学运算", value: "open", options: [["open", "开运算（作者最终函数用的）"], ["close", "闭运算（作者讲解里用的）"], ["none", "不做"]] },
+      { id: "r", label: "圆盘半径（作者用 2）", min: 0, max: 4, step: 1, value: 2 },
+      { id: "fib", label: "示意病人", value: "0", options: [["0", "肺比较正常"], ["1", "肺边缘有纤维化（发白）"]] },
+    ],
+    note: "在 120×120 的示意 CT（单位 HU）上逐像素现场计算：低于阈值的标为可能是肺 → 4 邻接连通区域标记，去掉碰到四条边的区域 → 用圆盘做开 / 闭运算 → 统计剩下的白色区域。选“纤维化”病人再看：阈值 −320 会不会把发白的病变挖掉？",
+    render(svg, v) {
+      const N = 120, ct = chestCT(N, { fib: v.fib === "1" }, 9);
+      const m = segment(ct, v.thr, v.border === "1", v.op, v.r);
+      PX.draw(svg, 20, 30, 240, 240, winImg(ct, -600, 1500), null, 0, 1, true);
+      PX.draw(svg, 380, 30, 240, 240, PX.grid(N, N, (x, y) => (m[y * N + x] ? K.clamp((ct.a[y * N + x] + 1000) / 800, 0, 1) * 0.8 + 0.2 : 0)), null, 0, 1, true);
+      K.svg(svg, "text", { x: 140, y: 20, "text-anchor": "middle", "font-size": 12 }, "示意 CT（宽窗显示）");
+      K.svg(svg, "text", { x: 500, y: 20, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, "分割结果（只保留被判为肺的像素）");
+      K.arrow(svg, 275, 150, 365, 150);
+      let area = 0; for (const b of m) area += b;
+      const { lab, n } = label(m, N, N); const comps = new Set(); m.forEach((b, i) => b && comps.add(lab[i])); void n;
+      let lungTrue = 0, hit = 0;
+      for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) { const xx = x / N - 0.5, yy = y / N - 0.5; const inL = Math.pow((xx + 0.17) / 0.13, 2) + yy * yy / 0.0441 < 1 || Math.pow((xx - 0.17) / 0.13, 2) + yy * yy / 0.0441 < 1; if (inL) { lungTrue++; if (m[y * N + x]) hit++; } }
+      return { readout: [
+        { k: "保留像素占比", v: ((area / N / N) * 100).toFixed(1) + "%" },
+        { k: "连通块个数", v: String(comps.size), color: comps.size === 2 ? "var(--good)" : "var(--warn)" },
+        { k: "真实肺区被保留", v: Math.round((hit / lungTrue) * 100) + "%", color: hit / lungTrue > 0.9 ? "var(--good)" : "var(--bad)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

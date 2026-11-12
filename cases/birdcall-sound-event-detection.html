@@ -1,0 +1,772 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>鸟鸣事件检测</title>
+<meta name="description" content="Kaggle 案例拆解：只知道“这段录音里有某种鸟”，怎样训练出能指出“几秒到几秒在叫”的声音事件检测模型——PANNs CNN14、注意力池化、弱监督学习。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">音频 · 声音事件检测 · 弱监督深度学习</div>
+  <h1>只知道“有鸟叫”，怎么学会“几秒在叫”</h1>
+  <p class="en">Introduction to Sound Event Detection</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">对数梅尔频谱</span><span class="tag method">PANNs CNN14</span><span class="tag method">SpecAugment</span>
+    <span class="tag method">注意力池化</span><span class="tag method">弱监督学习</span><span class="tag method">迁移学习</span><span class="tag method">阈值切事件</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Hidehisa Arai</b></span>
+    <span>Kaggle 点赞 <b>1,787</b>（2026-11 抓取）</span>
+    <span>数据 <b>Kaggle 比赛 birdsong-recognition（Cornell 鸟鸣识别）</b></span>
+    <span><a href="https://www.kaggle.com/code/hidehisaarai1213/introduction-to-sound-event-detection" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">野外录下的鸟叫声</div><p>训练集每条录音只标了“这是哪种鸟”，共 264 种（代码里的鸟名编码表）。<span data-cell="31">出处</span> 测试录音是长录音，要按 5 秒一段给答案。<span data-cell="2">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">什么声音、从几秒到几秒</div><p>声音事件检测（SED）的输出是一张表：片段编号、开始时间、结束时间、事件名，而不只是“整段里有什么”。<span data-cell="2">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">PANNs CNN14 + 注意力池化</div><p>在大型音频库 AudioSet 上预训练好的卷积网络，最后一层换成“逐段打分 + 注意力加权汇总”，只用整段标签就能训练。<span data-cell="3">出处</span> <span data-cell="27">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一套完整的训练和推理流程</div><p>作者说训练“看起来学到了东西”，推理部分用他自己训练的权重演示。具体分数在运行输出里，这里不列。<span data-cell="43">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据来自 Kaggle 比赛 <b>Cornell Birdcall Identification</b>（birdsong-recognition）。本案例库另有一个用同一比赛数据做探索分析的案例 <a href="birdcall-audio-eda.html">birdcall-audio-eda</a>，这里侧重模型。以下数字来自 notebook 代码与文字。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">鸟的种类</div><div class="v">264</div></div>
+        <div class="stat-tile"><div class="k">采样率（重采样后）</div><div class="v">32,000 Hz</div></div>
+        <div class="stat-tile"><div class="k">训练时每次截取</div><div class="v">5 秒</div></div>
+        <div class="stat-tile"><div class="k">推理时每块</div><div class="v">30 秒</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">264 种见第 20 格 <code>classes_num</code> <span data-cell="20">出处</span>；32 kHz 见第 18 格 <span data-cell="18">出处</span>；5 秒见第 32 格 <span data-cell="32">出处</span>；30 秒见第 47 格 <span data-cell="47">出处</span>。训练录音条数在运行输出里，源码不带。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">训练和测试各给了什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>部分</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>ebird_code</code></td><td><b>训练答案</b>：这条录音是哪种鸟（如 <code>aldfly</code>）</td><td>类别</td></tr>
+        <tr><td><code>resampled_filename</code></td><td>重采样成 32 kHz 后的 wav 文件名</td><td>文本</td></tr>
+        <tr><td><code>site</code></td><td>测试录音的录制地点：site_1、site_2 要按 5 秒段回答，site_3 只回答整段</td><td>类别</td></tr>
+        <tr><td><code>row_id</code> / <code>birds</code></td><td>提交格式：每一段的编号，和这一段里有哪些鸟（没有写 <code>nocall</code>）</td><td>文本</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">字段名来自第 38、47、52–54 格的代码 <span data-cell="38">出处</span> <span data-cell="54">出处</span>；site 的说明见第 2 格 <span data-cell="2">出处</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="11">
+    <h3>动手试试 A · SpecAugment：在频谱图上挖几条缝 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="28">
+    <h3>动手试试 B · 只有整段标签：最大、平均、注意力三种汇总 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="47">
+    <h3>动手试试 C · 调阈值，把逐帧概率切成事件 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>SED 和音频打标签不同：要给出逐段预测，才能知道事件从何时开始、何时结束</td><td><span data-cell="3">第 3 格</span></td></tr>
+        <tr><td>CNN 特征图只在频率方向平均、保留时间方向，就能得到逐段信息</td><td><span data-cell="3">第 3 格</span></td></tr>
+        <tr><td>5 秒片段经过特征提取后，时间维还剩 15 个“段”，每段都要给预测</td><td><span data-cell="26">第 26 格</span></td></tr>
+        <tr><td>只有整段标签时，先逐段分类，再用注意力在时间上汇总，用整段标签和 BCE 损失训练</td><td><span data-cell="27">第 27 格</span> <span data-cell="28">第 28 格</span></td></tr>
+        <tr><td>v3 修正：训练时改用预训练权重</td><td><span data-cell="1">第 1 格</span> <span data-cell="41">第 41 格</span></td></tr>
+        <tr><td>训练“看起来学到了东西”；推理用作者本地训练的权重，出于对其他参赛者的尊重不公开训练细节</td><td><span data-cell="43">第 43 格</span></td></tr>
+        <tr><td>后处理里删除重叠事件的步骤“可能没必要”，作者在别的模型上删掉它，公开榜分数没变化</td><td><span data-cell="52">第 52 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">训练过程的 F1、mAP 数值都在运行输出里，Kaggle 下载的源码不带输出，作者文字里也没写，所以这里不列分数。预训练权重文件名里的 <code>mAP0.425</code> 是 PANNs 原作者在 AudioSet 上的成绩，不是本比赛的成绩。<span data-cell="41">第 41 格</span></p>
+      <h3>读代码时发现的小问题</h3>
+      <ul class="tight">
+        <li>第 47 格算事件置信度时写的是 <code>framewise_outputs[onset_idx:offset_idx]</code>，Python 切片不含结尾，会漏掉最后一帧；如果事件只有一帧，切片为空，<code>.max()</code> 会报错。<span data-cell="47">第 47 格</span></li>
+        <li>同一格里，录音长度正好是 30 秒整数倍时，循环最后还会多补一块全零的 30 秒片段（只多算一次，不影响结果）。<span data-cell="47">第 47 格</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>在一段很长的录音里，自动标出“第 12.3–14.8 秒有黄雀叫”“第 40 秒有汽车鸣笛”。</li>
+        <li><b>同类问题：</b>野生动物声学监测、城市噪声监测（警笛、施工）、婴儿哭声 / 玻璃破碎报警、会议录音里谁在什么时候说话、心音里的杂音定位。</li>
+        <li><b>可迁移的套路：</b>标注成本太高时，只标“整段有没有”，用逐段分类 + 注意力池化做弱监督学习；再用阈值把逐帧概率切成事件。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>用卷积实现的 STFT 和对数梅尔滤波（torchlibrosa）<span data-cell="10">第 10 格</span></li>
+        <li>SpecAugment 数据增强 <span data-cell="11">第 11 格</span></li>
+        <li>CNN14：6 个卷积块 + 频率方向平均 + 注意力块 <span data-cell="15">第 15 格</span> <span data-cell="16">第 16 格</span></li>
+        <li>随机截 5 秒、不足补零 <span data-cell="32">第 32 格</span></li>
+        <li>BCE 损失、宏平均 F1、mAP <span data-cell="34">第 34 格</span> <span data-cell="36">第 36 格</span></li>
+        <li>分层 5 折、加载 AudioSet 预训练权重、换新头、余弦学习率 <span data-cell="39">第 39 格</span> <span data-cell="41">第 41 格</span></li>
+        <li>逐帧阈值 0.5 切事件、IoU &gt; 0.4 去重叠、对齐到 5 秒段 <span data-cell="47">第 47 格</span> <span data-cell="52">第 52 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>“弱标签”只说整段里有什么鸟，没说在哪几秒。模型为什么还能学会“在哪几秒”？如果每条录音里鸟都叫满全程，还能学会吗？</li>
+      <li>把逐段概率汇总成整段概率，用最大值、平均值、注意力加权各有什么问题？鸟只叫了 1 秒的录音，平均汇总会怎样？</li>
+      <li>阈值 0.5 是作者给的默认值。如果是“濒危鸟类监测”，你会把阈值调高还是调低？代价是什么？</li>
+      <li>作者用的是在 AudioSet 上预训练的模型，再换掉最后一层。为什么不从零训练？v1、v2 没用预训练权重会有什么后果？</li>
+      <li>作者因为“尊重其他参赛者”没公开训练好的权重和训练细节。你怎么看比赛中分享代码的边界？</li>
+      <li>野外长时间录音可能录到路过行人的谈话。做生态监测时，该怎么处理这些人声以保护隐私？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Hidehisa Arai，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。模型代码来自 PANNs（Qiuqiang Kong 等）与 torchlibrosa，作者在 notebook 中保留了它们的许可证。本页为教学解读，动画与实验中的声音和概率曲线都是浏览器里合成或计算的示意，不是比赛数据或作者模型的输出。
+</footer>
+</main>
+
+<script src="nb/birdcall-sound-event-detection.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* ===== 本页专用：浏览器内的小型音频工具（合成示意声音、FFT、频谱图、梅尔滤波、MFCC） ===== */
+  const AK = {};
+  AK.SR = 16000;
+  // 原地基 2 FFT
+  AK.fft = function (re, im) {
+    const n = re.length;
+    for (let i = 1, j = 0; i < n; i++) {
+      let bit = n >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
+    }
+    for (let len = 2; len <= n; len <<= 1) {
+      const ang = (-2 * Math.PI) / len, wr = Math.cos(ang), wi = Math.sin(ang);
+      for (let i = 0; i < n; i += len) {
+        let cr = 1, ci = 0;
+        for (let k = 0; k < len / 2; k++) {
+          const a = i + k, b = a + len / 2;
+          const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
+          re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+          const nr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = nr;
+        }
+      }
+    }
+  };
+  AK.pow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
+  // 短时傅里叶变换：返回 [帧][频点] 的功率谱
+  AK.stft = function (x, win, hop, nfft) {
+    nfft = nfft || AK.pow2(win);
+    const frames = [], w = new Float32Array(win);
+    for (let i = 0; i < win; i++) w[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (win - 1));
+    for (let s = 0; s + win <= x.length; s += hop) {
+      const re = new Float32Array(nfft), im = new Float32Array(nfft);
+      for (let i = 0; i < win; i++) re[i] = x[s + i] * w[i];
+      AK.fft(re, im);
+      const p = new Float32Array(nfft / 2 + 1);
+      for (let k = 0; k <= nfft / 2; k++) p[k] = (re[k] * re[k] + im[k] * im[k]) / win;
+      frames.push(p);
+    }
+    return frames;
+  };
+  AK.spectrum = function (x) { // 整段 FFT 幅度（取前一半）
+    const n = AK.pow2(x.length), re = new Float32Array(n), im = new Float32Array(n);
+    re.set(x);
+    AK.fft(re, im);
+    const out = new Float32Array(n / 2);
+    for (let k = 0; k < n / 2; k++) out[k] = (2 / x.length) * Math.hypot(re[k], im[k]);
+    return out;
+  };
+  AK.hz2mel = (f) => 2595 * Math.log10(1 + f / 700);
+  AK.mel2hz = (m) => 700 * (Math.pow(10, m / 2595) - 1);
+  // 三角形梅尔滤波器组：返回 nMels 个 {lo, c, hi, w: Float32Array(nBins)}
+  AK.melFB = function (nMels, nfft, sr, fmin, fmax) {
+    fmin = fmin || 0; fmax = fmax || sr / 2;
+    const nb = nfft / 2 + 1, m0 = AK.hz2mel(fmin), m1 = AK.hz2mel(fmax), pts = [];
+    for (let i = 0; i < nMels + 2; i++) pts.push(AK.mel2hz(m0 + ((m1 - m0) * i) / (nMels + 1)));
+    const fb = [];
+    for (let m = 0; m < nMels; m++) {
+      const lo = pts[m], c = pts[m + 1], hi = pts[m + 2], w = new Float32Array(nb);
+      for (let k = 0; k < nb; k++) {
+        const f = (k * sr) / nfft;
+        w[k] = f < lo || f > hi ? 0 : f <= c ? (f - lo) / (c - lo) : (hi - f) / (hi - c);
+      }
+      fb.push({ lo, c, hi, w });
+    }
+    return fb;
+  };
+  AK.applyFB = function (frames, fb) {
+    return frames.map((p) => Float32Array.from(fb, (f) => { let s = 0; for (let k = 0; k < p.length; k++) s += p[k] * f.w[k]; return s; }));
+  };
+  AK.log = (frames, eps) => frames.map((p) => Float32Array.from(p, (v) => Math.log(v + (eps || 1e-10))));
+  AK.db = (frames) => { let mx = 1e-12; frames.forEach((p) => p.forEach((v) => (mx = Math.max(mx, v)))); return frames.map((p) => Float32Array.from(p, (v) => Math.max(-80, 10 * Math.log10((v + 1e-12) / mx)))); };
+  AK.dct = function (v, n) { // DCT-II，取前 n 个系数
+    const N = v.length, out = new Float32Array(n);
+    for (let k = 0; k < n; k++) { let s = 0; for (let i = 0; i < N; i++) s += v[i] * Math.cos((Math.PI * k * (2 * i + 1)) / (2 * N)); out[k] = s * Math.sqrt((k ? 2 : 1) / N); }
+    return out;
+  };
+  // ---- 合成示意声音 ----
+  const VOW = { a: [730, 1090, 2440], e: [530, 1840, 2480], i: [270, 2290, 3010], o: [570, 840, 2410], u: [300, 870, 2240], n: [250, 1700, 2600], l: [360, 1300, 2700], r: [420, 1300, 1600], w: [300, 700, 2200] };
+  function voiced(out, s0, n, f0, F, amp, sr, f0end) {
+    const nh = Math.floor(3800 / f0);
+    const amps = [];
+    for (let k = 1; k <= nh; k++) { let a = 0; F.forEach((f, j) => (a += Math.exp(-Math.pow((k * f0 - f) / (90 + 40 * j), 2)) / (1 + j * 0.6))); amps.push((a + 0.02) / Math.sqrt(k)); }
+    let ph = 0;
+    for (let i = 0; i < n; i++) {
+      const t = i / n, env = Math.min(1, t * 12, (1 - t) * 10), f = f0 + ((f0end || f0) - f0) * t;
+      ph += (2 * Math.PI * f) / sr;
+      let v = 0;
+      for (let k = 1; k <= amps.length; k++) if (k * f < sr / 2) v += amps[k - 1] * Math.sin(k * ph);
+      out[s0 + i] += amp * env * v * 0.35;
+    }
+  }
+  function noiseBand(out, s0, n, lo, hi, amp, r, sr) {
+    const comps = [];
+    for (let j = 0; j < 70; j++) comps.push([lo + r() * (hi - lo), r() * 6.283]);
+    for (let i = 0; i < n; i++) {
+      const t = i / n, env = Math.min(1, t * 6, (1 - t) * 6);
+      let v = 0;
+      for (const c of comps) v += Math.sin((2 * Math.PI * c[0] * i) / sr + c[1]);
+      out[s0 + i] += (amp * env * v) / 9;
+    }
+  }
+  // 一个音段：[类型, 时长秒, 参数]；类型：v 元音/浊音（参数=VOW 键）, f 擦音（[lo,hi]）, b 爆破（[lo,hi]）, s 静音
+  AK.WORDS = {
+    yes: [["v", 0.07, "i"], ["v", 0.2, "e"], ["f", 0.22, [4200, 7600]]],
+    no: [["v", 0.09, "n"], ["v", 0.32, "o"], ["v", 0.08, "u"]],
+    up: [["v", 0.24, "a"], ["s", 0.06], ["b", 0.03, [600, 3000]]],
+    down: [["b", 0.025, [2500, 5000]], ["v", 0.18, "a"], ["v", 0.12, "u"], ["v", 0.09, "n"]],
+    left: [["v", 0.07, "l"], ["v", 0.17, "e"], ["f", 0.11, [1500, 6500]], ["b", 0.03, [3500, 7000]]],
+    right: [["v", 0.07, "r"], ["v", 0.16, "a"], ["v", 0.1, "i"], ["s", 0.04], ["b", 0.03, [3500, 7000]]],
+    on: [["v", 0.28, "o"], ["v", 0.12, "n"]],
+    off: [["v", 0.26, "o"], ["f", 0.17, [1200, 6500]]],
+    stop: [["f", 0.16, [4200, 7600]], ["b", 0.02, [3500, 7000]], ["v", 0.2, "o"], ["s", 0.05], ["b", 0.03, [600, 3000]]],
+    go: [["b", 0.02, [1200, 3000]], ["v", 0.32, "o"], ["v", 0.08, "u"]],
+  };
+  // 合成一个词：opt {sr, dur, f0, start, noise, seed}；返回 {x, segs:[{name,t0,t1}]}
+  AK.word = function (name, opt) {
+    opt = Object.assign({ sr: AK.SR, dur: 1, f0: 130, start: 0.22, noise: 0.004, seed: 1 }, opt || {});
+    const sr = opt.sr, N = Math.round(sr * opt.dur), x = new Float32Array(N), r = K.rng(opt.seed);
+    let t = opt.start;
+    const segs = [];
+    (AK.WORDS[name] || AK.WORDS.yes).forEach((sg, j) => {
+      const n = Math.round(sg[1] * sr), s0 = Math.round(t * sr);
+      if (s0 + n < N) {
+        if (sg[0] === "v") voiced(x, s0, n, opt.f0 * (1 + 0.04 * Math.sin(j)), VOW[sg[2]], sg[2] === "n" ? 0.5 : 1, sr, opt.f0 * (j % 2 ? 0.93 : 1.02));
+        else if (sg[0] === "f") noiseBand(x, s0, n, sg[2][0], Math.min(sg[2][1], sr / 2 - 100), 0.16, r, sr);
+        else if (sg[0] === "b") noiseBand(x, s0, n, sg[2][0], Math.min(sg[2][1], sr / 2 - 100), 0.35, r, sr);
+      }
+      segs.push({ name: sg[0] === "v" ? sg[2] : sg[0] === "f" ? "擦音" : sg[0] === "b" ? "爆破" : "停顿", t0: t, t1: t + sg[1] });
+      t += sg[1];
+    });
+    for (let i = 0; i < N; i++) x[i] += opt.noise * K.randn(r);
+    return { x, segs, sr };
+  };
+  // 环境声 / 其他示意声音
+  AK.sound = function (kind, opt) {
+    opt = Object.assign({ sr: AK.SR, dur: 1, seed: 1 }, opt || {});
+    const sr = opt.sr, N = Math.round(sr * opt.dur), x = new Float32Array(N), r = K.rng(opt.seed);
+    const add = (f, a, s0, n, decay) => { for (let i = 0; i < n && s0 + i < N; i++) x[s0 + i] += a * Math.sin((2 * Math.PI * f * i) / sr) * (decay ? Math.exp(-i / (decay * sr)) : 1); };
+    if (kind === "siren") { let ph = 0; for (let i = 0; i < N; i++) { const f = 900 + 400 * Math.sin((2 * Math.PI * 1.5 * i) / sr); ph += (2 * Math.PI * f) / sr; x[i] = 0.4 * Math.sin(ph) + 0.15 * Math.sin(2 * ph); } }
+    else if (kind === "dog") { [0.1, 0.45].forEach((t0) => { const s0 = Math.round(t0 * sr), n = Math.round(0.18 * sr); voiced(x, s0, n, 420, [800, 1500, 2600], 1.4, sr, 330); noiseBand(x, s0, Math.round(0.05 * sr), 500, 4000, 0.6, r, sr); }); }
+    else if (kind === "rain") { for (let i = 0; i < N; i++) x[i] = 0.12 * K.randn(r); for (let k = 0; k < 40; k++) { const s0 = Math.floor(r() * N); for (let i = 0; i < 120 && s0 + i < N; i++) x[s0 + i] += 0.5 * K.randn(r) * Math.exp(-i / 25); } }
+    else if (kind === "clock") { for (let t0 = 0.05; t0 < opt.dur; t0 += 0.25) { const s0 = Math.round(t0 * sr); add(3000, 0.6, s0, 400, 0.004); add(5200, 0.4, s0, 300, 0.003); } }
+    else if (kind === "engine") { let ph = 0; for (let i = 0; i < N; i++) { ph += (2 * Math.PI * 55) / sr; let v = 0; for (let k = 1; k < 12; k++) v += Math.sin(k * ph + k) / k; x[i] = 0.25 * v * (1 + 0.3 * Math.sin((2 * Math.PI * 8 * i) / sr)) + 0.03 * K.randn(r); } }
+    else if (kind === "bird") { for (let t0 = 0.08; t0 < opt.dur - 0.15; t0 += 0.3) { const s0 = Math.round(t0 * sr), n = Math.round(0.12 * sr); let ph = 0; for (let i = 0; i < n && s0 + i < N; i++) { const f = 3200 + 1600 * (i / n) + 300 * Math.sin(i / 40); ph += (2 * Math.PI * f) / sr; x[s0 + i] += 0.45 * Math.sin(ph) * Math.sin((Math.PI * i) / n); } } }
+    else if (kind === "crying") { [0, 0.5].forEach((t0) => voiced(x, Math.round((t0 + 0.05) * sr), Math.round(0.4 * sr), 450, [1000, 2500, 3500], 1.2, sr, 380)); }
+    else if (kind === "glass") { const s0 = Math.round(0.2 * sr); noiseBand(x, s0, Math.round(0.04 * sr), 2000, 7500, 1.2, r, sr); [2800, 4100, 5600, 6900].forEach((f, j) => add(f, 0.3, s0, Math.round(0.6 * sr), 0.15 + j * 0.03)); }
+    else if (kind === "noise") { for (let i = 0; i < N; i++) x[i] = 0.2 * K.randn(r); }
+    for (let i = 0; i < N; i++) x[i] += 0.003 * K.randn(r);
+    return { x, sr };
+  };
+  // ---- 画图 ----
+  AK.drawWave = function (svg, box, x, opt) {
+    opt = opt || {};
+    K.svg(svg, "rect", { x: box.x, y: box.y, width: box.w, height: box.h, fill: "var(--panel-2)", rx: 4 });
+    let mx = 1e-9; for (let i = 0; i < x.length; i++) mx = Math.max(mx, Math.abs(x[i]));
+    const cols = Math.min(box.w, 600), step = x.length / cols, mid = box.y + box.h / 2, sc = (box.h / 2 - 3) / (opt.max || mx);
+    let d = "";
+    for (let c = 0; c < cols; c++) {
+      let lo = 0, hi = 0;
+      for (let i = Math.floor(c * step); i < Math.floor((c + 1) * step); i++) { lo = Math.min(lo, x[i]); hi = Math.max(hi, x[i]); }
+      const px = box.x + (c / cols) * box.w;
+      d += `M${px.toFixed(1)},${(mid - hi * sc).toFixed(1)}V${(mid - lo * sc + 0.5).toFixed(1)}`;
+    }
+    return K.svg(svg, "path", { d, stroke: opt.color || "var(--c1)", "stroke-width": Math.max(1, box.w / cols) * 0.9, fill: "none" });
+  };
+  AK.color = function (t) { // 频谱图色带：底色 → 蓝 → 橙
+    t = K.clamp(t, 0, 1);
+    return t < 0.55 ? `color-mix(in srgb, var(--c1) ${Math.round((t / 0.55) * 100)}%, var(--panel-2))` : `color-mix(in srgb, var(--warn) ${Math.round(((t - 0.55) / 0.45) * 100)}%, var(--c1))`;
+  };
+  // frames: [时间][频率]，画成热力图；opt {lo, hi, maxT, maxF, fmax(频点上限)}
+  AK.drawSpec = function (svg, box, frames, opt) {
+    opt = opt || {};
+    const g = K.svg(svg, "g");
+    const T = frames.length, Fall = frames[0].length, F = opt.fmax ? Math.min(Fall, opt.fmax) : Fall;
+    let lo = opt.lo, hi = opt.hi;
+    if (lo == null || hi == null) { const v = []; frames.forEach((p) => { for (let k = 0; k < F; k++) v.push(p[k]); }); v.sort((a, b) => a - b); if (lo == null) lo = v[Math.floor(v.length * 0.05)]; if (hi == null) hi = v[Math.floor(v.length * 0.995)]; }
+    const nt = Math.min(T, opt.maxT || 90), nf = Math.min(F, opt.maxF || 64);
+    const cw = box.w / nt, ch = box.h / nf;
+    for (let a = 0; a < nt; a++) for (let b = 0; b < nf; b++) {
+      const t0 = Math.floor((a * T) / nt), t1 = Math.max(t0 + 1, Math.floor(((a + 1) * T) / nt)), f0 = Math.floor((b * F) / nf), f1 = Math.max(f0 + 1, Math.floor(((b + 1) * F) / nf));
+      let s = -Infinity;
+      for (let t = t0; t < t1; t++) for (let f = f0; f < f1; f++) s = Math.max(s, frames[t][f]);
+      K.svg(g, "rect", { x: (box.x + a * cw).toFixed(1), y: (box.y + box.h - (b + 1) * ch).toFixed(1), width: (cw + 0.6).toFixed(1), height: (ch + 0.6).toFixed(1), fill: AK.color((s - lo) / (hi - lo || 1)) });
+    }
+    return g;
+  };
+  // 用 WebAudio 播放（课堂上可以真的听到合成声音）
+  AK.play = function (x, sr) {
+    try {
+      const C = window.AudioContext || window.webkitAudioContext; if (!C) return;
+      const ac = AK._ac || (AK._ac = new C());
+      let mx = 1e-9; for (let i = 0; i < x.length; i++) mx = Math.max(mx, Math.abs(x[i]));
+      const buf = ac.createBuffer(1, x.length, sr), ch = buf.getChannelData(0);
+      for (let i = 0; i < x.length; i++) ch[i] = (0.8 * x[i]) / mx;
+      const src = ac.createBufferSource(); src.buffer = buf; src.connect(ac.destination); src.start();
+    } catch (e) { /* 没有声卡也不影响页面 */ }
+  };
+  // 在实验面板外加一个“播放”按钮
+  AK.playBtn = function (labEl, label, getter) {
+    const b = K.el("button", { class: "btn ghost", style: "margin-top:8px" }, label || "▶ 播放合成声音");
+    b.onclick = () => { const s = getter(); if (s) AK.play(s.x, s.sr); };
+    const ctrl = labEl.querySelector(".ctrl"); (ctrl || labEl).appendChild(b);
+    return b;
+  };
+  /* ===== 音频工具结束 ===== */
+
+
+  const SR = 16000;
+  // 合成一段 dur 秒的“野外录音”：背景风声 + 若干次鸟叫；events: [[t0, 长度, 种类 0/1]]
+  function field(dur, events, seed) {
+    const r = K.rng(seed || 1), N = Math.round(dur * SR), x = new Float32Array(N);
+    let lp = 0;
+    for (let i = 0; i < N; i++) { lp = 0.97 * lp + 0.03 * K.randn(r); x[i] = 0.08 * lp + 0.004 * K.randn(r); }
+    events.forEach(([t0, len, kind]) => {
+      const s0 = Math.round(t0 * SR), n = Math.round(len * SR);
+      const notes = Math.max(1, Math.round(len / (kind ? 0.18 : 0.3)));
+      for (let k = 0; k < notes; k++) {
+        const a = s0 + Math.round((k * n) / notes), m = Math.round((n / notes) * 0.7);
+        let ph = 0;
+        for (let i = 0; i < m && a + i < N; i++) {
+          const u = i / m, f = kind ? 5200 - 1800 * u : 2600 + 1500 * Math.sin(Math.PI * u);
+          ph += (2 * Math.PI * f) / SR;
+          x[a + i] += 0.35 * Math.sin(ph) * Math.sin(Math.PI * u);
+        }
+      }
+    });
+    return x;
+  }
+  const melOf = (x, nm) => { const fb = AK.melFB(nm || 40, 512, SR, 50, 7900); return AK.log(AK.applyFB(AK.stft(x, 512, 256, 512), fb)); };
+  const EV = [[0.6, 0.9, 0], [2.4, 0.5, 1], [3.6, 0.8, 0]];
+  let clip5 = null;
+  const getClip = () => clip5 || (clip5 = field(5, EV, 3));
+
+  const steps = [
+    {
+      at: 0, title: "开场：什么是声音事件检测", kicker: "第 0–3 格 · 任务介绍",
+      html: `<p>作者先区分了三种音频任务：<b>音频打标签</b>只说“整段里有什么”（以前的 Freesound 比赛）；<b>语音命令识别</b>说“这一秒是哪个词”，本质也是整段一个答案；<b>声音事件检测（SED）</b>则要说“什么声音、从几秒到几秒”。</p><p>这个鸟鸣比赛里，site_1、site_2 的录音要按 5 秒一段回答，site_3 只回答整段。按段回答可以当成短片段打标签来做，也可以用 SED 的思路。作者要演示的是后者：怎么让模型输出<b>逐段</b>预测，而且只用<b>弱标注</b>（整段标签）就能训练。</p>`,
+      draw(svg, ctx) {
+        const x = field(10, [[1, 1.4, 0], [4.2, 0.7, 1], [6.5, 2, 0], [8.8, 0.6, 1]], 5);
+        const sp = melOf(x, 40);
+        K.svg(svg, "text", { x: 30, y: 22, "font-size": 12, class: "muted" }, "10 秒合成野外录音的梅尔频谱图（示意）");
+        AK.drawSpec(svg, { x: 30, y: 30, w: 660, h: 120 }, sp, { maxT: 110, maxF: 40 });
+        const rows = [["音频打标签：整段一个答案", "鸟 A、鸟 B", 180], ["SED（本 notebook）：每个事件的起止时间", "", 235]];
+        rows.forEach((r) => { K.svg(svg, "text", { x: 30, y: r[2] - 6, "font-size": 13, "font-weight": 700 }, r[0]); if (r[1]) K.node(svg, 30, r[2], 660, 30, r[1], { fill: "var(--panel-2)" }); });
+        const evs = [[1, 2.4, 0], [4.2, 4.9, 1], [6.5, 8.5, 0], [8.8, 9.4, 1]];
+        const bars = evs.map((e) => { const g = K.svg(svg, "rect", { x: 30 + (e[0] / 10) * 660, y: 235, width: 0, height: 30, rx: 4, fill: e[2] ? "var(--c6)" : "var(--c3)", opacity: 0.85 }); return g; });
+        const labs = evs.map((e) => { const t = K.svg(svg, "text", { x: 30 + (e[0] / 10) * 660 + 4, y: 290, "font-size": 11 }, `${e[2] ? "鸟 B" : "鸟 A"} ${e[0]}–${e[1]}s`); t.style.opacity = 0; return t; });
+        K.svg(svg, "text", { x: 30, y: 325, "font-size": 12, class: "muted" }, "SED 的答案是一张表：开始时间 onset、结束时间 offset、事件名");
+        (async () => {
+          await ctx.wait(400);
+          for (let i = 0; i < 4; i++) { const e = evs[i]; if (!(await ctx.tween(400, (t) => bars[i].setAttribute("width", ((e[1] - e[0]) / 10) * 660 * t)))) return; labs[i].style.opacity = 1; }
+        })();
+      },
+    },
+    {
+      at: 4, title: "导入工具，读入比赛数据", kicker: "第 4–7 格 · 准备",
+      html: `<p>作者用 PyTorch 搭模型，用 Catalyst 管理训练循环，用 librosa、soundfile 读声音。<code>set_seed(1213)</code> 固定随机种子，让结果可以复现。</p><p>训练录音用的是别人<b>预先重采样到 32 kHz 的版本</b>（5 个数据集分卷），读取 <code>train_mod.csv</code> 作为索引；如果找不到测试音频（比赛提交前测试集是隐藏的），就退回到一个小的检查用测试集 <code>birdcall-check</code>。</p>`,
+      cells: [6, 7], highlight: ["birdsong-resampled-train-audio", "birdcall-check"],
+      draw(svg, ctx) {
+        const items = [["原始录音", "mp3，采样率不一"], ["重采样版", "32 kHz wav\n分 5 个数据集"], ["train_mod.csv", "文件名 ↔ 鸟种"], ["训练集", "路径 + ebird_code"]];
+        const ns = items.map((d, i) => { const g = K.node(svg, 20 + i * 178, 120, 150, 80, d[0] + "\n" + d[1], { bold: i === 3, fill: i === 3 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 3 ? "var(--accent)" : "var(--line)" }); g.style.opacity = 0; return g; });
+        const as = [0, 1, 2].map((i) => { const a = K.arrow(svg, 170 + i * 178, 160, 196 + i * 178, 160); a.style.opacity = 0; return a; });
+        K.svg(svg, "text", { x: 20, y: 250, "font-size": 13 }, "测试集隐藏时 → 用 birdcall-check 里的小测试集代替，保证 notebook 能跑通");
+        (async () => { for (let i = 0; i < 4; i++) { if (!(await ctx.tween(350, (t) => { ns[i].style.opacity = t; if (i) as[i - 1].style.opacity = t; }))) return; } })();
+      },
+    },
+    {
+      at: 8, title: "torchlibrosa：用卷积算频谱", kicker: "第 8–10 格 · 频谱提取放进网络",
+      html: `<p>PANNs 把 librosa 的频谱计算改写成 PyTorch 版本（torchlibrosa）。巧妙之处在第 10 格的 <code>STFT</code> 类：傅里叶变换本质上是“拿一组正弦波模板和声音逐段做内积”，所以可以直接写成一个<b>一维卷积</b>，卷积核就是加了汉宁窗的正弦、余弦模板，步长等于帧移，参数冻结不训练。</p><p>好处是：模型可以直接吃<b>原始波形</b>，频谱在 GPU 上和网络一起算，数据增强也能在频谱上做。</p>`,
+      cells: [10], highlight: ["nn.Conv1d", "dft_matrix", "freeze_parameters"],
+      draw(svg, ctx) {
+        const N = 64, r = K.rng(2), x = [];
+        for (let i = 0; i < 200; i++) x.push(Math.sin(i / 3.2) * 0.6 + Math.sin(i / 1.3) * 0.3 + K.randn(r) * 0.05);
+        const yW = 70;
+        let d = ""; x.forEach((v, i) => (d += (i ? "L" : "M") + (30 + i * 3.3) + "," + (yW - v * 30)));
+        K.svg(svg, "path", { d, fill: "none", stroke: "var(--c1)", "stroke-width": 1.5 });
+        K.svg(svg, "text", { x: 30, y: 22, "font-size": 12, class: "muted" }, "波形");
+        const ks = [2, 5, 9].map((k, j) => { let s = ""; for (let i = 0; i < N; i++) { const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1)); s += (i ? "L" : "M") + (30 + i * 3.3) + "," + (150 + j * 50 - w * Math.cos((2 * Math.PI * k * i) / N) * 18); } return K.svg(svg, "path", { d: s, fill: "none", stroke: K.colors[j + 2], "stroke-width": 1.4 }); });
+        K.svg(svg, "text", { x: 30, y: 325, "font-size": 12 }, "左下：卷积核 = 加窗的余弦模板（每个频率一个，参数冻结）");
+        const outs = [];
+        for (let f = 0; f < 3; f++) for (let t = 0; t < 12; t++) outs.push(K.svg(svg, "rect", { x: 450 + t * 20, y: 140 + f * 50, width: 18, height: 36, fill: "var(--panel-2)" }));
+        const box = K.svg(svg, "rect", { x: 30, y: 30, width: N * 3.3, height: 80, fill: "none", stroke: "var(--warn)", "stroke-width": 2 });
+        const g = ks.map((k) => k);
+        ctx.tween(2600, (t) => {
+          const step = Math.floor(t * 11.99);
+          box.setAttribute("x", 30 + step * 11);
+          g.forEach((k) => k.setAttribute("transform", `translate(${step * 11},0)`));
+          for (let f = 0; f < 3; f++) for (let s = 0; s <= step; s++) { let acc = 0; for (let i = 0; i < N; i++) { const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1)); acc += (x[s * 3 + i] || 0) * w * Math.cos((2 * Math.PI * [2, 5, 9][f] * i) / N); } outs[f * 12 + s].style.fill = AK.color(Math.min(1, Math.abs(acc) / 12)); }
+        });
+        K.svg(svg, "text", { x: 450, y: 320, "font-size": 12, class: "muted" }, "输出：频率 × 时间（示意）");
+      },
+    },
+    {
+      at: 11, title: "SpecAugment：在频谱图上挖空", kicker: "第 11 格 · 数据增强",
+      html: `<p><b>SpecAugment</b> 是一种很简单的数据增强：训练时，在频谱图上随机抹掉几条<b>时间带</b>（竖条）和几条<b>频率带</b>（横条），把那里清零。模型因此不能只盯着某一小块特征，必须学会“缺了一块也能认出来”。</p><p>作者的配置：时间方向最多抹 64 帧宽、抹 2 条；频率方向最多抹 8 个梅尔带宽、抹 2 条（第 16 格）。注意代码里 <code>if self.training is False: return input</code>：只在训练时挖空，推理时不动。</p>`,
+      cells: [11], highlight: ["DropStripes", "SpecAugmentation", "e[:, bgn : bgn + distance, :] = 0"],
+      draw(svg, ctx) {
+        const sp = melOf(getClip(), 40);
+        const box = { x: 40, y: 30, w: 640, h: 250 };
+        AK.drawSpec(svg, box, sp, { maxT: 120, maxF: 40 });
+        K.svg(svg, "text", { x: 40, y: 22, "font-size": 12, class: "muted" }, "5 秒合成鸟鸣的对数梅尔频谱，训练时随机挖掉 2 条竖带和 2 条横带");
+        const r = K.rng(11), masks = [];
+        for (let k = 0; k < 2; k++) { const w = 30 + r() * 60, x0 = box.x + r() * (box.w - w); masks.push(K.svg(svg, "rect", { x: x0, y: box.y, width: w, height: 0, fill: "var(--panel)", opacity: 0.95 })); }
+        for (let k = 0; k < 2; k++) { const h = 15 + r() * 30, y0 = box.y + r() * (box.h - h); masks.push(K.svg(svg, "rect", { x: box.x, y: y0, width: 0, height: h, fill: "var(--panel)", opacity: 0.95 })); }
+        K.svg(svg, "text", { x: 40, y: 310, "font-size": 12 }, "推理时（model.eval()）不挖空，频谱原样进入网络");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1200, (t) => masks.forEach((m, i) => { if (i < 2) m.setAttribute("height", box.h * t); else m.setAttribute("width", box.w * t); })));
+      },
+    },
+    {
+      at: 12, title: "CNN14 的积木：卷积块和注意力块", kicker: "第 12–15 格 · 模块",
+      html: `<p>模型用的是 PANNs 里的 <code>Cnn14_DecisionLevelAtt</code>。它由两种积木搭成：</p><ul class="tight"><li><b>卷积块 ConvBlock</b>：两层 3×3 卷积，每层后接批归一化和 ReLU，最后 2×2 平均池化，把图缩小一半。</li><li><b>注意力块 AttBlock</b>：两个 1×1 卷积，一个算每段的“分类结果”<code>cla</code>（经过 sigmoid，表示每种鸟在这一段出现的概率），另一个算每段的“注意力权重”<code>norm_att</code>（在时间方向 softmax，加起来等于 1）。两者相乘再求和，就是整段的预测。</li></ul><p>另外两个小工具 <code>interpolate</code> 和 <code>pad_framewise_output</code> 用来把被池化缩短的时间轴拉回原来的帧数。</p>`,
+      cells: [15], highlight: ["class ConvBlock", "class AttBlock", "torch.softmax", "torch.sum(norm_att * cla, dim=2)"],
+      draw(svg, ctx) {
+        // 卷积块：3x3 卷积滑动 + 2x2 池化
+        const G = 8, c = 22, ox = 30, oy = 50, r = K.rng(3), v = [];
+        for (let i = 0; i < G * G; i++) v.push(r());
+        v.forEach((q, i) => K.svg(svg, "rect", { x: ox + (i % G) * c, y: oy + Math.floor(i / G) * c, width: c - 2, height: c - 2, fill: AK.color(q) }));
+        K.svg(svg, "text", { x: ox, y: 36, "font-size": 12 }, "ConvBlock：3×3 卷积 ×2 → 2×2 平均池化");
+        const k = K.svg(svg, "rect", { x: ox, y: oy, width: c * 3 - 2, height: c * 3 - 2, fill: "none", stroke: "var(--warn)", "stroke-width": 2.5 });
+        const P = [];
+        for (let i = 0; i < 16; i++) P.push(K.svg(svg, "rect", { x: 230 + (i % 4) * 22, y: 90 + Math.floor(i / 4) * 22, width: 20, height: 20, fill: "var(--panel-2)" }));
+        K.arrow(svg, 210, 135, 226, 135);
+        // 注意力块
+        const T = 10, ax = 360;
+        K.svg(svg, "text", { x: ax, y: 36, "font-size": 12 }, "AttBlock：每段分类 cla × 注意力 norm_att → 求和");
+        const cla = [0.05, 0.1, 0.8, 0.9, 0.7, 0.1, 0.05, 0.6, 0.1, 0.05], att = [0.02, 0.03, 0.2, 0.25, 0.15, 0.03, 0.02, 0.24, 0.03, 0.03];
+        const bc = cla.map((p, i) => K.svg(svg, "rect", { x: ax + i * 32, y: 150, width: 26, height: 0, fill: "var(--c1)" }));
+        const ba = att.map((p, i) => K.svg(svg, "rect", { x: ax + i * 32, y: 250, width: 26, height: 0, fill: "var(--c4)" }));
+        K.svg(svg, "text", { x: ax, y: 166, "font-size": 11, fill: "var(--c1)" }, "cla：这一段像不像鸟 A（sigmoid）");
+        K.svg(svg, "text", { x: ax, y: 266, "font-size": 11, fill: "var(--c4)" }, "norm_att：这一段有多重要（softmax，和为 1）");
+        let clip = 0; cla.forEach((p, i) => (clip += p * att[i]));
+        const res = K.svg(svg, "text", { x: ax, y: 300, "font-size": 15, "font-weight": 700, fill: "var(--good)" }, "");
+        (async () => {
+          for (let s = 0; s < 36; s++) { const i = s % 6, j = Math.floor(s / 6); k.setAttribute("x", ox + i * c); k.setAttribute("y", oy + j * c); if (!(await ctx.wait(60))) return; }
+          if (!(await ctx.tween(500, (t) => P.forEach((p, i) => { const a = v[Math.floor(i / 4) * 2 * G + (i % 4) * 2]; p.style.fill = AK.color(a * t); })))) return;
+          if (!(await ctx.tween(900, (t) => { bc.forEach((b, i) => { b.setAttribute("height", cla[i] * 90 * t); b.setAttribute("y", 150 - cla[i] * 90 * t); }); ba.forEach((b, i) => { b.setAttribute("height", att[i] * 300 * t); b.setAttribute("y", 250 - att[i] * 300 * t); }); }))) return;
+          res.textContent = `整段概率 = Σ cla × att ≈ ${clip.toFixed(2)}（示意数字）`;
+        })();
+      },
+    },
+    {
+      at: 16, title: "PANNs 模型：从波形到逐帧概率", kicker: "第 16 格 · 整条流水线",
+      html: `<p><code>PANNsCNN14Att</code> 把所有积木串起来：原始波形 → 频谱 → 对数梅尔（64 个频带）→ 批归一化 → （训练时）SpecAugment → <b>6 个卷积块</b>，通道数 64→128→256→512→1024→2048，前 5 块各把时间和频率缩小一半。</p><p>关键一步是 <code>torch.mean(x, dim=3)</code>：<b>只在频率方向求平均，时间方向保留</b>。再做一次最大池化加平均池化平滑，经过全连接层，交给注意力块得到每段分类和整段分类。最后把每段结果复制 32 倍（因为时间被缩小了 2⁵ = 32 倍），补齐到原来的帧数，就是逐帧概率 <code>framewise_output</code>。</p>`,
+      cells: [16], highlight: ["torch.mean(x, dim=3)", "self.interpolate_ratio = 32", "conv_block6", "framewise_output"],
+      draw(svg, ctx) {
+        const L = [["波形", 30, 40], ["梅尔谱\n64×500", 120, 64], ["卷积块1\n64 通道", 210, 54], ["块2\n128", 290, 44], ["块3\n256", 360, 36], ["块4\n512", 420, 28], ["块5\n1024", 475, 22], ["块6\n2048", 525, 22]];
+        const els = L.map((d, i) => { const g = K.svg(svg, "g"); K.svg(g, "rect", { x: d[1], y: 120 - d[2] / 2, width: i ? Math.max(30, 80 - i * 7) : 70, height: d[2] + 20, rx: 4, fill: i ? `color-mix(in srgb, var(--c1) ${15 + i * 9}%, var(--panel))` : "var(--panel-2)", stroke: "var(--line)" }); d[0].split("\n").forEach((ln, j) => K.svg(g, "text", { x: d[1] + 2, y: 186 + (i % 2) * 26 + j * 13, "font-size": 10 }, ln)); g.style.opacity = 0; return g; });
+        const avg = K.node(svg, 590, 90, 110, 60, "频率方向平均\n时间保留 15 段", { fill: "var(--accent-soft)", stroke: "var(--accent)", bold: true }); avg.style.opacity = 0;
+        const segs = []; for (let i = 0; i < 15; i++) segs.push(K.svg(svg, "rect", { x: 40 + i * 44, y: 260, width: 40, height: 22, fill: i > 4 && i < 10 ? "var(--c3)" : "var(--panel-2)", stroke: "var(--line)" }));
+        segs.forEach((s) => (s.style.opacity = 0));
+        const fl = K.svg(svg, "text", { x: 40, y: 305, "font-size": 12 }, "");
+        K.svg(svg, "text", { x: 40, y: 250, "font-size": 12, class: "muted" }, "5 秒 ≈ 500 帧 → 缩小 32 倍 → 15 段；每段再复制 32 份 → 逐帧概率");
+        (async () => {
+          for (const e of els) if (!(await ctx.tween(220, (t) => (e.style.opacity = t)))) return;
+          if (!(await ctx.tween(400, (t) => (avg.style.opacity = t)))) return;
+          for (const s of segs) if (!(await ctx.tween(60, (t) => (s.style.opacity = t)))) return;
+          fl.textContent = "绿色段 = 这几段判断“有鸟 A”，对应大约 1.7–3.3 秒（示意）";
+        })();
+      },
+    },
+    {
+      at: 17, title: "把一段鸟鸣送进模型看看", kicker: "第 17–26 格 · 形状检查",
+      html: `<p>作者读入一条 <code>aldfly</code>（一种霸鹟）的录音，按 32 kHz 采样，画出波形。模型参数：窗长 1024、帧移 320（10 毫秒一帧）、64 个梅尔带、50–14000 Hz、264 类。</p><p>取前 5 秒（<code>y[:SR * 5]</code>）送进 <code>preprocess</code>，得到对数梅尔频谱；再送进卷积特征提取器，看输出形状。作者说：虽然经过多次卷积和池化，第三维（时间）还有 <b>15</b>，仍然保留了时间信息，每个元素就是一个“段”，SED 模型要对每一段给出预测。</p>`,
+      cells: [18, 20, 22, 25], highlight: ["\"hop_size\": 320", "\"mel_bins\": 64", "y[:SR * 5]", "feature_map.size()"],
+      draw(svg, ctx) {
+        const x = getClip();
+        AK.drawWave(svg, { x: 40, y: 30, w: 640, h: 70 }, x);
+        K.svg(svg, "text", { x: 40, y: 22, "font-size": 12, class: "muted" }, "5 秒波形（合成示意）");
+        const sp = melOf(x, 40);
+        const g = AK.drawSpec(svg, { x: 40, y: 125, w: 640, h: 110 }, sp, { maxT: 120, maxF: 40 }); g.style.opacity = 0;
+        K.svg(svg, "text", { x: 40, y: 118, "font-size": 12, class: "muted" }, "对数梅尔频谱：时间 × 梅尔带");
+        const cells = []; for (let i = 0; i < 15; i++) { const c = K.svg(svg, "rect", { x: 40 + i * (640 / 15), y: 270, width: 640 / 15 - 3, height: 30, rx: 3, fill: "var(--c1)", opacity: 0 }); cells.push(c); }
+        const t1 = K.svg(svg, "text", { x: 40, y: 262, "font-size": 12 }, "");
+        ctx.tween(600, (t) => (g.style.opacity = t))
+          .then((ok) => { if (ok) t1.textContent = "特征图的时间维：15 个段（每段约 0.33 秒）"; return ok && ctx.tween(1200, (t) => cells.forEach((c, i) => (c.style.opacity = K.clamp(t * 15 - i, 0, 1) * 0.75))); });
+      },
+    },
+    {
+      at: 27, title: "只有“弱标签”，怎么学“什么时候”", kicker: "第 27–29 格 · 弱监督学习",
+      html: `<p><b>强标注</b>告诉你每个事件的起止时间；<b>弱标注</b>只告诉你“整段里有什么”。这个比赛的训练数据只有弱标注，人工去标每一声鸟叫的起止时间太贵了。</p><p>作者的解释：先在特征提取器后面接一个<b>逐段分类器</b>，输出每段“有没有这种鸟”的概率；再在时间方向<b>汇总</b>成整段概率；用整段概率和整段标签算 BCE 损失（二分类交叉熵），正常训练。训练完以后，整段预测和逐段预测都能拿到。汇总方式就是注意力：<code>norm_att</code> 决定哪几段说了算。</p>`,
+      cells: [27, 28], highlight: ["norm_att = torch.softmax", "x = torch.sum(norm_att * cla, dim=2)"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "强标注：每一声都标了起止时间");
+        K.svg(svg, "rect", { x: 30, y: 40, width: 660, height: 30, fill: "var(--panel-2)" });
+        [[0.12, 0.3], [0.48, 0.58], [0.72, 0.88]].forEach((e) => K.svg(svg, "rect", { x: 30 + e[0] * 660, y: 40, width: (e[1] - e[0]) * 660, height: 30, fill: "var(--c3)" }));
+        K.svg(svg, "text", { x: 30, y: 105, "font-size": 13, "font-weight": 700 }, "弱标注：只知道“这段里有鸟 A”");
+        K.svg(svg, "rect", { x: 30, y: 115, width: 660, height: 30, fill: "color-mix(in srgb, var(--c3) 25%, var(--panel))", stroke: "var(--c3)" });
+        K.svg(svg, "text", { x: 360, y: 135, "text-anchor": "middle", "font-size": 12 }, "鸟 A（整段标签）");
+        // 模型输出的逐段概率逐步学出来
+        const T = 15, truth = Array.from({ length: T }, (_, i) => (i >= 2 && i <= 4) || (i >= 7 && i <= 8) || (i >= 11 && i <= 13) ? 1 : 0);
+        K.svg(svg, "text", { x: 30, y: 180, "font-size": 13, "font-weight": 700 }, "训练后，逐段概率自己“长”在鸟叫的位置（示意）");
+        const bars = truth.map((q, i) => K.svg(svg, "rect", { x: 30 + i * 44, y: 300, width: 40, height: 0, fill: "var(--c1)" }));
+        const ep = K.svg(svg, "text", { x: 690, y: 180, "text-anchor": "end", "font-size": 12, class: "muted" }, "");
+        ctx.wait(400).then((ok) => ok && ctx.tween(2600, (t) => { ep.textContent = "训练进度 " + Math.round(t * 100) + "%"; bars.forEach((b, i) => { const p = 0.3 + (truth[i] * 0.65 - 0.25) * t + 0.05 * Math.sin(i * 3); b.setAttribute("height", p * 100); b.setAttribute("y", 300 - p * 100); b.style.fill = p > 0.5 ? "var(--c3)" : "var(--c1)"; }); }));
+      },
+    },
+    {
+      at: 30, title: "数据集：随机截一段 5 秒", kicker: "第 30–32 格 · Dataset",
+      html: `<p><code>BIRD_CODE</code> 把 264 个鸟名（如 <code>aldfly</code>）编成 0–263 的数字。<code>PANNsDataset</code> 每次读一条录音：</p><ul class="tight"><li>比 5 秒短：放进一段全零的 5 秒里，<b>起点随机</b>；</li><li>比 5 秒长：<b>随机截</b>一段 5 秒；</li><li>标签做成 264 维的向量，对应鸟种位置为 1，其余为 0。</li></ul><p>随机截取本身就是一种数据增强：同一条录音每个训练轮次看到的片段都不一样。但这也带来弱标签的老问题：截到的 5 秒里可能刚好没有鸟叫，标签却说“有”。</p>`,
+      cells: [32], highlight: ["PERIOD = 5", "np.random.randint(len_y - effective_length)", "labels[BIRD_CODE[ebird_code]] = 1"],
+      draw(svg, ctx) {
+        const x = field(16, [[1, 1, 0], [5.5, 0.8, 0], [12, 1.2, 0]], 9);
+        AK.drawWave(svg, { x: 30, y: 50, w: 660, h: 80 }, x);
+        K.svg(svg, "text", { x: 30, y: 40, "font-size": 12, class: "muted" }, "一条 16 秒的训练录音（示意），标签：鸟 A");
+        const win = K.svg(svg, "rect", { x: 30, y: 46, width: (5 / 16) * 660, height: 88, fill: "var(--warn)", "fill-opacity": 0.12, stroke: "var(--warn)", "stroke-width": 2 });
+        const lab = K.svg(svg, "text", { x: 30, y: 170, "font-size": 13 }, "");
+        const r = K.rng(4), starts = [0.3, 4.6, 7.2, 10.9, 2.1];
+        (async () => {
+          for (let k = 0; k < starts.length; k++) {
+            const s = starts[k], from = +win.getAttribute("x");
+            if (!(await ctx.tween(500, (t) => win.setAttribute("x", K.lerp(from, 30 + (s / 16) * 660, t))))) return;
+            const has = [[1, 2], [5.5, 6.3], [12, 13.2]].some((e) => e[1] > s && e[0] < s + 5);
+            lab.textContent = `第 ${k + 1} 轮：截 ${s.toFixed(1)}–${(s + 5).toFixed(1)} 秒 → ${has ? "里面有鸟叫" : "里面恰好没有鸟叫，但标签仍是“鸟 A”（弱标签噪声）"}`;
+            lab.style.fill = has ? "var(--ink)" : "var(--bad)";
+            if (!(await ctx.wait(900))) return;
+          }
+        })();
+        K.svg(svg, "text", { x: 30, y: 220, "font-size": 12 }, "标签向量（264 维）：");
+        for (let i = 0; i < 40; i++) K.svg(svg, "rect", { x: 30 + i * 16, y: 232, width: 14, height: 22, fill: i === 0 ? "var(--c3)" : "var(--panel-2)", stroke: "var(--line)" });
+        K.svg(svg, "text", { x: 30, y: 274, "font-size": 11, class: "muted" }, "aldfly = 0 号位置为 1，其余全为 0（只画出前 40 位）");
+      },
+    },
+    {
+      at: 33, title: "损失函数和评估指标", kicker: "第 33–36 格 · BCE、F1、mAP",
+      html: `<p>损失函数 <code>PANNsLoss</code> 用的是 <b>BCE</b>（二分类交叉熵）：264 种鸟各自当成一道“有 / 没有”的判断题，答错越自信罚得越重。作者还把 NaN、无穷大替换成 0，防止训练崩掉。</p><p>两个评估回调：<b>F1</b> 取概率最大的那一类当预测，算宏平均 F1（每个类别的 F1 再平均，小类别和大类别一样重要）；<b>mAP</b> 对每个类别算平均精确率再平均，看的是排序质量，不需要选阈值。</p>`,
+      cells: [34, 36], highlight: ["nn.BCELoss()", "torch.isnan", "f1_score(y_true, y_pred, average=\"macro\")", "average_precision_score"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 300, h: 250 }, [0, 1], [0, 5], { xlabel: "模型给出的概率 p", ylabel: "损失" });
+        let d1 = "", d0 = "";
+        for (let i = 1; i < 100; i++) { const p = i / 100; d1 += (i > 1 ? "L" : "M") + ax.sx(p) + "," + ax.sy(Math.min(5, -Math.log(p))); d0 += (i > 1 ? "L" : "M") + ax.sx(p) + "," + ax.sy(Math.min(5, -Math.log(1 - p))); }
+        const p1 = K.svg(svg, "path", { d: d1, fill: "none", stroke: "var(--c3)", "stroke-width": 2.5 }), p0 = K.svg(svg, "path", { d: d0, fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 90, y: 60, "font-size": 12, fill: "var(--c3)" }, "真有这种鸟：−log p");
+        K.svg(svg, "text", { x: 220, y: 60, "font-size": 12, fill: "var(--c6)" }, "真没有：−log(1−p)");
+        const len1 = p1.getTotalLength ? p1.getTotalLength() : 600, len0 = p0.getTotalLength ? p0.getTotalLength() : 600;
+        p1.style.strokeDasharray = len1; p0.style.strokeDasharray = len0; p1.style.strokeDashoffset = len1; p0.style.strokeDashoffset = len0;
+        ctx.tween(1500, (t) => { p1.style.strokeDashoffset = len1 * (1 - t); p0.style.strokeDashoffset = len0 * (1 - t); });
+        K.node(svg, 420, 50, 270, 90, "F1（宏平均）\n取概率最大的一类当答案\n每类 F1 再平均", { fill: "var(--panel-2)" });
+        K.node(svg, 420, 170, 270, 90, "mAP\n按概率从高到低排序\n看真答案排得靠不靠前", { fill: "var(--panel-2)" });
+      },
+    },
+    {
+      at: 37, title: "交叉验证 + 预训练权重开始训练", kicker: "第 37–43 格 · 训练",
+      html: `<p>作者把训练文件和 csv 合并，用<b>分层 5 折</b>划分（每一折里各种鸟的比例一致），用第 0 折做验证。</p><p>模型先按 AudioSet 的 <b>527 类</b>建好，加载 PANNs 预训练权重（v3 版本修正为真正加载），再把注意力块<b>换成 264 类</b>的新头。这就是<b>迁移学习</b>：卷积层已经在两百多万段各种声音上学会了“听”，只需要学最后怎么分鸟。优化器 Adam，学习率 0.001，余弦退火，训练 10 轮，按验证集 F1 选最好的一轮。</p><p>作者的评价是“看起来学到了东西”。推理时他用自己本地训练的权重，并说明不公开训练细节，以免比赛中过度分享顶尖方案。</p>`,
+      cells: [39, 41, 42], highlight: ["StratifiedKFold(n_splits=5", "model_config[\"classes_num\"] = 527", "AttBlock(2048, 264", "CosineAnnealingLR", "num_epochs=10"],
+      draw(svg, ctx) {
+        // 5 折
+        for (let k = 0; k < 5; k++) K.svg(svg, "rect", { x: 30 + k * 70, y: 40, width: 64, height: 40, rx: 4, fill: k === 0 ? "color-mix(in srgb, var(--c3) 25%, var(--panel))" : "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: k === 0 ? "var(--c3)" : "var(--c1)" });
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 12 }, "分层 5 折：第 0 折验证，其余训练");
+        K.svg(svg, "text", { x: 62, y: 65, "text-anchor": "middle", "font-size": 11 }, "验证");
+        // 迁移学习：冻结主干 + 新头
+        const body = K.node(svg, 30, 130, 360, 90, "CNN14 主干（AudioSet 预训练）\n已会“听”各种声音", { fill: "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: "var(--c1)" });
+        const oldH = K.node(svg, 420, 130, 120, 90, "旧头\n527 类\n(AudioSet)", { fill: "var(--panel-2)" });
+        const newH = K.node(svg, 420, 130, 120, 90, "新头\n264 类\n(鸟种)", { fill: "var(--accent-soft)", stroke: "var(--accent)", bold: true });
+        newH.style.opacity = 0;
+        const cur = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c3)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 570, y: 140, "font-size": 12 }, "余弦学习率");
+        ctx.wait(600).then((ok) => ok && ctx.tween(800, (t) => { oldH.setAttribute("transform", `translate(0,${t * 120})`); oldH.style.opacity = 1 - t; newH.style.opacity = t; }))
+          .then((ok) => ok && ctx.tween(1200, (t) => { let d = ""; for (let i = 0; i <= 40 * t; i++) d += (i ? "L" : "M") + (570 + i * 3) + "," + (160 + 60 * (1 - Math.cos((Math.PI * i) / 40)) / 2); cur.setAttribute("d", d); }));
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12, class: "muted" }, "Adam · lr 0.001 · 10 轮 · 按验证 F1 选最好的一轮");
+      },
+    },
+    {
+      at: 44, title: "推理：逐帧打分，切出事件", kicker: "第 44–50 格 · 预测",
+      html: `<p>推理时把每条测试录音切成 <b>30 秒</b>一块，不足的补零，逐块送进模型，拿到逐帧概率 <code>framewise_output</code>（每 10 毫秒一帧，264 列）。</p><p>然后对每种鸟：概率 ≥ <b>0.5</b> 的帧标为“有”，<b>连续</b>的“有”合并成一个事件，记下开始时间 onset、结束时间 offset（帧号 × 0.01 秒 + 这一块的起始时间），以及这段时间里的最大和平均置信度。</p>`,
+      cells: [47], highlight: ["PERIOD = 30", "framewise_outputs >= threshold", "onset = 0.01 * detected", "global_time += PERIOD"],
+      draw(svg, ctx) {
+        const T = 300, r = K.rng(12), pa = [], pb = [];
+        for (let i = 0; i < T; i++) { const t = i / T; pa.push(K.clamp(0.08 + 0.8 * Math.exp(-Math.pow((t - 0.25) / 0.06, 2)) + 0.7 * Math.exp(-Math.pow((t - 0.7) / 0.04, 2)) + 0.012 * K.randn(r), 0, 1)); pb.push(K.clamp(0.05 + 0.75 * Math.exp(-Math.pow((t - 0.5) / 0.03, 2)) + 0.012 * K.randn(r), 0, 1)); }
+        const ax = K.axes(svg, { x: 50, y: 30, w: 620, h: 180 }, [0, 30], [0, 1], { xlabel: "时间（秒）", ylabel: "概率" });
+        const line = (p, col) => { let d = ""; p.forEach((v, i) => (d += (i ? "L" : "M") + ax.sx((i / T) * 30) + "," + ax.sy(v))); return K.svg(svg, "path", { d, fill: "none", stroke: col, "stroke-width": 1.6 }); };
+        line(pa, "var(--c3)"); line(pb, "var(--c6)");
+        K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(30), y1: ax.sy(0.5), y2: ax.sy(0.5), stroke: "var(--warn)", "stroke-dasharray": "5 3", "stroke-width": 1.5 });
+        K.svg(svg, "text", { x: ax.sx(30) - 4, y: ax.sy(0.5) - 6, "text-anchor": "end", "font-size": 12, fill: "var(--warn)" }, "阈值 0.5");
+        const seg = (p) => { const out = []; let s = -1; p.forEach((v, i) => { if (v >= 0.5 && s < 0) s = i; if ((v < 0.5 || i === p.length - 1) && s >= 0) { out.push([s, v < 0.5 ? i - 1 : i]); s = -1; } }); return out; };
+        const evs = seg(pa).map((e) => [...e, "鸟 A", "var(--c3)"]).concat(seg(pb).map((e) => [...e, "鸟 B", "var(--c6)"]));
+        const tx = [];
+        evs.forEach((e, k) => { const b = K.svg(svg, "rect", { x: ax.sx((e[0] / T) * 30), y: 250, width: 0, height: 22, fill: e[3], opacity: 0.8 }); const t = K.svg(svg, "text", { x: ax.sx((e[0] / T) * 30), y: 292 + (k % 2) * 16, "font-size": 11 }, `${e[2]} ${((e[0] / T) * 30).toFixed(2)}–${((e[1] / T) * 30).toFixed(2)}s`); t.style.opacity = 0; tx.push([b, t, e]); });
+        (async () => { await ctx.wait(500); for (const [b, t, e] of tx) { if (!(await ctx.tween(400, (q) => b.setAttribute("width", (ax.sx(((e[1] - e[0]) / T) * 30) - ax.sx(0)) * q)))) return; t.style.opacity = 1; } })();
+        K.svg(svg, "text", { x: 50, y: 240, "font-size": 12, class: "muted" }, "连续超过阈值的帧 → 一个事件（示意曲线）");
+      },
+    },
+    {
+      at: 51, title: "后处理：去重叠，对齐到 5 秒段", kicker: "第 51–55 格 · 生成提交",
+      html: `<p>同一条录音里，两个事件如果时间上重叠很多（交并比 IoU &gt; 0.4），只留置信度高的那个。IoU 是“重叠部分 ÷ 两段合起来的总长度”。作者坦言：这一步“可能没必要”，他在别的模型上删掉它，公开榜分数没有变化。</p><p>然后按比赛格式整理：site_1、site_2 要按 <b>5 秒段</b>回答，事件覆盖到的每一个 5 秒段都写上这种鸟；site_3 只要整段答案。最后和测试集的 <code>row_id</code> 对齐，没有检测到鸟的段填 <code>nocall</code>，写出 submission.csv。</p>`,
+      cells: [52, 54], highlight: ["iou > 0.4", "(onset // 5) * 5", "fillna(\"nocall\")"],
+      draw(svg, ctx) {
+        const S = 30, ax = (t) => 40 + (t / S) * 640;
+        for (let k = 0; k < 6; k++) { K.svg(svg, "rect", { x: ax(k * 5), y: 40, width: 640 / 6 - 4, height: 30, fill: "var(--panel-2)", stroke: "var(--line)" }); K.svg(svg, "text", { x: ax(k * 5) + 50, y: 60, "text-anchor": "middle", "font-size": 11 }, `_${(k + 1) * 5}`); }
+        K.svg(svg, "text", { x: 40, y: 30, "font-size": 12 }, "row_id：site_1_音频号_5、_10、_15……（每 5 秒一段）");
+        const evs = [[6.2, 8.4, "鸟 A", "var(--c3)", 0.9], [6.8, 8.9, "鸟 A", "var(--c3)", 0.7], [14.1, 16.3, "鸟 B", "var(--c6)", 0.8], [20.5, 21.4, "鸟 A", "var(--c3)", 0.85]];
+        const bars = evs.map((e, i) => { const b = K.svg(svg, "rect", { x: ax(e[0]), y: 110 + i * 26, width: ax(e[1]) - ax(e[0]), height: 20, fill: e[3], opacity: 0.8 }); K.svg(svg, "text", { x: ax(e[1]) + 6, y: 125 + i * 26, "font-size": 11 }, `${e[2]} 置信度 ${e[4]}`); return b; });
+        const x1 = K.svg(svg, "text", { x: 40, y: 240, "font-size": 12, fill: "var(--bad)" }, "");
+        const out = [];
+        (async () => {
+          if (!(await ctx.wait(800))) return;
+          x1.textContent = "前两个事件 IoU ≈ 0.69 > 0.4 → 删掉置信度低的那个";
+          if (!(await ctx.tween(600, (t) => (bars[1].style.opacity = 0.8 - 0.7 * t)))) return;
+          const fills = { 1: ["鸟 A"], 2: ["鸟 B"], 3: ["鸟 B"], 4: ["鸟 A"] };
+          for (let k = 0; k < 6; k++) { const txt = (fills[k] || ["nocall"]).join(" "); const t = K.svg(svg, "text", { x: ax(k * 5) + 50, y: 290, "text-anchor": "middle", "font-size": 12, "font-weight": 700, fill: txt === "nocall" ? "var(--ink-3)" : "var(--ink)" }, txt); t.style.opacity = 0; out.push(t); }
+          K.svg(svg, "text", { x: 40, y: 270, "font-size": 12 }, "每个 5 秒段的提交答案：");
+          for (const t of out) if (!(await ctx.tween(200, (q) => (t.style.opacity = q)))) return;
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：SpecAugment ---------- */
+  const melA = melOf(getClip(), 40);
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "tn", label: "时间方向抹几条（作者 2）", min: 0, max: 5, step: 1, value: 2 },
+      { id: "tw", label: "时间带最宽几帧（作者 64，这里按 312 帧换算）", min: 2, max: 60, step: 1, value: 20 },
+      { id: "fn", label: "频率方向抹几条（作者 2）", min: 0, max: 5, step: 1, value: 2 },
+      { id: "fw", label: "频率带最宽几个梅尔带（作者 8，共 64 带）", min: 1, max: 16, step: 1, value: 5 },
+      { id: "seed", label: "换一组随机位置", button: true },
+    ],
+    note: "照第 11 格 DropStripes 的写法：每条带的宽度在 0 到最大宽度之间随机，起点随机，把那一块清零。读数是被抹掉的面积和鸟叫能量里被抹掉的比例。",
+    render(svg, v) {
+      const T = melA.length, F = melA[0].length, r = K.rng(31 + v.seed * 7);
+      const M = melA.map((p) => Float32Array.from(p));
+      let lo = Infinity; M.forEach((p) => p.forEach((q) => (lo = Math.min(lo, q))));
+      const kill = M.map((p) => new Uint8Array(p.length));
+      for (let k = 0; k < v.tn; k++) { const d = Math.floor(r() * v.tw * (T / 312)), b = Math.floor(r() * (T - d)); for (let t = b; t < b + d; t++) kill[t].fill(1); }
+      for (let k = 0; k < v.fn; k++) { const d = Math.floor(r() * v.fw * (F / 64)), b = Math.floor(r() * (F - d)); for (let t = 0; t < T; t++) for (let f = b; f < b + d; f++) kill[t][f] = 1; }
+      let area = 0, eAll = 0, eKill = 0;
+      M.forEach((p, t) => p.forEach((q, f) => { const e = Math.exp(q); eAll += e; if (kill[t][f]) { area++; eKill += e; p[f] = lo; } }));
+      AK.drawSpec(svg, { x: 40, y: 20, w: 580, h: 260 }, M, { maxT: 120, maxF: 40, lo, hi: undefined });
+      K.svg(svg, "text", { x: 40, y: 305, "font-size": 12, class: "muted" }, "合成 5 秒鸟鸣的对数梅尔频谱；深色带 = 被清零的区域");
+      return { readout: [
+        { k: "被抹掉的面积", v: ((area / (T * F)) * 100).toFixed(1) + "%" },
+        { k: "鸟叫能量被抹掉", v: ((eKill / eAll) * 100).toFixed(1) + "%", color: eKill / eAll > 0.5 ? "var(--bad)" : "var(--ink)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：三种汇总方式 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "len", label: "鸟叫占了几段（共 15 段）", min: 0, max: 15, step: 1, value: 3 },
+      { id: "noise", label: "背景里像鸟叫的干扰（误报段的概率）", min: 0, max: 0.6, step: 0.02, value: 0.15, fmt: (x) => x.toFixed(2) },
+      { id: "temp", label: "注意力的“尖锐程度”（越大越只看最显眼的段）", min: 0, max: 8, step: 0.2, value: 3, fmt: (x) => x.toFixed(1) },
+    ],
+    note: "每段的“像鸟 A 的概率”cla 由滑块生成；注意力 logits 设为 尖锐程度 × cla，再在时间上做 softmax（第 15 格 AttBlock 的做法）。比较三种把 15 段汇总成整段概率的方式。",
+    render(svg, v) {
+      const T = 15, r = K.rng(5), cla = [];
+      const s0 = Math.floor((T - v.len) / 2);
+      for (let i = 0; i < T; i++) cla.push(i >= s0 && i < s0 + v.len ? 0.85 + 0.1 * r() : K.clamp(v.noise * (0.4 + 0.6 * r()), 0, 1));
+      const logit = cla.map((c) => v.temp * c), m = Math.max(...logit), ex = logit.map((z) => Math.exp(z - m)), Z = ex.reduce((a, b) => a + b), att = ex.map((e) => e / Z);
+      const maxP = Math.max(...cla), meanP = cla.reduce((a, b) => a + b) / T, attP = cla.reduce((s, c, i) => s + c * att[i], 0);
+      const bw = 560 / T;
+      K.svg(svg, "text", { x: 40, y: 20, "font-size": 12, fill: "var(--c1)" }, "每段分类 cla（这一段像不像鸟 A）");
+      cla.forEach((c, i) => K.svg(svg, "rect", { x: 40 + i * bw + 2, y: 140 - c * 110, width: bw - 4, height: c * 110, fill: c > 0.5 ? "var(--c3)" : "var(--c1)" }));
+      K.svg(svg, "text", { x: 40, y: 175, "font-size": 12, fill: "var(--c4)" }, "注意力权重 norm_att（和为 1）");
+      const am = Math.max(...att);
+      att.forEach((a, i) => K.svg(svg, "rect", { x: 40 + i * bw + 2, y: 290 - (a / am) * 100, width: bw - 4, height: (a / am) * 100, fill: "var(--c4)", opacity: 0.8 }));
+      K.svg(svg, "text", { x: 40, y: 320, "font-size": 12, class: "muted" }, `横轴：15 个时间段　最大的注意力权重 = ${am.toFixed(2)}`);
+      const truth = v.len > 0;
+      const col = (p) => ((p > 0.5) === truth ? "var(--good)" : "var(--bad)");
+      return { readout: [
+        { k: "整段真相", v: truth ? "有鸟 A" : "没有鸟 A" },
+        { k: "最大值汇总", v: maxP.toFixed(2), color: col(maxP) },
+        { k: "平均值汇总", v: meanP.toFixed(2), color: col(meanP) },
+        { k: "注意力汇总", v: attP.toFixed(2), color: col(attP) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：阈值切事件 ---------- */
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "th", label: "阈值（作者 0.5）", min: 0.1, max: 0.9, step: 0.01, value: 0.5, fmt: (x) => x.toFixed(2) },
+      { id: "sm", label: "先把概率曲线平滑几帧（作者没做，0 = 不平滑）", min: 0, max: 30, step: 1, value: 0 },
+      { id: "seed", label: "换一段录音", button: true },
+    ],
+    note: "浏览器生成一条 30 秒、3000 帧（每帧 10 ms）的逐帧概率：真实鸟叫处概率高，再加缓慢起伏的随机抖动。照第 47 格的做法：≥ 阈值的帧标为“有”，连续的合并成一个事件。灰色条是真实鸟叫位置，彩色条是切出来的事件。",
+    render(svg, v) {
+      const T = 3000, r = K.rng(70 + v.seed * 13), truth = [];
+      let t = 1 + r() * 2;
+      while (t < 28) { const len = 0.4 + r() * 1.6; truth.push([t, Math.min(29.9, t + len)]); t += len + 1 + r() * 5; }
+      let p = [];
+      let ar = 0;
+      for (let i = 0; i < T; i++) { const s = i / 100, on = truth.some((e) => s >= e[0] && s <= e[1]); ar = 0.97 * ar + 0.243 * K.randn(r); p.push(K.clamp((on ? 0.75 : 0.2) + 0.1 * ar + 0.04 * K.randn(r), 0, 1)); }
+      if (v.sm > 0) { const q = []; for (let i = 0; i < T; i++) { let s = 0, n = 0; for (let j = Math.max(0, i - v.sm); j <= Math.min(T - 1, i + v.sm); j++) { s += p[j]; n++; } q.push(s / n); } p = q; }
+      const ev = []; let s = -1;
+      for (let i = 0; i < T; i++) { if (p[i] >= v.th && s < 0) s = i; if ((p[i] < v.th || i === T - 1) && s >= 0) { ev.push([s / 100, (p[i] < v.th ? i - 1 : i) / 100]); s = -1; } }
+      const ax = K.axes(svg, { x: 50, y: 20, w: 570, h: 170 }, [0, 30], [0, 1], { xlabel: "时间（秒）" });
+      let d = ""; for (let i = 0; i < T; i += 3) d += (i ? "L" : "M") + ax.sx(i / 100).toFixed(1) + "," + ax.sy(p[i]).toFixed(1);
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--c1)", "stroke-width": 1 });
+      K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(30), y1: ax.sy(v.th), y2: ax.sy(v.th), stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+      K.svg(svg, "text", { x: 50, y: 248, "font-size": 12 }, "真实");
+      truth.forEach((e) => K.svg(svg, "rect", { x: ax.sx(e[0]), y: 236, width: ax.sx(e[1]) - ax.sx(e[0]), height: 16, fill: "var(--ink-3)", opacity: 0.6 }));
+      K.svg(svg, "text", { x: 50, y: 282, "font-size": 12 }, "检测");
+      ev.forEach((e) => K.svg(svg, "rect", { x: ax.sx(e[0]), y: 268, width: Math.max(1.5, ax.sx(e[1]) - ax.sx(e[0])), height: 16, fill: "var(--c3)", opacity: 0.9 }));
+      // 命中：检测事件与真实事件 IoU > 0.3
+      const iou = (a, b) => { const i = Math.min(a[1], b[1]) - Math.max(a[0], b[0]); return i <= 0 ? 0 : i / (Math.max(a[1], b[1]) - Math.min(a[0], b[0])); };
+      const hit = truth.filter((tr) => ev.some((e) => iou(tr, e) > 0.3)).length;
+      const single = ev.filter((e) => e[1] === e[0]).length;
+      K.svg(svg, "text", { x: 50, y: 316, "font-size": 12, class: "muted" }, `其中只有 1 帧的事件 ${single} 个（原代码在这种情况下取最大值会遇到空切片）`);
+      return { readout: [
+        { k: "切出的事件数", v: String(ev.length), color: ev.length > truth.length * 2 ? "var(--bad)" : "var(--ink)" },
+        { k: "真实鸟叫次数", v: String(truth.length) },
+        { k: "找到的真实鸟叫", v: `${hit} / ${truth.length}`, color: hit === truth.length ? "var(--good)" : "var(--warn)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

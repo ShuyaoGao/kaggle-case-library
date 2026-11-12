@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>神经风格迁移</title>
+<meta name="description" content="Kaggle 案例拆解：用预训练的 VGG19 当“眼睛”，同时比较内容和 Gram 矩阵表示的风格，直接修改像素，把风景照画成毕加索、保罗·克利的风格。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">图像 · 风格迁移 · 预训练网络当“尺子”</div>
+  <h1>把风景照画成毕加索：神经风格迁移</h1>
+  <p class="en">Style Transfer Deep Learning Algorithm</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">神经风格迁移</span><span class="tag method">VGG19 预训练特征</span><span class="tag method">内容损失</span>
+    <span class="tag method">Gram 矩阵风格损失</span><span class="tag method">对像素求梯度</span><span class="tag method">L-BFGS 优化</span><span class="tag method">Keras</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Victor Basu</b>（basu369victor）</span>
+    <span>Kaggle 点赞 <b>937</b>（2026-11 抓取）</span>
+    <span>数据集 <b>ikarus777/best-artworks-of-all-time</b> + <b>duttadebadri/image-classification</b></span>
+    <span><a href="https://www.kaggle.com/code/basu369victor/style-transfer-deep-learning-algorithm" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">一张风景照 + 一幅名画</div><p>内容图取自一个图片分类数据集里“旅行与探险”类的照片；风格图取自名画数据集里毕加索、保罗·克利的作品。<span data-cell="4">出处</span> <span data-cell="6">出处</span></p></div>
+    <div class="card panel"><h3>要做什么</h3><div class="big">内容像照片，笔触像名画</div><p>生成一张新图：画面里的东西和照片一样，颜色、笔触、纹理却像那幅画。手机里的“艺术滤镜”就是这个思路。<span data-cell="1">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">VGG19 当尺子，直接改像素</div><p>不训练任何网络。用现成的 VGG19 量出“内容差多少”“风格差多少”，再用 L-BFGS 一点点修改生成图的像素，让总差距变小。<span data-cell="31">出处</span> <span data-cell="45">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">风格迁移成功，但没融合好</div><p>作者结论：结果“不算完美”，风格没有和内容完全融为一体；可以多迭代、换能保留边缘的算法或换优化器来改进。<span data-cell="55">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">这个案例不需要成千上万张训练图：<b>每次只用两张图</b>。数据集只是“图库”，作者从里面挑图。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">用到的图</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>角色</th><th>来自</th><th>具体文件</th></tr>
+        <tr><td><b>内容图</b>（要保留画面）</td><td>duttadebadri/image-classification，“travel and adventure” 类</td><td><code>13.jpg</code> 及另外 3 张 Places365 风景照 <span data-cell="6">第 6 格</span> <span data-cell="52">第 52 格</span></td></tr>
+        <tr><td><b>风格图</b>（要学笔触）</td><td>ikarus777/best-artworks-of-all-time，按画家分文件夹</td><td>毕加索 <code>Pablo_Picasso_92.jpg</code>；保罗·克利 96、24、83 号 <span data-cell="6">第 6 格</span> <span data-cell="52">第 52–54 格</span></td></tr>
+        <tr><td><b>生成图</b>（要求的答案）</td><td>不是数据，是被优化的“变量”</td><td>从内容图出发，一点点改像素 <span data-cell="39">第 39 格</span></td></tr>
+      </table></div>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">关键数字（来自作者代码）</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">生成图高度</div><div class="v">400 像素</div></div>
+        <div class="stat-tile"><div class="k">风格层 / 内容层</div><div class="v">5 层 / 1 层</div></div>
+        <div class="stat-tile"><div class="k">内容权重 : 风格权重</div><div class="v" style="color:var(--c1)">0.025 : 1.0</div></div>
+        <div class="stat-tile"><div class="k">外层迭代</div><div class="v" style="color:var(--c3)">400 次</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">高度见 <span data-cell="7">第 7 格</span>，层见 <span data-cell="20">第 20 格</span>，权重见 <span data-cell="31">第 31 格</span>，迭代见 <span data-cell="45">第 45 格</span>。宽度按原图比例缩放。VGG19 本身是在 ImageNet 上预训练好的，作者在第 8 格介绍了它的来历。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="25">
+    <h3>动手试试 A · Gram 矩阵为什么只记“风格”不记“位置” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="45">
+    <h3>动手试试 B · 在浏览器里做一次迷你风格迁移 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>VGG19 原本用于分类，这里只要它提取特征，所以去掉了分类用的顶层</td><td><span data-cell="19">第 19 格</span></td></tr>
+        <tr><td>作者自己写的“按层提取特征”版本没有成功，留给读者修改尝试</td><td><span data-cell="26">第 26 格</span></td></tr>
+        <tr><td>不建议用 <code>maxiter</code> 控制迭代次数，而是外面套循环迭代</td><td><span data-cell="44">第 44 格</span></td></tr>
+        <tr><td>生成图不算完美：风格没有和内容图完全融合</td><td><span data-cell="55">第 55 格</span></td></tr>
+        <tr><td>改进方向：增加迭代、换能保留边缘的算法、换优化器</td><td><span data-cell="55">第 55 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">作者没有给出数字型指标（风格迁移本来也没有“准确率”）。损失值和生成图都在运行输出里，Kaggle 下载的源码不带输出，这里不列。</p>
+      <p class="callout">读代码发现的问题：<br>① Gram 矩阵和风格损失的归一化（除以通道数和像素数）都被注释掉了 <span data-cell="25">第 25 格</span>。于是风格损失的数量级远大于内容损失，0.025 : 1.0 的权重并不代表两者真实的平衡；这可能正是作者说“风格没融合好”的原因之一。<br>② 外层循环 400 次、每次 <code>maxfun=20</code>，最多要算 8000 次 VGG19 的前向和反向，非常耗时 <span data-cell="45">第 45 格</span>。<br>③ <code>Evaluator</code> 里初始化写的是 <code>grads_values</code>，后面用的是 <code>grad_values</code>，名字不一致（碰巧不影响运行）<span data-cell="42">第 42 格</span>。<br>④ <code>Run_StyleTransfer</code> 每换一对图片都重新建一次 VGG19 和计算图 <span data-cell="51">第 51 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>照片艺术滤镜、给游戏或动画快速换画风、设计稿的多风格预览。</li>
+        <li><b>同类问题：</b>纹理合成（只要风格不要内容）、照片修复、“深度梦境”可视化，都是“固定网络、优化输入图片”。</li>
+        <li><b>可迁移的套路：</b>预训练网络的中间层 = 现成的“感知尺子”。浅层管纹理、深层管物体；用 Gram 矩阵描述纹理统计；对输入求梯度而不是对权重求梯度。</li>
+        <li><b>后来的发展：</b>这种逐张优化很慢；后来出现了“训练一个前馈网络一次出图”的快速风格迁移，以及今天的扩散模型风格化。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>预处理：缩放到高 400，VGG19 的 <code>preprocess_input</code>（RGB→BGR、减 ImageNet 均值）<span data-cell="9">第 9 格</span></li>
+        <li>网络：VGG19（不含顶层），三张图拼成一个批次输入 <span data-cell="16">第 16 格</span> <span data-cell="18">第 18 格</span></li>
+        <li>内容损失：block5_conv2 特征的平方差之和 <span data-cell="23">第 23 格</span></li>
+        <li>风格损失：block1–5_conv1 的 Gram 矩阵平方差 <span data-cell="25">第 25 格</span></li>
+        <li>优化：对生成图像素求梯度，scipy 的 L-BFGS <span data-cell="36">第 36 格</span> <span data-cell="45">第 45 格</span></li>
+        <li>后处理：加回均值、BGR→RGB、截到 0–255 <span data-cell="34">第 34 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>这个方法一个网络都没训练，那它“学”的是什么？被优化的到底是谁？</li>
+      <li>内容用的是很深的 block5 层，风格用的是 block1 到 block5 的第一层。为什么内容要用深层？只用浅层算内容会怎样？</li>
+      <li>Gram 矩阵把“哪里有什么”的信息丢掉了，只剩“哪些花纹经常一起出现”。在实验 A 里打乱图块后 Gram 几乎不变，这说明了什么？</li>
+      <li>作者觉得风格没融合好。结合“归一化被注释掉”这一点，你会先调哪个参数？</li>
+      <li>用 AI 把照片转成某位在世画家的风格并出售，你觉得合适吗？名画已经过了版权期，和在世画家有什么不同？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Victor Basu（Kaggle：basu369victor），代码思路来自 Keras 官方的神经风格迁移示例（Gatys 等人 2015 年的方法）。版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的图像均为程序生成的示意图，不是作者使用的照片和名画。数据集：ikarus777/best-artworks-of-all-time、duttadebadri/image-classification。
+</footer>
+</main>
+
+<script src="nb/neural-style-transfer-vgg19.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 小图工具 ---------- */
+  const N = 32;
+  const mk = (f) => { const a = new Float64Array(N * N); for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) a[i * N + j] = f((j + 0.5) / N, (i + 0.5) / N); return a; };
+  const HOUSE = mk((x, y) => { if (y > 0.45 && y < 0.9 && x > 0.2 && x < 0.8) return x > 0.43 && x < 0.57 && y > 0.65 ? 0.1 : 0.85; if (y <= 0.45 && y > 0.12 && Math.abs(x - 0.5) < (y - 0.12)) return 0.6; return 0.15; });
+  const TREE = mk((x, y) => { if (Math.hypot((x - 0.5) / 0.32, (y - 0.38) / 0.28) < 1) return 0.8; if (Math.abs(x - 0.5) < 0.07 && y > 0.6 && y < 0.92) return 0.45; return 0.1; });
+  const STYLES = {
+    stripes: mk((x, y) => 0.5 + 0.5 * Math.sin((x + y) * 2 * Math.PI * 5)),
+    dots: mk((x, y) => { const u = ((x * 6) % 1) - 0.5, v = ((y * 6) % 1) - 0.5; return Math.hypot(u, v) < 0.25 ? 1 : 0; }),
+    waves: mk((x, y) => 0.5 + 0.5 * Math.sin(2 * Math.PI * (y * 6 + 0.6 * Math.sin(2 * Math.PI * x * 2)))),
+    grid: mk((x, y) => ((Math.floor(x * 8) + Math.floor(y * 8)) % 2 ? 0.9 : 0.1)),
+  };
+  function pix(svg, x, y, size, arr, color) {
+    const n = Math.round(Math.sqrt(arr.length)), s = size / n, g = K.svg(svg, "g");
+    K.svg(g, "rect", { x, y, width: size, height: size, fill: "var(--panel-2)", stroke: "var(--line)" });
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) { const v = arr[i * n + j]; if (v > 0.03) K.svg(g, "rect", { x: x + j * s, y: y + i * s, width: s + 0.3, height: s + 0.3, fill: color || "var(--ink)", "fill-opacity": K.clamp(v, 0, 1) }); }
+    return g;
+  }
+  /* 6 个手工卷积核：充当迷你版“VGG 的浅层特征” */
+  const FIL = [[-1, 0, 1, -2, 0, 2, -1, 0, 1], [-1, -2, -1, 0, 0, 0, 1, 2, 1], [0, 1, 2, -1, 0, 1, -2, -1, 0], [2, 1, 0, 1, 0, -1, 0, -1, -2], [0, -1, 0, -1, 4, -1, 0, -1, 0], [1, 1, 1, 1, 1, 1, 1, 1, 1].map((v) => v / 9)];
+  const FNAME = ["竖边", "横边", "斜边↗", "斜边↘", "斑点", "平均亮度"];
+  function conv(x, w) { const o = new Float64Array(N * N); for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) { let s = 0; for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) { const ii = i + a, jj = j + b; if (ii < 0 || jj < 0 || ii >= N || jj >= N) continue; s += x[ii * N + jj] * w[(a + 1) * 3 + b + 1]; } o[i * N + j] = s; } return o; }
+  function convT(g, w) { const o = new Float64Array(N * N); for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) { const v = g[i * N + j]; if (!v) continue; for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) { const ii = i + a, jj = j + b; if (ii < 0 || jj < 0 || ii >= N || jj >= N) continue; o[ii * N + jj] += v * w[(a + 1) * 3 + b + 1]; } } return o; }
+  const relu = (a) => a.map((v) => Math.max(0, v));
+  function gram(F) { const k = F.length, G = []; for (let a = 0; a < k; a++) { G.push([]); for (let b = 0; b < k; b++) { let s = 0; for (let p = 0; p < N * N; p++) s += F[a][p] * F[b][p]; G[a].push(s / (N * N)); } } return G; }
+  const gdist = (A, B) => { let s = 0; for (let a = 0; a < A.length; a++) for (let b = 0; b < A.length; b++) s += (A[a][b] - B[a][b]) ** 2; return Math.sqrt(s); };
+  function heat(svg, x, y, size, G, mx) {
+    const k = G.length, s = size / k;
+    for (let a = 0; a < k; a++) for (let b = 0; b < k; b++) K.svg(svg, "rect", { x: x + b * s, y: y + a * s, width: s - 1, height: s - 1, fill: "var(--c2)", "fill-opacity": 0.08 + 0.92 * K.clamp(Math.abs(G[a][b]) / mx, 0, 1) });
+  }
+
+  const steps = [
+    {
+      at: 0, title: "什么是风格迁移", kicker: "第 0–2 格 · 作者的介绍",
+      html: `<p>作者从手机里的“艺术滤镜”说起：这些滤镜怎么让照片看起来像油画？答案是<b>风格迁移</b>：用另一张图的风格，重新“画”一遍这张图 <span data-cell="1">第 1 格</span>。</p><p>这份 notebook 用的是最经典的神经风格迁移：同时盯住两个目标，<b>内容</b>要像照片，<b>风格</b>要像名画。动画：一张房子（内容）+ 一块斜条纹（风格）→ 一张“条纹画法的房子”。</p>`,
+      cells: [0, 1, 2],
+      draw(svg, ctx) {
+        const a = pix(svg, 40, 90, 150, HOUSE, "var(--c1)");
+        K.svg(svg, "text", { x: 115, y: 268, "text-anchor": "middle", "font-size": 13 }, "内容：照片");
+        K.svg(svg, "text", { x: 215, y: 172, "text-anchor": "middle", "font-size": 28 }, "+");
+        pix(svg, 240, 90, 150, STYLES.stripes, "var(--c2)");
+        K.svg(svg, "text", { x: 315, y: 268, "text-anchor": "middle", "font-size": 13 }, "风格：名画的笔触");
+        K.svg(svg, "text", { x: 420, y: 172, "text-anchor": "middle", "font-size": 28 }, "→");
+        const mix = HOUSE.map((v, i) => K.clamp(v * (0.55 + 0.6 * STYLES.stripes[i]), 0, 1));
+        const g = pix(svg, 460, 90, 150, mix, "var(--c3)"); g.style.opacity = 0;
+        K.svg(svg, "text", { x: 535, y: 268, "text-anchor": "middle", "font-size": 13 }, "生成图（示意）");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1200, (t) => (g.style.opacity = t)));
+      },
+    },
+    {
+      title: "选一张风景照和一幅毕加索", kicker: "第 3–8 格 · 读入路径与尺寸",
+      html: `<p>导入 Keras、VGG19 和 scipy 的 L-BFGS 优化器 <span data-cell="3">第 3 格</span>。内容图选“旅行与探险”类的 <code>13.jpg</code>，风格图选毕加索的第 92 号作品 <span data-cell="6">第 6 格</span>。</p><p>生成图的高度定为 400 像素，宽度按内容图的长宽比算出来 <span data-cell="7">第 7 格</span>。图越大越慢，所以不用原图尺寸。</p>`,
+      cells: [3, 4, 6, 7], highlight: ["Pablo_Picasso", "img_nrows = 400"],
+      draw(svg, ctx) {
+        const f1 = K.node(svg, 60, 70, 240, 160, "风景照\n（宽 W × 高 H）", { fill: "color-mix(in srgb, var(--c1) 12%, var(--panel))", stroke: "var(--c1)" });
+        const f2 = K.node(svg, 420, 70, 240, 160, "生成图\n宽 = W × 400 / H\n高 = 400", { bold: true, fill: "color-mix(in srgb, var(--c3) 14%, var(--panel))", stroke: "var(--c3)" });
+        f2.style.opacity = 0;
+        K.arrow(svg, 304, 150, 416, 150);
+        K.svg(svg, "text", { x: 360, y: 280, "text-anchor": "middle", "font-size": 13 }, "保持长宽比，把高度固定成 400 像素");
+        ctx.tween(1200, (t) => { f2.style.opacity = t; f2.setAttribute("transform", `translate(${(1 - t) * -60},0) `); });
+      },
+    },
+    {
+      title: "按 VGG19 的习惯准备图片", kicker: "第 9–11 格 · 预处理与显示",
+      html: `<p>作者先介绍 VGG：牛津大学视觉几何组提出，2014 年 ImageNet 比赛分类第二、定位第一；VGG19 用 ImageNet 预训练过 <span data-cell="8">第 8 格</span>。</p><p><code>preprocess_image</code> 把图片读进来、缩放、加一个“批次”维度，再交给 <code>vgg19.preprocess_input</code>：把颜色顺序从 RGB 换成 BGR，并减去 ImageNet 图片的平均颜色 <span data-cell="9">第 9 格</span>。因为 VGG19 当年就是这样训练的，喂给它的图必须是同一种“口味”。</p>`,
+      cells: [9, 10, 11], highlight: ["preprocess_input", "expand_dims"],
+      draw(svg, ctx) {
+        const C = [["R", "var(--c6)"], ["G", "var(--c3)"], ["B", "var(--c1)"]];
+        const els = C.map((c, i) => K.node(svg, 80 + i * 90, 80, 70, 70, c[0], { bold: true, fill: `color-mix(in srgb, ${c[1]} 25%, var(--panel))`, stroke: c[1] }));
+        K.svg(svg, "text", { x: 80, y: 60, "font-size": 13 }, "原图通道顺序");
+        const means = ["−123.68", "−116.78", "−103.94"];
+        const mt = means.map((m, i) => K.svg(svg, "text", { x: 115 + i * 90, y: 180, "text-anchor": "middle", "font-size": 12, fill: "var(--warn)" }, ""));
+        K.svg(svg, "text", { x: 420, y: 110, "font-size": 13 }, "① RGB → BGR（顺序倒过来）");
+        K.svg(svg, "text", { x: 420, y: 140, "font-size": 13 }, "② 每个通道减去 ImageNet 均值");
+        K.svg(svg, "text", { x: 420, y: 170, "font-size": 12, class: "muted" }, "（均值数值见作者第 34 格的反处理）");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1200, (t) => { els.forEach((e, i) => e.setAttribute("transform", `translate(${(2 - 2 * i) * 90 * t},0)`)); })).then((ok) => ok && ctx.tween(600, (t) => mt.forEach((m, i) => { m.textContent = t > 0.5 ? ["B −103.94", "G −116.78", "R −123.68"][i] : ""; m.style.opacity = t; })));
+      },
+    },
+    {
+      title: "三张图拼成一个批次", kicker: "第 12–17 格 · 内容、风格、生成图",
+      html: `<p>内容图和风格图用 <code>K.variable</code> 存成固定不变的张量 <span data-cell="12">第 12 格</span>；生成图用 <code>K.placeholder</code> 留一个“空位”，之后每一轮都往里填新的像素 <span data-cell="15">第 15 格</span>。作者在第 14 格解释了 Variable 和 placeholder 的区别。</p><p>然后把三张图按顺序拼成一个批次：第 0 张内容、第 1 张风格、第 2 张生成图 <span data-cell="16">第 16 格</span>。这样 VGG19 跑一次就能同时拿到三张图的特征，后面用下标 0、1、2 取出来比较。</p>`,
+      cells: [12, 15, 16], highlight: ["K.placeholder", "K.concatenate"],
+      draw(svg, ctx) {
+        const imgs = [[HOUSE, "第 0 张：内容", "var(--c1)"], [STYLES.stripes, "第 1 张：风格", "var(--c2)"], [mk(() => 0), "第 2 张：生成图（空位）", "var(--c3)"]];
+        const gs = imgs.map((m, i) => { const g = K.svg(svg, "g"); pix(g, 0, 0, 90, m[0], m[2]); K.svg(g, "text", { x: 45, y: 110, "text-anchor": "middle", "font-size": 12 }, m[1]); g.setAttribute("transform", `translate(${60 + i * 220},40)`); return g; });
+        const batch = K.svg(svg, "rect", { x: 40, y: 200, width: 640, height: 0, rx: 8, fill: "none", stroke: "var(--accent)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 13 }, "VGG19 一次前向，三张图的特征都有了");
+        ctx.wait(400).then((ok) => ok && ctx.tween(1400, (t) => { gs.forEach((g, i) => g.setAttribute("transform", `translate(${K.lerp(60 + i * 220, 140 + i * 160, t)},${K.lerp(40, 180, t)}) scale(${1 - 0.25 * t})`)); K.set(batch, { y: 170, height: 120 * t }); }));
+      },
+    },
+    {
+      title: "VGG19 当“眼睛”：选哪几层", kicker: "第 18–22 格 · 网络与层",
+      html: `<p>加载不带顶层的 VGG19，权重来自本地文件 <span data-cell="18">第 18 格</span>。作者说明：这里不是要分类，只要它看图的能力，所以不要分类用的全连接层 <span data-cell="19">第 19 格</span>。</p><p>选层 <span data-cell="20">第 20 格</span>：</p><ul class="tight"><li><b>内容层</b>：<code>block5_conv2</code>，很深的一层，记的是“画面里有什么、在哪”；</li><li><b>风格层</b>：<code>block1_conv1</code> 到 <code>block5_conv1</code> 五层，从细纹理到大块笔触都照顾到。</li></ul><p>再把每层的输出存进一个字典，方便按名字取 <span data-cell="21">第 21 格</span>。</p>`,
+      cells: [18, 20, 21], highlight: ["include_top = False", "block5_conv2", "block1_conv1"],
+      draw(svg, ctx) {
+        const B = [["block1", 64], ["block2", 128], ["block3", 256], ["block4", 512], ["block5", 512]];
+        const els = B.map((b, i) => {
+          const h = 200 - i * 30, g = K.svg(svg, "g"); g.style.opacity = 0;
+          K.svg(g, "rect", { x: 40 + i * 120, y: 160 - h / 2, width: 90, height: h, rx: 6, fill: "var(--panel-2)", stroke: "var(--ink-3)" });
+          K.svg(g, "text", { x: 85 + i * 120, y: 165, "text-anchor": "middle", "font-size": 12 }, b[0]);
+          K.svg(g, "text", { x: 85 + i * 120, y: 182, "text-anchor": "middle", "font-size": 10, class: "muted" }, b[1] + " 通道");
+          K.svg(g, "circle", { cx: 85 + i * 120, cy: 160 - h / 2 + 14, r: 6, fill: "var(--c2)" });
+          if (i === 4) K.svg(g, "circle", { cx: 70 + i * 120, cy: 160 - h / 2 + 30, r: 6, fill: "var(--c1)" });
+          return g;
+        });
+        K.svg(svg, "circle", { cx: 60, cy: 300, r: 6, fill: "var(--c2)" }); K.svg(svg, "text", { x: 72, y: 305, "font-size": 12 }, "风格层：每个 block 的 conv1（浅层管细纹理，深层管大笔触）");
+        K.svg(svg, "circle", { cx: 60, cy: 325, r: 6, fill: "var(--c1)" }); K.svg(svg, "text", { x: 72, y: 330, "font-size": 12 }, "内容层：block5_conv2（只关心“有什么、在哪”）");
+        (async () => { for (const e of els) if (!(await ctx.tween(300, (t) => (e.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "内容损失：特征图逐点比", kicker: "第 23–24 格 · 内容",
+      html: `<p>内容损失就是：在 <code>block5_conv2</code> 这一层，生成图的特征图和内容图的特征图逐个位置相减、平方、加总 <span data-cell="23">第 23 格</span>。</p><p>为什么不直接比像素？因为像素对“画风”太敏感：同一栋房子，换成条纹笔触后像素全变了，但在深层特征里“这里有一栋房子”的信号还在。比较深层特征，等于只要求“内容对”，不要求“每个点颜色都一样”。</p>`,
+      cells: [23], highlight: ["K.sum(K.square(target - base_content))"],
+      draw(svg, ctx) {
+        const A = relu(conv(HOUSE, FIL[0])), B = relu(conv(HOUSE.map((v, i) => K.clamp(v * (0.55 + 0.6 * STYLES.stripes[i]), 0, 1)), FIL[0]));
+        const mx = Math.max(...A, ...B, 0.01);
+        pix(svg, 40, 60, 160, A.map((v) => v / mx), "var(--c1)");
+        pix(svg, 280, 60, 160, B.map((v) => v / mx), "var(--c3)");
+        K.svg(svg, "text", { x: 120, y: 245, "text-anchor": "middle", "font-size": 12 }, "内容图的特征（示意）");
+        K.svg(svg, "text", { x: 360, y: 245, "text-anchor": "middle", "font-size": 12 }, "生成图的特征（示意）");
+        K.svg(svg, "text", { x: 240, y: 145, "text-anchor": "middle", "font-size": 22 }, "−");
+        const sc = K.svg(svg, "rect", { x: 160, y: 30, width: 1, height: 200, fill: "var(--warn)", opacity: 0.7 });
+        const lab = K.svg(svg, "text", { x: 500, y: 140, "font-size": 15, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 500, y: 170, "font-size": 12, class: "muted" }, "Σ (差)²");
+        let sum = 0;
+        ctx.tween(2200, (t) => {
+          const col = Math.floor(t * N);
+          K.set(sc, { x: 40 + (col * 160) / N, width: 160 / N });
+          sum = 0; for (let i = 0; i < N; i++) for (let j = 0; j < Math.min(N, col); j++) sum += (A[i * N + j] - B[i * N + j]) ** 2;
+          lab.textContent = "内容损失 ≈ " + sum.toFixed(1);
+        });
+      },
+    },
+    {
+      title: "风格损失：Gram 矩阵", kicker: "第 25–26 格 · 风格",
+      html: `<p>风格怎么量？作者解释 <span data-cell="24">第 24 格</span>：把某一层的特征图摊平，两两做点积，得到 <b>Gram 矩阵</b>。矩阵里第 (i, j) 格大，说明第 i 种花纹和第 j 种花纹<b>经常同时出现</b>；接近 0 说明很少一起出现。</p><p>风格损失 = 生成图和风格图的 Gram 矩阵逐格相减、平方、加总 <span data-cell="25">第 25 格</span>。关键在于：点积是把所有位置<b>加在一起</b>，所以“在哪里”的信息被抹掉了，只剩“画面整体上是什么花纹搭配”，这正是我们说的“风格”。</p><p>注意代码里归一化的部分（除以通道数、像素数）被注释掉了。</p>`,
+      cells: [25], highlight: ["tf.matmul(a, a, transpose_a=True)", "return gram#/tf.cast(n, tf.float32)"],
+      draw(svg, ctx) {
+        const F = FIL.slice(0, 4).map((w) => relu(conv(STYLES.stripes, w)));
+        const mx = Math.max(...F.map((f) => Math.max(...f)));
+        F.forEach((f, k) => { pix(svg, 30, 20 + k * 78, 70, f.map((v) => v / mx), "var(--c2)"); K.svg(svg, "text", { x: 108, y: 60 + k * 78, "font-size": 12 }, FNAME[k]); });
+        K.svg(svg, "text", { x: 30, y: 336, "font-size": 11, class: "muted" }, "条纹图的 4 张特征图");
+        const G = gram(F), gm = Math.max(...G.flat());
+        const s = 50, ox = 300, oy = 60;
+        const cells = [];
+        for (let a = 0; a < 4; a++) for (let b = 0; b < 4; b++) cells.push({ a, b, el: K.svg(svg, "rect", { x: ox + b * s, y: oy + a * s, width: s - 2, height: s - 2, fill: "var(--c2)", "fill-opacity": 0 }) });
+        FNAME.slice(0, 4).forEach((n, k) => { K.svg(svg, "text", { x: ox - 6, y: oy + k * s + 30, "text-anchor": "end", "font-size": 11 }, n); K.svg(svg, "text", { x: ox + k * s + 24, y: oy - 8, "text-anchor": "middle", "font-size": 11 }, n); });
+        K.svg(svg, "text", { x: ox + 100, y: oy + 230, "text-anchor": "middle", "font-size": 12 }, "Gram 矩阵：两两“同时亮”的程度");
+        const hl = K.svg(svg, "text", { x: 540, y: 120, "font-size": 12 }, "");
+        (async () => {
+          for (const c of cells) {
+            hl.textContent = `${FNAME[c.a]} · ${FNAME[c.b]}`;
+            if (!(await ctx.tween(110, (t) => K.set(c.el, { "fill-opacity": (0.08 + 0.92 * G[c.a][c.b] / gm) * t })))) return;
+          }
+          hl.textContent = "条纹是↗方向：只有“斜边↗”那一格最亮";
+        })();
+      },
+    },
+    {
+      title: "作者自己的尝试：没跑通的四格", kicker: "第 27–30 格 · 注释掉的代码",
+      html: `<p>作者坦白：接下来四格是他“自己的写法”，想用 <code>get_layer</code> 按名字取出风格层和内容层、按层加权求和，“但没有成功”，所以全部注释掉，留给读者改了再试 <span data-cell="26">第 26 格</span>。</p><p>保留失败的尝试并说明原因，是很诚实的做法。也能从注释里看到他的思路：每层风格损失权重相等（1/层数），内容损失同理 <span data-cell="30">第 30 格</span>，这和下一格真正运行的版本是一致的。</p>`,
+      cells: [27, 28, 29, 30],
+      draw(svg, ctx) {
+        const lines = ["# style_outputs = [model.get_layer(name).output ...]", "# content_outputs = [...]", "# gram_style_features = [gram_matrix(...) ...]", "# weight_per_style_layer = 1.0 / num_style_layers", "# loss = style_score + content_score"];
+        const els = lines.map((l, i) => K.svg(svg, "text", { x: 40, y: 60 + i * 40, "font-size": 14, "font-family": "var(--mono)", fill: "var(--ink-3)" }, l));
+        const x = K.svg(svg, "text", { x: 560, y: 160, "font-size": 60, fill: "var(--bad)", "font-weight": 700 }, "✗");
+        x.style.opacity = 0;
+        K.svg(svg, "text", { x: 40, y: 290, "font-size": 13 }, "作者：没跑通，先注释掉，读者可以改了再试");
+        ctx.tween(800, (t) => els.forEach((e) => (e.style.opacity = t))).then((ok) => ok && ctx.tween(500, (t) => (x.style.opacity = t)));
+      },
+    },
+    {
+      title: "总损失：内容 × 0.025 + 风格 × 1.0", kicker: "第 31–33 格 · 组装损失",
+      html: `<p>真正运行的版本 <span data-cell="31">第 31 格</span>：</p><ul class="tight"><li>从字典里取 <code>block5_conv2</code> 的输出，第 0 张（内容图）和第 2 张（生成图）比，乘 <b>0.025</b>；</li><li>对 5 个风格层，每层取第 1 张（风格图）和第 2 张（生成图）比 Gram 矩阵，乘 <b>1.0 / 5</b>；</li><li>全部加起来就是总损失。</li></ul><p>这两个权重像一个“调色旋钮”：风格权重越大，画面越像名画、越不像原照片。由于 Gram 没有归一化，风格项的数量级本来就大很多，实际的平衡比 0.025 : 1 看上去还要偏向风格。</p>`,
+      cells: [31], highlight: ["content_weight=0.025", "style_weight / len(feature_layers)"],
+      draw(svg, ctx) {
+        const bc = K.svg(svg, "rect", { x: 120, y: 200, width: 80, height: 0, fill: "var(--c1)" });
+        const bs = K.svg(svg, "rect", { x: 280, y: 200, width: 80, height: 0, fill: "var(--c2)" });
+        K.svg(svg, "line", { x1: 80, x2: 420, y1: 200, y2: 200, stroke: "var(--ink-3)" });
+        K.svg(svg, "text", { x: 160, y: 222, "text-anchor": "middle", "font-size": 12 }, "内容 × 0.025");
+        K.svg(svg, "text", { x: 320, y: 222, "text-anchor": "middle", "font-size": 12 }, "风格 × 1.0（5 层平均）");
+        K.svg(svg, "text", { x: 480, y: 100, "font-size": 15, "font-weight": 700 }, "总损失 = 两者相加");
+        K.svg(svg, "text", { x: 480, y: 130, "font-size": 12, class: "muted" }, "柱高只是示意：风格项通常");
+        K.svg(svg, "text", { x: 480, y: 150, "font-size": 12, class: "muted" }, "大得多（Gram 未归一化）");
+        ctx.tween(1200, (t) => { K.set(bc, { y: 200 - 40 * t, height: 40 * t }); K.set(bs, { y: 200 - 160 * t, height: 160 * t }); });
+      },
+    },
+    {
+      title: "要改的不是网络，是像素", kicker: "第 34–38 格 · 反处理与求梯度",
+      html: `<p><code>deprocess_image</code> 是预处理的逆操作：加回 ImageNet 均值、BGR 换回 RGB、截到 0–255 <span data-cell="34">第 34 格</span>。</p><p>最关键的一行：<code>K.gradients(loss, combination_image)</code> <span data-cell="36">第 36 格</span>。平时训练网络是对<b>权重</b>求梯度；这里 VGG19 的权重一动不动，求的是损失对<b>生成图每个像素</b>的梯度：每个像素往哪个方向改一点，总损失会下降。然后包装成一个函数 <code>f_outputs</code>，输入像素，输出损失和梯度 <span data-cell="37">第 37 格</span>。</p>`,
+      cells: [34, 36, 37], highlight: ["K.gradients(loss, combination_image)", "103.939"],
+      draw(svg, ctx) {
+        const net = K.node(svg, 270, 110, 180, 80, "VGG19\n🔒 权重冻结", { bold: true, fill: "var(--panel-2)", stroke: "var(--ink-3)" });
+        const img = K.svg(svg, "g"); pix(img, 40, 90, 120, HOUSE, "var(--c3)");
+        K.svg(svg, "text", { x: 100, y: 235, "text-anchor": "middle", "font-size": 12 }, "生成图的像素（被改的是它）");
+        K.arrow(svg, 162, 150, 268, 150);
+        K.node(svg, 520, 120, 150, 60, "损失", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        K.arrow(svg, 452, 150, 518, 150);
+        const back = K.svg(svg, "path", { d: "M595,182 C595,290 100,290 100,232", fill: "none", stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 12, fill: "var(--warn)" }, "梯度沿虚线回到像素：每个像素该变亮还是变暗");
+        ctx.tween(1600, (t) => K.set(back, { "stroke-dashoffset": -40 * t }));
+      },
+    },
+    {
+      title: "L-BFGS：更聪明的下山方法", kicker: "第 39–44 格 · 优化器",
+      html: `<p>作者选了 scipy 的 <b>L-BFGS</b> 优化器 <span data-cell="38">第 38 格</span>，起点是内容图本身 <span data-cell="39">第 39 格</span>。普通梯度下降只看“脚下的坡往哪边斜”；L-BFGS 还会记住最近几步的坡度变化，估计出“地形是碗状还是长沟状”，从而迈出更合适的步子。</p><p>scipy 要求分别提供“算损失”和“算梯度”两个函数，而 Keras 一次就把两个都算出来了。为了不算两遍，作者写了 <code>Evaluator</code>：算损失时把梯度顺便存起来，要梯度时直接取 <span data-cell="41">第 41 格</span> <span data-cell="42">第 42 格</span>。</p>`,
+      cells: [39, 40, 42, 43], highlight: ["class Evaluator", "x_opt = preprocess_image(base_image_path)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 40, y: 20, w: 400, h: 290 }, [-3, 3], [-2, 2], { xticks: 0, yticks: 0 });
+        for (let k = 1; k <= 6; k++) K.svg(svg, "ellipse", { cx: ax.sx(0), cy: ax.sy(0), rx: ax.sx(0.45 * k) - ax.sx(0), ry: ax.sy(0) - ax.sy(0.12 * k), fill: "none", stroke: "var(--line)" });
+        const gd = [[-2.6, 0.7]], lb = [[-2.6, 0.7]];
+        for (let i = 0; i < 14; i++) { const p = gd[gd.length - 1]; gd.push([p[0] - 0.12 * p[0], p[1] - 1.75 * p[1]]); }
+        lb.push([-0.9, 0.05], [-0.1, 0.0], [0, 0]);
+        const path = (pts) => pts.map((p, i) => (i ? "L" : "M") + ax.sx(p[0]) + "," + ax.sy(p[1])).join("");
+        const p1 = K.svg(svg, "path", { d: path(gd), fill: "none", stroke: "var(--c6)", "stroke-width": 2 });
+        const p2 = K.svg(svg, "path", { d: path(lb), fill: "none", stroke: "var(--c3)", "stroke-width": 3 });
+        [p1, p2].forEach((p) => { const L = p.getTotalLength ? p.getTotalLength() : 600; K.set(p, { "stroke-dasharray": L, "stroke-dashoffset": L }); p._L = L; });
+        K.svg(svg, "text", { x: 470, y: 80, "font-size": 13, fill: "var(--c6)" }, "— 普通梯度下降：在狭长的沟里来回撞");
+        K.svg(svg, "text", { x: 470, y: 110, "font-size": 13, fill: "var(--c3)" }, "— L-BFGS：估计地形，几步到底");
+        K.svg(svg, "text", { x: 470, y: 150, "font-size": 12, class: "muted" }, "（示意：一个二维的损失地形）");
+        ctx.tween(2400, (t) => { K.set(p1, { "stroke-dashoffset": p1._L * (1 - t) }); K.set(p2, { "stroke-dashoffset": p2._L * (1 - Math.min(1, t * 2)) }); });
+      },
+    },
+    {
+      title: "迭代 400 次，留下最好的那张", kicker: "第 45–50 格 · 运行与结果",
+      html: `<p>作者不用 L-BFGS 自带的 <code>maxiter</code>，而是在外面套一个 400 次的循环，每次让 L-BFGS 最多算 20 次损失 <span data-cell="44">第 44 格</span> <span data-cell="45">第 45 格</span>。每次结束都看看损失是不是新低，是的话就把这张图存为“最好的图”。</p><p>最后反处理成正常图片，和内容图、风格图并排显示 <span data-cell="47">第 47 格</span> <span data-cell="48">第 48 格</span>。动画示意生成图从“照片”一步步长出笔触。下面的实验 B 用同样的思路在浏览器里真的跑一遍。</p>`,
+      cells: [45, 47, 48], highlight: ["iterations=400", "maxfun=20", "best_img = x_opt.copy()"],
+      draw(svg, ctx) {
+        const S = STYLES.waves, g = K.svg(svg, "g");
+        const it = K.svg(svg, "text", { x: 330, y: 60, "font-size": 15, "font-family": "var(--mono)" }, "");
+        const bl = K.svg(svg, "text", { x: 330, y: 90, "font-size": 13 }, "");
+        K.svg(svg, "text", { x: 330, y: 130, "font-size": 12, class: "muted" }, "从内容图出发，笔触一点点长出来");
+        K.svg(svg, "text", { x: 330, y: 150, "font-size": 12, class: "muted" }, "（示意，非作者结果）");
+        ctx.tween(3000, (t) => {
+          while (g.firstChild) g.firstChild.remove();
+          pix(g, 40, 40, 250, HOUSE.map((v, i) => K.clamp(v * (1 - 0.6 * t) + t * 0.6 * v * (0.3 + 1.2 * S[i]) + 0.12 * t * S[i], 0, 1)), "var(--c3)");
+          it.textContent = "iteration " + Math.round(t * 399);
+          bl.textContent = "best_loss 持续下降 ↓";
+        });
+      },
+    },
+    {
+      title: "打包成函数，换保罗·克利再试三次", kicker: "第 51–55 格 · 更多例子与结论",
+      html: `<p>作者把前面所有步骤打包成 <code>Run_StyleTransfer(内容图路径, 风格图路径)</code> <span data-cell="51">第 51 格</span>，换了三张风景照、三幅保罗·克利的画各跑一次 <span data-cell="52">第 52–54 格</span>。</p><p>结论 <span data-cell="55">第 55 格</span>：生成图“不算完美”，风格没有和内容完全融合；可以增加迭代次数、换能保留边缘的算法，或换优化器。</p>`,
+      cells: [51, 52, 53, 54], highlight: ["def Run_StyleTransfer", "Paul_Klee"],
+      draw(svg, ctx) {
+        const C = [HOUSE, TREE, HOUSE.map((v, i) => TREE[i] * 0.5 + v * 0.5)], S = [STYLES.grid, STYLES.dots, STYLES.waves];
+        const gs = [];
+        for (let k = 0; k < 3; k++) {
+          const y = 18 + k * 105;
+          pix(svg, 60, y, 90, C[k], "var(--c1)"); K.svg(svg, "text", { x: 175, y: y + 52, "font-size": 22 }, "+");
+          pix(svg, 210, y, 90, S[k], "var(--c2)"); K.svg(svg, "text", { x: 325, y: y + 52, "font-size": 22 }, "→");
+          const g = K.svg(svg, "g"); pix(g, 360, y, 90, C[k].map((v, i) => K.clamp(v * (0.5 + 0.7 * S[k][i]), 0, 1)), "var(--c3)"); g.style.opacity = 0; gs.push(g);
+        }
+        K.svg(svg, "text", { x: 480, y: 140, "font-size": 13 }, "Run_StyleTransfer(内容, 风格)");
+        K.svg(svg, "text", { x: 480, y: 165, "font-size": 12, class: "muted" }, "每对图片都从头跑一遍（示意）");
+        (async () => { for (const g of gs) if (!(await ctx.tween(500, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：Gram 矩阵 ---------- */
+  function scramble(a, seed, bs) {
+    const r = K.rng(seed), nb = N / bs, idx = [];
+    for (let k = 0; k < nb * nb; k++) idx.push(k);
+    for (let k = idx.length - 1; k > 0; k--) { const j = Math.floor(r() * (k + 1)); [idx[k], idx[j]] = [idx[j], idx[k]]; }
+    const o = new Float64Array(N * N);
+    idx.forEach((src, dst) => { const si = Math.floor(src / nb) * bs, sj = (src % nb) * bs, di = Math.floor(dst / nb) * bs, dj = (dst % nb) * bs; for (let u = 0; u < bs; u++) for (let v = 0; v < bs; v++) o[(di + u) * N + dj + v] = a[(si + u) * N + sj + v]; });
+    return o;
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 660, height: 330,
+    controls: [
+      { id: "tex", label: "风格图（纹理）", value: "stripes", options: [["stripes", "斜条纹"], ["dots", "圆点"], ["waves", "波浪"], ["grid", "棋盘格"]] },
+      { id: "other", label: "拿来对比的另一种纹理", value: "dots", options: [["stripes", "斜条纹"], ["dots", "圆点"], ["waves", "波浪"], ["grid", "棋盘格"]] },
+      { id: "bs", label: "打乱时每块的大小（像素）", value: "8", options: [["4", "4×4"], ["8", "8×8"], ["16", "16×16"]] },
+      { id: "seed", label: "重新打乱", button: true },
+    ],
+    note: "用 6 个手工设计的 3×3 卷积核（竖边、横边、两种斜边、斑点、平均亮度）+ ReLU 代替 VGG 的浅层，对 32×32 的图算 6×6 的 Gram 矩阵。中间那张是把左图切成小块后随机打乱：画面“布局”全变了，Gram 矩阵却几乎不变；换一种纹理，Gram 就差很多。",
+    render(svg, v) {
+      const A = STYLES[v.tex], B = scramble(A, 7 + v.seed * 11, +v.bs), C = STYLES[v.other];
+      const g = (x) => gram(FIL.map((w) => relu(conv(x, w))));
+      const GA = g(A), GB = g(B), GC = g(C);
+      const mx = Math.max(...GA.flat(), ...GC.flat());
+      const cols = [[A, GA, "原纹理"], [B, GB, "切块打乱后"], [C, GC, "另一种纹理"]];
+      cols.forEach((c, k) => {
+        const x = 30 + k * 215;
+        pix(svg, x, 10, 120, c[0], "var(--c2)");
+        K.svg(svg, "text", { x: x + 60, y: 148, "text-anchor": "middle", "font-size": 12 }, c[2]);
+        heat(svg, x, 160, 120, c[1], mx);
+        K.svg(svg, "text", { x: x + 60, y: 298, "text-anchor": "middle", "font-size": 11, class: "muted" }, "Gram 矩阵 6×6");
+      });
+      let pd = 0; for (let p = 0; p < N * N; p++) pd += (A[p] - B[p]) ** 2;
+      const n0 = Math.sqrt(GA.flat().reduce((s, x) => s + x * x, 0));
+      return { readout: [
+        { k: "像素差（原 vs 打乱）", v: Math.sqrt(pd / (N * N)).toFixed(3), color: "var(--warn)" },
+        { k: "Gram 差（原 vs 打乱）", v: ((gdist(GA, GB) / n0) * 100).toFixed(1) + "%", color: "var(--good)" },
+        { k: "Gram 差（原 vs 另一种）", v: ((gdist(GA, GC) / n0) * 100).toFixed(1) + "%", color: "var(--bad)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：迷你风格迁移（对像素做梯度下降） ---------- */
+  function transfer(content, style, beta, iters, init, seed) {
+    const S = gram(FIL.map((w) => relu(conv(style, w))));
+    const Cf = conv(content, FIL[5]);
+    const r = K.rng(seed);
+    let x = init === "noise" ? content.map(() => r()) : content.slice();
+    const m = new Float64Array(N * N), vv = new Float64Array(N * N);
+    let Ls = 0, Lc = 0;
+    for (let t = 1; t <= iters; t++) {
+      const pre = FIL.map((w) => conv(x, w)), F = pre.map(relu), G = gram(F);
+      Ls = 0; for (let a = 0; a < 6; a++) for (let b = 0; b < 6; b++) Ls += (G[a][b] - S[a][b]) ** 2;
+      const g = new Float64Array(N * N);
+      for (let a = 0; a < 6; a++) {
+        const dF = new Float64Array(N * N);
+        for (let p = 0; p < N * N; p++) { if (pre[a][p] <= 0) continue; let s = 0; for (let b = 0; b < 6; b++) s += (G[a][b] - S[a][b]) * F[b][p]; dF[p] = (beta * 4 * s) / (N * N); }
+        const d = convT(dF, FIL[a]); for (let p = 0; p < N * N; p++) g[p] += d[p];
+      }
+      const Bx = conv(x, FIL[5]), res = Bx.map((q, p) => q - Cf[p]);
+      Lc = res.reduce((s, q) => s + q * q, 0) / (N * N);
+      const dc = convT(res.map((q) => (2 * q) / (N * N)), FIL[5]);
+      for (let p = 0; p < N * N; p++) {
+        const gg = g[p] + dc[p];
+        m[p] = 0.9 * m[p] + 0.1 * gg; vv[p] = 0.999 * vv[p] + 0.001 * gg * gg;
+        x[p] = K.clamp(x[p] - (0.02 * (m[p] / (1 - Math.pow(0.9, t)))) / (Math.sqrt(vv[p] / (1 - Math.pow(0.999, t))) + 1e-8), 0, 1);
+      }
+    }
+    return { x, Ls, Lc };
+  }
+  K.lab(document.getElementById("lab2"), {
+    width: 660, height: 300,
+    controls: [
+      { id: "content", label: "内容图", value: "house", options: [["house", "小房子"], ["tree", "一棵树"]] },
+      { id: "style", label: "风格图", value: "stripes", options: [["stripes", "斜条纹"], ["dots", "圆点"], ["waves", "波浪"], ["grid", "棋盘格"]] },
+      { id: "beta", label: "风格权重（对数刻度）", min: -4.5, max: -1, step: 0.1, value: -2.7, fmt: (v) => Math.pow(10, v).toExponential(1) },
+      { id: "iters", label: "迭代次数", value: "150", options: [["0", "0"], ["20", "20"], ["60", "60"], ["150", "150"], ["300", "300"]] },
+      { id: "init", label: "从哪里开始", value: "content", options: [["content", "从内容图开始（和作者一样）"], ["noise", "从随机噪声开始"]] },
+    ],
+    note: "32×32 灰度图。总损失 = 内容损失（模糊后逐像素比，代替 VGG 深层）+ 风格权重 × 风格损失（6 个手工卷积核 + ReLU 的 Gram 矩阵差，代替 VGG 浅层）。和作者一样，网络不动，只对生成图的像素求梯度、一步步修改（这里用 Adam 代替 L-BFGS）。风格权重拖到最左：几乎就是原图；拖到最右：房子消失，只剩纹理。",
+    render(svg, v) {
+      const C = v.content === "house" ? HOUSE : TREE, S = STYLES[v.style];
+      const t0 = performance.now();
+      const r = transfer(C, S, Math.pow(10, v.beta), +v.iters, v.init, 3);
+      const ms = performance.now() - t0;
+      pix(svg, 20, 20, 180, C, "var(--c1)"); K.svg(svg, "text", { x: 110, y: 224, "text-anchor": "middle", "font-size": 12 }, "内容图");
+      pix(svg, 240, 20, 180, S, "var(--c2)"); K.svg(svg, "text", { x: 330, y: 224, "text-anchor": "middle", "font-size": 12 }, "风格图");
+      pix(svg, 460, 20, 180, r.x, "var(--c3)"); K.svg(svg, "text", { x: 550, y: 224, "text-anchor": "middle", "font-size": 12 }, "生成图（浏览器内优化结果）");
+      return { readout: [
+        { k: "内容损失", v: r.Lc.toFixed(4), color: "var(--c1)" },
+        { k: "风格损失（Gram 差²）", v: r.Ls.toFixed(3), color: "var(--c2)" },
+        { k: "计算用时", v: Math.round(ms) + " ms", color: "var(--ink-3)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

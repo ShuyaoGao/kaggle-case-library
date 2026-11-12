@@ -1,0 +1,564 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CLIP 图文配对</title>
+<meta name="description" content="Kaggle 案例拆解：从零实现 OpenAI CLIP，用图像编码器 + 文本编码器 + 对比损失，把图片和句子放进同一个空间，一句话搜图。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">图像 + 文本 · 多模态检索 · 对比学习</div>
+  <h1>CLIP：让图片和句子说同一种“语言”</h1>
+  <p class="en">OpenAI CLIP simple implementation</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">双塔编码器</span><span class="tag method">ResNet50</span><span class="tag method">DistilBERT</span>
+    <span class="tag method">投影头</span><span class="tag method">对比损失（InfoNCE）</span><span class="tag method">余弦相似度检索</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Moein Shariatnia</b></span>
+    <span>Kaggle 点赞 <b>830</b>（2026-11 抓取）</span>
+    <span>数据集 <b>hsankesara/flickr-image-dataset</b>（Flickr30k）</span>
+    <span><a href="https://www.kaggle.com/code/moeinshariatnia/openai-clip-simple-implementation" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">一张照片配 5 句英文描述</div><p>Flickr30k 图文数据集：每张照片有 5 条人工写的描述句，作者给同一张照片的 5 句编上同一个 id。<span data-cell="10">出处</span></p></div>
+    <div class="card panel"><h3>要学会什么</h3><div class="big">给一句话，找出最配的图</div><p>不是“分成固定几类”，而是让模型理解整句话，例如 “one dog sitting on grass”，再从没见过的图里找最相关的 9 张。<span data-cell="62">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">两座塔 + 一个共同空间</div><p>ResNet50 把图变成 2048 维向量，DistilBERT 把句子变成 768 维向量，两个投影头都压到 256 维，再用对比损失让“配对的图和句子”靠近。<span data-cell="39">出处</span></p></div>
+    <div class="card panel"><h3>特别在哪里</h3><div class="big">没有类别标签，句子本身就是标签</div><p>普通 CNN 最后一层是“猫/狗/车”几个固定出口；CLIP 没有固定出口，任何一句话都能变成一个“出口”，所以能搜训练时没出现过的说法。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>Flickr30k</b>（Kaggle 上由 hsankesara 上传）：从图片网站 Flickr 收集的日常照片，每张由人工写 5 句英文描述。作者读的是 <code>results.csv</code>，用竖线 <code>|</code> 分隔。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">每张图的描述句</div><div class="v">5 句</div></div>
+        <div class="stat-tile"><div class="k">验证集比例（按图片切）</div><div class="v">20%</div></div>
+        <div class="stat-tile"><div class="k">图片缩放到</div><div class="v">224×224</div></div>
+        <div class="stat-tile"><div class="k">共同空间维度</div><div class="v">256</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">“5 句一组、按行号整除 5 编 id”见第 10 格 <span data-cell="10">出处</span>；20% 验证集见第 47 格 <span data-cell="47">出处</span>；图片尺寸与 256 维见第 14 格 <span data-cell="14">出处</span>。总图片数在运行输出 <code>df.shape</code> 里，源码不带输出，这里不写。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>image</code></td><td>图片文件名（同一张图出现 5 行）</td><td>文本</td></tr>
+        <tr><td><code>caption_number</code></td><td>这是第几句描述（0–4）</td><td>编号</td></tr>
+        <tr><td><code>caption</code></td><td>一句英文描述，<b>它就是“标签”</b>，例如作者手动补上的 “A dog runs across the grass .”</td><td>文本</td></tr>
+        <tr><td><code>id</code></td><td>作者新加的列：同一张图的 5 句共用一个 id，训练时用来判断谁和谁是一对</td><td>整数</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">原始文件第 19999 行有一处格式错误，作者手工把它补成上面那句描述 <span data-cell="10">出处</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="39">
+    <h3>动手试试 A · 现场训练一个迷你 CLIP <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="62">
+    <h3>动手试试 B · 一句话搜图：连没见过的组合也能找 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>训练后，输入 “a boy jumping with skateboard” 这类句子，模型能找出最相关的图片（作者放了一张效果预览图）</td><td><span data-cell="5">第 5 格</span></td></tr>
+        <tr><td>GPU 上每轮约 24 分钟，“一轮就够了”；作者设了 2 轮</td><td><span data-cell="50">第 50 格</span></td></tr>
+        <tr><td>2025 年 10 月的更新：旧版用模型自己的输出做目标，会塌缩成“全是 1”；新版改为用 id 构造目标并做 L2 归一化</td><td><span data-cell="1">第 1 格</span></td></tr>
+        <tr><td>不用更简单的 <code>arange</code> 目标，是因为一个批次里可能出现同一张图的两句描述，它们不该被推开</td><td><span data-cell="44">第 44 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">原 notebook 没有给出任何检索准确率之类的数字，验证损失也只在运行输出里。Kaggle 下载的源码不带输出，这里不列分数。</p>
+      <p class="callout">读代码时发现的两处小问题：① 第 42 格的文字还在说“所以我们要计算 images_similarity 和 texts_similarity”，但第 39 格更新后的代码已经不算这两个矩阵了，是改代码时没同步改文字。② 第 14 格温度 <code>temperature = 1.0</code>，而第 39 格又把向量归一化了，相似度只能落在 −1 到 1 之间，softmax 很难变“尖”，损失降不下去；CLIP 论文里的温度是可学习的、初始约 0.07。实验 A 可以亲手看到这个差别。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一句话，在图库里按相似度排序；反过来给一张图，也能找最贴切的描述句。</li>
+        <li><b>同类问题：</b>相册“搜一搜”、电商以文搜图、图片自动打标签、零样本分类（把类别名写成句子 “a photo of a cat”）、给文生图模型打分。</li>
+        <li><b>和普通 CNN 分类的区别：</b>CNN 分类器的输出个数在训练前就定死了；CLIP 的“类别”是现场写的句子，想加一类不用重训。</li>
+        <li><b>可迁移的套路：</b>两种不同的数据各用一个编码器 → 投影到同一维度 → 归一化 → 相似度矩阵 + 对角线为正样本的交叉熵。语音和文字、商品图和商品标题都能这样配对。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>数据：按 id 切训练 / 验证，防止同一张图两边都有 <span data-cell="47">第 47 格</span></li>
+        <li>图像塔：timm 的 ResNet50，全局平均池化得 2048 维 <span data-cell="24">第 24 格</span></li>
+        <li>文本塔：DistilBERT，取 [CLS] 位置的 768 维 <span data-cell="27">第 27 格</span></li>
+        <li>投影头：Linear → GELU → Linear → Dropout → 残差 → LayerNorm <span data-cell="30">第 30 格</span></li>
+        <li>损失：id 掩码做软目标的对称交叉熵 <span data-cell="39">第 39 格</span></li>
+        <li>优化：AdamW，三组学习率，ReduceLROnPlateau <span data-cell="49">第 49 格</span></li>
+        <li>检索：余弦相似度 + topk <span data-cell="60">第 60 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>普通图像分类器要先定好“有哪几类”。CLIP 用句子当标签，好处是什么？如果描述句写得很随意（比如“好看的照片”），会带来什么麻烦？</li>
+      <li>作者为什么要按 <b>图片 id</b> 而不是按 <b>行</b> 切验证集？如果按行切，同一张图的 5 句话会怎样分布？</li>
+      <li>一个批次里如果恰好有同一张图的两句描述，用 <code>arange</code> 目标会让模型把它们推开。批次越大，这种情况越常见还是越少见？</li>
+      <li>三个部分用了三种学习率：投影头 1e-3、图像塔 1e-4、文本塔 1e-5。为什么已经预训练好的部分要用更小的学习率？</li>
+      <li>第 60 格取前 45 个结果再每隔 5 个取一个（<code>indices[::5]</code>）。这是在解决什么问题？有没有更稳妥的写法？</li>
+      <li>用网上抓来的图文对训练 CLIP，图片说明里的偏见（性别、职业、地域）会不会被模型学走？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Moein Shariatnia，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：Flickr30k（Kaggle 上传者 hsankesara）。
+</footer>
+</main>
+
+<script src="nb/clip-image-text-matching.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const COL = ["var(--c6)", "var(--c3)", "var(--c1)"];        // 红 绿 蓝
+  const CN = ["红", "绿", "蓝"], SN = ["圆", "方", "三角"];
+
+  /* 画一个小图标：shape 0 圆 1 方 2 三角 */
+  function icon(svg, x, y, s, color, shape, big) {
+    const r = s * (big ? 0.42 : 0.28);
+    K.svg(svg, "rect", { x: x - s / 2, y: y - s / 2, width: s, height: s, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" });
+    if (shape === 0) return K.svg(svg, "circle", { cx: x, cy: y, r, fill: color });
+    if (shape === 1) return K.svg(svg, "rect", { x: x - r, y: y - r, width: 2 * r, height: 2 * r, fill: color });
+    return K.svg(svg, "path", { d: `M${x},${y - r} L${x + r},${y + r * 0.85} L${x - r},${y + r * 0.85} Z`, fill: color });
+  }
+
+  const steps = [
+    {
+      at: 0, title: "CLIP 想做什么", kicker: "第 0–8 格 · 介绍与导入",
+      html: `<p>作者先介绍 OpenAI 2021 年的 CLIP（Contrastive Language-Image Pre-training，对比式图文预训练）：模型学的是<b>整句话和图片的关系</b>，而不是“猫、狗、车”这样的单个类别。</p><p>动画左边是普通 CNN 分类器：输出口的个数事先定死；右边是 CLIP：图片和句子各走一座“塔”，最后比的是两个向量像不像，句子可以随便写。</p>`,
+      cells: [4], highlight: ["whole sentence"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 20, y: 26, "font-size": 14, "font-weight": 700 }, "普通 CNN 分类");
+        K.svg(svg, "text", { x: 380, y: 26, "font-size": 14, "font-weight": 700, fill: "var(--accent)" }, "CLIP 双塔");
+        icon(svg, 60, 170, 70, "var(--c2)", 0, true);
+        K.node(svg, 110, 140, 90, 60, "CNN", { bold: true });
+        K.arrow(svg, 96, 170, 108, 170);
+        const outs = ["猫", "狗", "车", "鸟"];
+        outs.forEach((o, i) => { K.arrow(svg, 200, 170, 250, 80 + i * 60); K.node(svg, 252, 62 + i * 60, 70, 36, o); });
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 12, class: "muted" }, "出口固定 4 个，想加“马”要重训");
+        icon(svg, 420, 110, 60, "var(--c2)", 0, true);
+        K.node(svg, 470, 85, 100, 50, "图像塔", { fill: "color-mix(in srgb, var(--c1) 14%, var(--panel))", stroke: "var(--c1)" });
+        K.arrow(svg, 452, 110, 468, 110);
+        K.node(svg, 380, 215, 170, 50, "“一只橙色的球”", {});
+        K.node(svg, 470, 280, 100, 46, "文本塔", { fill: "color-mix(in srgb, var(--c2) 14%, var(--panel))", stroke: "var(--c2)" });
+        K.arrow(svg, 465, 265, 500, 278);
+        const v1 = K.svg(svg, "circle", { cx: 600, cy: 110, r: 7, fill: "var(--c1)" }), v2 = K.svg(svg, "circle", { cx: 600, cy: 303, r: 7, fill: "var(--c2)" });
+        K.arrow(svg, 570, 110, 592, 110); K.arrow(svg, 570, 303, 592, 303);
+        const sim = K.svg(svg, "text", { x: 640, y: 210, "font-size": 13, "text-anchor": "middle", "font-weight": 700 }, "");
+        ctx.wait(600).then((ok) => ok && ctx.tween(1600, (t) => {
+          K.set(v1, { cx: 600 + 30 * t, cy: 110 + 85 * t }); K.set(v2, { cx: 600 + 30 * t, cy: 303 - 85 * t });
+          sim.textContent = t > 0.95 ? "像！相似度高" : "";
+        }));
+      },
+    },
+    {
+      title: "读入图文对：5 句话共用一个 id", kicker: "第 10–11 格 · 预处理",
+      html: `<p>作者读入 <code>results.csv</code>，去掉多余空格，补好一处坏行，然后写了关键一句：<code>ids = [id_ for id_ in range(len(df) // 5) for i in range(5)]</code>，也就是每 5 行编同一个号。</p><p>这个 id 后面非常重要：训练时靠它判断“这张图和那句话是不是一对”。</p>`,
+      cells: [10], highlight: ["ids = [id_ for id_ in range(len(df) // 5) for i in range(5)]"],
+      draw(svg, ctx) {
+        const caps = ["A dog runs on grass", "A brown dog playing", "Dog in a field", "An animal running", "Puppy on the lawn"];
+        icon(svg, 90, 170, 110, "var(--c5)", 0, true);
+        K.svg(svg, "text", { x: 90, y: 250, "text-anchor": "middle", "font-size": 12, class: "muted" }, "一张照片（示意）");
+        const rows = caps.map((c, i) => {
+          const g = K.svg(svg, "g"); g.style.opacity = 0;
+          K.node(g, 200, 40 + i * 54, 330, 40, c, {});
+          K.node(g, 560, 40 + i * 54, 110, 40, "id = 0", { fill: "color-mix(in srgb, var(--accent) 16%, var(--panel))", stroke: "var(--accent)", bold: true });
+          return g;
+        });
+        (async () => { for (let i = 0; i < 5; i++) if (!(await ctx.tween(380, (t) => (rows[i].style.opacity = t)))) return; })();
+        K.svg(svg, "text", { x: 200, y: 330, "font-size": 12, class: "muted" }, "描述句为示意，不是数据集原文");
+      },
+    },
+    {
+      title: "超参数：三座零件三种学习速度", kicker: "第 14 格 · 配置",
+      html: `<p>所有设置集中在 <code>CFG</code> 类里：批大小 32，2 轮，图片 224×224，投影到 256 维，温度 1.0。</p><p>最有意思的是<b>三组学习率</b>：新搭的投影头 1e-3，预训练的 ResNet50 1e-4，预训练的 DistilBERT 1e-5。已经学过很多东西的部分，只做小幅微调，免得“学了新的忘了旧的”。动画里横条长度按对数画。</p>`,
+      cells: [14], highlight: ["head_lr = 1e-3", "image_encoder_lr = 1e-4", "text_encoder_lr = 1e-5", "temperature = 1.0"],
+      draw(svg, ctx) {
+        const items = [{ label: "投影头 1e-3", v: 3, color: "var(--c3)" }, { label: "图像塔 1e-4", v: 2, color: "var(--c1)" }, { label: "文本塔 1e-5", v: 1, color: "var(--c2)" }];
+        K.svg(svg, "text", { x: 30, y: 40, "font-size": 13, class: "muted" }, "每一步参数能改多少（对数刻度示意）");
+        const bars = items.map((d, i) => {
+          K.svg(svg, "text", { x: 160, y: 104 + i * 70, "text-anchor": "end", "font-size": 14 }, d.label);
+          return K.svg(svg, "rect", { x: 175, y: 82 + i * 70, width: 0, height: 34, rx: 4, fill: d.color });
+        });
+        ctx.tween(1400, (t) => bars.forEach((b, i) => b.setAttribute("width", items[i].v * 150 * t)));
+        K.svg(svg, "text", { x: 30, y: 310, "font-size": 12, class: "muted" }, "从零开始的零件大步走；预训练好的零件小步调");
+      },
+    },
+    {
+      title: "Dataset：一次同时交出图和句子", kicker: "第 18–20 格 · 数据管道",
+      html: `<p><code>CLIPDataset</code> 每次返回一个字典：句子先用 DistilBERT 的分词器切成编号 <code>input_ids</code>，补齐到同样长度并给出 <code>attention_mask</code>（哪些位置是真词、哪些是补的空位）；图片用 OpenCV 读入、缩放、归一化；再带上 <code>id</code>。</p><p>动画演示一句话怎样变成一串数字，补位的格子掩码是 0。</p>`,
+      cells: [20], highlight: ["self.encoded_captions = tokenizer(", "item['id']"],
+      draw(svg, ctx) {
+        const toks = ["[CLS]", "a", "dog", "runs", "[SEP]", "[PAD]", "[PAD]"];
+        const ids = ["101", "1037", "3899", "3216", "102", "0", "0"];
+        K.svg(svg, "text", { x: 30, y: 46, "font-size": 15, "font-weight": 700 }, "“a dog runs”");
+        const W = 88;
+        toks.forEach((t, i) => {
+          const x = 30 + i * W;
+          const g1 = K.node(svg, x, 80, W - 8, 40, t, { fs: 12 });
+          const g2 = K.node(svg, x, 150, W - 8, 40, ids[i], { fs: 12, fill: "var(--panel)" });
+          const g3 = K.node(svg, x, 220, W - 8, 40, i < 5 ? "1" : "0", { fs: 13, bold: true, fill: i < 5 ? "color-mix(in srgb, var(--good) 18%, var(--panel))" : "color-mix(in srgb, var(--ink-3) 12%, var(--panel))" });
+          [g1, g2, g3].forEach((g, k) => { g.style.opacity = 0; ctx.wait(200 + i * 120 + k * 600).then((ok) => ok && ctx.tween(300, (s) => (g.style.opacity = s))); });
+        });
+        K.svg(svg, "text", { x: 650, y: 105, "font-size": 12 }, "词片");
+        K.svg(svg, "text", { x: 650, y: 175, "font-size": 12 }, "编号");
+        K.svg(svg, "text", { x: 650, y: 245, "font-size": 12 }, "掩码");
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12, class: "muted" }, "编号数字为示意；[CLS] 开头、[SEP] 结尾、[PAD] 补位");
+      },
+    },
+    {
+      title: "图像塔：ResNet50 → 2048 维", kicker: "第 21–24 格 · 图像编码器",
+      html: `<p>图像编码器直接用 <code>timm</code> 库里预训练好的 <b>ResNet50</b>，去掉分类头（<code>num_classes=0</code>），用全局平均池化把最后的特征图压成一个 <b>2048 维向量</b>。</p><p>动画：图片穿过一层层卷积，特征图越来越小、通道越来越多，最后每个通道取平均，变成一长串数字。</p>`,
+      cells: [24], highlight: ["num_classes=0", "global_pool=\"avg\""],
+      draw(svg, ctx) {
+        const L = [{ s: 120, c: 1, lab: "224×224 图" }, { s: 86, c: 3, lab: "卷积块" }, { s: 60, c: 5, lab: "卷积块" }, { s: 38, c: 7, lab: "7×7×2048" }];
+        let x = 30; const gs = [];
+        L.forEach((l, i) => {
+          const g = K.svg(svg, "g"); g.style.opacity = 0; gs.push(g);
+          for (let k = l.c - 1; k >= 0; k--) K.svg(g, "rect", { x: x + k * 6, y: 170 - l.s / 2 - k * 6, width: l.s, height: l.s, fill: i ? `color-mix(in srgb, var(--c1) ${20 + i * 15}%, var(--panel))` : "var(--panel-2)", stroke: "var(--c1)" });
+          K.svg(g, "text", { x: x + l.s / 2, y: 260, "text-anchor": "middle", "font-size": 12 }, l.lab);
+          x += l.s + l.c * 6 + 30;
+        });
+        const vec = K.svg(svg, "g"); vec.style.opacity = 0;
+        for (let i = 0; i < 12; i++) K.svg(vec, "rect", { x: 600, y: 70 + i * 17, width: 40, height: 14, fill: K.heat(((i * 37) % 11) / 11) });
+        K.svg(vec, "text", { x: 620, y: 290, "text-anchor": "middle", "font-size": 12 }, "2048 维");
+        K.svg(vec, "text", { x: 560, y: 175, "text-anchor": "middle", "font-size": 12, class: "muted" }, "平均池化 →");
+        (async () => { for (const g of [...gs, vec]) if (!(await ctx.tween(450, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "文本塔：DistilBERT 取 [CLS]", kicker: "第 25–27 格 · 文本编码器",
+      html: `<p>文本编码器用 <b>DistilBERT</b>（BERT 的“瘦身版”，层数减半但效果接近）。它给每个词片都输出一个 768 维向量，作者只取第 0 个位置 <code>[CLS]</code> 的向量，当作整句话的意思。</p><p>动画：每个词通过注意力看其他词，信息汇到 [CLS] 上。</p>`,
+      cells: [27], highlight: ["self.target_token_idx = 0", "last_hidden_state[:, self.target_token_idx, :]"],
+      draw(svg, ctx) {
+        const toks = ["[CLS]", "a", "dog", "runs", "on", "grass"];
+        const xs = toks.map((_, i) => 70 + i * 110);
+        toks.forEach((t, i) => K.node(svg, xs[i] - 40, 250, 80, 36, t, { fs: 12 }));
+        const tops = toks.map((t, i) => K.svg(svg, "circle", { cx: xs[i], cy: 90, r: 14, fill: i ? "var(--panel-2)" : "var(--c2)", stroke: "var(--c2)" }));
+        toks.forEach((t, i) => K.svg(svg, "line", { x1: xs[i], y1: 248, x2: xs[i], y2: 106, stroke: "var(--line)" }));
+        const lines = toks.slice(1).map((t, i) => K.svg(svg, "line", { x1: xs[i + 1], y1: 250, x2: xs[0], y2: 104, stroke: "var(--c2)", "stroke-width": 0, opacity: 0.7 }));
+        K.svg(svg, "text", { x: xs[0], y: 56, "text-anchor": "middle", "font-size": 12, "font-weight": 700, fill: "var(--c2)" }, "取它 → 768 维");
+        K.svg(svg, "text", { x: 300, y: 56, "font-size": 12, class: "muted" }, "其他位置的输出不用");
+        ctx.wait(400).then((ok) => ok && ctx.tween(1500, (t) => lines.forEach((l, i) => K.set(l, { "stroke-width": t * (1 + ((i * 3) % 4)) }))));
+      },
+    },
+    {
+      title: "投影头：搬进同一个 256 维世界", kicker: "第 28–30 格 · ProjectionHead",
+      html: `<p>图是 2048 维、句子是 768 维，长度都不一样，没法直接比。作者给两边各配一个<b>投影头</b>：先用一层线性变换压到 256 维，再经过 GELU 激活、第二层线性、Dropout，<b>加回</b>第一次投影的结果（残差），最后 LayerNorm。</p><p>动画：两团原本在不同“坐标系”里的点，被搬进同一张地图，配对的图和句子落在附近。</p>`,
+      cells: [30], highlight: ["x = x + projected", "nn.LayerNorm(projection_dim)"],
+      draw(svg, ctx) {
+        const r = K.rng(4), P = [];
+        for (let k = 0; k < 6; k++) {
+          const tx = 420 + Math.cos(k) * 170 + 40, ty = 170 + Math.sin(k * 1.7) * 100;
+          P.push({ c: K.colors[k], ix: 60 + r() * 140, iy: 60 + r() * 220, sx: 230 + r() * 120, sy: 60 + r() * 220, tx, ty });
+        }
+        K.svg(svg, "text", { x: 60, y: 36, "font-size": 12, class: "muted" }, "图像空间 2048 维");
+        K.svg(svg, "text", { x: 230, y: 36, "font-size": 12, class: "muted" }, "文本空间 768 维");
+        K.svg(svg, "text", { x: 470, y: 36, "font-size": 12, "font-weight": 700, fill: "var(--accent)" }, "共同空间 256 维");
+        K.svg(svg, "rect", { x: 440, y: 50, width: 270, height: 260, rx: 10, fill: "none", stroke: "var(--accent)", "stroke-dasharray": "5 4" });
+        const els = P.map((p) => [K.svg(svg, "rect", { x: p.ix - 6, y: p.iy - 6, width: 12, height: 12, fill: p.c }), K.svg(svg, "circle", { cx: p.sx, cy: p.sy, r: 6, fill: "none", stroke: p.c, "stroke-width": 2.5 })]);
+        K.svg(svg, "text", { x: 60, y: 330, "font-size": 12, class: "muted" }, "■ 图片  ○ 句子，同色 = 一对（示意）");
+        ctx.wait(700).then((ok) => ok && ctx.tween(2000, (t) => els.forEach(([a, b], i) => {
+          const p = P[i];
+          K.set(a, { x: K.lerp(p.ix, p.tx - 14, t) - 6, y: K.lerp(p.iy, p.ty, t) - 6 });
+          K.set(b, { cx: K.lerp(p.sx, p.tx + 8, t), cy: K.lerp(p.sy, p.ty, t) });
+        })));
+      },
+    },
+    {
+      title: "相似度矩阵与对比损失", kicker: "第 31–39 格 · CLIPModel（核心）",
+      html: `<p>这是 CLIP 最核心、也是和普通网络最不一样的地方。一个批次有 B 张图和 B 句话，把两边都<b>归一化</b>成长度 1 的向量，做一次矩阵乘法 <code>text @ image.T</code>，得到 B×B 的相似度表（logits）。</p><ul class="tight"><li>对角线：第 i 句和第 i 张图，是真配对，要变大；</li><li>其余格子：错配，要变小；</li><li>作者用 id 做掩码：同一张图的两句话都算“对”。</li></ul><p>然后按行做一次交叉熵（给句子找图）、按列做一次（给图找句子），取平均。这就是<b>对比学习</b>：不告诉模型“这是什么”，只告诉它“谁和谁是一对”。</p>`,
+      cells: [39], highlight: ["F.normalize(image_embeddings, p=2, dim=-1)", "logits = (text_embeddings @ image_embeddings.T) / self.temperature", "positive_mask = ids.unsqueeze(1) == ids.unsqueeze(0)", "loss = (images_loss + texts_loss) / 2.0"],
+      draw(svg, ctx) {
+        const B = 5, s = 46, x0 = 250, y0 = 50;
+        for (let j = 0; j < B; j++) icon(svg, x0 + j * s + s / 2, y0 - 22, 34, K.colors[j], j % 3, false);
+        for (let i = 0; i < B; i++) K.svg(svg, "text", { x: x0 - 10, y: y0 + i * s + s / 2 + 4, "text-anchor": "end", "font-size": 12 }, "句子 " + (i + 1));
+        const cells = [];
+        for (let i = 0; i < B; i++) for (let j = 0; j < B; j++) cells.push({ i, j, e: K.svg(svg, "rect", { x: x0 + j * s, y: y0 + i * s, width: s - 3, height: s - 3, rx: 4, fill: K.heat(0.3) }) });
+        const r = K.rng(8), start = cells.map(() => 0.2 + r() * 0.4);
+        const lossT = K.svg(svg, "text", { x: 520, y: 120, "font-size": 15, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 520, y: 150, "font-size": 12, class: "muted" }, "对角线 = 真配对 → 拉近");
+        K.svg(svg, "text", { x: 520, y: 172, "font-size": 12, class: "muted" }, "其他格 = 错配 → 推远");
+        K.svg(svg, "text", { x: 250, y: 330, "font-size": 12, class: "muted" }, "颜色越深 = 余弦相似度越高（示意训练过程）");
+        ctx.wait(500).then((ok) => ok && ctx.tween(2600, (t) => {
+          cells.forEach((c, k) => { const v = c.i === c.j ? K.lerp(start[k], 0.95, t) : K.lerp(start[k], 0.05, t); K.set(c.e, { fill: K.heat(v) }); });
+          lossT.textContent = "损失 ≈ " + (1.6 * (1 - t) + 0.15).toFixed(2) + "（示意）";
+        }));
+      },
+    },
+    {
+      title: "小例子：最理想的矩阵长什么样", kicker: "第 40–44 格 · 直觉",
+      html: `<p>作者用 4 个随机向量和自己相乘做了个小实验：同一组向量 @ 它的转置，再 softmax，对角线接近 1，其余接近 0，也就是<b>单位矩阵</b>。这就是“图和句子的向量完全一样”时的理想答案。</p><p>作者还解释了为什么不用更简单的 <code>arange</code> 目标：同一批里偶尔会有同一张图的两句描述，硬当成“不是一对”会把本该相近的推开。</p>`,
+      cells: [41], highlight: ["embeddings @ embeddings.T"],
+      draw(svg, ctx) {
+        const B = 4, s = 60, x0 = 80, y0 = 50;
+        const r = K.rng(2), M = [];
+        for (let i = 0; i < B; i++) { M.push([]); for (let j = 0; j < B; j++) M[i].push(i === j ? 0.97 + r() * 0.03 : r() * 0.02); }
+        const els = [];
+        for (let i = 0; i < B; i++) for (let j = 0; j < B; j++) {
+          const e = K.svg(svg, "rect", { x: x0 + j * s, y: y0 + i * s, width: s - 4, height: s - 4, rx: 4, fill: K.heat(0) });
+          const t = K.svg(svg, "text", { x: x0 + j * s + s / 2 - 2, y: y0 + i * s + s / 2 + 3, "text-anchor": "middle", "font-size": 12 }, "");
+          els.push({ e, t, v: M[i][j] });
+        }
+        K.svg(svg, "text", { x: 360, y: 90, "font-size": 15, "font-weight": 700 }, "softmax(E · Eᵀ)");
+        K.svg(svg, "text", { x: 360, y: 120, "font-size": 13 }, "随机 256 维向量和自己比：");
+        K.svg(svg, "text", { x: 360, y: 144, "font-size": 13 }, "自己和自己点积最大 → 对角线≈1");
+        K.svg(svg, "text", { x: 360, y: 200, "font-size": 13, fill: "var(--accent)" }, "训练目标：让“句子 · 图片”");
+        K.svg(svg, "text", { x: 360, y: 224, "font-size": 13, fill: "var(--accent)" }, "也变成这个样子");
+        K.svg(svg, "text", { x: 80, y: 320, "font-size": 12, class: "muted" }, "格内数字为示意");
+        ctx.tween(1500, (t) => els.forEach((d) => { K.set(d.e, { fill: K.heat(d.v * t) }); d.t.textContent = (d.v * t).toFixed(2); }));
+      },
+    },
+    {
+      title: "训练：按图片切数据，三组学习率", kicker: "第 45–51 格 · 训练循环",
+      html: `<p><code>make_train_valid_dfs</code> 随机挑 <b>20% 的图片 id</b> 当验证集，同一张图的 5 句话整组进同一边，防止“考试题在练习册里见过”。</p><p><code>main()</code> 里用 AdamW 给三组参数配不同学习率，每轮结束看验证损失，变好了就存 <code>best.pt</code>；验证损失不降时 <code>ReduceLROnPlateau</code> 把学习率乘 0.8。</p>`,
+      cells: [47, 49], highlight: ["valid_ids = np.random.choice(", "torch.save(model.state_dict(), \"best.pt\")", "ReduceLROnPlateau"],
+      draw(svg, ctx) {
+        const N = 30, r = K.rng(42), val = new Set();
+        while (val.size < 6) val.add(Math.floor(r() * N));
+        const els = [];
+        for (let k = 0; k < N; k++) {
+          const x = 40 + (k % 10) * 64, y = 50 + Math.floor(k / 10) * 80;
+          const g = K.svg(svg, "g");
+          K.svg(g, "rect", { x, y, width: 56, height: 30, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" });
+          for (let c = 0; c < 5; c++) K.svg(g, "rect", { x: x + 4 + c * 10, y: y + 36, width: 7, height: 10, fill: "var(--ink-3)", opacity: 0.6 });
+          K.svg(g, "text", { x: x + 28, y: y + 20, "text-anchor": "middle", "font-size": 11 }, "id " + k);
+          els.push({ g, k, x, y });
+        }
+        K.svg(svg, "text", { x: 40, y: 320, "font-size": 12, class: "muted" }, "每张图下面 5 个小条 = 5 句描述；橙色整组进验证集（20%）");
+        ctx.wait(600).then((ok) => ok && ctx.tween(1200, (t) => els.forEach((d) => { if (val.has(d.k)) d.g.querySelectorAll("rect").forEach((e) => K.set(e, { fill: `color-mix(in srgb, var(--c2) ${Math.round(t * 50)}%, var(--panel-2))` })); })));
+      },
+    },
+    {
+      title: "检索：一句话找出 9 张图", kicker: "第 52–62 格 · 推理",
+      html: `<p>训练完，先把验证集所有图片过一遍图像塔和投影头，存下向量。查询时把一句话（作者的例子是 <code>"one dog sitting on grass"</code>）过文本塔，两边归一化后算点积，<code>topk</code> 取最相似的。</p><p>小细节：验证集里每张图出现 5 行，向量完全一样，所以作者取前 45 个、每隔 5 个取一个（<code>indices[::5]</code>），得到 9 张不重复的图。</p>`,
+      cells: [56, 60, 62], highlight: ["torch.topk(dot_similarity.squeeze(0), n * 5)", "indices[::5]", "one dog sitting on grass"],
+      draw(svg, ctx) {
+        K.node(svg, 20, 140, 170, 50, "“one dog sitting\non grass”", { bold: true });
+        const q = K.svg(svg, "circle", { cx: 210, cy: 165, r: 8, fill: "var(--c2)" });
+        const r = K.rng(11), items = [];
+        for (let k = 0; k < 15; k++) items.push({ s: r(), c: K.colors[k % 6], sh: k % 3 });
+        items.sort((a, b) => b.s - a.s);
+        const els = items.map((d, k) => {
+          const x = 290 + (k % 5) * 84, y = 30 + Math.floor(k / 5) * 90;
+          const g = K.svg(svg, "g"); icon(g, x, y + 30, 56, d.c, d.sh, true);
+          K.svg(g, "text", { x, y: y + 72, "text-anchor": "middle", "font-size": 11, class: "muted" }, "相似度 " + (0.2 + d.s * 0.7).toFixed(2));
+          g.style.opacity = 0.25; return g;
+        });
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 12, class: "muted" }, "按相似度从高到低排，亮起的就是返回结果（示意图标，不是原图）");
+        (async () => {
+          for (let k = 0; k < 9; k++) if (!(await ctx.tween(220, (t) => (els[k].style.opacity = 0.25 + 0.75 * t)))) return;
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ================= 迷你 CLIP：浏览器内真训练 ================= */
+  // 9 种（颜色×形状）× 大小 2 种 × 2 个变体 = 36 张图；每张图配 2 句话
+  const VOCAB = ["红", "绿", "蓝", "圆", "方", "三角", "小", "大", "一个", "的", "图案", "形状"];
+  function makeWorld(seed) {
+    const r = K.rng(seed), imgs = [];
+    let id = 0;
+    for (let c = 0; c < 3; c++) for (let s = 0; s < 3; s++) for (let b = 0; b < 2; b++) for (let v = 0; v < 2; v++) {
+      // “冻结的图像特征”：颜色强度 3 维 + 面积 + 填充率 + 尖角数 + 4 维噪声（示意 ResNet 输出）
+      const fill = [0.785, 1.0, 0.5][s], corners = [0, 4, 3][s];
+      const area = (b ? 0.6 : 0.25) * fill;
+      const f = [c === 0 ? 1 : 0.1, c === 1 ? 1 : 0.1, c === 2 ? 1 : 0.1, area * 2, fill, corners / 4];
+      for (let k = 0; k < 4; k++) f.push(K.randn(r) * 0.3);
+      for (let k = 0; k < 6; k++) f[k] += K.randn(r) * 0.06;
+      imgs.push({ id: id++, c, s, b, f });
+    }
+    return imgs;
+  }
+  function captions(img) {
+    const C = CN[img.c], S = SN[img.s], B = img.b ? "大" : "小";
+    return [["一个", B, "的", C, S], [C, "的", S, "图案"]];
+  }
+  const bow = (words) => VOCAB.map((w) => (words.includes(w) ? 1 : 0));
+  const DIM = 8;
+  function initModel(seed) {
+    const r = K.rng(seed), mk = (n) => Array.from({ length: DIM }, () => Array.from({ length: n }, () => K.randn(r) * 0.4));
+    return { Wi: mk(10), Wt: mk(VOCAB.length) };
+  }
+  const mv = (W, x) => W.map((row) => row.reduce((s, w, k) => s + w * x[k], 0));
+  function norm(u) { const n = Math.hypot(...u) || 1e-9; return { e: u.map((x) => x / n), n }; }
+  const embI = (m, f) => norm(mv(m.Wi, f)).e, embT = (m, x) => norm(mv(m.Wt, x)).e;
+  const dot = (a, b) => a.reduce((s, x, k) => s + x * b[k], 0);
+  /* 一步训练：pairs=[{img, cap(bow), id}]；返回损失 */
+  function trainStep(m, pairs, tau, lr) {
+    const B = pairs.length;
+    const ui = pairs.map((p) => norm(mv(m.Wi, p.img.f))), ut = pairs.map((p) => norm(mv(m.Wt, p.cap)));
+    const I = ui.map((u) => u.e), T = ut.map((u) => u.e);
+    const S = T.map((t) => I.map((v) => dot(t, v) / tau));
+    const tgt = pairs.map((a) => pairs.map((b) => (a.img.id === b.img.id ? 1 : 0)));
+    tgt.forEach((row) => { const s = row.reduce((x, y) => x + y, 0); row.forEach((_, j) => (row[j] /= s)); });
+    const sm = (row) => { const mx = Math.max(...row), e = row.map((x) => Math.exp(x - mx)), z = e.reduce((a, b) => a + b, 0); return e.map((x) => x / z); };
+    const Pr = S.map(sm), Pc = I.map((_, j) => sm(S.map((row) => row[j])));   // Pc[j][i]
+    let loss = 0; const dS = S.map((row) => row.map(() => 0));
+    for (let i = 0; i < B; i++) for (let j = 0; j < B; j++) {
+      loss += (-tgt[i][j] * Math.log(Pr[i][j] + 1e-12) - tgt[j][i] * Math.log(Pc[j][i] + 1e-12)) / (2 * B);
+      dS[i][j] += (Pr[i][j] - tgt[i][j]) / (2 * B) + (Pc[j][i] - tgt[j][i]) / (2 * B);
+    }
+    const dT = T.map(() => Array(DIM).fill(0)), dI = I.map(() => Array(DIM).fill(0));
+    for (let i = 0; i < B; i++) for (let j = 0; j < B; j++) {
+      const g = dS[i][j] / tau;
+      for (let k = 0; k < DIM; k++) { dT[i][k] += g * I[j][k]; dI[j][k] += g * T[i][k]; }
+    }
+    const back = (e, n, d) => { const p = dot(e, d); return d.map((x, k) => (x - e[k] * p) / n); };
+    for (let i = 0; i < B; i++) {
+      const gt = back(T[i], ut[i].n, dT[i]), gi = back(I[i], ui[i].n, dI[i]);
+      for (let k = 0; k < DIM; k++) {
+        pairs[i].cap.forEach((x, q) => { if (x) m.Wt[k][q] -= lr * gt[k] * x; });
+        pairs[i].img.f.forEach((x, q) => (m.Wi[k][q] -= lr * gi[k] * x));
+      }
+    }
+    return loss;
+  }
+  function allPairs(imgs, skip) {
+    const P = [];
+    imgs.forEach((img) => { if (skip && skip(img)) return; captions(img).forEach((w) => P.push({ img, cap: bow(w), words: w })); });
+    return P;
+  }
+  function train(imgs, opt) {
+    const m = initModel(opt.seed), r = K.rng(opt.seed + 7), P = allPairs(imgs, opt.skip), losses = [];
+    for (let st = 0; st < opt.steps; st++) {
+      const batch = [];
+      for (let b = 0; b < opt.batch; b++) batch.push(P[Math.floor(r() * P.length)]);
+      losses.push(trainStep(m, batch, opt.tau, opt.lr));
+    }
+    return { m, losses };
+  }
+  function topAcc(m, imgs) {   // 每张图的第 1 句话去搜，看第 1 名的颜色、形状、大小是否都对
+    const IE = imgs.map((im) => embI(m, im.f));
+    let ok = 0;
+    imgs.forEach((im) => {
+      const t = embT(m, bow(captions(im)[0]));
+      let best = -1, bi = 0; IE.forEach((v, j) => { const s = dot(t, v); if (s > best) { best = s; bi = j; } });
+      const h = imgs[bi]; if (h.c === im.c && h.s === im.s && h.b === im.b) ok++;
+    });
+    return ok / imgs.length;
+  }
+
+  const WORLD = makeWorld(5);
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "tau", label: "温度 τ（作者设 1.0；CLIP 论文初始约 0.07）", min: 0.05, max: 1.0, step: 0.01, value: 1.0, fmt: (v) => v.toFixed(2) },
+      { id: "steps", label: "训练步数", min: 0, max: 600, step: 20, value: 300 },
+      { id: "batch", label: "批大小（一次比几对）", min: 4, max: 24, step: 2, value: 12 },
+      { id: "seed", label: "换一组随机初始值", button: true },
+    ],
+    note: "36 张模拟小图（3 种颜色 × 3 种形状 × 大小）各配 2 句中文描述。两个线性投影头把“冻结的图像特征”和“词袋”映射到 8 维、归一化，用和第 39 格同样的 id 掩码对称交叉熵现场梯度下降。先保持 τ=1.0 看损失降不下去，再把 τ 拉到 0.1 左右重训。",
+    render(svg, v) {
+      const res = train(WORLD, { seed: 3 + v.seed * 13, steps: v.steps, batch: v.batch, tau: v.tau, lr: 0.5 });
+      const L = res.losses;
+      const ax = K.axes(svg, { x: 46, y: 20, w: 260, h: 230 }, [0, Math.max(1, v.steps)], [0, 3.5], { xlabel: "训练步数", ylabel: "损失" });
+      if (L.length) {
+        let d = "", sm = L[0];
+        L.forEach((l, k) => { sm = 0.9 * sm + 0.1 * l; d += (k ? "L" : "M") + ax.sx(k) + "," + ax.sy(Math.min(3.5, sm)); });
+        K.svg(svg, "path", { d, fill: "none", stroke: "var(--accent)", "stroke-width": 2 });
+      }
+      K.svg(svg, "text", { x: 60, y: 300, "font-size": 12, class: "muted" }, "损失曲线（滑动平均）");
+      // 9 句 × 9 图 相似度矩阵（每类各取一张大图和它的第 1 句）
+      const sel = WORLD.filter((im) => im.b === 1 && im.id % 2 === 0);
+      const IE = sel.map((im) => embI(res.m, im.f)), TE = sel.map((im) => embT(res.m, bow(captions(im)[0])));
+      const s = 28, x0 = 370, y0 = 46;
+      sel.forEach((im, j) => icon(svg, x0 + j * s + s / 2, y0 - 16, 22, COL[im.c], im.s, true));
+      sel.forEach((im, i) => K.svg(svg, "text", { x: x0 - 4, y: y0 + i * s + s / 2 + 4, "text-anchor": "end", "font-size": 10 }, CN[im.c] + SN[im.s]));
+      let diag = 0;
+      TE.forEach((t, i) => IE.forEach((im, j) => {
+        const c = dot(t, im); if (i === j) diag += c / sel.length;
+        K.svg(svg, "rect", { x: x0 + j * s, y: y0 + i * s, width: s - 2, height: s - 2, rx: 2, fill: K.heat(c, true) });
+      }));
+      K.svg(svg, "text", { x: x0, y: y0 + 9 * s + 18, "font-size": 11, class: "muted" }, "行=句子 列=图片；蓝负 白 0 橙正（余弦）");
+      return { readout: [
+        { k: "最后 20 步平均损失", v: L.length ? (L.slice(-20).reduce((a, b) => a + b, 0) / Math.min(20, L.length)).toFixed(3) : "—" },
+        { k: "对配对与错配最多能拉开的分差 2/τ", v: (2 / v.tau).toFixed(1), color: "var(--ink-3)" },
+        { k: "对角线平均相似度", v: diag.toFixed(2), color: diag > 0.6 ? "var(--good)" : "var(--warn)" },
+        { k: "一句话搜图第 1 名全对", v: (topAcc(res.m, WORLD) * 100).toFixed(0) + "%" },
+      ] };
+    },
+  });
+
+  /* 实验 B：零样本组合检索。训练时拿掉全部“绿色三角”图文对 */
+  let cache = null;
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "c", label: "颜色", value: "1", options: [["0", "红"], ["1", "绿"], ["2", "蓝"]] },
+      { id: "s", label: "形状", value: "2", options: [["0", "圆"], ["1", "方"], ["2", "三角"]] },
+      { id: "b", label: "大小", value: "1", options: [["0", "小"], ["1", "大"]] },
+      { id: "hold", label: "训练时是否藏起“绿色三角”", value: "1", options: [["1", "藏起来（零样本）"], ["0", "不藏"]] },
+    ],
+    note: "按所选方式训练 800 步（τ=0.2，批大小 12），再把你拼出的句子“一个 大 的 绿 三角”编码去搜全部 36 张图，显示前 6 名。藏起来时，模型从没见过“绿色三角”这对组合，只学过“绿”和“三角”各自长什么样。",
+    render(svg, v) {
+      const key = v.hold;
+      if (!cache || cache.key !== key) {
+        const skip = v.hold === "1" ? (im) => im.c === 1 && im.s === 2 : null;
+        cache = { key, m: train(WORLD, { seed: 21, steps: 800, batch: 12, tau: 0.2, lr: 0.5, skip }).m };
+      }
+      const words = ["一个", +v.b ? "大" : "小", "的", CN[+v.c], SN[+v.s]];
+      const t = embT(cache.m, bow(words));
+      const ranked = WORLD.map((im) => ({ im, s: dot(t, embI(cache.m, im.f)) })).sort((a, b) => b.s - a.s);
+      K.svg(svg, "text", { x: 20, y: 30, "font-size": 15, "font-weight": 700 }, "查询：“" + words.join(" ") + "”");
+      ranked.slice(0, 6).forEach((d, k) => {
+        const x = 70 + k * 100, y = 120;
+        icon(svg, x, y, d.im.b ? 80 : 80, COL[d.im.c], d.im.s, d.im.b === 1);
+        const hit = d.im.c === +v.c && d.im.s === +v.s;
+        K.svg(svg, "text", { x, y: y + 58, "text-anchor": "middle", "font-size": 12, "font-weight": 700, fill: hit ? "var(--good)" : "var(--bad)" }, (k + 1) + ". " + (hit ? "✓" : "✗") + (d.im.b ? " 大" : " 小"));
+        K.svg(svg, "text", { x, y: y + 76, "text-anchor": "middle", "font-size": 11, class: "muted" }, "相似度 " + d.s.toFixed(2));
+      });
+      const hits = ranked.slice(0, 4).filter((d) => d.im.c === +v.c && d.im.s === +v.s).length;
+      const sizeOk = ranked[0].im.b === +v.b;
+      const unseen = v.hold === "1" && +v.c === 1 && +v.s === 2;
+      K.svg(svg, "text", { x: 20, y: 250, "font-size": 13, fill: unseen ? "var(--warn)" : "var(--ink-3)" }, unseen ? "这是训练时被藏起来的组合：模型从没见过“绿色三角”的图文对" : "这个组合训练时见过");
+      K.svg(svg, "text", { x: 20, y: 276, "font-size": 12, class: "muted" }, "✓ = 颜色和形状都对。每种“颜色+形状”有 4 张图（大小各 2 张），满分是前 4 名都 ✓");
+      return { readout: [
+        { k: "前 4 名颜色+形状都对", v: hits + " / 4", color: hits >= 3 ? "var(--good)" : "var(--warn)" },
+        { k: "第 1 名大小也对", v: sizeOk ? "是" : "否", color: sizeOk ? "var(--good)" : "var(--warn)" },
+        { k: "第 1 名相似度", v: ranked[0].s.toFixed(2) },
+        { k: "第 7 名相似度", v: ranked[6].s.toFixed(2), color: "var(--ink-3)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

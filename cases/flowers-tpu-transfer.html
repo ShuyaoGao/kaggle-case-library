@@ -1,0 +1,629 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>104 种花分类</title>
+<meta name="description" content="Kaggle 案例拆解：在 TPU 上用 tf.data 流水线读 TFRecord，冻结 ImageNet 预训练的 VGG16，接全局平均池化和 104 类 softmax，给花卉照片分类。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">自然图像 · 104 类多分类 · 迁移学习 + TPU</div>
+  <h1>104 种花分类：TPU 流水线 + 冻结 VGG16</h1>
+  <p class="en">Getting started with 100+ flowers on TPU</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">迁移学习</span><span class="tag method">VGG16（冻结）</span><span class="tag method">全局平均池化 GAP</span>
+    <span class="tag method">TFRecord</span><span class="tag method">tf.data 流水线</span><span class="tag method">TPUStrategy</span><span class="tag method">宏平均 F1</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Martin Görner</b></span>
+    <span>Kaggle 点赞 <b>1,682</b>（2026-11 抓取）</span>
+    <span>比赛 <b>Flower Classification with TPUs</b></span>
+    <span><a href="https://www.kaggle.com/code/mgorner/getting-started-with-100-flowers-on-tpu" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">打包成 TFRecord 的花卉照片</div><p>比赛提供 192、224、331、512 四种分辨率，作者选 512×512。训练集、验证集带标签，测试集只有图片 ID。<span data-cell="6">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">照片里是 104 种花中的哪一种</div><p>多分类，类别从粉报春（pink primrose）到野玫瑰（wild rose），编号 0–103，名字写在 <code>CLASSES</code> 列表里。<span data-cell="6">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">高效喂数据 + 借用预训练网络</div><p>用 <code>tf.data</code> 并行读取、解码、打乱、分批、预取，让 TPU 不空等；模型是冻结的 VGG16 卷积主干 + 全局平均池化 + 104 类 softmax，训练 12 轮。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一个“能收敛”的入门基线</div><p>作者自己说这个模型“不是最好的，但能收敛”。他用混淆矩阵和宏平均 F1 评估，具体分数在运行输出里（源码不带）。<span data-cell="17">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据来自 Kaggle 比赛 <b>Flower Classification with TPUs</b>。照片被打包成 TFRecord 文件（TensorFlow 的一种二进制格式，后面会讲）。下面的信息来自 notebook 的代码和注释；各集合的具体张数是运行时打印的（第 10 格最后一行），源码不带输出，这里不列。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">类别数</div><div class="v">104</div></div>
+        <div class="stat-tile"><div class="k">可选分辨率</div><div class="v">4 种</div></div>
+        <div class="stat-tile"><div class="k">作者选用尺寸</div><div class="v">512×512×3</div></div>
+        <div class="stat-tile"><div class="k">文件格式</div><div class="v">TFRecord</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">类别列表、四种分辨率、512 的选择见第 6 格 <span data-cell="6">出处</span>；每个 .tfrec 文件名里写着图片数（如 flowers00-230.tfrec = 230 张），见第 10 格注释 <span data-cell="10">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每条记录里有什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>字段</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>image</code></td><td>JPEG 压缩后的照片字节串，解码后是 512×512 的彩色图 <span data-cell="10">第 10 格</span></td><td>字节串</td></tr>
+        <tr><td><code>class</code></td><td><b>要预测的答案</b>：花的类别编号 0–103，对应 <code>CLASSES</code> 列表里的名字；只有训练集、验证集有 <span data-cell="6">第 6 格</span></td><td>整数</td></tr>
+        <tr><td><code>id</code></td><td>测试集图片的编号，提交时用；测试集没有 class <span data-cell="10">第 10 格</span></td><td>字符串</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">几个真实的类别名（第 6 格）：0 pink primrose（粉报春）、48 daisy（雏菊）、53 sunflower（向日葵）、73 rose（玫瑰）、103 wild rose（野玫瑰）。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="18">
+    <h3>动手试试 A · Flatten 还是 GlobalAveragePooling2D <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="24">
+    <h3>动手试试 B · 104 类时，准确率和宏平均 F1 为什么不一样 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>这个模型“不是最好的，但能收敛”，定位是入门示例</td><td><span data-cell="17">第 17 格</span></td></tr>
+        <tr><td>512×512 的尺寸下 GPU 会显存不够，要用 TPU；用 GPU 训练时建议选 224×224</td><td><span data-cell="6">第 6 格</span></td></tr>
+        <tr><td><code>trainable = False</code> 是迁移学习，改成 True 就是微调</td><td><span data-cell="18">第 18 格</span></td></tr>
+        <tr><td>数据增强放在 <code>prefetch</code> 前面，在 TPU 的 CPU 部分执行，几乎“免费”</td><td><span data-cell="10">第 10 格</span></td></tr>
+        <tr><td><code>steps_per_execution=16</code> 一次给 TPU 发 16 个批次，减少通信开销</td><td><span data-cell="18">第 18 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">原 notebook 的训练曲线、F1、精确率、召回率都在运行输出里，Kaggle 下载的源码不带输出，作者的文字和注释里也没有写具体数值，所以这里不列分数。想看可以点上方链接在 Kaggle 上看作者的运行结果。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>输入一张花卉照片，输出 104 个类别的概率，取最大的作为预测；可做识花 App、植物园导览、标本数字化的自动归类。</li>
+        <li><b>同类问题：</b>细粒度分类（鸟类、车型、狗的品种）、商品图片分类、遥感地物分类。共同点是类别多、类间差异小。</li>
+        <li><b>可迁移的套路：</b>大数据集先打包成 TFRecord → tf.data 并行解码 + 打乱 + 分批 + 预取 → 冻结预训练主干 + GAP + softmax 先跑通基线 → 用宏平均指标看小类别 → 再考虑解冻微调、换更强的主干（作者注释里给了 Xception 的写法）。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>硬件：<code>TPUClusterResolver</code> + <code>TPUStrategy</code>，失败则 <code>MirroredStrategy</code> <span data-cell="2">第 2 格</span></li>
+        <li>数据：TFRecord 解析、<code>decode_jpeg</code>、随机左右翻转、shuffle(2048)、batch、prefetch <span data-cell="10">第 10 格</span></li>
+        <li>模型：VGG16(imagenet, include_top=False, 冻结) + GlobalAveragePooling2D + Dense(104, softmax) <span data-cell="18">第 18 格</span></li>
+        <li>训练：Adam，稀疏类别交叉熵，12 轮 <span data-cell="20">第 20 格</span></li>
+        <li>评估：按行归一化的混淆矩阵，宏平均 F1 / 精确率 / 召回率 <span data-cell="24">第 24 格</span></li>
+        <li>提交：argmax 得到类别，写 <code>submission.csv</code> <span data-cell="26">第 26 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者把 VGG16 全部冻结，只训练最后一层。如果改成 <code>trainable = True</code>（微调），学习率应该怎么调？为什么微调时一般用更小的学习率？</li>
+      <li>VGG16 原本在 224×224 的 ImageNet 图上训练，这里输入是 512×512。为什么模型仍然能跑？如果把 GAP 换成 Flatten，还能随便换分辨率吗？（用实验 A 算一算）</li>
+      <li>数据增强只用了随机左右翻转，作者把调饱和度的那行注释掉了。对花卉分类来说，改变颜色饱和度有什么风险？还有哪些增强值得加？</li>
+      <li>评估时作者用的是宏平均（macro）F1，而不是准确率。在 104 类、每类样本数不同的情况下，两者会有什么差别？（用实验 B 试试）</li>
+      <li>tf.data 里 <code>shuffle(2048)</code> 只在一个 2048 大小的缓冲区里打乱。如果数据在文件里是按类别排好序的，这个缓冲区够不够？作者还用了什么办法让顺序更乱？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Martin Görner，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据来自 Kaggle 比赛 Flower Classification with TPUs。
+</footer>
+</main>
+
+<script src="nb/flowers-tpu-transfer.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* ===== 页面专用：像素图工具（用代码生成小图并在浏览器里真算卷积、池化、仿射变换） ===== */
+  const PX = (function () {
+    function rgbOf(name, fb) {
+      let s = (K.css(name) || fb || "#888888").trim();
+      if (s[0] !== "#") return [128, 128, 128];
+      if (s.length === 4) s = "#" + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+      return [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
+    }
+    function grid(W, H, f) { const a = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) a[y * W + x] = f(x, y); return { W, H, a }; }
+    function at(m, x, y) { return m.a[y * m.W + x]; }
+    function atClamp(m, x, y) { x = x < 0 ? 0 : x >= m.W ? m.W - 1 : x; y = y < 0 ? 0 : y >= m.H ? m.H - 1 : y; return m.a[y * m.W + x]; }
+    function atZero(m, x, y) { return x < 0 || y < 0 || x >= m.W || y >= m.H ? 0 : m.a[y * m.W + x]; }
+    /* Keras padding='same'：边界外按 0 补 */
+    function conv(m, k) { const n = k.length, r = (n - 1) / 2; return grid(m.W, m.H, (x, y) => { let s = 0; for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) s += k[j][i] * atZero(m, x + i - r, y + j - r); return s; }); }
+    function map(m, f) { const o = { W: m.W, H: m.H, a: new Float32Array(m.a.length) }; for (let i = 0; i < m.a.length; i++) o.a[i] = f(m.a[i], i); return o; }
+    const relu = (m) => map(m, (v) => (v > 0 ? v : 0));
+    function pool(m, s) { s = s || 2; const W = Math.ceil(m.W / s), H = Math.ceil(m.H / s); return grid(W, H, (x, y) => { let b = -Infinity; for (let j = 0; j < s; j++) for (let i = 0; i < s; i++) { const xx = x * s + i, yy = y * s + j; if (xx < m.W && yy < m.H) b = Math.max(b, at(m, xx, yy)); } return b; }); }
+    function range(m) { let lo = Infinity, hi = -Infinity; for (const v of m.a) { if (v < lo) lo = v; if (v > hi) hi = v; } return [lo, hi]; }
+    function bilinear(m, x, y) {
+      const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+      return (atClamp(m, x0, y0) * (1 - fx) + atClamp(m, x0 + 1, y0) * fx) * (1 - fy) + (atClamp(m, x0, y0 + 1) * (1 - fx) + atClamp(m, x0 + 1, y0 + 1) * fx) * fy;
+    }
+    /* 类似 Keras ImageDataGenerator：绕中心旋转/剪切/缩放/平移/翻转，边界外用最近像素填充（fill_mode='nearest'） */
+    function affine(m, p) {
+      const th = ((p.rot || 0) * Math.PI) / 180, c = Math.cos(th), s = Math.sin(th), sh = p.shear || 0, z = p.zoom || 1;
+      const cx = (m.W - 1) / 2, cy = (m.H - 1) / 2, tx = (p.tx || 0) * m.W, ty = (p.ty || 0) * m.H;
+      return grid(m.W, m.H, (x, y) => {
+        let u = x - cx - tx, v = y - cy - ty;
+        if (p.flip) u = -u;
+        if (p.vflip) v = -v;
+        let a = c * u + s * v, b = -s * u + c * v;
+        a = a - sh * b;
+        return bilinear(m, a / z + cx, b / z + cy) * (p.bright == null ? 1 : p.bright);
+      });
+    }
+    function toURL(m, mode, lo, hi) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      const P = rgbOf("--panel", "#ffffff"), A = rgbOf("--c1"), B = rgbOf("--c2");
+      if (lo == null || hi == null) { const r = range(m); if (lo == null) lo = r[0]; if (hi == null) hi = r[1]; }
+      const span = hi - lo || 1, amax = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+      for (let i = 0; i < m.a.length; i++) {
+        const v = m.a[i]; let r, gg, b;
+        if (mode === "div") { const t = Math.max(-1, Math.min(1, v / amax)), C = t >= 0 ? B : A, k = Math.abs(t); r = P[0] + (C[0] - P[0]) * k; gg = P[1] + (C[1] - P[1]) * k; b = P[2] + (C[2] - P[2]) * k; }
+        else if (mode === "heat") { const k = Math.max(0, Math.min(1, (v - lo) / span)); r = P[0] + (A[0] - P[0]) * k; gg = P[1] + (A[1] - P[1]) * k; b = P[2] + (A[2] - P[2]) * k; }
+        else { const k = Math.max(0, Math.min(1, (v - lo) / span)) * 255; r = gg = b = k; }
+        d[i * 4] = r; d[i * 4 + 1] = gg; d[i * 4 + 2] = b; d[i * 4 + 3] = 255;
+      }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    /* 彩色图：m 为 {W,H,rgb:[Float32Array*3]}，取值 0–1 */
+    function rgbURL(m) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      for (let i = 0; i < m.W * m.H; i++) { for (let c = 0; c < 3; c++) d[i * 4 + c] = Math.max(0, Math.min(1, m.rgb[c][i])) * 255; d[i * 4 + 3] = 255; }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    function draw(svg, x, y, w, h, m, mode, lo, hi) {
+      const e = K.svg(svg, "image", { x, y, width: w, height: h, preserveAspectRatio: "none" });
+      e.style.imageRendering = "pixelated";
+      e.setAttribute("href", m.rgb ? rgbURL(m) : toURL(m, mode, lo, hi));
+      K.svg(svg, "rect", { x, y, width: w, height: h, fill: "none", stroke: "var(--line)" });
+      return e;
+    }
+    function update(e, m, mode, lo, hi) { e.setAttribute("href", m.rgb ? rgbURL(m) : toURL(m, mode, lo, hi)); }
+    function lines(svg, x, y, w, h, W, H, op) {
+      const g = K.svg(svg, "g");
+      for (let i = 0; i <= W; i++) K.svg(g, "line", { x1: x + (w * i) / W, x2: x + (w * i) / W, y1: y, y2: y + h, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      for (let j = 0; j <= H; j++) K.svg(g, "line", { y1: y + (h * j) / H, y2: y + (h * j) / H, x1: x, x2: x + w, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      return g;
+    }
+    const smooth = (e0, e1, x) => { const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+    const blob = (x, y, cx, cy, sx, sy) => Math.exp(-(((x - cx) * (x - cx)) / (2 * sx * sx) + ((y - cy) * (y - cy)) / (2 * sy * sy)));
+    return { grid, at, atClamp, conv, map, relu, pool, range, bilinear, affine, toURL, rgbURL, draw, update, lines, smooth, blob, rgbOf };
+  })();
+
+  /* ---------- 用代码画一朵花：极坐标花瓣 + 花心 + 绿色背景 ---------- */
+  function flower(N, o) {
+    o = o || {};
+    const r = K.rng(o.seed || 1), k = o.k || 5, R = o.R || 0.4, rot = o.rot || 0;
+    const pc = o.pc || [0.9, 0.35, 0.55], cc = o.cc || [0.95, 0.78, 0.15], cx = o.cx == null ? 0.5 : o.cx, cy = o.cy == null ? 0.5 : o.cy;
+    const rgb = [0, 1, 2].map(() => new Float32Array(N * N));
+    for (let py = 0; py < N; py++) for (let px = 0; px < N; px++) {
+      const X = (px + 0.5) / N - cx, Y = (py + 0.5) / N - cy, d = Math.hypot(X, Y), th = Math.atan2(Y, X) + rot;
+      const rr = R * (0.3 + 0.7 * Math.pow(Math.abs(Math.cos((k * th) / 2)), o.sharp || 0.7));
+      const nz = (r() - 0.5) * 0.06;
+      let c = [0.16 + 0.05 * Math.sin(px * 0.4 + py * 0.2), 0.36 + 0.12 * Math.sin(px * 0.13 - py * 0.21), 0.14];
+      if (d < rr) { const sh = 0.7 + 0.3 * (1 - d / rr), vein = 1 - 0.12 * Math.pow(Math.abs(Math.sin(k * th)), 8); c = pc.map((v) => v * sh * vein); }
+      if (d < R * (o.cs || 0.24)) { const dot = 0.85 + 0.15 * Math.sin(px * 2.1) * Math.sin(py * 2.3); c = cc.map((v) => v * dot); }
+      for (let q = 0; q < 3; q++) rgb[q][py * N + px] = K.clamp(c[q] + nz, 0, 1);
+    }
+    return { W: N, H: N, rgb };
+  }
+  function flipRGB(m) { const rgb = m.rgb.map((ch) => { const o = new Float32Array(ch.length); for (let y = 0; y < m.H; y++) for (let x = 0; x < m.W; x++) o[y * m.W + x] = ch[y * m.W + (m.W - 1 - x)]; return o; }); return { W: m.W, H: m.H, rgb }; }
+  const PAL = [
+    { name: "sunflower 向日葵", k: 18, pc: [0.98, 0.78, 0.1], cc: [0.35, 0.2, 0.08], cs: 0.42, sharp: 0.4 },
+    { name: "daisy 雏菊", k: 16, pc: [0.96, 0.96, 0.94], cc: [0.98, 0.8, 0.1], cs: 0.28, sharp: 0.5 },
+    { name: "rose 玫瑰", k: 5, pc: [0.85, 0.12, 0.2], cc: [0.6, 0.05, 0.12], cs: 0.3, sharp: 1.2 },
+    { name: "iris 鸢尾", k: 3, pc: [0.45, 0.3, 0.85], cc: [0.98, 0.85, 0.2], cs: 0.15, sharp: 0.9 },
+    { name: "lotus 莲", k: 8, pc: [0.98, 0.6, 0.72], cc: [0.95, 0.85, 0.3], cs: 0.2, sharp: 1.1 },
+    { name: "marigold 万寿菊", k: 12, pc: [0.98, 0.55, 0.08], cc: [0.85, 0.4, 0.05], cs: 0.3, sharp: 0.45 },
+    { name: "morning glory 牵牛", k: 5, pc: [0.3, 0.45, 0.95], cc: [0.98, 0.98, 0.9], cs: 0.18, sharp: 0.3 },
+    { name: "hibiscus 木槿", k: 5, pc: [0.95, 0.25, 0.45], cc: [0.6, 0.0, 0.15], cs: 0.16, sharp: 0.55 },
+  ];
+  const fl = (i, N, extra) => flower(N, Object.assign({ seed: 10 + i, rot: i * 0.4 }, PAL[i % PAL.length], extra || {}));
+
+  const steps = [
+    {
+      title: "配置：104 类、512 像素、12 轮", kicker: "第 5–8 格 · 任务与配置", at: 5, notes: { 8: "这一格是画图用的辅助函数（显示图片、混淆矩阵、训练曲线），和建模无关，可以跳过。" },
+      html: `<p>这是 Kaggle 比赛 <b>Flower Classification with TPUs</b> 的官方入门 notebook。每张图属于 <code>CLASSES</code> 列表里 104 种花中的一种（编号 0–103），测试集要提交每张图的类别编号。</p><p>和猫狗二分类相比，难点在于<b>类别多、很多花长得很像</b>（比如几种百合、几种罂粟），属于“细粒度分类”。同一格里还定了训练 12 轮（<code>EPOCHS = 12</code>）和图片尺寸 512。第 8 格是画图用的辅助函数，和建模无关。</p>`,
+      cells: [6], highlight: ["CLASSES", "IMAGE_SIZE = [512, 512]", "EPOCHS = 12", "BATCH_SIZE = 16 * strategy.num_replicas_in_sync"],
+      draw(svg, ctx) {
+        const els = [];
+        for (let i = 0; i < 16; i++) {
+          const x = 30 + (i % 8) * 84, y = 30 + Math.floor(i / 8) * 130;
+          const e = PX.draw(svg, x, y, 76, 76, fl(i, 40, { R: 0.38 + (i % 3) * 0.03 }), "rgb"); e.style.opacity = 0; els.push(e);
+          const t = K.svg(svg, "text", { x: x + 38, y: y + 94, "text-anchor": "middle", "font-size": 10.5 }, PAL[i % PAL.length].name.split(" ").pop()); t.style.opacity = 0; els.push(t);
+          const n = K.svg(svg, "text", { x: x + 38, y: y + 110, "text-anchor": "middle", "font-size": 10, class: "muted" }, "类别 " + [53, 48, 73, 67, 77, 46, 75, 82][i % 8]); n.style.opacity = 0; els.push(n);
+        }
+        K.svg(svg, "text", { x: 360, y: 316, "text-anchor": "middle", "font-size": 13 }, "…… 一共 104 类。类别编号取自 CLASSES 列表的下标（花是代码画的示意图）");
+        ctx.tween(1600, (t) => els.forEach((e, i) => (e.style.opacity = K.clamp(t * 1.5 - (Math.floor(i / 3) / 16) * 0.5, 0, 1))));
+      },
+    },
+    {
+      title: "找加速器：TPU 优先，否则 GPU", kicker: "第 0–2 格 · 硬件", at: 0,
+      html: `<p>先尝试连接 TPU（<code>TPUClusterResolver.connect()</code>），成功就建 <code>TPUStrategy</code>；没有 TPU 就退回 <code>MirroredStrategy</code>（单机多 GPU）。</p><p><b>分布式策略</b>的意思是：把同一个模型复制到每个计算核心上，每个核心处理一小份批次，再把梯度汇总。所以批大小写成 <code>16 * strategy.num_replicas_in_sync</code>：每个核心 16 张，核心越多批次越大（例如 8 个核心时是 128 张）。</p>`,
+      cells: [2], highlight: ["TPUStrategy", "MirroredStrategy", "num_replicas_in_sync"],
+      draw(svg, ctx) {
+        const B = K.node(svg, 30, 130, 130, 70, "一个批次\n16 × 核心数", { bold: true });
+        const cores = [];
+        for (let i = 0; i < 8; i++) { const x = 250 + (i % 4) * 110, y = 60 + Math.floor(i / 4) * 130; cores.push([x, y]); K.node(svg, x, y, 96, 90, `核心 ${i}\n模型副本\n16 张`, { fs: 12 }); }
+        K.svg(svg, "text", { x: 470, y: 40, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "TPU：8 个核心（示意）");
+        const pkts = cores.map(() => K.svg(svg, "rect", { x: 160, y: 160, width: 14, height: 14, rx: 2, fill: "var(--c3)" }));
+        const sync = K.svg(svg, "text", { x: 470, y: 330, "text-anchor": "middle", "font-size": 13, fill: "var(--accent)", "font-weight": 700 }, "");
+        (async () => {
+          for (let r = 0; r < 3; r++) {
+            sync.textContent = "① 把批次平均切给各核心";
+            if (!(await ctx.tween(900, (t) => pkts.forEach((p, i) => K.set(p, { x: K.lerp(160, cores[i][0] + 40, t), y: K.lerp(160, cores[i][1] + 70, t), fill: "var(--c3)" }))))) return;
+            sync.textContent = "② 各自算梯度 → ③ 汇总求平均 → 所有副本一起更新";
+            if (!(await ctx.tween(800, (t) => pkts.forEach((p) => K.set(p, { fill: t > 0.5 ? "var(--c2)" : "var(--c3)" }))))) return;
+            if (!(await ctx.wait(600))) return;
+          }
+        })();
+        void B;
+      },
+    },
+    {
+      title: "数据在云存储里，有四种分辨率", kicker: "第 3–4 格 · 数据位置", at: 3,
+      html: `<p>TPU 只能直接读 Google 云存储（GCS），<code>KaggleDatasets().get_gcs_path()</code> 把比赛数据映射到 GCS 路径。</p><p>数据提供 192、224、331、512 四种尺寸的 TFRecord（路径表在下一章的第 6 格）。作者选 <b>512×512</b>，注释写明：这个尺寸 GPU 会显存不够，要用 TPU；用 GPU 就选 224。像素个数随边长平方增长，512 的一张图是 224 的 5.2 倍多。</p>`,
+      cells: [4], highlight: ["get_gcs_path"],
+      draw(svg, ctx) {
+        const sizes = [192, 224, 331, 512], base = fl(0, 64);
+        const els = [];
+        let x = 30;
+        sizes.forEach((s, i) => {
+          const w = s * 0.5;
+          const e = PX.draw(svg, x, 290 - w, w, w, base, "rgb"); e.style.opacity = 0;
+          const t = K.svg(svg, "text", { x: x + w / 2, y: 310, "text-anchor": "middle", "font-size": 13, "font-weight": s === 512 ? 700 : 400, fill: s === 512 ? "var(--accent)" : "var(--ink)" }, `${s}×${s}`);
+          const q = K.svg(svg, "text", { x: x + w / 2, y: 328, "text-anchor": "middle", "font-size": 11, class: "muted" }, `像素是 192 的 ${((s * s) / (192 * 192)).toFixed(1)} 倍`);
+          t.style.opacity = q.style.opacity = 0; els.push([e, t, q]);
+          x += w + 26;
+        });
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 13, class: "muted" }, "同一张花图的四种分辨率（按比例画）");
+        (async () => { for (const g of els) { if (!(await ctx.tween(450, (t) => g.forEach((e) => (e.style.opacity = t))))) return; } })();
+      },
+    },
+    {
+      title: "TFRecord：一条记录 = JPEG 字节 + 类别号", kicker: "第 9–10 格 · 数据读取函数", at: 9,
+      html: `<p>第 10 格一口气定义了读数据要用的所有函数，接下来三章分别讲其中的流水线、增强和计数。</p><p>TFRecord 是 TensorFlow 的二进制格式，把成千上万张图连同标签打包进少数几个大文件，读起来比零散的小 JPEG 快得多。</p><p>每条记录有两个字段：<code>image</code>（JPEG 压缩后的字节串）和 <code>class</code>（整数类别）。解析时：<code>parse_single_example</code> 取出字段 → <code>decode_jpeg</code> 解码成 0–255 的像素 → <code>reshape</code> 成固定的 [512, 512, 3]（TPU 要求形状明确）。</p>`,
+      cells: [10], highlight: ["parse_single_example", "tf.image.decode_jpeg", "tf.reshape(image, [*IMAGE_SIZE, 3])", "dataset.shuffle(2048)", "dataset.prefetch(AUTO)", "random_flip_left_right", "count_data_items", "experimental_deterministic = False"],
+      draw(svg, ctx) {
+        K.svg(svg, "rect", { x: 20, y: 40, width: 250, height: 200, rx: 8, fill: "var(--panel-2)", stroke: "var(--line)" });
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "一条 TFRecord 记录");
+        K.svg(svg, "text", { x: 34, y: 66, "font-size": 12, "font-family": "var(--mono)" }, "image: b'\\xff\\xd8\\xff\\xe0…'");
+        const hex = []; const r = K.rng(4);
+        for (let j = 0; j < 6; j++) hex.push(K.svg(svg, "text", { x: 34, y: 92 + j * 18, "font-size": 11, "font-family": "var(--mono)", class: "muted" }, Array.from({ length: 8 }, () => Math.floor(r() * 256).toString(16).padStart(2, "0")).join(" ")));
+        K.svg(svg, "text", { x: 34, y: 220, "font-size": 12, "font-family": "var(--mono)" }, "class: 53");
+        const a1 = K.arrow(svg, 280, 140, 350, 140); a1.style.opacity = 0;
+        const dec = K.node(svg, 360, 110, 110, 60, "decode_jpeg\n+ reshape", { fs: 12, fill: "var(--accent-soft)", stroke: "var(--accent)" }); dec.style.opacity = 0;
+        const a2 = K.arrow(svg, 475, 140, 520, 140); a2.style.opacity = 0;
+        const img = PX.draw(svg, 530, 50, 170, 170, fl(0, 64), "rgb"); img.style.opacity = 0;
+        const sh = K.svg(svg, "text", { x: 615, y: 240, "text-anchor": "middle", "font-size": 12, "font-family": "var(--mono)" }, "[512, 512, 3]  uint8"); sh.style.opacity = 0;
+        const lab = K.svg(svg, "text", { x: 615, y: 262, "text-anchor": "middle", "font-size": 12, "font-family": "var(--mono)", fill: "var(--accent)" }, "label = 53 → 'sunflower'"); lab.style.opacity = 0;
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 12, class: "muted" }, "测试集记录里没有 class，只有 id（read_unlabeled_tfrecord），所以要提交的正是它们的类别");
+        (async () => {
+          for (let k = 0; k < 2; k++) for (const e of hex) { e.style.fill = "var(--warn)"; if (!(await ctx.wait(90))) return; e.style.fill = ""; }
+          for (const e of [a1, dec, a2, img, sh, lab]) { if (!(await ctx.tween(350, (t) => (e.style.opacity = t)))) return; }
+        })();
+      },
+    },
+    {
+      title: "tf.data 流水线：读、解码、打乱、分批、预取", kicker: "第 11–12 格 · 输入流水线（代码在第 10 格）", at: 11,
+      html: `<p><span data-cell="10">第 10 格</span>里的 <code>get_training_dataset()</code> 把数据处理串成一条流水线：并行读取多个文件 → <code>map</code> 解码 → <code>map</code> 增强 → <code>repeat</code> 无限循环 → <code>shuffle(2048)</code> 在 2048 张的缓冲区里打乱 → <code>batch</code> 分批 → <code>prefetch</code>。</p><p>最后一步 <b>prefetch</b> 最关键：TPU 在算这一批的梯度时，CPU 已经在准备下一批，两边<b>同时干活</b>，加速器不用空等数据。作者还关掉了“保持顺序”（<code>experimental_deterministic = False</code>），数据一到就用，进一步提速。第 12 格各取 3 批打印形状，确认流水线输出对不对。</p>`,
+      cells: [12], highlight: ["get_training_dataset()"],
+      draw(svg, ctx) {
+        const st = ["读文件", "解码", "增强", "打乱", "分批", "预取"];
+        st.forEach((s, i) => K.node(svg, 20 + i * 114, 30, 100, 44, s, { fs: 13, fill: i === 5 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 5 ? "var(--accent)" : "var(--line)" }));
+        for (let i = 0; i < 5; i++) K.arrow(svg, 120 + i * 114, 52, 134 + i * 114, 52);
+        const items = Array.from({ length: 10 }, (_, i) => K.svg(svg, "circle", { cx: 70, cy: 52, r: 0, fill: K.colors[i % 6] }));
+        K.svg(svg, "text", { x: 20, y: 130, "font-size": 13, "font-weight": 700 }, "没有 prefetch：");
+        K.svg(svg, "text", { x: 20, y: 230, "font-size": 13, "font-weight": 700 }, "有 prefetch：");
+        const lane = (y, lab) => K.svg(svg, "text", { x: 20, y, "font-size": 12, class: "muted" }, lab);
+        lane(158, "CPU 准备"); lane(188, "TPU 计算"); lane(258, "CPU 准备"); lane(288, "TPU 计算");
+        const blocks = [];
+        const add = (x, y, w, c) => { const r = K.svg(svg, "rect", { x, y, width: w, height: 20, rx: 3, fill: c }); r.style.opacity = 0; blocks.push({ r, x }); };
+        for (let k = 0; k < 4; k++) { add(100 + k * 150, 145, 70, "var(--c5)"); add(170 + k * 150, 175, 70, "var(--c1)"); }
+        for (let k = 0; k < 7; k++) { add(100 + k * 75, 245, 70, "var(--c5)"); if (k < 6) add(170 + k * 75, 275, 70, "var(--c1)"); }
+        K.svg(svg, "text", { x: 360, y: 330, "text-anchor": "middle", "font-size": 12, class: "muted" }, "黄色 = CPU 准备一批数据，蓝色 = TPU 训练一批（示意时间轴）：同样时间里，下面多训练了几乎一倍的批次");
+        (async () => {
+          const go = ctx.tween(2600, (t) => items.forEach((e, i) => { const u = K.clamp(t * 1.8 - i * 0.08, 0, 1); K.set(e, { cx: 70 + u * 570, r: u > 0 && u < 1 ? 6 : 0 }); }));
+          const g2 = ctx.tween(2600, (t) => blocks.forEach((b) => (b.r.style.opacity = b.x < 100 + t * 600 ? 1 : 0)));
+          await go; await g2;
+        })();
+      },
+    },
+    {
+      title: "数据增强：只做随机左右翻转", kicker: "第 13–14 格 · 数据增强与看训练样本", at: 13,
+      html: `<p><span data-cell="10">第 10 格</span>里的 <code>data_augment</code> 只有一行生效：<code>tf.image.random_flip_left_right</code>，每张图有一半概率被左右镜像。调饱和度那一行被作者注释掉了。</p><p>注释里写了一个巧妙之处：因为增强写在 <code>prefetch</code> 之前，它在 TPU 主机的 CPU 上执行，和 TPU 计算重叠，<b>几乎不占训练时间</b>。第 13–14 格从训练流水线里取 20 张画出来，看到的就是增强之后的图。</p>`,
+      cells: [13, 14], highlight: ["unbatch().batch(20)"],
+      draw(svg, ctx) {
+        const base = fl(3, 64, { cx: 0.42, rot: 0.3 }), flip = flipRGB(base);
+        PX.draw(svg, 60, 50, 220, 220, base, "rgb");
+        K.svg(svg, "text", { x: 170, y: 292, "text-anchor": "middle", "font-size": 13 }, "原图");
+        const out = PX.draw(svg, 440, 50, 220, 220, base, "rgb");
+        const lab = K.svg(svg, "text", { x: 550, y: 292, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--accent)" }, "");
+        K.arrow(svg, 300, 160, 420, 160);
+        K.svg(svg, "text", { x: 360, y: 150, "text-anchor": "middle", "font-size": 12, class: "muted" }, "掷硬币");
+        const r = K.rng(5);
+        (async () => {
+          for (let k = 0; k < 8; k++) {
+            const f = r() < 0.5;
+            PX.update(out, f ? flip : base); lab.textContent = `第 ${k + 1} 次读到：${f ? "翻转" : "不翻转"}`;
+            if (!(await ctx.wait(800))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "数样本、看测试集：数字就写在文件名里", kicker: "第 15–16 格 · 探索", at: 15,
+      html: `<p>TFRecord 没法直接知道里面有多少条记录。比赛的文件名里带着数量，例如 <code>flowers00-230.tfrec</code> 表示这个文件有 230 张图。<span data-cell="10">第 10 格</span>里的 <code>count_data_items</code> 用正则表达式 <code>-([0-9]*)\\.</code> 把这个数字抠出来再求和，用来算每轮的步数 <code>STEPS_PER_EPOCH</code>。</p><p>第 15–16 格再从测试集取 20 张画出来（测试图没有标签），确认数据读对了。</p>`,
+      cells: [15, 16], highlight: ["get_test_dataset()"],
+      draw(svg, ctx) {
+        const files = ["flowers00-230.tfrec", "flowers01-230.tfrec", "flowers02-230.tfrec", "flowers03-230.tfrec", "…", "flowers15-218.tfrec"];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "文件名（示意）");
+        const nums = [];
+        files.forEach((f, i) => {
+          const y = 56 + i * 30;
+          if (f === "…") { K.svg(svg, "text", { x: 40, y, "font-size": 13 }, "……"); return; }
+          const [a, b] = f.split("-");
+          const t1 = K.svg(svg, "text", { x: 40, y, "font-size": 13, "font-family": "var(--mono)" }, a + "-");
+          const n = K.svg(svg, "text", { x: 40 + (a.length + 1) * 7.9, y, "font-size": 13, "font-family": "var(--mono)" }, b.split(".")[0]);
+          K.svg(svg, "text", { x: 40 + (a.length + 1 + b.split(".")[0].length) * 7.9, y, "font-size": 13, "font-family": "var(--mono)" }, ".tfrec");
+          nums.push({ n, v: +b.split(".")[0] }); void t1;
+        });
+        const sum = K.svg(svg, "text", { x: 30, y: 270, "font-size": 14, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 30, y: 294, "font-size": 12, class: "muted" }, "STEPS_PER_EPOCH = 训练图片总数 // BATCH_SIZE");
+        const grid = [];
+        for (let i = 0; i < 20; i++) { const e = PX.draw(svg, 380 + (i % 5) * 66, 30 + Math.floor(i / 5) * 66, 60, 60, fl(i, 28, { rot: i }), "rgb"); e.style.opacity = 0; grid.push(e); }
+        K.svg(svg, "text", { x: 545, y: 310, "text-anchor": "middle", "font-size": 12, class: "muted" }, "display_batch_of_images：一次看 20 张");
+        (async () => {
+          let acc = 0;
+          for (const d of nums) { d.n.style.fill = "var(--warn)"; d.n.style.fontWeight = 700; acc += d.v; sum.textContent = "正则抠出的数字累加：" + acc + " + …"; if (!(await ctx.wait(400))) return; }
+          for (const g of grid) { if (!(await ctx.tween(80, (t) => (g.style.opacity = t)))) return; }
+        })();
+      },
+    },
+    {
+      title: "模型：冻结 VGG16 + 全局平均池化 + 104 类", kicker: "第 17–18 格 · 迁移学习", at: 17,
+      html: `<p>先用 <code>Lambda</code> 层做 VGG16 要求的预处理，再接 ImageNet 权重的 <b>VGG16 卷积主干</b>，<code>trainable = False</code> 冻结（注释写着：False = 迁移学习，True = 微调）。</p><p>512×512 的图经过 5 次池化变成 16×16×512 的特征图。<b>GlobalAveragePooling2D</b> 把每个通道的 16×16 个数取平均，只留 1 个数，得到 512 维向量，再接 <code>Dense(104, softmax)</code> 输出 104 个概率。新层只有 512×104 + 104 = 53,352 个参数。</p>`,
+      cells: [18], highlight: ["pretrained_model.trainable = False", "GlobalAveragePooling2D()", "Dense(len(CLASSES), activation='softmax')"],
+      draw(svg, ctx) {
+        PX.draw(svg, 16, 110, 90, 90, fl(0, 40), "rgb");
+        K.svg(svg, "text", { x: 61, y: 218, "text-anchor": "middle", "font-size": 11 }, "512×512×3");
+        K.svg(svg, "rect", { x: 120, y: 80, width: 150, height: 150, rx: 10, fill: "color-mix(in srgb, var(--ink-3) 12%, var(--panel))", stroke: "var(--ink-3)", "stroke-dasharray": "6 4" });
+        K.svg(svg, "text", { x: 195, y: 140, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "VGG16");
+        K.svg(svg, "text", { x: 195, y: 162, "text-anchor": "middle", "font-size": 12 }, "13 个卷积层");
+        K.svg(svg, "text", { x: 195, y: 195, "text-anchor": "middle", "font-size": 18 }, "🔒");
+        K.svg(svg, "text", { x: 195, y: 250, "text-anchor": "middle", "font-size": 11, class: "muted" }, "冻结，不更新");
+        const r = K.rng(3), maps = [];
+        for (let c = 0; c < 4; c++) {
+          const m = PX.grid(8, 8, (x, y) => K.clamp(0.5 + 0.4 * Math.sin(x * (0.5 + c * 0.3) + c) * Math.cos(y * (0.4 + c * 0.2)) + (r() - 0.5) * 0.2, 0, 1));
+          let s = 0; m.a.forEach((v) => (s += v));
+          const x = 290 + c * 12, y = 70 + c * 12;
+          const el = PX.draw(svg, x, y, 96, 96, m, "heat", 0, 1); maps.push({ m, avg: s / 64, el, fr: el.nextSibling, x, y });
+        }
+        K.svg(svg, "text", { x: 356, y: 250, "text-anchor": "middle", "font-size": 11 }, "16×16×512 特征图");
+        K.svg(svg, "text", { x: 356, y: 266, "text-anchor": "middle", "font-size": 11, class: "muted" }, "（画出 4 个通道，示意）");
+        const gap = K.svg(svg, "text", { x: 470, y: 64, "text-anchor": "middle", "font-size": 12, "font-weight": 700, fill: "var(--accent)" }, "GAP：每个通道取平均");
+        const vec = maps.map((d, i) => { const e = K.svg(svg, "rect", { x: 460, y: 84 + i * 26, width: 22, height: 22, rx: 3, fill: K.heat(d.avg), stroke: "var(--accent)" }); const t = K.svg(svg, "text", { x: 490, y: 100 + i * 26, "font-size": 11, "font-family": "var(--mono)" }, d.avg.toFixed(2)); e.style.opacity = t.style.opacity = 0; return [e, t]; });
+        const dots = K.svg(svg, "text", { x: 474, y: 210, "text-anchor": "middle", "font-size": 12 }, "⋮ 共 512 个"); dots.style.opacity = 0;
+        const probs = [0.46, 0.18, 0.09, 0.06, 0.04], names = ["sunflower", "black-eyed susan", "barberton daisy", "gazania", "marigold"];
+        K.svg(svg, "text", { x: 620, y: 64, "text-anchor": "middle", "font-size": 12, "font-weight": 700, fill: "var(--accent)" }, "Dense 104 · softmax");
+        const bars = probs.map((p, i) => { const b = K.svg(svg, "rect", { x: 560, y: 80 + i * 34, width: 0, height: 16, rx: 3, fill: i === 0 ? "var(--accent)" : "var(--ink-3)" }); K.svg(svg, "text", { x: 560, y: 108 + i * 34, "font-size": 10.5 }, names[i]); return [b, p]; });
+        K.svg(svg, "text", { x: 620, y: 270, "text-anchor": "middle", "font-size": 11, class: "muted" }, "前 5 名概率（示意）");
+        K.svg(svg, "text", { x: 360, y: 316, "text-anchor": "middle", "font-size": 13 }, "只训练 GAP 之后的 Dense 层：512 × 104 + 104 = 53,352 个参数");
+        (async () => {
+          if (!(await ctx.wait(500))) return;
+          for (let i = 0; i < 4; i++) {
+            const d = maps[i];
+            d.fr.style.opacity = 0;
+            if (!(await ctx.tween(400, (t) => K.set(d.el, { x: K.lerp(d.x, 460 + 48 - 48 * (1 - t), t), y: K.lerp(d.y, 84 + i * 26, t), width: K.lerp(96, 22, t), height: K.lerp(96, 22, t) })))) return;
+            d.el.style.opacity = 0; d.fr.style.opacity = 0; vec[i].forEach((e) => (e.style.opacity = 1));
+          }
+          dots.style.opacity = 1;
+          await ctx.tween(900, (t) => bars.forEach(([b, p]) => K.set(b, { width: p * 260 * t })));
+        })();
+        void gap;
+      },
+    },
+    {
+      title: "编译要点：稀疏交叉熵、一次发 16 批，然后开始训练", kicker: "第 19–20 格 · 编译与训练（编译在第 18 格）", at: 19,
+      html: `<p>上一章<span data-cell="18">第 18 格</span>的 <code>model.compile</code> 里有两个值得讲的设置。标签是一个整数（比如 53），不是 104 维的 one-hot 向量，所以损失用 <code>sparse_categorical_crossentropy</code>：直接拿“正确类别那一项的预测概率”取负对数，省得把标签展开。</p><p><code>steps_per_execution=16</code> 是给 TPU 的优化：一次把 16 个批次打包发过去，让 TPU 在内部循环跑完再回报，减少主机和 TPU 之间来回通信的开销。第 20 格随后调用 <code>model.fit</code> 训练 12 轮。</p>`,
+      cells: [20], highlight: ["steps_per_epoch=STEPS_PER_EPOCH", "epochs=EPOCHS"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "标签 y = 53（sunflower）");
+        K.svg(svg, "text", { x: 30, y: 52, "font-size": 12, class: "muted" }, "one-hot 写法要 104 个数，只有第 53 位是 1：");
+        for (let i = 0; i < 52; i++) K.svg(svg, "rect", { x: 30 + i * 6.4, y: 62, width: 5, height: 14, fill: i === 26 ? "var(--accent)" : "var(--panel-2)", stroke: "var(--line)", "stroke-width": 0.5 });
+        K.svg(svg, "text", { x: 370, y: 74, "font-size": 11, class: "muted" }, "…（共 104 位）");
+        K.svg(svg, "text", { x: 30, y: 112, "font-size": 13 }, "稀疏写法：loss = −log p[53]");
+        const p = K.svg(svg, "text", { x: 30, y: 136, "font-size": 13, "font-family": "var(--mono)", fill: "var(--accent)" }, "");
+        K.svg(svg, "text", { x: 30, y: 190, "font-size": 13, "font-weight": 700 }, "steps_per_execution = 16");
+        K.node(svg, 30, 210, 110, 60, "主机 CPU", { fs: 13 });
+        K.node(svg, 560, 210, 120, 60, "TPU", { fs: 13, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        K.svg(svg, "line", { x1: 140, y1: 240, x2: 560, y2: 240, stroke: "var(--line)", "stroke-width": 2 });
+        const pk = Array.from({ length: 16 }, (_, i) => K.svg(svg, "rect", { x: 150 + (i % 8) * 12, y: 222 + Math.floor(i / 8) * 14, width: 10, height: 10, rx: 2, fill: "var(--c3)" }));
+        const msg = K.svg(svg, "text", { x: 350, y: 300, "text-anchor": "middle", "font-size": 12, class: "muted" }, "16 个批次打成一包发送，TPU 内部连跑 16 步再回报");
+        void msg;
+        (async () => {
+          for (const pr of [0.05, 0.2, 0.45, 0.7]) { p.textContent = `p[53] = ${pr.toFixed(2)} → loss = ${(-Math.log(pr)).toFixed(2)}`; if (!(await ctx.wait(500))) return; }
+          for (let r = 0; r < 3; r++) {
+            if (!(await ctx.tween(1000, (t) => pk.forEach((e, i) => K.set(e, { x: K.lerp(150 + (i % 8) * 12, 450 + (i % 8) * 12, t) }))))) return;
+            if (!(await ctx.wait(300))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "看训练与验证曲线", kicker: "第 21 格 · 训练曲线", at: 21,
+      html: `<p><code>model.fit</code> 训练 12 轮，每轮 <code>STEPS_PER_EPOCH</code> 步，同时在验证集上评估。因为训练集用了 <code>repeat()</code> 无限循环，必须明确告诉 Keras 每轮跑多少步。</p><p>然后画出训练和验证的损失、准确率曲线。主干冻结、只训练一层，这类模型通常收敛很快，但上限也有限。动画里的曲线是示意，不是作者的真实曲线。</p>`,
+      cells: [21], highlight: ["display_training_curves"],
+      draw(svg, ctx) {
+        const r = K.rng(21), tl = [], vl = [];
+        for (let e = 0; e < 12; e++) { tl.push(3.6 * Math.exp(-e / 2.2) + 0.9 + K.randn(r) * 0.03); vl.push(3.4 * Math.exp(-e / 2.5) + 1.25 + K.randn(r) * 0.05); }
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [1, 12], [0, 5], { xticks: 11, yticks: 5, xfmt: (v) => Math.round(v), xlabel: "轮次 epoch" });
+        K.svg(svg, "text", { x: 500, y: 52, "font-size": 12, fill: "var(--c1)" }, "— 训练损失（示意）");
+        K.svg(svg, "text", { x: 500, y: 70, "font-size": 12, fill: "var(--c6)" }, "— 验证损失（示意）");
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 }), p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        ctx.tween(2400, (t) => { const n = Math.max(1, Math.round(t * 12)); let a = "", b = ""; for (let e = 0; e < n; e++) { a += (a ? "L" : "M") + ax.sx(e + 1) + "," + ax.sy(tl[e]); b += (b ? "L" : "M") + ax.sx(e + 1) + "," + ax.sy(vl[e]); } p1.setAttribute("d", a); p2.setAttribute("d", b); });
+      },
+    },
+    {
+      title: "评估：混淆矩阵 + 宏平均 F1", kicker: "第 22–24 格 · 评估", at: 22, notes: { 23: "按顺序读出验证集，拿到每张图的真实标签和预测标签。" },
+      html: `<p>作者把验证集按顺序（<code>ordered=True</code>）读出来，拿到真实标签和预测标签，画 104×104 的混淆矩阵，并<b>按行归一化</b>（每行除以该类样本数），对角线越亮说明这一类认得越准。</p><p>指标用 <code>average='macro'</code> 的 F1、精确率、召回率：先对每一类单独算，再<b>把 104 个数简单平均</b>。这样每一类权重相同，样本少的类做不好也会被看见。</p>`,
+      cells: [24], highlight: ["average='macro'", "cmat = (cmat.T / cmat.sum(axis=1)).T"],
+      draw(svg, ctx) {
+        const n = 14, c = 17, x0 = 30, y0 = 40, r = K.rng(8), cells = [];
+        for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+          const diag = 0.55 + r() * 0.4 - (i % 5 === 3 ? 0.35 : 0);
+          const v = i === j ? diag : r() < 0.12 ? r() * 0.25 : 0;
+          cells.push({ i, j, v, e: K.svg(svg, "rect", { x: x0 + j * c, y: y0 + i * c, width: c - 1, height: c - 1, fill: "var(--panel-2)" }) });
+        }
+        K.svg(svg, "text", { x: x0, y: 30, "font-size": 12, class: "muted" }, "按行归一化的混淆矩阵（只画 14 类，示意）");
+        K.svg(svg, "text", { x: x0 + (n * c) / 2, y: y0 + n * c + 18, "text-anchor": "middle", "font-size": 11, class: "muted" }, "预测类别 →");
+        const f1 = Array.from({ length: n }, (_, i) => cells.find((d) => d.i === i && d.j === i).v * (0.85 + r() * 0.15));
+        const bx = 330, by = 60;
+        K.svg(svg, "text", { x: bx, y: 40, "font-size": 12, "font-weight": 700 }, "每一类的 F1（示意）");
+        const bars = f1.map((f, i) => K.svg(svg, "rect", { x: bx + i * 24, y: by + 180, width: 18, height: 0, rx: 2, fill: f < 0.4 ? "var(--bad)" : "var(--c3)" }));
+        K.svg(svg, "line", { x1: bx, x2: bx + n * 24, y1: by + 180, y2: by + 180, stroke: "var(--ink-3)" });
+        const mean = f1.reduce((a, b) => a + b, 0) / n;
+        const ml = K.svg(svg, "line", { x1: bx, x2: bx + n * 24, y1: by + 180 - mean * 180, y2: by + 180 - mean * 180, stroke: "var(--accent)", "stroke-width": 2, "stroke-dasharray": "6 3" }); ml.style.opacity = 0;
+        const mt = K.svg(svg, "text", { x: bx, y: by + 216, "font-size": 13, "font-weight": 700, fill: "var(--accent)" }, "");
+        K.svg(svg, "text", { x: bx, y: by + 238, "font-size": 12, class: "muted" }, "宏平均 = 各类 F1 的简单平均；红色是做得差的类");
+        (async () => {
+          if (!(await ctx.tween(1200, (t) => cells.forEach((d) => { if (d.i <= t * n) d.e.style.fill = K.heat(d.v); })))) return;
+          if (!(await ctx.tween(900, (t) => bars.forEach((b, i) => K.set(b, { y: by + 180 - f1[i] * 180 * t, height: f1[i] * 180 * t }))))) return;
+          ml.style.opacity = 1; mt.textContent = `宏平均 F1（示意）= ${mean.toFixed(2)}`;
+        })();
+      },
+    },
+    {
+      title: "预测测试集，生成提交文件", kicker: "第 25–29 格 · 预测与检查", at: 25, notes: { 28: "从验证集取 20 张，准备画出预测结果。" },
+      html: `<p>对测试集（同样 <code>ordered=True</code>，保证图片和 ID 对得上）输出 104 个概率，<code>np.argmax</code> 取最大的那个作为类别，和图片 ID 一起写进 <code>submission.csv</code>（两列：id, label）。</p><p>最后再从验证集取 20 张，把预测画在图上：猜对标 <b>OK</b>，猜错标 <b>NO → 正确类别</b>，用红字显示。这是快速发现系统性错误的好办法。</p>`,
+      cells: [26, 29], highlight: ["np.argmax(probabilities, axis=-1)", "submission.csv"],
+      draw(svg, ctx) {
+        const r = K.rng(6), rows = [];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "probabilities → argmax → submission.csv（示意）");
+        for (let i = 0; i < 5; i++) {
+          const y = 50 + i * 54;
+          PX.draw(svg, 30, y, 44, 44, fl(i, 24, { rot: i }), "rgb");
+          const pr = Array.from({ length: 24 }, () => r() * 0.3); const k = Math.floor(r() * 24); pr[k] = 1;
+          pr.forEach((p, j) => K.svg(svg, "rect", { x: 90 + j * 9, y: y + 40 - p * 36, width: 7, height: p * 36, fill: j === k ? "var(--accent)" : "var(--ink-3)" }));
+          const id = Array.from({ length: 9 }, () => "0123456789abcdef"[Math.floor(r() * 16)]).join("");
+          const lab = [53, 48, 73, 67, 77][i];
+          const row = K.svg(svg, "text", { x: 440, y: y + 28, "font-size": 13, "font-family": "var(--mono)" }, `${id},${lab}`); row.style.opacity = 0; rows.push(row);
+          K.svg(svg, "text", { x: 330, y: y + 28, "font-size": 12, fill: "var(--accent)" }, `argmax → ${lab}`);
+        }
+        K.svg(svg, "text", { x: 440, y: 40, "font-size": 13, "font-family": "var(--mono)", "font-weight": 700 }, "id,label");
+        K.svg(svg, "text", { x: 30, y: 330, "font-size": 12, class: "muted" }, "柱子 = 104 个类别的概率（只画 24 根），蓝色是最大的那一个");
+        (async () => { for (const e of rows) { if (!(await ctx.tween(300, (t) => (e.style.opacity = t)))) return; } })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：Flatten vs GAP ---------- */
+  /* VGG16 有 5 个 2×2、步长 2 的最大池化（padding='valid'），每次边长向下取整减半 */
+  const vggOut = (s) => { for (let i = 0; i < 5; i++) s = Math.floor(s / 2); return s; };
+  K.lab(document.getElementById("lab1"), {
+    width: 660, height: 300,
+    controls: [
+      { id: "size", label: "输入分辨率（比赛提供的四种）", value: "512", options: [["192", "192×192"], ["224", "224×224"], ["331", "331×331"], ["512", "512×512（作者选的）"]] },
+      { id: "nc", label: "类别数", min: 2, max: 1000, step: 1, value: 104 },
+    ],
+    note: "VGG16 的卷积主干有 5 次 2×2 池化，边长每次向下取整减半（331 → 165 → 82 → 41 → 20 → 10）。Flatten 把整张特征图拉成一条，后面 Dense 层的权重个数 = 拉平长度 × 类别数；GAP 每个通道只留 1 个平均值，长度固定 512。",
+    render(svg, v) {
+      const s = +v.size, fs = vggOut(s), flat = fs * fs * 512, pF = flat * v.nc + v.nc, pG = 512 * v.nc + v.nc;
+      const cell = Math.min(14, 200 / fs);
+      K.svg(svg, "text", { x: 10, y: 22, "font-size": 13, "font-weight": 700 }, `VGG16 输出：${fs}×${fs}×512`);
+      const r = K.rng(fs);
+      for (let y = 0; y < fs; y++) for (let x = 0; x < fs; x++) K.svg(svg, "rect", { x: 10 + x * cell, y: 34 + y * cell, width: cell - 1, height: cell - 1, fill: K.heat(0.2 + r() * 0.7) });
+      K.svg(svg, "text", { x: 10, y: 34 + fs * cell + 18, "font-size": 11, class: "muted" }, "（画的是 1 个通道，共 512 个）");
+      const bx = 280;
+      K.svg(svg, "text", { x: bx, y: 40, "font-size": 13, "font-weight": 700 }, "Flatten → Dense");
+      K.svg(svg, "text", { x: bx, y: 60, "font-size": 12, class: "muted" }, `${flat.toLocaleString()} 维 × ${v.nc} 类 + ${v.nc}`);
+      K.svg(svg, "text", { x: bx, y: 140, "font-size": 13, "font-weight": 700 }, "GlobalAveragePooling2D → Dense（作者）");
+      K.svg(svg, "text", { x: bx, y: 160, "font-size": 12, class: "muted" }, `512 维 × ${v.nc} 类 + ${v.nc}`);
+      const L = (p) => Math.log10(Math.max(p, 1)), maxL = 9.5, W = 360;
+      K.svg(svg, "rect", { x: bx, y: 72, width: (L(pF) / maxL) * W, height: 22, rx: 3, fill: "var(--c6)" });
+      K.svg(svg, "rect", { x: bx, y: 172, width: (L(pG) / maxL) * W, height: 22, rx: 3, fill: "var(--c3)" });
+      K.svg(svg, "text", { x: bx, y: 112, "font-size": 12, "font-family": "var(--mono)" }, pF.toLocaleString() + " 个参数");
+      K.svg(svg, "text", { x: bx, y: 212, "font-size": 12, "font-family": "var(--mono)" }, pG.toLocaleString() + " 个参数");
+      K.svg(svg, "text", { x: bx, y: 250, "font-size": 12, class: "muted" }, "条形长度按对数刻度画（每格 10 倍）");
+      K.svg(svg, "text", { x: bx, y: 272, "font-size": 12, class: "muted" }, "GAP 的参数个数与输入分辨率无关；Flatten 随分辨率平方增长");
+      return { readout: [
+        { k: "Flatten 头参数", v: pF.toLocaleString(), color: "var(--c6)" },
+        { k: "GAP 头参数", v: pG.toLocaleString(), color: "var(--c3)" },
+        { k: "相差倍数", v: (pF / pG).toFixed(0) + " 倍" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：长尾多分类，准确率 vs 宏平均 F1（期望混淆矩阵） ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 660, height: 320,
+    controls: [
+      { id: "nc", label: "类别数", min: 5, max: 104, step: 1, value: 104 },
+      { id: "tail", label: "长尾程度（0 = 每类一样多）", min: 0, max: 2, step: 0.05, value: 1, fmt: (v) => v.toFixed(2) },
+      { id: "rmax", label: "最常见类的召回率", min: 0.3, max: 1, step: 0.01, value: 0.9, fmt: (v) => (v * 100).toFixed(0) + "%" },
+      { id: "beta", label: "模型对少见类的吃亏程度", min: 0, max: 1, step: 0.05, value: 0.5, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "第 i 类样本数 ∝ 1/(i+1)^长尾程度；召回率 = 最大召回率 × (样本数/最多那类)^吃亏程度。判错的样本按各类的样本比例被误判到别的类（模型偏向大类）。由此现场算出期望混淆矩阵，再算准确率与宏平均 F1。",
+    render(svg, v) {
+      const n = v.nc, N = 20000;
+      const w = Array.from({ length: n }, (_, i) => 1 / Math.pow(i + 1, v.tail)), sw = w.reduce((a, b) => a + b, 0);
+      const cnt = w.map((x) => (x / sw) * N), nmax = cnt[0];
+      const rec = cnt.map((c) => v.rmax * Math.pow(c / nmax, v.beta));
+      const colSum = cnt.map((c, j) => cnt[j] * rec[j]);
+      for (let i = 0; i < n; i++) { const wrong = cnt[i] * (1 - rec[i]), rest = N - cnt[i]; for (let j = 0; j < n; j++) if (j !== i) colSum[j] += (wrong * cnt[j]) / rest; }
+      const f1 = cnt.map((c, j) => { const tp = c * rec[j], prec = colSum[j] > 0 ? tp / colSum[j] : 0, r = rec[j]; return prec + r > 0 ? (2 * prec * r) / (prec + r) : 0; });
+      const acc = cnt.reduce((a, c, j) => a + c * rec[j], 0) / N, macro = f1.reduce((a, b) => a + b, 0) / n, macroR = rec.reduce((a, b) => a + b, 0) / n;
+      const ax = K.axes(svg, { x: 50, y: 20, w: 590, h: 230 }, [0, n], [0, 1], { xticks: 0, yticks: 5, yfmt: (x) => x.toFixed(1) });
+      const bw = 590 / n;
+      cnt.forEach((c, j) => K.svg(svg, "rect", { x: ax.sx(j) + 0.5, y: ax.sy(c / nmax), width: Math.max(1, bw - 1), height: ax.sy(0) - ax.sy(c / nmax), fill: "var(--panel-2)", stroke: "var(--line)", "stroke-width": 0.5 }));
+      let d = ""; f1.forEach((f, j) => (d += (d ? "L" : "M") + (ax.sx(j) + bw / 2) + "," + ax.sy(f)));
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--c6)", "stroke-width": 2 });
+      K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(n), y1: ax.sy(acc), y2: ax.sy(acc), stroke: "var(--accent)", "stroke-dasharray": "6 3", "stroke-width": 2 });
+      K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(n), y1: ax.sy(macro), y2: ax.sy(macro), stroke: "var(--c6)", "stroke-dasharray": "2 3", "stroke-width": 2 });
+      K.svg(svg, "text", { x: ax.sx(n) - 4, y: ax.sy(acc) - 5, "text-anchor": "end", "font-size": 12, fill: "var(--accent)", "font-weight": 700 }, "准确率");
+      K.svg(svg, "text", { x: ax.sx(n) - 4, y: ax.sy(macro) + 15, "text-anchor": "end", "font-size": 12, fill: "var(--c6)", "font-weight": 700 }, "宏平均 F1");
+      K.svg(svg, "text", { x: 50, y: 272, "font-size": 12, class: "muted" }, "灰柱 = 各类样本数（相对最多的类，从多到少排）；红线 = 每类的 F1");
+      K.svg(svg, "text", { x: 50, y: 292, "font-size": 12, class: "muted" }, "类别（从常见到少见）→");
+      return { readout: [
+        { k: "准确率", v: (acc * 100).toFixed(1) + "%", color: "var(--accent)" },
+        { k: "宏平均 F1", v: (macro * 100).toFixed(1) + "%", color: "var(--c6)" },
+        { k: "宏平均召回率", v: (macroR * 100).toFixed(1) + "%" },
+        { k: "最少类 / 最多类样本", v: (cnt[n - 1] / nmax * 100).toFixed(1) + "%" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

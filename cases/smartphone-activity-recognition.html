@@ -1,0 +1,717 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>手机知道你在干嘛</title>
+<meta name="description" content="Kaggle 案例拆解：只靠腰上手机的加速度计和陀螺仪，识别走路、上下楼、坐、站、躺，甚至认出是哪个人——t-SNE、LightGBM、SSA 分解与步频估计。">
+<link rel="stylesheet" href="../assets/case.css">
+<style>
+  .fast .ch-cells > .cell, .fast .ch-cells > .cell-note { display: none; }
+</style>
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">传感器时间序列 · 多分类 + 探索分析 · 物联网与隐私</div>
+  <h1>你的手机知道你在干什么，也知道你是谁</h1>
+  <p class="en">What Does Your Smartphone Know About You?</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">标准化</span><span class="tag method">PCA 降维</span><span class="tag method">t-SNE 可视化</span>
+    <span class="tag method">LightGBM 梯度提升</span><span class="tag method">特征重要性</span>
+    <span class="tag method">SSA 奇异谱分解</span><span class="tag method">正弦拟合 / FFT</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Data Liftoff（morrisb）</b></span>
+    <span>Kaggle 点赞 <b>664</b>（2026-11 抓取）</span>
+    <span>数据集 <b>uciml/human-activity-recognition-with-smartphones</b></span>
+    <span><a href="https://www.kaggle.com/code/morrisb/what-does-your-smartphone-know-about-you" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">30 个人腰上别着手机做日常动作</div><p>手机里的加速度计和陀螺仪一直在记录。研究者每 2.56 秒切一个时间窗、相邻窗重叠一半，从每个窗算出几百个特征。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>要回答什么</h3><div class="big">你在干什么？你是谁？</div><p>原本的任务是识别 6 种活动（走、上楼、下楼、坐、站、躺）。作者多问了一句：同样的数据能不能认出<b>是 30 个人里的哪一个</b>？<span data-cell="12">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">t-SNE 看分布，LightGBM 做分类</div><p>标准化 + PCA + t-SNE 画图；未调参的 LightGBM 分别识别活动和识别人；再用 SSA 分解加速度、拟合正弦曲线估计步频，并和自己数台阶的实验对比。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">活动约 95%，按走路认人约 94%</div><p>作者结论：手机只需 1–1.5 分钟的数据就能判断你在干什么（6 类约 95%），或者从走路姿态认出你是 30 人中的谁（约 94%）。<span data-cell="43">出处</span> 但切分方式有隐患，见第 5 章。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>Human Activity Recognition with Smartphones</b>（UCI 机器学习库，Kaggle 由 uciml 上传）。下面的规模信息来自 Kaggle 数据集说明页，以及作者第 0、16 格的文字。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">志愿者</div><div class="v">30 人</div></div>
+        <div class="stat-tile"><div class="k">年龄范围</div><div class="v">19–48 岁</div></div>
+        <div class="stat-tile"><div class="k">活动类别</div><div class="v">6 种</div></div>
+        <div class="stat-tile"><div class="k">每个窗的特征数</div><div class="v">561</div></div>
+        <div class="stat-tile"><div class="k">采样频率</div><div class="v">50 Hz</div></div>
+        <div class="stat-tile"><div class="k">时间窗</div><div class="v">2.56 秒</div></div>
+        <div class="stat-tile"><div class="k">窗口重叠</div><div class="v">50%</div></div>
+        <div class="stat-tile"><div class="k">相邻两行间隔</div><div class="v">1.28 秒</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">手机是腰上的 Samsung Galaxy S II；每个窗 128 个读数；原始的训练/测试划分是<b>按人</b>分的（70% 的人做训练，30% 的人做测试）。以上见数据集说明。窗长、重叠和 1.28 秒间隔作者在 <span data-cell="0">第 0 格</span>、<span data-cell="16">第 16 格</span> 也写了。总行数在第 3 格的运行输出里，源码不带输出，这里不写。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列（举例）</th><th>白话含义</th><th>类型</th></tr>
+        <tr><td><code>tBodyAcc-mean()-X</code></td><td>这个窗里“身体动作”加速度在 X 轴上的平均值（作者第 33 格用到）</td><td>数值</td></tr>
+        <tr><td>名字带 <code>Acc</code></td><td>来自加速度计：手机往哪个方向“被推了一下”</td><td>数值</td></tr>
+        <tr><td>名字带 <code>Gyro</code></td><td>来自陀螺仪：手机在怎么转、转多快</td><td>数值</td></tr>
+        <tr><td>名字带 <code>Gravity</code></td><td>从加速度里分离出的重力分量（0.3 Hz 低通滤波），反映手机朝向</td><td>数值</td></tr>
+        <tr><td><code>subject</code></td><td>是第几号志愿者（作者在第 5 章把它当成要猜的答案）</td><td>类别</td></tr>
+        <tr><td><code>Activity</code></td><td><b>要预测的答案</b>：WALKING、WALKING_UPSTAIRS、WALKING_DOWNSTAIRS、SITTING、STANDING、LAYING</td><td>类别</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">561 个特征都是研究者从时间窗里算好的统计量（均值、标准差、最大值、频域能量等），这里每个窗一行。原始波形本身不在这两张表里。<code>Data</code> 列是作者自己加的，标记该行原来属于 train 还是 test <span data-cell="3">第 3 格</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="5">
+    <h3>实验 A · 时间窗有多长，特征才分得开 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labA"></div>
+  </div>
+  <div data-at="13">
+    <h3>实验 B · 随机切分 vs 按人切分：重叠时间窗让分数虚高 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labB"></div>
+  </div>
+  <div data-at="37">
+    <h3>实验 C · 每 1.28 秒一个点，还看得出步频吗 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labC"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>t-SNE 图上 6 种活动大体能分开；按人上色时，走路区域里每个人自成一小团</td><td><span data-cell="12">第 12 格</span></td></tr>
+        <tr><td>未调参的 LightGBM 识别 6 种活动，准确率约 95%</td><td><span data-cell="14">第 14 格</span></td></tr>
+        <tr><td>只用走路的数据识别 30 个人中的哪一个，准确率约 94%；动起来的活动比静止的更容易认人</td><td><span data-cell="16">第 16 格</span></td></tr>
+        <tr><td>每个人每种活动平均只有 1–1.5 分钟的数据，手机“很快”就能猜对</td><td><span data-cell="18">第 18 格</span></td></tr>
+        <tr><td>按走路认人时，加速度计提供的信息略多于陀螺仪，两者都重要</td><td><span data-cell="20">第 20 格</span></td></tr>
+        <tr><td>下楼的数据比上楼少，推测大家下楼约快 10%；几乎每个人上楼都更久</td><td><span data-cell="10">第 10 格</span>、<span data-cell="22">第 22 格</span></td></tr>
+        <tr><td>每个人的走路数据分成两团，推测做了两次走路实验，速度不同</td><td><span data-cell="28">第 28 格</span>、<span data-cell="34">第 34 格</span></td></tr>
+        <tr><td>1 号志愿者两次走路拟合出的步频约 0.94 和 0.50 步/秒；作者自测慢走约 1.23 步/秒，并认为 0.50 步/秒不太可能，可能是采样太稀丢了信息</td><td><span data-cell="38">第 38 格</span>、<span data-cell="42">第 42 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">表里的百分比都来自作者的文字。每格代码的具体运行输出（如每种活动认人的准确率、各人时长）只在 Kaggle 网页上，源码不带输出，这里不列。</p>
+      <p class="callout warn"><b>读这些数字时要打折扣：</b>作者把原来按人划分的 train/test 合在一起，再<b>随机</b>切分 <span data-cell="13">第 13 格</span>。相邻两行的时间窗重叠一半，测试集里几乎每一行都有“半个双胞胎”在训练集里，所以 95% 很可能偏乐观，换成没见过的人会低一些（见实验 B）。此外第 37 格把“每点”换算成“每秒”时乘了 1.28（按单位应当除以 1.28），步频数字本身也要谨慎看待。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一段 2.56 秒的手机传感器数据，判断人正在走、上下楼、坐、站还是躺；在同一批人里，还能猜出是谁。</li>
+        <li><b>同类问题：</b>手环计步与久坐提醒、老人跌倒检测、骑车/开车/坐地铁的出行方式识别、工人作业姿态监测、车辆或设备振动的状态识别。</li>
+        <li><b>可迁移的套路：</b>传感器流 → 切时间窗 → 每窗算统计特征 → 标准化 + 降维看分布 → 梯度提升分类；评估时<b>按人（或按设备、按天）切分</b>，别让重叠窗口泄漏答案。</li>
+        <li><b>隐私提醒：</b>作者的落脚点是：普通 App 就能读到这两个传感器，而它们足以泄露你的身份和身体状况。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>合并 train/test、取出标签 <span data-cell="3">第 3 格</span></li>
+        <li>按主名称统计特征 <span data-cell="5">第 5 格</span></li>
+        <li>StandardScaler + PCA（保留 90% 方差）+ t-SNE <span data-cell="11">第 11 格</span></li>
+        <li>LightGBM（500 棵树，未调参）识别活动 <span data-cell="13">第 13 格</span>、识别人 <span data-cell="15">第 15 格</span></li>
+        <li>按传感器汇总特征重要性 <span data-cell="19">第 19 格</span></li>
+        <li>时长统计、比例、正态性检查（直方图 + Q-Q 图）<span data-cell="21">第 21 格</span>–<span data-cell="25">第 25 格</span></li>
+        <li>逐人 t-SNE 轨迹 <span data-cell="27">第 27 格</span>、<span data-cell="31">第 31 格</span></li>
+        <li>SSA 奇异谱分解 <span data-cell="33">第 33 格</span>，FFT 初值 + curve_fit 正弦拟合 <span data-cell="37">第 37 格</span></li>
+        <li>自测步频对照 <span data-cell="41">第 41 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者把原来“按人划分”的训练集和测试集合并后随机切分。相邻时间窗重叠 50%，这样得到的 95% 是偏高还是偏低？如果要评估“给一个从没见过的新用户用”，该怎么切？</li>
+      <li>“认出是谁”的 94% 只能在这 30 个人内部成立。如果来了第 31 个人，模型会怎么样？这还算“识别身份”吗？</li>
+      <li>数据集里每个点是 2.56 秒窗口的平均值，每 1.28 秒一个。用这样的点去估计每秒约 1–2 步的步频，靠得住吗？（提示：实验 C 和采样定理。）</li>
+      <li>第 37 格把拟合出的角频率换算成“每秒几步”时乘了 1.28。请按单位推一遍：每点 1.28 秒，应该乘还是除？作者的 0.94、0.50 会怎样变化？</li>
+      <li>作者用加速度和陀螺仪就能推测出步速、体能差异甚至年龄健康（第 24 格自己说是猜测）。你手机里哪些 App 能读这些传感器？应不应该需要授权？</li>
+      <li>坐着和站着在 t-SNE 图上常常挨在一起。为什么这两种最难分？如果把手机放在裤兜而不是腰上，会更好还是更难？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Data Liftoff（Kaggle 用户 morrisb），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：Anguita, Ghio, Oneto, Parra, Reyes-Ortiz, <i>A Public Domain Dataset for Human Activity Recognition Using Smartphones</i>, ESANN 2013（UCI Machine Learning Repository）。
+</footer>
+</main>
+
+<script src="nb/smartphone-activity-recognition.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  /* 自查开关：网址带 ?fast 或 #fast 时动画直接跳到最后一帧并隐藏代码格（无界面截图用） */
+  const FAST = /fast/.test(location.search + location.hash);
+  if (FAST) {
+    K.tween = (ms, fn, ctx) => { fn(1, 1); return Promise.resolve(!ctx || ctx.alive()); };
+    K.wait = (ms, ctx) => Promise.resolve(!ctx || ctx.alive());
+    document.documentElement.classList.add("fast");
+  }
+  K.initPage();
+
+  const ACTS = ["走路", "上楼", "下楼", "坐", "站", "躺"];
+  const ACOL = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c5)", "var(--c6)"];
+  const T = (svg, x, y, s, a) => K.svg(svg, "text", Object.assign({ x, y, "font-size": 13 }, a || {}), s);
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+  const show = (ctx, els, ms) => ctx.tween(ms || 400, (t) => els.forEach((e) => (e.style.opacity = t)));
+
+  /* 模拟腰上手机的三轴加速度（单位 g）。act: 0走 1上楼 2下楼 3坐 4站 5躺；p: 个人参数 */
+  function accel(act, t, r, p) {
+    p = p || { f: 1, a: 1, tilt: 0 };
+    const n = () => K.randn(r) * 0.02;
+    if (act <= 2) {
+      const f = [1.8, 1.5, 2.0][act] * p.f, A = [0.28, 0.32, 0.42][act] * p.a, ph = 2 * Math.PI * f * t;
+      return [0.12 * Math.sin(ph / 2) + n() * 3, 1 + A * Math.sin(ph) + 0.35 * A * Math.sin(2 * ph + 0.7) + n() * 4, 0.1 + 0.15 * A * Math.cos(ph) + n() * 3 + (act === 1 ? 0.08 : act === 2 ? -0.06 : 0)];
+    }
+    if (act === 3) return [0.05 + n(), 0.93 + n(), 0.36 + p.tilt + n()];
+    if (act === 4) return [0.02 + n(), 1.0 + n(), 0.06 + p.tilt * 0.5 + n()];
+    return [0.1 + n(), 0.08 + n(), 0.99 + n()];
+  }
+
+  const steps = [
+    {
+      title: "开场：腰上的手机与 2.56 秒时间窗", kicker: "第 0–3 格 · 数据从哪来", at: 0,
+      html: `<p>30 名志愿者把手机别在腰上做日常动作，手机里的<b>加速度计</b>和<b>陀螺仪</b>每秒各记 50 次三个方向的读数。研究者把连续的波形切成一个个 2.56 秒的<b>时间窗</b>，相邻两个窗重叠一半，所以每隔 1.28 秒产生一行数据。<span data-cell="0">第 0 格</span></p><p>作者导入库后，把原始的 train.csv 和 test.csv <b>合并</b>成一张表 <code>both_df</code>，并把活动标签 <code>Activity</code> 单独取出来。<span data-cell="3">第 3 格</span>（动画里的波形是模拟的。）</p>`,
+      cells: [3], highlight: ["pd.concat", "label = both_df.pop('Activity')"],
+      draw(svg, ctx) {
+        const r = K.rng(4);
+        T(svg, 20, 24, "腰上手机的加速度（模拟，竖直方向）", { class: "muted" });
+        const ax = K.axes(svg, { x: 40, y: 40, w: 640, h: 130 }, [0, 12], [0.3, 1.7], { xticks: 6, yticks: 2, xlabel: "时间（秒）" });
+        const seq = [[0, 4, 4], [4, 9, 0], [9, 12, 3]];
+        let d = "";
+        for (let t = 0; t <= 12; t += 0.02) { const act = seq.find((s) => t >= s[0] && t < s[1]); const a = accel(act ? act[2] : 3, t, r); d += (d ? "L" : "M") + ax.sx(t).toFixed(1) + "," + ax.sy(a[1]).toFixed(1); }
+        const path = K.svg(svg, "path", { d, fill: "none", stroke: "var(--c1)", "stroke-width": 1.4 });
+        seq.forEach((s) => T(svg, ax.sx((s[0] + s[1]) / 2), 56, ACTS[s[2]], { "text-anchor": "middle", fill: ACOL[s[2]], "font-weight": 700 }));
+        const len = path.getTotalLength ? path.getTotalLength() : 2000;
+        path.style.strokeDasharray = len; path.style.strokeDashoffset = len;
+        const wins = [], rows = [];
+        for (let k = 0; k < 8; k++) {
+          const t0 = k * 1.28, x0 = ax.sx(t0), x1 = ax.sx(t0 + 2.56);
+          wins.push(K.svg(svg, "rect", { x: x0, y: 44 + (k % 2) * 6, width: x1 - x0, height: 120, fill: "var(--accent)", "fill-opacity": 0.08, stroke: "var(--accent)", "stroke-width": 1.2 }));
+          rows.push(K.node(svg, 40 + k * 82, 250, 74, 40, `第 ${k + 1} 行\n${t0.toFixed(2)}s 起`, { fs: 11 }));
+        }
+        hide(wins); hide(rows);
+        T(svg, 40, 236, "每个窗 → 算 561 个特征 → 表格里的一行（相邻窗重叠 50%，所以每 1.28 秒一行）", { "font-size": 12 });
+        T(svg, 40, 318, "窗长 2.56 s = 128 个读数（50 Hz）", { "font-size": 12, class: "muted" });
+        (async () => {
+          if (!(await ctx.tween(1600, (t) => (path.style.strokeDashoffset = len * (1 - t))))) return;
+          for (let k = 0; k < 8; k++) { if (!(await ctx.tween(260, (t) => { wins[k].style.opacity = t; rows[k].style.opacity = t; }))) return; }
+        })();
+      },
+    },
+    {
+      title: "561 个特征从哪来", kicker: "第 4–6 格 · 特征一览",
+      html: `<p>作者把列名按“主名称”归类计数（去掉 <code>-mean()-X</code> 这类后缀），发现主要是<b>加速度</b>和<b>陀螺仪</b>两大类，另有少量<b>重力</b>特征。<span data-cell="6">第 6 格</span></p><p>动画演示一个时间窗是怎么变成一串数字的：同一段波形，算平均、算波动大小、算最大最小、再做频谱……乘上 3 个方向、两个传感器、身体/重力两种分量，特征数就涨到了几百个。</p>`,
+      cells: [5], highlight: ["col.split('-')[0]"],
+      draw(svg, ctx) {
+        const r = K.rng(8);
+        K.svg(svg, "rect", { x: 30, y: 60, width: 220, height: 120, rx: 8, fill: "var(--panel-2)", stroke: "var(--line)" });
+        let d = "";
+        for (let i = 0; i <= 128; i++) { const t = i / 50, a = accel(0, t, r); d += (d ? "L" : "M") + (36 + i * 1.62).toFixed(1) + "," + (120 - (a[1] - 1) * 110).toFixed(1); }
+        K.svg(svg, "path", { d, fill: "none", stroke: "var(--c1)", "stroke-width": 1.3 });
+        T(svg, 30, 50, "一个时间窗：128 个读数（模拟）", { "font-size": 12, class: "muted" });
+        const fs = [["mean()", "平均值：整体偏向哪边"], ["std()", "标准差：晃得厉不厉害"], ["max() / min()", "最大最小：冲击有多猛"], ["energy()", "能量：动作总强度"], ["fft → 频域", "频谱：一秒晃几下"], ["angle()", "和重力方向的夹角"]];
+        const items = fs.map((f, i) => {
+          const g = K.svg(svg, "g");
+          K.arrow(g, 252, 120, 330, 40 + i * 44);
+          K.node(g, 332, 22 + i * 44, 130, 34, f[0], { fs: 12, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+          T(g, 472, 44 + i * 44, f[1], { "font-size": 12 });
+          return g;
+        });
+        hide(items);
+        const tot = T(svg, 30, 230, "", { "font-size": 15, "font-weight": 700 });
+        const sub = T(svg, 30, 256, "", { "font-size": 12, class: "muted" });
+        T(svg, 30, 300, "× X/Y/Z 三个方向  × 加速度计/陀螺仪  × 身体/重力分量  × 时域/频域 …", { "font-size": 12 });
+        (async () => {
+          for (let i = 0; i < items.length; i++) if (!(await ctx.tween(300, (t) => (items[i].style.opacity = t)))) return;
+          await ctx.wait(300);
+          if (ctx.alive()) { tot.textContent = "组合起来：每个窗 561 个特征（数据集说明）"; sub.textContent = "名字里带 Acc 的来自加速度计，带 Gyro 的来自陀螺仪"; }
+        })();
+      },
+    },
+    {
+      title: "没有缺失值，标签大致均衡", kicker: "第 7–10 格 · 数据检查",
+      html: `<p>除了标签、<code>Data</code> 和 <code>subject</code>，全是数值，而且<b>没有缺失值</b>。<span data-cell="8">第 8 格</span>六种活动的样本数有起伏，但大体均衡。</p><p>作者从一个细节推出了一条“个人信息”：实验里上楼和下楼走的是同样的台阶，采样频率固定，那么下楼的数据更少，就说明下楼更快，<b>大约快 10%</b>。<span data-cell="10">第 10 格</span>动画里的条形高度是示意。</p>`,
+      cells: [7, 9],
+      draw(svg, ctx) {
+        const hs = [1, 0.88, 0.8, 0.94, 1.02, 1.05];
+        const bars = K.bars(svg, { x: 40, y: 40, w: 330, h: 220 }, ACTS.map((a, i) => ({ label: a, value: hs[i], color: ACOL[i] })), { max: 1.1, fmt: () => "" });
+        bars.forEach((b) => { b.rect.dataset.h = b.rect.getAttribute("height"); b.rect.dataset.y = b.rect.getAttribute("y"); b.rect.setAttribute("height", 0); b.rect.setAttribute("y", 260); });
+        T(svg, 40, 26, "各活动样本数（示意：大致均衡）", { "font-size": 12, class: "muted" });
+        const g = K.svg(svg, "g");
+        T(g, 410, 60, "同样 15 级台阶，采样频率固定：", { "font-size": 13, "font-weight": 700 });
+        const up = [], dn = [];
+        for (let i = 0; i < 9; i++) up.push(K.svg(g, "circle", { cx: 420 + i * 24, cy: 110, r: 7, fill: "var(--c2)" }));
+        for (let i = 0; i < 8; i++) dn.push(K.svg(g, "circle", { cx: 420 + i * 24, cy: 170, r: 7, fill: "var(--c3)" }));
+        T(g, 410, 92, "上楼：点更多 → 用时更长", { "font-size": 12, fill: "var(--c2)" });
+        T(g, 410, 152, "下楼：点更少 → 用时更短", { "font-size": 12, fill: "var(--c3)" });
+        T(g, 410, 220, "作者推断：下楼大约快 10%", { "font-size": 15, "font-weight": 700, fill: "var(--accent)" });
+        T(g, 410, 244, "（每个点 = 1.28 秒；点数为示意）", { "font-size": 12, class: "muted" });
+        hide([...up, ...dn]);
+        (async () => {
+          if (!(await ctx.tween(900, (t) => bars.forEach((b) => { const h = +b.rect.dataset.h * t; b.rect.setAttribute("height", h); b.rect.setAttribute("y", 260 - h); })))) return;
+          for (let i = 0; i < 9; i++) { if (!(await ctx.tween(140, (t) => { up[i].style.opacity = t; if (dn[i]) dn[i].style.opacity = t; }))) return; }
+        })();
+      },
+    },
+    {
+      title: "t-SNE：把 561 维压到一张纸上", kicker: "第 11–12 格 · 降维可视化",
+      html: `<p>561 维没法画。作者三步走：<b>StandardScaler</b> 把每列换成同一把尺子；<b>PCA</b> 保留 90% 的信息、先砍掉大部分维度提速；再用 <b>t-SNE</b> 压到 2 维画散点图。<span data-cell="11">第 11 格</span></p><p>结论两条：按活动上色，<b>6 种活动大体分得开</b>；按人上色，<b>走路区域里每个人自成一小团</b>，说明每个人走路的样子都不一样，手机既能知道你在干什么，也能知道你是谁。<span data-cell="12">第 12 格</span></p><p>动画先按活动上色，再在“走路”团里按人上色（示意，不是原图）。</p>`,
+      cells: [11], highlight: ["PCA(n_components=0.9", "TSNE("],
+      draw(svg, ctx) {
+        const r = K.rng(11);
+        ["561 维", "标准化", "PCA 90%", "t-SNE 2 维"].forEach((s, i) => { K.node(svg, 20 + i * 104, 14, 92, 30, s, { fs: 12, fill: i === 3 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 3 ? "var(--accent)" : "var(--line)" }); if (i) K.arrow(svg, 20 + i * 104 - 12, 29, 20 + i * 104 - 2, 29); });
+        const C = [[150, 120], [240, 100], [200, 200], [470, 230], [540, 210], [610, 120]];
+        const P = [];
+        for (let i = 0; i < 300; i++) {
+          const a = i % 6, person = Math.floor(r() * 6);
+          const sub = a === 0 ? [Math.cos(person) * 26, Math.sin(person) * 22] : [0, 0];
+          const spread = a === 3 || a === 4 ? 32 : 18;
+          P.push({ a, person, x0: 60 + r() * 600, y0: 70 + r() * 250, x1: C[a][0] + sub[0] + K.randn(r) * (a === 0 ? 9 : spread), y1: C[a][1] + 40 + sub[1] + K.randn(r) * (a === 0 ? 9 : spread * 0.8) });
+        }
+        const dots = P.map((p) => K.svg(svg, "circle", { cx: p.x0, cy: p.y0, r: 3.4, fill: "var(--ink-3)", opacity: 0.7 }));
+        const leg = K.svg(svg, "g");
+        ACTS.forEach((a, i) => { K.svg(leg, "circle", { cx: 660, cy: 70 + i * 20, r: 5, fill: ACOL[i] }); T(leg, 670, 75 + i * 20, a, { "font-size": 12 }); });
+        hide([leg]);
+        const note = T(svg, 20, 334, "", { "font-size": 12, fill: "var(--accent)" });
+        const pc = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c5)", "var(--c6)"];
+        (async () => {
+          await ctx.wait(400);
+          if (!(await ctx.tween(2200, (t) => dots.forEach((d, i) => { d.setAttribute("cx", K.lerp(P[i].x0, P[i].x1, t)); d.setAttribute("cy", K.lerp(P[i].y0, P[i].y1, t)); })))) return;
+          dots.forEach((d, i) => (d.style.fill = ACOL[P[i].a]));
+          leg.style.opacity = 1;
+          note.textContent = "按活动上色：6 种活动大体分开，坐和站挨得最近（示意）";
+          if (!(await ctx.wait(1600))) return;
+          dots.forEach((d, i) => { if (P[i].a === 0) { d.style.fill = pc[P[i].person]; d.setAttribute("r", 4); } else d.style.opacity = 0.2; });
+          note.textContent = "只看“走路”团、按人上色：每个人自成一小团 → 走路姿势能认人（示意）";
+        })();
+      },
+    },
+    {
+      title: "LightGBM：未调参就能认出 6 种活动", kicker: "第 13–14 格 · 活动分类",
+      html: `<p>作者把 PCA 后的数据随机切成训练集和测试集，训练一个 500 棵树、不调参的 <b>LightGBM</b> 分类器，测试准确率<b>约 95%</b>。<span data-cell="14">第 14 格</span></p><p>LightGBM 是一种<b>梯度提升树</b>：第一棵树先粗分，后面每一棵都只盯着前面没分对的部分修正。动画演示前几棵树怎样一步步逼近（一维示意数据）。</p><p class="callout warn">注意：作者用的是合并后的数据<b>随机</b>切分 <code>train_test_split(tsne_data, ...)</code>。相邻时间窗重叠 50%，测试集的很多行在训练集里都有几乎一样的“邻居”；原数据集本来是按人划分的。这个 95% 衡量的是“同一批人、同一段录音里的插值”，不是“给新用户用”。实验 B 现场演示差别。</p>`,
+      cells: [13], highlight: ["train_test_split(tsne_data", "LGBMClassifier(n_estimators=500"],
+      draw(svg, ctx) {
+        const r = K.rng(13), X = [], Y = [];
+        for (let i = 0; i < 60; i++) { const x = i / 59; X.push(x); Y.push((x < 0.3 ? 0.15 : x < 0.55 ? 0.8 : x < 0.8 ? 0.4 : 0.95) + K.randn(r) * 0.05); }
+        const ax = K.axes(svg, { x: 50, y: 30, w: 440, h: 260 }, [0, 1], [0, 1.1], { xticks: 0, yticks: 0, xlabel: "某个特征（示意）" });
+        X.forEach((x, i) => K.svg(svg, "circle", { cx: ax.sx(x), cy: ax.sy(Y[i]), r: 3.5, fill: "var(--ink-3)" }));
+        // 真算：用树桩逐轮拟合残差
+        const lr = 0.5, preds = [X.map(() => Y.reduce((a, b) => a + b) / Y.length)];
+        for (let m = 0; m < 6; m++) {
+          const F = preds[preds.length - 1], R = Y.map((y, i) => y - F[i]);
+          let best = null;
+          for (let s = 1; s < X.length; s++) { const L = R.slice(0, s), Rr = R.slice(s), ml = L.reduce((a, b) => a + b) / L.length, mr = Rr.reduce((a, b) => a + b) / Rr.length; const e = L.reduce((a, v) => a + (v - ml) ** 2, 0) + Rr.reduce((a, v) => a + (v - mr) ** 2, 0); if (!best || e < best.e) best = { e, s, ml, mr }; }
+          preds.push(F.map((f, i) => f + lr * (i < best.s ? best.ml : best.mr)));
+        }
+        const pathOf = (F) => F.map((f, i) => (i ? "L" : "M") + ax.sx(X[i]).toFixed(1) + "," + ax.sy(f).toFixed(1)).join("");
+        const line = K.svg(svg, "path", { d: pathOf(preds[0]), fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        const lab = T(svg, 520, 60, "第 0 棵：全体平均", { "font-size": 14, "font-weight": 700 });
+        const err = T(svg, 520, 90, "", { "font-size": 13 });
+        T(svg, 520, 140, "每棵新树只学习", { "font-size": 13 });
+        T(svg, 520, 160, "“前面还差多少”（残差）", { "font-size": 13 });
+        T(svg, 520, 200, "作者：500 棵树、未调参", { "font-size": 13, fill: "var(--c2)" });
+        T(svg, 520, 222, "测试准确率约 95%（第 14 格）", { "font-size": 13, fill: "var(--c2)" });
+        const mse = (F) => (F.reduce((a, f, i) => a + (f - Y[i]) ** 2, 0) / F.length).toFixed(4);
+        err.textContent = "均方误差 " + mse(preds[0]);
+        (async () => {
+          for (let m = 1; m < preds.length; m++) {
+            if (!(await ctx.wait(500))) return;
+            const A = preds[m - 1], B = preds[m];
+            if (!(await ctx.tween(600, (t) => line.setAttribute("d", pathOf(A.map((a, i) => K.lerp(a, B[i], t))))))) return;
+            lab.textContent = `加到第 ${m} 棵树`; err.textContent = "均方误差 " + mse(B);
+          }
+        })();
+      },
+    },
+    {
+      title: "换个问题：能认出是哪个人吗", kicker: "第 15–16 格 · 身份识别",
+      html: `<p>作者把目标从“活动”换成“志愿者编号 subject”，对每种活动单独训练同样的 LightGBM，看能否从 30 个人里认出是谁。<span data-cell="15">第 15 格</span></p><p>结论：不仅可行，而且<b>只看走路就有约 94%</b>；动起来的活动（走、上下楼）比静止的（坐、站、躺）更容易认人，说明每个人有自己独特的“步态”。<span data-cell="16">第 16 格</span></p><p>动画对比两种活动下 6 个人的特征点（示意）：躺着时大家差不多，混成一片；走路时各自成团。</p>`,
+      cells: [15], highlight: ["label_encoded = enc.fit_transform(act_subject_data)"],
+      draw(svg, ctx) {
+        const r = K.rng(15);
+        const panel = (x0, title, spread, sep) => {
+          K.svg(svg, "rect", { x: x0, y: 40, width: 320, height: 250, rx: 10, fill: "var(--panel-2)", stroke: "var(--line)" });
+          T(svg, x0 + 160, 30, title, { "text-anchor": "middle", "font-weight": 700 });
+          const out = [];
+          for (let p = 0; p < 6; p++) {
+            const cx = x0 + 160 + Math.cos(p * 1.05) * sep, cy = 165 + Math.sin(p * 1.05) * sep * 0.8;
+            for (let k = 0; k < 18; k++) out.push(K.svg(svg, "circle", { cx: x0 + 160, cy: 165, r: 3.6, fill: K.colors[p], opacity: 0.8, "data-x": cx + K.randn(r) * spread, "data-y": cy + K.randn(r) * spread }));
+          }
+          return out;
+        };
+        const A = panel(30, "躺着：6 个人混在一起", 30, 12), B = panel(370, "走路：每个人自成一团", 9, 80);
+        const msg = T(svg, 370, 320, "", { "font-size": 13, fill: "var(--accent)" });
+        const all = [...A, ...B].map((d) => ({ d, x0: +d.getAttribute("cx"), y0: +d.getAttribute("cy"), x1: +d.getAttribute("data-x"), y1: +d.getAttribute("data-y") }));
+        ctx.tween(1600, (t) => all.forEach((q) => { q.d.setAttribute("cx", K.lerp(q.x0, q.x1, t)); q.d.setAttribute("cy", K.lerp(q.y0, q.y1, t)); }))
+          .then((ok) => { if (ok) msg.textContent = "作者：仅凭走路，30 人中认对约 94%（第 16 格）"; });
+      },
+    },
+    {
+      title: "手机要“偷听”多久", kicker: "第 17–18 格 · 换算时长",
+      html: `<p>每行数据代表 1.28 秒。作者数一数每人每种活动平均有多少行，乘以 1.28，就得到手机为了达到上面的准确率收集了多久的数据。<span data-cell="17">第 17 格</span></p><p>结论：<b>大约 1–1.5 分钟</b>。<span data-cell="18">第 18 格</span>也就是说，你揣着手机走一两分钟，它就够认出你了。动画里的点数按“60–90 秒 ÷ 1.28 秒”换算。</p>`,
+      cells: [17], highlight: ["* 1.28"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 40, y: 150, w: 640, h: 30 }, [0, 90], [0, 1], { xticks: 6, yticks: 0, xlabel: "秒" });
+        const n = Math.floor(90 / 1.28), dots = [];
+        for (let i = 0; i < n; i++) dots.push(K.svg(svg, "circle", { cx: ax.sx(i * 1.28 + 0.64), cy: 165, r: 3.2, fill: i * 1.28 < 60 ? "var(--c1)" : "var(--c2)", opacity: 0 }));
+        K.svg(svg, "rect", { x: ax.sx(60), y: 140, width: ax.sx(90) - ax.sx(60), height: 50, fill: "var(--c2)", "fill-opacity": 0.1 });
+        T(svg, ax.sx(75), 132, "1–1.5 分钟", { "text-anchor": "middle", "font-weight": 700, fill: "var(--c2)" });
+        const cnt = T(svg, 40, 70, "", { "font-size": 22, "font-weight": 700 });
+        T(svg, 40, 96, "每个点 = 一个 2.56 秒时间窗（每 1.28 秒一个）", { "font-size": 13, class: "muted" });
+        T(svg, 40, 250, `60 秒 ≈ ${Math.round(60 / 1.28)} 行，90 秒 ≈ ${Math.round(90 / 1.28)} 行（按 1.28 秒/行换算）`, { "font-size": 13 });
+        T(svg, 40, 280, "作者：手机“相当快”就能猜对（第 18 格）", { "font-size": 13, fill: "var(--accent)" });
+        ctx.tween(2600, (t) => { const k = Math.round(t * n); dots.forEach((d, i) => (d.style.opacity = i < k ? 0.85 : 0)); cnt.textContent = `已收集 ${(k * 1.28).toFixed(1)} 秒 · ${k} 行`; });
+      },
+    },
+    {
+      title: "加速度计还是陀螺仪更重要", kicker: "第 19–20 格 · 特征重要性",
+      html: `<p>只用走路的数据训练“认人”模型，再把 561 个特征的<b>重要性</b>按名字里的 <code>Acc</code> / <code>Gyro</code> 加总，比一比两个传感器谁贡献大。<span data-cell="19">第 19 格</span></p><p>结论：<b>加速度计略多一些，但两者都重要</b>，少了哪个模型都会变差。<span data-cell="20">第 20 格</span></p><p>动画左边：加速度计感受“被推了一下”（直线方向的变化）；陀螺仪感受“转了一下”（旋转快慢）。右边条形长短为示意，只表示作者结论的方向。</p>`,
+      cells: [19], highlight: ["if 'Gyro' in feature", "if 'Acc' in feature"],
+      draw(svg, ctx) {
+        const phone = (x, y) => { const g = K.svg(svg, "g"); K.svg(g, "rect", { x: x - 22, y: y - 38, width: 44, height: 76, rx: 7, fill: "var(--panel-2)", stroke: "var(--ink)", "stroke-width": 2 }); K.svg(g, "circle", { cx: x, cy: y + 28, r: 3, fill: "var(--ink-3)" }); return g; };
+        const p1 = phone(110, 150), p2 = phone(290, 150);
+        T(svg, 110, 60, "加速度计", { "text-anchor": "middle", "font-weight": 700, fill: "var(--c1)" });
+        T(svg, 110, 240, "测直线方向的加速", { "text-anchor": "middle", "font-size": 12 });
+        T(svg, 110, 258, "例：计步、摇一摇", { "text-anchor": "middle", "font-size": 12, class: "muted" });
+        T(svg, 290, 60, "陀螺仪", { "text-anchor": "middle", "font-weight": 700, fill: "var(--c2)" });
+        T(svg, 290, 240, "测转动的快慢", { "text-anchor": "middle", "font-size": 12 });
+        T(svg, 290, 258, "例：自动转屏、体感游戏", { "text-anchor": "middle", "font-size": 12, class: "muted" });
+        const bars = K.bars(svg, { x: 400, y: 110, w: 300, h: 90 }, [{ label: "加速度计", value: 1.12, color: "var(--c1)" }, { label: "陀螺仪", value: 1, color: "var(--c2)" }], { horizontal: true, max: 1.2, labelWidth: 80, fmt: () => "" });
+        bars.forEach((b) => { b.rect.dataset.w = b.rect.getAttribute("width"); b.rect.setAttribute("width", 0); });
+        T(svg, 400, 96, "重要性加总（示意）", { "font-size": 12, class: "muted" });
+        T(svg, 400, 240, "作者：加速度计略多，两者都重要", { "font-size": 13, fill: "var(--accent)" });
+        ctx.tween(2400, (t) => {
+          p1.setAttribute("transform", `translate(0 ${Math.sin(t * Math.PI * 6) * 14})`);
+          p2.setAttribute("transform", `rotate(${Math.sin(t * Math.PI * 4) * 25} 290 150)`);
+          bars.forEach((b) => b.rect.setAttribute("width", +b.rect.dataset.w * K.clamp(t * 1.5, 0, 1)));
+        });
+      },
+    },
+    {
+      title: "上下楼花多久：体能的影子", kicker: "第 21–26 格 · 时长与分布",
+      html: `<p>作者按人统计上楼、下楼各花了多少秒（行数 × 1.28）。几乎每个人<b>上楼都比下楼久</b>；把两者相除，看每个人“下楼比上楼快多少”，人和人差别很大，作者猜测这和年龄、健康有关（他自己标明是推测）。<span data-cell="24">第 24 格</span></p><p>最后画直方图和 Q-Q 图检查时长的分布，结论是“近似正态分布”。<span data-cell="26">第 26 格</span>不过这里上楼和下楼的时长被放进了同一个分布里检查，样本也只有 30 人。动画中的条高为示意。</p>`,
+      cells: [21, 23, 25], highlight: ["duration_df.loc['WALKING_UPSTAIRS'] / duration_df.loc['WALKING_DOWNSTAIRS']"],
+      draw(svg, ctx) {
+        const r = K.rng(21), n = 12, up = [], dn = [];
+        for (let i = 0; i < n; i++) { const b = 45 + K.randn(r) * 7; up.push(b * (1.05 + r() * 0.45)); dn.push(b); }
+        const ax = K.axes(svg, { x: 50, y: 40, w: 400, h: 220 }, [0, n], [0, 90], { xticks: 0, yticks: 3, ylabel: "秒（示意）" });
+        const rs = [];
+        for (let i = 0; i < n; i++) {
+          const x = ax.sx(i) + 6;
+          rs.push([K.svg(svg, "rect", { x, y: ax.sy(0), width: 13, height: 0, fill: "var(--c2)" }), up[i], K.svg(svg, "rect", { x: x + 14, y: ax.sy(0), width: 13, height: 0, fill: "var(--c3)" }), dn[i]]);
+        }
+        T(svg, 60, 30, "■ 上楼", { "font-size": 12, fill: "var(--c2)" }); T(svg, 120, 30, "■ 下楼", { "font-size": 12, fill: "var(--c3)" });
+        T(svg, 250, 290, "每组两根柱 = 一位志愿者", { "text-anchor": "middle", "font-size": 12, class: "muted" });
+        const ratio = up.map((u, i) => u / dn[i] - 1).sort((a, b) => b - a);
+        const ax2 = K.axes(svg, { x: 500, y: 40, w: 190, h: 220 }, [0, n], [0, 0.6], { xticks: 0, yticks: 3, yfmt: (v) => Math.round(v * 100) + "%" });
+        T(svg, 595, 30, "上楼比下楼多用的比例", { "text-anchor": "middle", "font-size": 12 });
+        const rb = ratio.map((v, i) => K.svg(svg, "rect", { x: ax2.sx(i) + 2, y: ax2.sy(0), width: 12, height: 0, fill: "var(--accent)" }));
+        ctx.tween(1400, (t) => rs.forEach((q) => { [[q[0], q[1]], [q[2], q[3]]].forEach(([e, v]) => { const h = (ax.sy(0) - ax.sy(v)) * t; e.setAttribute("y", ax.sy(0) - h); e.setAttribute("height", h); }); }))
+          .then((ok) => ok && ctx.tween(1000, (t) => rb.forEach((e, i) => { const h = (ax2.sy(0) - ax2.sy(ratio[i])) * t; e.setAttribute("y", ax2.sy(0) - h); e.setAttribute("height", h); })));
+      },
+    },
+    {
+      title: "每个人的走路轨迹：为什么是两团", kicker: "第 27–32 格 · 逐人 t-SNE",
+      html: `<p>作者对<b>每个人单独</b>做 t-SNE，并<b>按时间顺序</b>把点连成线（前提是数据没被打乱，作者自己写明了这个假设）。<span data-cell="28">第 28 格</span></p><p>发现：几乎每个人的走路数据都分成<b>两团</b>，两团之间大多只有一条连线。作者推理：如果两团是左右脚，线应该来回穿梭；只有一条线连接，说明是<b>先后两次走路实验</b>。少数离群点可能是起步、停下或绊了一下。上下楼也同样两团，推测上下楼各走了两次。<span data-cell="32">第 32 格</span></p><p>中间一格还算了每人走路总时长：长短不一，作者推测实验固定的是距离而不是时间。<span data-cell="30">第 30 格</span></p>`,
+      cells: [27, 29, 31], highlight: ["'.-'"],
+      draw(svg, ctx) {
+        const r = K.rng(27), pts = [];
+        let x = 200, y = 170;
+        for (let i = 0; i < 40; i++) { x = 200 + K.randn(r) * 40; y = 170 + K.randn(r) * 40; pts.push([x, y]); }
+        pts.push([300, 120]);
+        for (let i = 0; i < 40; i++) { x = 500 + K.randn(r) * 40; y = 170 + K.randn(r) * 40; pts.push([x, y]); }
+        pts.push([650, 310]);
+        T(svg, 20, 26, "一位志愿者的走路数据，按时间顺序连线（示意）", { "font-size": 12, class: "muted" });
+        const line = K.svg(svg, "path", { d: "M" + pts[0].join(","), fill: "none", stroke: "var(--ink-3)", "stroke-width": 1, opacity: 0.7 });
+        const dots = pts.map((p, i) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 3.5, fill: i < 40 ? "var(--c1)" : i === 40 ? "var(--warn)" : i === 81 ? "var(--bad)" : "var(--c2)", opacity: 0 }));
+        const l1 = T(svg, 200, 260, "第 1 次走路", { "text-anchor": "middle", fill: "var(--c1)", "font-weight": 700 });
+        const l2 = T(svg, 500, 260, "第 2 次走路", { "text-anchor": "middle", fill: "var(--c2)", "font-weight": 700 });
+        const l3 = T(svg, 360, 60, "两团之间只有一条线 → 不是左右脚，而是两次实验", { "text-anchor": "middle", "font-size": 13, fill: "var(--accent)" });
+        const l4 = T(svg, 640, 300, "离群点：起步/停下/绊一下？", { "text-anchor": "end", "font-size": 12, fill: "var(--bad)" });
+        hide([l1, l2, l3, l4]);
+        ctx.tween(3000, (t) => { const k = Math.max(1, Math.round(t * pts.length)); line.setAttribute("d", "M" + pts.slice(0, k).map((p) => p.join(",")).join("L")); dots.forEach((d, i) => (d.style.opacity = i < k ? 0.9 : 0)); })
+          .then((ok) => ok && show(ctx, [l1, l2, l3, l4], 500));
+      },
+    },
+    {
+      title: "SSA：把加速度拆成趋势和“步子的节奏”", kicker: "第 33–36 格 · 奇异谱分解",
+      html: `<p>作者借用 jdarcy 写的 <b>SSA（奇异谱分析）</b>类：取 1 号志愿者走路时三个方向平均加速度的合成大小，当成一条时间序列。<span data-cell="33">第 33 格</span></p><p>SSA 的做法：用一个长度为 L 的窗口沿序列滑动，把每一段竖着排成矩阵的一列（“轨迹矩阵”）；对这个矩阵做奇异值分解（SVD），把它拆成几个“成分”，再还原成几条序列。结果：第一个成分是平稳的趋势，后两个是<b>来回振荡的走路节奏</b>。序列中间频率变了，再次支持“两次实验、速度不同”。<span data-cell="34">第 34 格</span></p><p>接着作者把两次实验<b>分开</b>分解，效果更好。<span data-cell="36">第 36 格</span>注意第 35 格按固定行号 <code>loc[78:124]</code>、<code>loc[248:295]</code> 取两段，没有再按人和活动筛选。</p>`,
+      cells: [33, 35], highlight: ["SSA(walking_series, 30)", "both_df.loc[78:124]"],
+      draw(svg, ctx) {
+        const r = K.rng(33), N = 90, s = [], tr = [], os = [];
+        for (let i = 0; i < N; i++) { const a = 0.6 + 0.002 * i, f = i < 45 ? 0.35 : 0.2, o = 0.18 * Math.sin(i * f); tr.push(a); os.push(o); s.push(a + o + K.randn(r) * 0.05); }
+        const ax = K.axes(svg, { x: 40, y: 20, w: 400, h: 120 }, [0, N], [0.3, 1.0], { xticks: 0, yticks: 0 });
+        T(svg, 44, 16, "原序列（示意）", { "font-size": 12, class: "muted" });
+        const P = (arr, a, off) => arr.map((v, i) => (i ? "L" : "M") + a.sx(i).toFixed(1) + "," + a.sy(v + (off || 0)).toFixed(1)).join("");
+        K.svg(svg, "path", { d: P(s, ax), fill: "none", stroke: "var(--ink-3)", "stroke-width": 1.4 });
+        const L = 12, win = K.svg(svg, "rect", { x: ax.sx(0), y: 22, width: ax.sx(L) - ax.sx(0), height: 118, fill: "var(--accent)", "fill-opacity": 0.12, stroke: "var(--accent)" });
+        // 轨迹矩阵
+        T(svg, 470, 16, "轨迹矩阵：每列 = 一段窗口", { "font-size": 12, class: "muted" });
+        const cols = [];
+        for (let c = 0; c < 20; c++) for (let k = 0; k < L; k++) { const v = s[c * 3 + k]; const e = K.svg(svg, "rect", { x: 470 + c * 11, y: 24 + k * 9.5, width: 10, height: 8.5, fill: K.heat((v - 0.4) / 0.7), opacity: 0 }); cols.push([c, e]); }
+        const ax2 = K.axes(svg, { x: 40, y: 175, w: 640, h: 140 }, [0, N], [-0.5, 1.0], { xticks: 0, yticks: 0 });
+        const p1 = K.svg(svg, "path", { d: P(tr, ax2, 0.15), fill: "none", stroke: "var(--c1)", "stroke-width": 2.2, opacity: 0 });
+        const p2 = K.svg(svg, "path", { d: P(os, ax2, -0.15), fill: "none", stroke: "var(--c2)", "stroke-width": 2.2, opacity: 0 });
+        const t1 = T(svg, 690, ax2.sy(0.85), "成分 0：趋势", { "text-anchor": "end", "font-size": 12, fill: "var(--c1)" });
+        const t2 = T(svg, 690, ax2.sy(0.15), "成分 1+2：步子的振荡（中间变慢）", { "text-anchor": "end", "font-size": 12, fill: "var(--c2)" });
+        hide([t1, t2]);
+        T(svg, 40, 334, "SVD 分解轨迹矩阵 → 每个成分沿对角线平均，还原成一条序列", { "font-size": 12 });
+        (async () => {
+          for (let c = 0; c < 20; c++) {
+            if (!(await ctx.tween(110, (t) => { win.setAttribute("x", ax.sx(c * 3 + t * 3)); cols.forEach(([cc, e]) => { if (cc === c) e.style.opacity = t; }); }))) return;
+          }
+          await show(ctx, [p1, t1], 600);
+          await show(ctx, [p2, t2], 600);
+        })();
+      },
+    },
+    {
+      title: "拟合正弦曲线，估计步频", kicker: "第 37–38 格 · FFT + curve_fit",
+      html: `<p>作者对主成分拟合一条正弦曲线 <code>A·sin(ωt+φ)+c</code>：先用 <b>FFT</b>（快速傅里叶变换，把波形拆成不同频率，看哪个频率最强）找到最强频率当初始猜测，再用 <code>curve_fit</code> 微调四个参数。<span data-cell="37">第 37 格</span></p><p>结论：1 号志愿者两次实验的速度差了<b>将近 2 倍</b>；第二次速度低得可疑，作者怀疑数据<b>采样太稀</b>，聚合时丢了信息（采样定理）。<span data-cell="38">第 38 格</span></p><p class="callout warn">换算单位要小心：拟合时横轴是“第几个点”，每点 1.28 秒。把“每点几个周期”换成“每秒几步”应当<b>除以</b> 1.28，作者在标题里写的是 <code>omega*1.28/pi</code>（乘以 1.28）。另外，每个点本身是 2.56 秒窗口的平均值，步子的快速起伏大多已被平均掉了。实验 C 演示这一点。</p>`,
+      cells: [37], highlight: ["(res1['omega']*1.28)/(pi)", "np.fft.fft"],
+      draw(svg, ctx) {
+        const r = K.rng(37), N = 46, w0 = 0.55, A0 = 0.08, ph0 = 0.6, yy = [];
+        for (let i = 0; i < N; i++) yy.push(A0 * Math.sin(w0 * i + ph0) + K.randn(r) * 0.025);
+        // 真算 FFT 幅度
+        const mag = [];
+        for (let k = 1; k < N / 2; k++) { let re = 0, im = 0; for (let i = 0; i < N; i++) { re += yy[i] * Math.cos(2 * Math.PI * k * i / N); im -= yy[i] * Math.sin(2 * Math.PI * k * i / N); } mag.push(Math.hypot(re, im)); }
+        const kBest = mag.indexOf(Math.max(...mag)) + 1, wGuess = 2 * Math.PI * kBest / N;
+        const ax = K.axes(svg, { x: 40, y: 30, w: 420, h: 250 }, [0, N], [-0.16, 0.16], { xticks: 5, yticks: 0, xlabel: "第几个点（每点 1.28 秒）" });
+        yy.forEach((v, i) => K.svg(svg, "circle", { cx: ax.sx(i), cy: ax.sy(v), r: 3, fill: "var(--ink)" }));
+        const fit = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--bad)", "stroke-width": 2 });
+        const ax2 = K.axes(svg, { x: 500, y: 30, w: 190, h: 120 }, [0, mag.length], [0, Math.max(...mag) * 1.1], { xticks: 0, yticks: 0, xlabel: "频率（FFT）" });
+        const fb = mag.map((m, i) => K.svg(svg, "rect", { x: ax2.sx(i) + 1, y: ax2.sy(0), width: Math.max(2, ax2.sx(1) - ax2.sx(0) - 2), height: 0, fill: i + 1 === kBest ? "var(--accent)" : "var(--ink-3)" }));
+        const info = T(svg, 500, 200, "", { "font-size": 13 });
+        const info2 = T(svg, 500, 222, "", { "font-size": 13 });
+        const draw = (A, w, p) => { let d = ""; for (let x = 0; x <= N; x += 0.25) d += (d ? "L" : "M") + ax.sx(x).toFixed(1) + "," + ax.sy(A * Math.sin(w * x + p)).toFixed(1); fit.setAttribute("d", d); };
+        (async () => {
+          if (!(await ctx.tween(900, (t) => fb.forEach((e, i) => { const h = (ax2.sy(0) - ax2.sy(mag[i])) * t; e.setAttribute("y", ax2.sy(0) - h); e.setAttribute("height", h); })))) return;
+          info.textContent = `① FFT 最强峰 → 初猜 ω ≈ ${wGuess.toFixed(2)}`;
+          if (!(await ctx.wait(500))) return;
+          if (!(await ctx.tween(1600, (t) => draw(K.lerp(0.05, A0, t), K.lerp(wGuess, w0, t), K.lerp(0, ph0, t))))) return;
+          info2.textContent = `② curve_fit 微调 → ω ≈ ${w0.toFixed(2)}（模拟）`;
+        })();
+      },
+    },
+    {
+      title: "所有人的走路 t-SNE：人人两团", kicker: "第 39–40 格 · 汇总可视化",
+      html: `<p>前面只拆了一个人。作者再把所有人的走路数据放在一起做 t-SNE、按人上色：每个人都能看到<b>两团</b>，有的分得清楚，有的不那么明显。<span data-cell="40">第 40 格</span></p><p>所以“先把两次实验分开、再分别分解”的思路对所有人都适用。动画为示意：每种颜色是一个人，各有一大一小两团。</p>`,
+      cells: [39],
+      draw(svg, ctx) {
+        const r = K.rng(39), D = [];
+        for (let p = 0; p < 12; p++) {
+          const cx = 90 + (p % 6) * 108, cy = 100 + Math.floor(p / 6) * 140, ang = r() * 6.28, sep = 22 + r() * 18;
+          for (let k = 0; k < 26; k++) { const side = k % 2 ? 1 : -1; D.push({ p, x: cx + side * Math.cos(ang) * sep + K.randn(r) * 8, y: cy + side * Math.sin(ang) * sep + K.randn(r) * 8 }); }
+        }
+        const dots = D.map((d) => K.svg(svg, "circle", { cx: 360, cy: 170, r: 3.4, fill: K.colors[d.p % 6], opacity: 0.8 }));
+        T(svg, 20, 330, "示意：12 个人，每人两团（两次走路实验）；颜色循环使用", { "font-size": 12, class: "muted" });
+        ctx.tween(2000, (t) => dots.forEach((e, i) => { e.setAttribute("cx", K.lerp(360, D[i].x, t)); e.setAttribute("cy", K.lerp(170, D[i].y, t)); }));
+      },
+    },
+    {
+      title: "作者亲自数台阶：真实步频对照", kicker: "第 41–43 格 · 自测实验与结论",
+      html: `<p>为了检验从数据里算出的步频，作者自己走路、上下楼，边数步数边计时，记了 20 条记录，按“步数 ÷ 秒数”算出每秒几步。<span data-cell="41">第 41 格</span>动画里的条形就是用第 41 格作者记录的数字<b>现场算</b>出来的。</p><p>对比：数据集第一种速度 0.94 步/秒，接近作者慢走的 1.23 步/秒；第二种 0.50 步/秒“几乎不可能”。作者解释：快走时每个数据点（1.28 秒）里有一步半左右，这么稀的数据很难还原快走的步频。<span data-cell="42">第 42 格</span></p><p>结论：只要 1–1.5 分钟，两颗普通传感器就能告诉别人你在做什么（约 95%）、你是谁（走路约 94%）。<span data-cell="43">第 43 格</span></p>`,
+      cells: [41],
+      draw(svg, ctx) {
+        const raw = [["下楼", 8.82, 15], ["下楼", 9.49, 15], ["下楼", 10.06, 15], ["下楼", 8.77, 15], ["快走", 42.25, 80], ["慢走", 62.64, 80], ["上楼", 11.16, 15], ["上楼", 12.06, 15], ["上楼", 11.08, 15], ["上楼", 11.12, 15], ["上楼", 42.47, 60], ["下楼", 10.334, 15], ["下楼", 10.785, 15], ["下楼", 10.487, 15], ["慢走", 165.449, 200], ["快走", 115.36, 200], ["上楼", 11.823, 15], ["上楼", 11.872, 15], ["上楼", 11.928, 15], ["上楼", 11.351, 15]];
+        const agg = {};
+        raw.forEach(([a, d, s]) => { agg[a] = agg[a] || { d: 0, s: 0 }; agg[a].d += d; agg[a].s += s; });
+        const items = Object.keys(agg).map((a) => ({ label: "自测·" + a, value: agg[a].s / agg[a].d, color: "var(--c1)" })).sort((a, b) => b.value - a.value);
+        items.push({ label: "数据集·速度1", value: 0.94, color: "var(--c2)" }, { label: "数据集·速度2", value: 0.5, color: "var(--bad)" });
+        T(svg, 20, 24, "每秒几步：蓝 = 用第 41 格数据现场算出；绿/红 = 作者第 42 格写的数据集结果", { "font-size": 12, class: "muted" });
+        const bars = K.bars(svg, { x: 20, y: 40, w: 660, h: 270 }, items, { horizontal: true, max: 2, labelWidth: 120, fmt: (v) => v.toFixed(2) + " 步/秒" });
+        bars.forEach((b) => { b.rect.dataset.w = b.rect.getAttribute("width"); b.rect.setAttribute("width", 0); b.text.style.opacity = 0; });
+        ctx.tween(1500, (t) => bars.forEach((b) => { b.rect.setAttribute("width", +b.rect.dataset.w * t); b.text.style.opacity = t > 0.9 ? 1 : 0; }));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：时间窗长度与特征 ---------- */
+  const SCHED = [[3, 12], [0, 14], [4, 12], [1, 12], [5, 12], [2, 12], [3, 10], [4, 10], [0, 12]]; // [活动, 秒]
+  function record(seed, noise) {
+    const r = K.rng(seed), fs = 50, out = [];
+    let t = 0;
+    const p = { f: 0.9 + r() * 0.2, a: 0.9 + r() * 0.2, tilt: (r() - 0.5) * 0.1 };
+    SCHED.forEach(([a, sec]) => { for (let i = 0; i < sec * fs; i++, t += 1 / fs) { const v = accel(a, t, r, p); out.push({ t, a, v: v.map((x) => x + K.randn(r) * noise) }); } });
+    return out;
+  }
+  function windows(rec, W, ov) {
+    const n = Math.round(W * 50), stepN = Math.max(1, Math.round(n * (1 - ov))), res = [];
+    for (let s = 0; s + n <= rec.length; s += stepN) {
+      const seg = rec.slice(s, s + n), cnt = [0, 0, 0, 0, 0, 0];
+      let mz = 0, m = 0, m2 = 0;
+      seg.forEach((q) => { const mag = Math.hypot(q.v[0], q.v[1], q.v[2]); m += mag; m2 += mag * mag; mz += q.v[2]; cnt[q.a]++; });
+      m /= n; mz /= n;
+      const sd = Math.sqrt(Math.max(0, m2 / n - m * m)), maj = cnt.indexOf(Math.max(...cnt));
+      res.push({ t0: seg[0].t, t1: seg[n - 1].t, sd, mz, a: maj, mixed: Math.max(...cnt) < n * 0.999 });
+    }
+    return res;
+  }
+  K.lab(document.getElementById("labA"), {
+    width: 660, height: 430,
+    controls: [
+      { id: "W", label: "时间窗长度（秒）", min: 0.3, max: 6, step: 0.01, value: 2.56, fmt: (v) => v.toFixed(2) + " 秒" },
+      { id: "ov", label: "相邻窗重叠", value: "0.5", options: [["0", "不重叠"], ["0.5", "重叠 50%（本数据集）"], ["0.75", "重叠 75%"]] },
+      { id: "noise", label: "传感器噪声", min: 0, max: 0.15, step: 0.005, value: 0.03, fmt: (v) => v.toFixed(3) + " g" },
+    ],
+    note: "浏览器里现场生成一段约 100 秒的模拟录音（坐→走→站→上楼→躺→下楼…），按你选的窗长切窗，每窗算两个特征：加速度大小的标准差（晃得多厉害）和 Z 轴平均值（手机朝向）。再用另一段新录音测试“最近中心”分类器。试试把窗长拉到最短和最长。",
+    render(svg, v) {
+      const W = v.W, ov = +v.ov;
+      const tr = windows(record(5, v.noise), W, ov), te = windows(record(77, v.noise), W, ov);
+      // 时间轴
+      const total = SCHED.reduce((a, s) => a + s[1], 0);
+      const axT = K.axes(svg, { x: 40, y: 10, w: 600, h: 40 }, [0, total], [0, 1], { xticks: 7, yticks: 0 });
+      let t0 = 0;
+      SCHED.forEach(([a, sec]) => { K.svg(svg, "rect", { x: axT.sx(t0), y: 14, width: axT.sx(t0 + sec) - axT.sx(t0), height: 14, fill: ACOL[a], opacity: 0.75 }); if (sec >= 6) T(svg, axT.sx(t0 + sec / 2), 25, ACTS[a], { "text-anchor": "middle", "font-size": 10, fill: "var(--panel)" }); t0 += sec; });
+      tr.slice(0, 400).forEach((w, i) => K.svg(svg, "rect", { x: axT.sx(w.t0), y: 32 + (i % 3) * 5, width: Math.max(1, axT.sx(w.t1) - axT.sx(w.t0)), height: 4, fill: w.mixed ? "var(--bad)" : "var(--ink-3)", opacity: 0.7 }));
+      T(svg, 40, 76, "上：录音时间轴；下面的小横条是切出的窗（红色 = 跨了两种活动的“混合窗”）", { "font-size": 11, class: "muted" });
+      // 特征散点
+      const ax = K.axes(svg, { x: 60, y: 92, w: 420, h: 290 }, [0, 0.5], [-0.1, 1.15], { xticks: 5, yticks: 4, xlabel: "窗内加速度大小的标准差（g）", ylabel: "窗内 Z 轴平均（g）" });
+      const cent = ACTS.map((_, a) => { const q = tr.filter((w) => w.a === a && !w.mixed); return q.length ? [q.reduce((s, w) => s + w.sd, 0) / q.length, q.reduce((s, w) => s + w.mz, 0) / q.length] : [9, 9]; });
+      tr.forEach((w) => K.svg(svg, "circle", { cx: ax.sx(Math.min(w.sd, 0.5)), cy: ax.sy(w.mz), r: 4, fill: ACOL[w.a], opacity: w.mixed ? 0.35 : 0.75, stroke: w.mixed ? "var(--bad)" : "none" }));
+      cent.forEach((c, a) => { if (c[0] < 9) { K.svg(svg, "path", { d: `M${ax.sx(Math.min(c[0], 0.5)) - 7},${ax.sy(c[1])}h14M${ax.sx(Math.min(c[0], 0.5))},${ax.sy(c[1]) - 7}v14`, stroke: "var(--ink)", "stroke-width": 2.5 }); } });
+      ACTS.forEach((a, i) => { K.svg(svg, "circle", { cx: 520, cy: 110 + i * 20, r: 5, fill: ACOL[i] }); T(svg, 532, 115 + i * 20, a, { "font-size": 12 }); });
+      T(svg, 510, 250, "＋ = 每种活动的中心", { "font-size": 12 });
+      // 最近中心分类（只用两个特征，按尺度缩放）
+      const sc = [0.08, 0.3];
+      let ok = 0;
+      te.forEach((w) => { let best = -1, bd = 1e9; cent.forEach((c, a) => { const d = ((w.sd - c[0]) / sc[0]) ** 2 + ((w.mz - c[1]) / sc[1]) ** 2; if (d < bd) { bd = d; best = a; } }); if (best === w.a) ok++; });
+      const mixed = te.filter((w) => w.mixed).length;
+      return { readout: [
+        { k: "训练集切出的窗数", v: String(tr.length) },
+        { k: "每秒产生几行", v: (1 / (W * (1 - ov))).toFixed(2) },
+        { k: "混合窗占比", v: ((mixed / te.length) * 100).toFixed(0) + "%", color: mixed / te.length > 0.25 ? "var(--bad)" : "var(--good)" },
+        { k: "新录音上的准确率", v: ((ok / te.length) * 100).toFixed(1) + "%" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：随机切分 vs 按人切分 ---------- */
+  K.lab(document.getElementById("labB"), {
+    width: 640, height: 400,
+    controls: [
+      { id: "split", label: "怎么切测试集", value: "random", options: [["random", "随机切 25% 的行（作者第 13 格的做法）"], ["subject", "留出 25% 的人（原数据集的做法）"]] },
+      { id: "ov", label: "相邻窗重叠", value: "0.5", options: [["0", "不重叠"], ["0.5", "重叠 50%（本数据集）"], ["0.75", "重叠 75%"]] },
+      { id: "ps", label: "个人差异有多大（每个人走路的样子差多少）", min: 0, max: 2.5, step: 0.05, value: 1.5, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "重新生成", button: true },
+    ],
+    note: "现场生成 16 个人 × 3 种活动（走、上楼、下楼）的时间窗特征：同一段录音里相邻窗的特征很像（重叠越多越像），每个人每种活动还有自己的“步态偏移”。随机切分时，测试点几乎总能在训练集里找到同一个人、同一段录音的邻居；按人切分时，模型面对的是从没见过的人。用 1-近邻分类（找最像的一个训练样本，抄它的答案）预测活动。两种切法的准确率都会算出来，切换下拉框看图上圈出的测试点。",
+    render(svg, v) {
+      const r = K.rng(300 + v.seed * 13), P = 16, rho = { "0": 0.35, "0.5": 0.85, "0.75": 0.95 }[v.ov];
+      const C = [[0, 0], [1.6, 0.5], [0.6, 1.7]], data = [];
+      for (let p = 0; p < P; p++) {
+        for (let a = 0; a < 3; a++) {
+          const off = [K.randn(r) * v.ps, K.randn(r) * v.ps];
+          let e = [K.randn(r), K.randn(r)];
+          for (let i = 0; i < 28; i++) {
+            e = [rho * e[0] + Math.sqrt(1 - rho * rho) * K.randn(r), rho * e[1] + Math.sqrt(1 - rho * rho) * K.randn(r)];
+            data.push({ p, a, x: C[a][0] + off[0] * 0.6 + e[0] * 0.18, y: C[a][1] + off[1] * 0.6 + e[1] * 0.18 });
+          }
+        }
+      }
+      const acc = (isTest) => {
+        const trn = data.filter((d, i) => !isTest(d, i)), tst = data.filter((d, i) => isTest(d, i));
+        let ok = 0;
+        tst.forEach((q) => { let bd = 1e9, ba = -1; trn.forEach((t) => { const dd = (t.x - q.x) ** 2 + (t.y - q.y) ** 2; if (dd < bd) { bd = dd; ba = t.a; } }); if (ba === q.a) ok++; });
+        return ok / tst.length;
+      };
+      const rr = K.rng(900 + v.seed), mask = data.map(() => rr() < 0.25);
+      const testPeople = new Set([0, 1, 2, 3]);
+      const isRand = (d, i) => mask[i], isSubj = (d) => testPeople.has(d.p);
+      const aR = acc(isRand), aS = acc(isSubj);
+      const isT = v.split === "random" ? isRand : isSubj;
+      const xs = data.map((d) => d.x), ys = data.map((d) => d.y);
+      const ax = K.axes(svg, { x: 40, y: 14, w: 560, h: 320 }, [Math.min(...xs) - 0.3, Math.max(...xs) + 0.3], [Math.min(...ys) - 0.3, Math.max(...ys) + 0.3], { xticks: 0, yticks: 0, xlabel: "特征 1（示意）", ylabel: "特征 2" });
+      data.forEach((d, i) => { const t = isT(d, i); K.svg(svg, "circle", { cx: ax.sx(d.x), cy: ax.sy(d.y), r: t ? 4.2 : 2.6, fill: t ? "none" : ACOL[d.a], stroke: t ? ACOL[d.a] : "none", "stroke-width": 1.6, opacity: t ? 1 : 0.55 }); });
+      T(svg, 50, 392, "实心 = 训练点，空心圈 = 测试点；蓝 = 走路，绿 = 上楼，第三色 = 下楼", { "font-size": 12, class: "muted" });
+      return { readout: [
+        { k: "随机切分的准确率", v: (aR * 100).toFixed(1) + "%", color: v.split === "random" ? "var(--accent)" : null },
+        { k: "按人切分的准确率", v: (aS * 100).toFixed(1) + "%", color: v.split === "subject" ? "var(--accent)" : null },
+        { k: "虚高了多少", v: ((aR - aS) * 100).toFixed(1) + " 个百分点", color: aR - aS > 0.05 ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：采样间隔与步频（混叠） ---------- */
+  K.lab(document.getElementById("labC"), {
+    width: 640, height: 390,
+    controls: [
+      { id: "f", label: "真实步频（每秒几个起伏）", min: 0.3, max: 2.6, step: 0.01, value: 1.8, fmt: (v) => v.toFixed(2) + " 次/秒" },
+      { id: "dt", label: "每隔多久取一个点", value: "1.28", options: [["0.02", "0.02 秒（原始 50 Hz）"], ["0.25", "0.25 秒"], ["0.64", "0.64 秒"], ["1.28", "1.28 秒（本数据集每行间隔）"]] },
+      { id: "mode", label: "每个点怎么取", value: "mean", options: [["point", "取那一瞬间的读数"], ["mean", "取 2.56 秒窗口内的平均（本数据集的 mean 特征）"]] },
+    ],
+    note: "浏览器里生成 80 秒正弦起伏加少量噪声，按你选的方式取点，再对取到的点做离散傅里叶变换，找最强的频率。默认设置接近作者第 33–37 格面对的情况：看出来的频率和真实频率差很多，起伏也几乎被平均掉了。",
+    render(svg, v) {
+      const f = v.f, dt = +v.dt, r = K.rng(42), D = 80, W = 2.56;
+      const sig = (t) => Math.sin(2 * Math.PI * f * t);
+      const ts = [], ys = [];
+      for (let t = W; t <= D; t += dt) {
+        let y;
+        if (v.mode === "mean") { let s = 0, n = 0; for (let u = t - W; u <= t + 1e-9; u += 0.02) { s += sig(u); n++; } y = s / n; } else y = sig(t);
+        ts.push(t); ys.push(y + K.randn(r) * 0.03);
+      }
+      // DFT：在 0.05~(1/(2dt)) 之间扫频
+      const nyq = 1 / (2 * dt), fmax = Math.min(nyq, 3);
+      let bestF = 0, bestP = -1;
+      const spec = [];
+      for (let g = 0.05; g <= fmax; g += 0.005) {
+        let re = 0, im = 0;
+        ts.forEach((t, i) => { re += ys[i] * Math.cos(2 * Math.PI * g * t); im += ys[i] * Math.sin(2 * Math.PI * g * t); });
+        const p = Math.hypot(re, im) / ts.length; spec.push([g, p]);
+        if (p > bestP) { bestP = p; bestF = g; }
+      }
+      const ax = K.axes(svg, { x: 40, y: 14, w: 580, h: 170 }, [0, 20], [-1.3, 1.3], { xticks: 5, yticks: 0 });
+      T(svg, 620, 11, "横轴：时间（秒，只画前 20 秒）", { "font-size": 11, "text-anchor": "end", class: "muted" });
+      let d = "";
+      for (let t = 0; t <= 20; t += 0.01) d += (d ? "L" : "M") + ax.sx(t).toFixed(1) + "," + ax.sy(sig(t)).toFixed(1);
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--ink-3)", "stroke-width": 1, opacity: 0.6 });
+      const vis = ts.map((t, i) => [t, ys[i]]).filter((q) => q[0] <= 20);
+      if (vis.length) K.svg(svg, "path", { d: vis.map((q, i) => (i ? "L" : "M") + ax.sx(q[0]).toFixed(1) + "," + ax.sy(q[1]).toFixed(1)).join(""), fill: "none", stroke: "var(--c2)", "stroke-width": 1.8 });
+      if (vis.length < 300) vis.forEach((q) => K.svg(svg, "circle", { cx: ax.sx(q[0]), cy: ax.sy(q[1]), r: 3.5, fill: "var(--c2)" }));
+      const ax2 = K.axes(svg, { x: 40, y: 230, w: 580, h: 110 }, [0, 3], [0, Math.max(0.05, ...spec.map((s) => s[1])) * 1.1], { xticks: 6, yticks: 0, xlabel: "频率（次/秒）" });
+      K.svg(svg, "path", { d: spec.map((s, i) => (i ? "L" : "M") + ax2.sx(s[0]).toFixed(1) + "," + ax2.sy(s[1]).toFixed(1)).join(""), fill: "none", stroke: "var(--c1)", "stroke-width": 1.6 });
+      K.svg(svg, "line", { x1: ax2.sx(f), x2: ax2.sx(f), y1: 230, y2: 340, stroke: "var(--good)", "stroke-width": 2, "stroke-dasharray": "4 3" });
+      K.svg(svg, "line", { x1: ax2.sx(bestF), x2: ax2.sx(bestF), y1: 230, y2: 340, stroke: "var(--bad)", "stroke-width": 2 });
+      if (nyq < 3) K.svg(svg, "rect", { x: ax2.sx(nyq), y: 230, width: ax2.sx(3) - ax2.sx(nyq), height: 110, fill: "var(--ink-3)", "fill-opacity": 0.15 });
+      T(svg, 40, 214, "上：灰线 = 真实信号，彩色 = 取到的点。下：取到的点的频谱。", { "font-size": 11, class: "muted" });
+      T(svg, 40, 227, "绿虚线 = 真实频率，红线 = 看起来最强的频率，灰区 = 超出能分辨的上限", { "font-size": 11, class: "muted" });
+      const amp = Math.sqrt(2 * ys.reduce((a, y) => a + y * y, 0) / ys.length);
+      return { readout: [
+        { k: "能分辨的最高频率（采样定理）", v: nyq.toFixed(2) + " 次/秒" },
+        { k: "看起来的频率", v: bestF.toFixed(2) + " 次/秒", color: Math.abs(bestF - f) > 0.05 ? "var(--bad)" : "var(--good)" },
+        { k: "真实频率", v: f.toFixed(2) + " 次/秒" },
+        { k: "剩下的起伏幅度", v: Math.min(100, amp * 100).toFixed(0) + "%" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

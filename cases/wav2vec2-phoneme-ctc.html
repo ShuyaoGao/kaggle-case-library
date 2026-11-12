@@ -1,0 +1,732 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>音素识别 CTC</title>
+<meta name="description" content="Kaggle 案例拆解：在 TIMIT 语料上微调 wav2vec2 XLS-R，让模型把英语语音直接写成音素（发音符号）——61 合 39 音素、CTC 损失与解码、WER/CER、编辑距离错误分析。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">音频 · 序列识别 · 自监督预训练 + CTC 微调</div>
+  <h1>把英语语音写成“发音符号”：wav2vec2 + CTC</h1>
+  <p class="en">Phoneme Recognition with Wav2Vec2</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">wav2vec2 XLS-R 300M</span><span class="tag method">CTC 损失</span><span class="tag method">贪心解码</span>
+    <span class="tag method">61→39 音素合并</span><span class="tag method">Hugging Face Trainer</span><span class="tag method">WER / CER</span><span class="tag method">编辑距离错误分析</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Vitou Phy</b></span>
+    <span>Kaggle 点赞 <b>210</b>（2026-11 抓取）</span>
+    <span>数据 <b>mfekadu/darpa-timit-acousticphonetic-continuous-speech</b>（TIMIT）</span>
+    <span><a href="https://www.kaggle.com/code/vitouphy/phoneme-recognition-with-wav2vec2" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">TIMIT 英语朗读语料</div><p>每句话有三份文件：录音、单词标注、<b>音素</b>标注（发音符号，如 <code>k ae t</code> 表示 cat）。<span data-cell="10">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">听一句话，写出音素序列</div><p>不是写单词，而是写“怎么发音”。音素先从 61 个合并成 39 个。<span data-cell="30">出处</span> <span data-cell="32">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">预训练 wav2vec2 + CTC 输出层</div><p>Meta 在大量无标注语音上预训练的 XLS-R 300M，换一个音素词表大小的输出层，用 <b>CTC 损失</b>微调 10000 步。<span data-cell="62">出处</span> <span data-cell="65">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">指标在输出里；错误规律写在文字里</div><p>作者总结：模型常把 ih、ah、eh、iy 这些相近的元音搞混。<span data-cell="95">出处</span> 测试集 CER 数值在运行输出里，这里不列。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">TIMIT 是语音学研究里的经典语料（DARPA 资助，美国英语朗读）。Kaggle 版本带一张文件清单表。下面只写 notebook 里出现的信息；条数和总时长在运行输出里，源码不带。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">采样率</div><div class="v">16,000 Hz</div></div>
+        <div class="stat-tile"><div class="k">原始音素种类</div><div class="v">61</div></div>
+        <div class="stat-tile"><div class="k">合并后（含静音 h#）</div><div class="v">39</div></div>
+        <div class="stat-tile"><div class="k">作者的划分</div><div class="v">80 / 10 / 10</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">采样率见第 16、41 格 <span data-cell="41">出处</span>；61 个见第 30 格 <span data-cell="30">出处</span>；合并表来自 Lee &amp; Hon（1989），停顿类合并成静音 <code>h#</code> <span data-cell="32">出处</span>；划分见第 12 格 <span data-cell="12">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每条样本由什么组成</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>字段</th><th>含义</th><th>来源</th></tr>
+        <tr><td><code>audio</code></td><td>录音（.wav），读成 16 kHz 的数组</td><td>音频文件</td></tr>
+        <tr><td><code>text</code></td><td>这句话的单词，空格分隔</td><td>.WRD 文件每行最后一列</td></tr>
+        <tr><td><code>phonetic</code></td><td><b>要预测的答案</b>：音素序列，如 <code>h# sh iy hh ae d …</code></td><td>.PHN 文件每行最后一列</td></tr>
+        <tr><td><code>labels</code></td><td>音素序列转成的数字编号</td><td>分词器生成</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">字段与读法见第 11、27、55 格 <span data-cell="11">出处</span> <span data-cell="27">出处</span> <span data-cell="55">出处</span>。表里的音素例子是我们写的示意。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="60">
+    <h3>动手试试 A · WER、CER、音素错误率：同一个错，三种算法 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="62">
+    <h3>动手试试 B · CTC 在对齐什么：把所有路径的概率加起来 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="78">
+    <h3>动手试试 C · 解码顺序：先合并再删空白，还是反过来？ <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>训练后发现 WER 不太合适，CER 更合适；但每个音素由 1–3 个字母表示，CER 也有偏差，所以最后改在“音素”层面再评估一次</td><td><span data-cell="59">第 59 格</span></td></tr>
+        <tr><td>模型常在 ah、t、ih、h# 上多写或漏写；倾向于多写 r、d、k、g</td><td><span data-cell="86">第 86 格</span></td></tr>
+        <tr><td>常混淆的元音：ih ↔ ah、ih ↔ eh、ih ↔ iy；常把 ah 写成 aa、er，把 eh 写成 ae，把 er 写成 r</td><td><span data-cell="95">第 95 格</span></td></tr>
+        <tr><td>训练好的模型推送到 Hugging Face：<code>vitouphy/wav2vec2-xls-r-300m-phoneme</code></td><td><span data-cell="74">第 74 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">验证集和测试集上的 WER、CER，以及逐条重算的平均 CER，都在运行输出里，Kaggle 下载的源码不带，作者文字里也没写具体数值，所以这里不列分数。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li><b>解码丢最后一个音素</b>：第 78 格 <code>collapse_tokens</code> 只在“遇到不同的符号”时才把前一个加进结果，循环结束后没有把最后一个加进去，每条序列都会少最后一个音素。<span data-cell="78">第 78 格</span>（见实验 C）</li>
+        <li><b>解码顺序不对</b>：<code>clean_token_ids</code> 先删掉 [PAD]（CTC 的空白）再合并重复，会把本来被空白隔开的两个相同音素（如 <code>t _ t</code>）合并成一个。标准 CTC 是先合并、再删空白。<span data-cell="78">第 78 格</span></li>
+        <li><b>标签也被“合并”</b>：同一个函数也用在真实标签上，标签里相邻的相同音素（比如两个停顿合并成的 <code>h# h#</code>）会被合并。<span data-cell="79">第 79 格</span></li>
+        <li><b>按句子随机划分</b>：TIMIT 原本有官方的训练 / 测试划分，作者把两者合并后按句子随机切 80/10/10，同一个说话人可能同时出现在训练集和测试集里，测试分数可能偏乐观。<span data-cell="7">第 7 格</span> <span data-cell="13">第 13 格</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>听一句英语，输出它的实际发音（音素序列），不依赖词典，也能处理生词和口音。</li>
+        <li><b>同类问题：</b>英语口语评测（找出“th 读成了 s”）、儿童语言发育评估、方言 / 小语种的发音记录、给没有文字的语言做语音转写。</li>
+        <li><b>可迁移的套路：</b>在大量无标注语音上预训练的模型 + 少量带标注数据 + CTC 微调；评估指标要和输出单位一致（音素就算音素错误率）。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>合并文件清单、随机划分并保存 <span data-cell="11">第 11 格</span> <span data-cell="13">第 13 格</span></li>
+        <li>61→39 音素映射 <span data-cell="32">第 32 格</span></li>
+        <li>音素词表 + <code>Wav2Vec2CTCTokenizer</code> / <code>FeatureExtractor</code> <span data-cell="47">第 47 格</span> <span data-cell="54">第 54 格</span></li>
+        <li>动态补齐的数据整理器 <span data-cell="57">第 57 格</span></li>
+        <li><code>facebook/wav2vec2-xls-r-300m</code> + CTC 头，冻结卷积特征编码器 <span data-cell="62">第 62 格</span> <span data-cell="63">第 63 格</span></li>
+        <li>Trainer：批 8 × 累积 4、10000 步、学习率 3e-5、预热 2000 步、fp16 <span data-cell="65">第 65 格</span></li>
+        <li>Levenshtein 编辑操作统计、替换混淆矩阵 <span data-cell="79">第 79 格</span> <span data-cell="94">第 94 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>为什么作者觉得 WER 不适合评估音素识别？如果音素用一个字母表示（如 IPA 符号），CER 是不是就合适了？</li>
+      <li>CTC 不需要知道“第几帧是哪个音素”。它是怎么在没有逐帧标注的情况下学会对齐的？（提示：实验 B 里所有路径的概率加起来）</li>
+      <li>模型最常混淆 ih、ah、eh、iy 这些元音。从发音的角度想一想为什么？中国学生学英语时是不是也容易混淆这几个？</li>
+      <li>如果同一个说话人既在训练集又在测试集，测试分数会有什么偏差？怎样划分更公平？</li>
+      <li>口语评测 App 会录下孩子的声音并上传分析。家长和学校应该关心哪些隐私问题？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Vitou Phy，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。TIMIT 语料由 DARPA 资助、LDC 发布；wav2vec2 XLS-R 由 Meta AI 发布。本页为教学解读，动画与实验中的声音、概率和音素序列都是示意或浏览器内计算，不是作者模型的输出。
+</footer>
+</main>
+
+<script src="nb/wav2vec2-phoneme-ctc.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* ===== 本页专用：浏览器内的小型音频工具（合成示意声音、FFT、频谱图、梅尔滤波、MFCC） ===== */
+  const AK = {};
+  AK.SR = 16000;
+  // 原地基 2 FFT
+  AK.fft = function (re, im) {
+    const n = re.length;
+    for (let i = 1, j = 0; i < n; i++) {
+      let bit = n >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
+    }
+    for (let len = 2; len <= n; len <<= 1) {
+      const ang = (-2 * Math.PI) / len, wr = Math.cos(ang), wi = Math.sin(ang);
+      for (let i = 0; i < n; i += len) {
+        let cr = 1, ci = 0;
+        for (let k = 0; k < len / 2; k++) {
+          const a = i + k, b = a + len / 2;
+          const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
+          re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+          const nr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = nr;
+        }
+      }
+    }
+  };
+  AK.pow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
+  // 短时傅里叶变换：返回 [帧][频点] 的功率谱
+  AK.stft = function (x, win, hop, nfft) {
+    nfft = nfft || AK.pow2(win);
+    const frames = [], w = new Float32Array(win);
+    for (let i = 0; i < win; i++) w[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (win - 1));
+    for (let s = 0; s + win <= x.length; s += hop) {
+      const re = new Float32Array(nfft), im = new Float32Array(nfft);
+      for (let i = 0; i < win; i++) re[i] = x[s + i] * w[i];
+      AK.fft(re, im);
+      const p = new Float32Array(nfft / 2 + 1);
+      for (let k = 0; k <= nfft / 2; k++) p[k] = (re[k] * re[k] + im[k] * im[k]) / win;
+      frames.push(p);
+    }
+    return frames;
+  };
+  AK.spectrum = function (x) { // 整段 FFT 幅度（取前一半）
+    const n = AK.pow2(x.length), re = new Float32Array(n), im = new Float32Array(n);
+    re.set(x);
+    AK.fft(re, im);
+    const out = new Float32Array(n / 2);
+    for (let k = 0; k < n / 2; k++) out[k] = (2 / x.length) * Math.hypot(re[k], im[k]);
+    return out;
+  };
+  AK.hz2mel = (f) => 2595 * Math.log10(1 + f / 700);
+  AK.mel2hz = (m) => 700 * (Math.pow(10, m / 2595) - 1);
+  // 三角形梅尔滤波器组：返回 nMels 个 {lo, c, hi, w: Float32Array(nBins)}
+  AK.melFB = function (nMels, nfft, sr, fmin, fmax) {
+    fmin = fmin || 0; fmax = fmax || sr / 2;
+    const nb = nfft / 2 + 1, m0 = AK.hz2mel(fmin), m1 = AK.hz2mel(fmax), pts = [];
+    for (let i = 0; i < nMels + 2; i++) pts.push(AK.mel2hz(m0 + ((m1 - m0) * i) / (nMels + 1)));
+    const fb = [];
+    for (let m = 0; m < nMels; m++) {
+      const lo = pts[m], c = pts[m + 1], hi = pts[m + 2], w = new Float32Array(nb);
+      for (let k = 0; k < nb; k++) {
+        const f = (k * sr) / nfft;
+        w[k] = f < lo || f > hi ? 0 : f <= c ? (f - lo) / (c - lo) : (hi - f) / (hi - c);
+      }
+      fb.push({ lo, c, hi, w });
+    }
+    return fb;
+  };
+  AK.applyFB = function (frames, fb) {
+    return frames.map((p) => Float32Array.from(fb, (f) => { let s = 0; for (let k = 0; k < p.length; k++) s += p[k] * f.w[k]; return s; }));
+  };
+  AK.log = (frames, eps) => frames.map((p) => Float32Array.from(p, (v) => Math.log(v + (eps || 1e-10))));
+  AK.db = (frames) => { let mx = 1e-12; frames.forEach((p) => p.forEach((v) => (mx = Math.max(mx, v)))); return frames.map((p) => Float32Array.from(p, (v) => Math.max(-80, 10 * Math.log10((v + 1e-12) / mx)))); };
+  AK.dct = function (v, n) { // DCT-II，取前 n 个系数
+    const N = v.length, out = new Float32Array(n);
+    for (let k = 0; k < n; k++) { let s = 0; for (let i = 0; i < N; i++) s += v[i] * Math.cos((Math.PI * k * (2 * i + 1)) / (2 * N)); out[k] = s * Math.sqrt((k ? 2 : 1) / N); }
+    return out;
+  };
+  // ---- 合成示意声音 ----
+  const VOW = { a: [730, 1090, 2440], e: [530, 1840, 2480], i: [270, 2290, 3010], o: [570, 840, 2410], u: [300, 870, 2240], n: [250, 1700, 2600], l: [360, 1300, 2700], r: [420, 1300, 1600], w: [300, 700, 2200] };
+  function voiced(out, s0, n, f0, F, amp, sr, f0end) {
+    const nh = Math.floor(3800 / f0);
+    const amps = [];
+    for (let k = 1; k <= nh; k++) { let a = 0; F.forEach((f, j) => (a += Math.exp(-Math.pow((k * f0 - f) / (90 + 40 * j), 2)) / (1 + j * 0.6))); amps.push((a + 0.02) / Math.sqrt(k)); }
+    let ph = 0;
+    for (let i = 0; i < n; i++) {
+      const t = i / n, env = Math.min(1, t * 12, (1 - t) * 10), f = f0 + ((f0end || f0) - f0) * t;
+      ph += (2 * Math.PI * f) / sr;
+      let v = 0;
+      for (let k = 1; k <= amps.length; k++) if (k * f < sr / 2) v += amps[k - 1] * Math.sin(k * ph);
+      out[s0 + i] += amp * env * v * 0.35;
+    }
+  }
+  function noiseBand(out, s0, n, lo, hi, amp, r, sr) {
+    const comps = [];
+    for (let j = 0; j < 70; j++) comps.push([lo + r() * (hi - lo), r() * 6.283]);
+    for (let i = 0; i < n; i++) {
+      const t = i / n, env = Math.min(1, t * 6, (1 - t) * 6);
+      let v = 0;
+      for (const c of comps) v += Math.sin((2 * Math.PI * c[0] * i) / sr + c[1]);
+      out[s0 + i] += (amp * env * v) / 9;
+    }
+  }
+  // 一个音段：[类型, 时长秒, 参数]；类型：v 元音/浊音（参数=VOW 键）, f 擦音（[lo,hi]）, b 爆破（[lo,hi]）, s 静音
+  AK.WORDS = {
+    yes: [["v", 0.07, "i"], ["v", 0.2, "e"], ["f", 0.22, [4200, 7600]]],
+    no: [["v", 0.09, "n"], ["v", 0.32, "o"], ["v", 0.08, "u"]],
+    up: [["v", 0.24, "a"], ["s", 0.06], ["b", 0.03, [600, 3000]]],
+    down: [["b", 0.025, [2500, 5000]], ["v", 0.18, "a"], ["v", 0.12, "u"], ["v", 0.09, "n"]],
+    left: [["v", 0.07, "l"], ["v", 0.17, "e"], ["f", 0.11, [1500, 6500]], ["b", 0.03, [3500, 7000]]],
+    right: [["v", 0.07, "r"], ["v", 0.16, "a"], ["v", 0.1, "i"], ["s", 0.04], ["b", 0.03, [3500, 7000]]],
+    on: [["v", 0.28, "o"], ["v", 0.12, "n"]],
+    off: [["v", 0.26, "o"], ["f", 0.17, [1200, 6500]]],
+    stop: [["f", 0.16, [4200, 7600]], ["b", 0.02, [3500, 7000]], ["v", 0.2, "o"], ["s", 0.05], ["b", 0.03, [600, 3000]]],
+    go: [["b", 0.02, [1200, 3000]], ["v", 0.32, "o"], ["v", 0.08, "u"]],
+  };
+  // 合成一个词：opt {sr, dur, f0, start, noise, seed}；返回 {x, segs:[{name,t0,t1}]}
+  AK.word = function (name, opt) {
+    opt = Object.assign({ sr: AK.SR, dur: 1, f0: 130, start: 0.22, noise: 0.004, seed: 1 }, opt || {});
+    const sr = opt.sr, N = Math.round(sr * opt.dur), x = new Float32Array(N), r = K.rng(opt.seed);
+    let t = opt.start;
+    const segs = [];
+    (AK.WORDS[name] || AK.WORDS.yes).forEach((sg, j) => {
+      const n = Math.round(sg[1] * sr), s0 = Math.round(t * sr);
+      if (s0 + n < N) {
+        if (sg[0] === "v") voiced(x, s0, n, opt.f0 * (1 + 0.04 * Math.sin(j)), VOW[sg[2]], sg[2] === "n" ? 0.5 : 1, sr, opt.f0 * (j % 2 ? 0.93 : 1.02));
+        else if (sg[0] === "f") noiseBand(x, s0, n, sg[2][0], Math.min(sg[2][1], sr / 2 - 100), 0.16, r, sr);
+        else if (sg[0] === "b") noiseBand(x, s0, n, sg[2][0], Math.min(sg[2][1], sr / 2 - 100), 0.35, r, sr);
+      }
+      segs.push({ name: sg[0] === "v" ? sg[2] : sg[0] === "f" ? "擦音" : sg[0] === "b" ? "爆破" : "停顿", t0: t, t1: t + sg[1] });
+      t += sg[1];
+    });
+    for (let i = 0; i < N; i++) x[i] += opt.noise * K.randn(r);
+    return { x, segs, sr };
+  };
+  // 环境声 / 其他示意声音
+  AK.sound = function (kind, opt) {
+    opt = Object.assign({ sr: AK.SR, dur: 1, seed: 1 }, opt || {});
+    const sr = opt.sr, N = Math.round(sr * opt.dur), x = new Float32Array(N), r = K.rng(opt.seed);
+    const add = (f, a, s0, n, decay) => { for (let i = 0; i < n && s0 + i < N; i++) x[s0 + i] += a * Math.sin((2 * Math.PI * f * i) / sr) * (decay ? Math.exp(-i / (decay * sr)) : 1); };
+    if (kind === "siren") { let ph = 0; for (let i = 0; i < N; i++) { const f = 900 + 400 * Math.sin((2 * Math.PI * 1.5 * i) / sr); ph += (2 * Math.PI * f) / sr; x[i] = 0.4 * Math.sin(ph) + 0.15 * Math.sin(2 * ph); } }
+    else if (kind === "dog") { [0.1, 0.45].forEach((t0) => { const s0 = Math.round(t0 * sr), n = Math.round(0.18 * sr); voiced(x, s0, n, 420, [800, 1500, 2600], 1.4, sr, 330); noiseBand(x, s0, Math.round(0.05 * sr), 500, 4000, 0.6, r, sr); }); }
+    else if (kind === "rain") { for (let i = 0; i < N; i++) x[i] = 0.12 * K.randn(r); for (let k = 0; k < 40; k++) { const s0 = Math.floor(r() * N); for (let i = 0; i < 120 && s0 + i < N; i++) x[s0 + i] += 0.5 * K.randn(r) * Math.exp(-i / 25); } }
+    else if (kind === "clock") { for (let t0 = 0.05; t0 < opt.dur; t0 += 0.25) { const s0 = Math.round(t0 * sr); add(3000, 0.6, s0, 400, 0.004); add(5200, 0.4, s0, 300, 0.003); } }
+    else if (kind === "engine") { let ph = 0; for (let i = 0; i < N; i++) { ph += (2 * Math.PI * 55) / sr; let v = 0; for (let k = 1; k < 12; k++) v += Math.sin(k * ph + k) / k; x[i] = 0.25 * v * (1 + 0.3 * Math.sin((2 * Math.PI * 8 * i) / sr)) + 0.03 * K.randn(r); } }
+    else if (kind === "bird") { for (let t0 = 0.08; t0 < opt.dur - 0.15; t0 += 0.3) { const s0 = Math.round(t0 * sr), n = Math.round(0.12 * sr); let ph = 0; for (let i = 0; i < n && s0 + i < N; i++) { const f = 3200 + 1600 * (i / n) + 300 * Math.sin(i / 40); ph += (2 * Math.PI * f) / sr; x[s0 + i] += 0.45 * Math.sin(ph) * Math.sin((Math.PI * i) / n); } } }
+    else if (kind === "crying") { [0, 0.5].forEach((t0) => voiced(x, Math.round((t0 + 0.05) * sr), Math.round(0.4 * sr), 450, [1000, 2500, 3500], 1.2, sr, 380)); }
+    else if (kind === "glass") { const s0 = Math.round(0.2 * sr); noiseBand(x, s0, Math.round(0.04 * sr), 2000, 7500, 1.2, r, sr); [2800, 4100, 5600, 6900].forEach((f, j) => add(f, 0.3, s0, Math.round(0.6 * sr), 0.15 + j * 0.03)); }
+    else if (kind === "noise") { for (let i = 0; i < N; i++) x[i] = 0.2 * K.randn(r); }
+    for (let i = 0; i < N; i++) x[i] += 0.003 * K.randn(r);
+    return { x, sr };
+  };
+  // ---- 画图 ----
+  AK.drawWave = function (svg, box, x, opt) {
+    opt = opt || {};
+    K.svg(svg, "rect", { x: box.x, y: box.y, width: box.w, height: box.h, fill: "var(--panel-2)", rx: 4 });
+    let mx = 1e-9; for (let i = 0; i < x.length; i++) mx = Math.max(mx, Math.abs(x[i]));
+    const cols = Math.min(box.w, 600), step = x.length / cols, mid = box.y + box.h / 2, sc = (box.h / 2 - 3) / (opt.max || mx);
+    let d = "";
+    for (let c = 0; c < cols; c++) {
+      let lo = 0, hi = 0;
+      for (let i = Math.floor(c * step); i < Math.floor((c + 1) * step); i++) { lo = Math.min(lo, x[i]); hi = Math.max(hi, x[i]); }
+      const px = box.x + (c / cols) * box.w;
+      d += `M${px.toFixed(1)},${(mid - hi * sc).toFixed(1)}V${(mid - lo * sc + 0.5).toFixed(1)}`;
+    }
+    return K.svg(svg, "path", { d, stroke: opt.color || "var(--c1)", "stroke-width": Math.max(1, box.w / cols) * 0.9, fill: "none" });
+  };
+  AK.color = function (t) { // 频谱图色带：底色 → 蓝 → 橙
+    t = K.clamp(t, 0, 1);
+    return t < 0.55 ? `color-mix(in srgb, var(--c1) ${Math.round((t / 0.55) * 100)}%, var(--panel-2))` : `color-mix(in srgb, var(--warn) ${Math.round(((t - 0.55) / 0.45) * 100)}%, var(--c1))`;
+  };
+  // frames: [时间][频率]，画成热力图；opt {lo, hi, maxT, maxF, fmax(频点上限)}
+  AK.drawSpec = function (svg, box, frames, opt) {
+    opt = opt || {};
+    const g = K.svg(svg, "g");
+    const T = frames.length, Fall = frames[0].length, F = opt.fmax ? Math.min(Fall, opt.fmax) : Fall;
+    let lo = opt.lo, hi = opt.hi;
+    if (lo == null || hi == null) { const v = []; frames.forEach((p) => { for (let k = 0; k < F; k++) v.push(p[k]); }); v.sort((a, b) => a - b); if (lo == null) lo = v[Math.floor(v.length * 0.05)]; if (hi == null) hi = v[Math.floor(v.length * 0.995)]; }
+    const nt = Math.min(T, opt.maxT || 90), nf = Math.min(F, opt.maxF || 64);
+    const cw = box.w / nt, ch = box.h / nf;
+    for (let a = 0; a < nt; a++) for (let b = 0; b < nf; b++) {
+      const t0 = Math.floor((a * T) / nt), t1 = Math.max(t0 + 1, Math.floor(((a + 1) * T) / nt)), f0 = Math.floor((b * F) / nf), f1 = Math.max(f0 + 1, Math.floor(((b + 1) * F) / nf));
+      let s = -Infinity;
+      for (let t = t0; t < t1; t++) for (let f = f0; f < f1; f++) s = Math.max(s, frames[t][f]);
+      K.svg(g, "rect", { x: (box.x + a * cw).toFixed(1), y: (box.y + box.h - (b + 1) * ch).toFixed(1), width: (cw + 0.6).toFixed(1), height: (ch + 0.6).toFixed(1), fill: AK.color((s - lo) / (hi - lo || 1)) });
+    }
+    return g;
+  };
+  // 用 WebAudio 播放（课堂上可以真的听到合成声音）
+  AK.play = function (x, sr) {
+    try {
+      const C = window.AudioContext || window.webkitAudioContext; if (!C) return;
+      const ac = AK._ac || (AK._ac = new C());
+      let mx = 1e-9; for (let i = 0; i < x.length; i++) mx = Math.max(mx, Math.abs(x[i]));
+      const buf = ac.createBuffer(1, x.length, sr), ch = buf.getChannelData(0);
+      for (let i = 0; i < x.length; i++) ch[i] = (0.8 * x[i]) / mx;
+      const src = ac.createBufferSource(); src.buffer = buf; src.connect(ac.destination); src.start();
+    } catch (e) { /* 没有声卡也不影响页面 */ }
+  };
+  // 在实验面板外加一个“播放”按钮
+  AK.playBtn = function (labEl, label, getter) {
+    const b = K.el("button", { class: "btn ghost", style: "margin-top:8px" }, label || "▶ 播放合成声音");
+    b.onclick = () => { const s = getter(); if (s) AK.play(s.x, s.sr); };
+    const ctrl = labEl.querySelector(".ctrl"); (ctrl || labEl).appendChild(b);
+    return b;
+  };
+  /* ===== 音频工具结束 ===== */
+
+
+  const SR = 16000;
+  // 编辑距离 + 操作序列（a = 预测，b = 标签）
+  function lev(a, b) {
+    const n = a.length, m = b.length, D = [];
+    for (let i = 0; i <= n; i++) { D.push(new Array(m + 1).fill(0)); D[i][0] = i; }
+    for (let j = 0; j <= m; j++) D[0][j] = j;
+    for (let i = 1; i <= n; i++) for (let j = 1; j <= m; j++) D[i][j] = Math.min(D[i - 1][j] + 1, D[i][j - 1] + 1, D[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    const ops = []; let i = n, j = m;
+    while (i > 0 || j > 0) {
+      if (i > 0 && j > 0 && D[i][j] === D[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)) { ops.unshift(a[i - 1] === b[j - 1] ? ["=", a[i - 1], b[j - 1]] : ["替换", a[i - 1], b[j - 1]]); i--; j--; }
+      else if (i > 0 && D[i][j] === D[i - 1][j] + 1) { ops.unshift(["多写", a[i - 1], ""]); i--; }
+      else { ops.unshift(["漏写", "", b[j - 1]]); j--; }
+    }
+    return { d: D[n][m], ops };
+  }
+  // 示意句子：she had a cat
+  const REF = { text: "she had a cat", ph: "sh iy hh ae d ah k ae t" };
+
+  const steps = [
+    {
+      at: 0, title: "开场：装库、登录 Hugging Face", kicker: "第 0–1 格 · 准备",
+      html: `<p>作者装了 Hugging Face 的 <code>datasets</code>、<code>transformers</code>（固定 4.17.0 版本），以及读声音的 librosa、算错误率的 jiwer，然后登录 Hugging Face，为最后把模型上传做准备。</p><p>整份 notebook 的思路：拿一个<b>已经“听过”大量语音</b>的预训练模型 wav2vec2，只用 TIMIT 这一小份带音素标注的数据，教它把声音写成音素。</p>`,
+      draw(svg, ctx) {
+        const items = [["大量无标注语音", "预训练（Meta 已完成）"], ["wav2vec2 XLS-R", "会“听”的骨干"], ["TIMIT 音素标注", "本 notebook 微调"], ["音素序列", "sh iy hh ae d …"]];
+        const ns = items.map((d, i) => { const g = K.node(svg, 20 + i * 175, 120, 155, 80, d[0] + "\n" + d[1], { fill: i === 2 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 2 ? "var(--accent)" : "var(--line)", bold: i === 2 }); g.style.opacity = 0; return g; });
+        const as = [0, 1, 2].map((i) => { const a = K.arrow(svg, 175 + i * 175, 160, 193 + i * 175, 160); a.style.opacity = 0; return a; });
+        (async () => { for (let i = 0; i < 4; i++) if (!(await ctx.tween(380, (t) => { ns[i].style.opacity = t; if (i) as[i - 1].style.opacity = t; }))) return; })();
+        K.svg(svg, "text", { x: 20, y: 260, "font-size": 12, class: "muted" }, "预训练 + 微调：先在海量数据上学会“听”，再用少量标注学会“写音素”");
+      },
+    },
+    {
+      at: 2, title: "读入 TIMIT：每句话三份文件", kicker: "第 2–11 格 · 文件清单",
+      html: `<p>Kaggle 上的 TIMIT 带一张文件清单（train_data.csv、test_data.csv）。作者把训练和测试两张清单<b>合并</b>，去掉转换过格式的重复音频。</p><p>清单里每一行是一个文件，而一句话对应三个文件：<b>录音</b>、<b>单词标注</b>、<b>音素标注</b>。第 11 格按文件名（去掉扩展名）把同一句话的三个文件归到一起。</p>`,
+      cells: [7, 11], highlight: ["pd.concat([df_train, df_test])", "is_converted_audio", "phonetic_file"],
+      draw(svg, ctx) {
+        const files = [["SA1.WAV", "录音", "var(--c1)"], ["SA1.WRD", "单词", "var(--c3)"], ["SA1.PHN", "音素", "var(--c4)"], ["SX9.WAV", "录音", "var(--c1)"], ["SX9.PHN", "音素", "var(--c4)"], ["SX9.WRD", "单词", "var(--c3)"]];
+        const ns = files.map((f, i) => K.node(svg, 30 + (i % 3) * 110, 40 + Math.floor(i / 3) * 70 + (i % 2) * 8, 76, 46, f[0] + "\n" + f[1], { fill: `color-mix(in srgb, ${f[2]} 18%, var(--panel))`, stroke: f[2], fs: 12 }));
+        K.svg(svg, "text", { x: 30, y: 25, "font-size": 12, class: "muted" }, "文件清单（示意文件名）");
+        const box1 = K.node(svg, 420, 40, 260, 110, "", { fill: "var(--panel-2)" }), box2 = K.node(svg, 420, 180, 260, 110, "", { fill: "var(--panel-2)" });
+        K.svg(svg, "text", { x: 430, y: 60, "font-size": 12, "font-weight": 700 }, "句子 SA1");
+        K.svg(svg, "text", { x: 430, y: 200, "font-size": 12, "font-weight": 700 }, "句子 SX9");
+        const target = [[425, 75], [505, 75], [585, 75], [425, 215], [585, 215], [505, 215]];
+        ctx.wait(500).then((o) => o && ctx.tween(1400, (t) => ns.forEach((g, i) => { const sx = 30 + (i % 3) * 110, sy = 40 + Math.floor(i / 3) * 70 + (i % 2) * 8; g.setAttribute("transform", `translate(${(target[i][0] - sx) * t},${(target[i][1] - sy) * t})`); })));
+      },
+    },
+    {
+      at: 12, title: "随机切 80 / 10 / 10，并存下来", kicker: "第 12–19 格 · 划分数据",
+      html: `<p>作者只保留三个文件齐全的句子，用固定种子 101 打乱，按 <b>80% 训练、10% 验证、10% 测试</b>切开，再算一算每份有多少分钟（具体数字在输出里）。</p><p>最后把划分结果存成 json 文件：“不同的训练 / 测试集会得到不同的成绩，存下来以后就不用重新划分”，这是保证可复现的好习惯。</p><p>需要注意：TIMIT 原本有官方的训练 / 测试划分，保证测试集里的说话人不在训练集里；按句子随机划分会打破这一点。</p>`,
+      cells: [13, 16, 19], highlight: ["random.Random(101).shuffle(keys)", "int(len(keys) * 0.8)", "json.dump(train, f)"],
+      draw(svg, ctx) {
+        const r = K.rng(101), cells = [];
+        for (let i = 0; i < 100; i++) cells.push({ sp: Math.floor(i / 5), x0: 30 + (i % 20) * 33, y0: 40 + Math.floor(i / 20) * 26 });
+        const perm = cells.map((_, i) => i).sort(() => r() - 0.5);
+        const els = cells.map((c) => K.svg(svg, "rect", { x: c.x0, y: c.y0, width: 28, height: 20, rx: 3, fill: K.colors[c.sp % 6], opacity: 0.75 }));
+        K.svg(svg, "text", { x: 30, y: 28, "font-size": 12, class: "muted" }, "每个方块 = 一句话，颜色 = 说话人（示意：每人 5 句）");
+        const lab = [["训练 80%", 30], ["验证 10%", 30 + 16 * 33], ["测试 10%", 30 + 18 * 33]];
+        lab.forEach((l, i) => K.svg(svg, "text", { x: [30, 30 + 16 * 32 + 8, 30 + 18 * 32 + 16][i], y: 220, "font-size": 12, "font-weight": 700 }, l[0]));
+        ctx.wait(500).then((o) => o && ctx.tween(1600, (t) => perm.forEach((p, k) => { const fx = 30 + (k % 20) * 32 + (k % 20 >= 16 ? 8 : 0) + (k % 20 >= 18 ? 8 : 0), fy = 226 + Math.floor(k / 20) * 21; els[p].setAttribute("x", K.lerp(cells[p].x0, fx, t)); els[p].setAttribute("y", K.lerp(cells[p].y0, fy, t)); })));
+        K.svg(svg, "text", { x: 30, y: 338, "font-size": 12, fill: "var(--warn)" }, "同一种颜色（同一个人）的句子可能同时落在训练和测试里");
+      },
+    },
+    {
+      at: 20, title: "转成 Hugging Face 数据集，读出单词和音素", kicker: "第 20–28 格 · 预处理",
+      html: `<p>把字典转成 Hugging Face 的 <code>Dataset</code>，再用 <code>map</code> 给每一条读出文字：.WRD 和 .PHN 文件每一行是“开始采样点 结束采样点 符号”，作者只取每行最后一列，用空格连起来，得到 <code>text</code>（单词）和 <code>phonetic</code>（音素）。</p><p>注意这里<b>丢掉了每个音素的起止时间</b>。TIMIT 其实标了每个音素在第几个采样点开始和结束，但 CTC 训练用不着这种逐帧对齐，只要知道顺序就够了。</p>`,
+      cells: [22, 27, 28], highlight: ["line.split()[-1]", "item['phonetic'] = read_text_file(item['phonetic_file'])"],
+      draw(svg, ctx) {
+        const lines = [["0", "2400", "h#"], ["2400", "4100", "sh"], ["4100", "5900", "iy"], ["5900", "6800", "hh"], ["6800", "8700", "ae"], ["8700", "9600", "d"]];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 12, class: "muted" }, ".PHN 文件（示意内容）：开始采样点  结束采样点  音素");
+        const rows = lines.map((l, i) => { const g = K.svg(svg, "g"); K.svg(g, "text", { x: 30, y: 60 + i * 26, "font-size": 14, "font-family": "var(--mono)" }, l[0].padStart(5) + "  " + l[1].padStart(5) + "  "); const last = K.svg(g, "text", { x: 190, y: 60 + i * 26, "font-size": 14, "font-family": "var(--mono)", "font-weight": 700, fill: "var(--c4)" }, l[2]); return [g, last]; });
+        const out = K.svg(svg, "text", { x: 30, y: 260, "font-size": 18, "font-family": "var(--mono)", "font-weight": 700, fill: "var(--c4)" }, "");
+        K.svg(svg, "text", { x: 30, y: 230, "font-size": 12 }, "只取最后一列，用空格连起来 →");
+        const strike = rows.map((r, i) => { const l = K.svg(svg, "line", { x1: 30, x2: 30, y1: 55 + i * 26, y2: 55 + i * 26, stroke: "var(--ink-3)", "stroke-width": 1.5 }); return l; });
+        (async () => {
+          if (!(await ctx.tween(900, (t) => strike.forEach((l) => l.setAttribute("x2", 30 + 150 * t))))) return;
+          for (let i = 0; i < lines.length; i++) { out.textContent = lines.slice(0, i + 1).map((l) => l[2]).join(" "); if (!(await ctx.wait(220))) return; }
+        })();
+        K.svg(svg, "text", { x: 30, y: 310, "font-size": 12, class: "muted" }, "时间信息被丢掉：CTC 只需要“顺序”，不需要“几号采样点”");
+      },
+    },
+    {
+      at: 29, title: "61 个音素合并成 39 个", kicker: "第 29–34 格 · 音素归并",
+      html: `<p>TIMIT 原始标注里有 <b>61 种</b>音素符号，分得非常细。比如 <code>tcl</code> 只是发 t 之前嘴巴闭住的那一小段停顿。作者用 Lee &amp; Hon（1989）论文里的经典映射表，把它们合并成 <b>39 类</b>：</p><ul class="tight"><li>相近的合并：<code>ix → ih</code>、<code>ax → ah</code>、<code>ux → uw</code>、<code>axr → er</code>、<code>zh → sh</code>……</li><li>各种闭塞停顿和短暂停顿（<code>pcl tcl kcl bcl dcl gcl pau epi q</code>）全部并成静音 <code>h#</code>。</li></ul><p>这样模型不必区分人耳都很难分清的细节，学起来更容易，结果也能和其他论文比较。</p>`,
+      cells: [31, 32], highlight: ["phon61_map39", "'tcl':'h#'", "'ix':'ih'"],
+      draw(svg, ctx) {
+        const pairs = [["ix", "ih"], ["ax", "ah"], ["ux", "uw"], ["axr", "er"], ["el", "l"], ["en", "n"], ["zh", "sh"], ["hv", "hh"], ["tcl", "h#"], ["kcl", "h#"], ["pau", "h#"], ["epi", "h#"]];
+        const left = pairs.map((p, i) => K.node(svg, 40, 15 + i * 26, 70, 22, p[0], { fs: 12, fill: "var(--panel-2)" }));
+        const tgt = [...new Set(pairs.map((p) => p[1]))];
+        const right = {}; tgt.forEach((t, i) => (right[t] = K.node(svg, 520, 25 + i * 36, 80, 28, t, { fs: 13, bold: true, fill: t === "h#" ? "color-mix(in srgb, var(--ink-3) 25%, var(--panel))" : "var(--accent-soft)", stroke: t === "h#" ? "var(--ink-3)" : "var(--accent)" })));
+        const lines = pairs.map((p, i) => { const j = tgt.indexOf(p[1]); const l = K.svg(svg, "line", { x1: 110, y1: 26 + i * 26, x2: 110, y2: 26 + i * 26, stroke: p[1] === "h#" ? "var(--ink-3)" : "var(--c4)", "stroke-width": 1.5 }); l._t = [520, 39 + j * 36]; return l; });
+        K.svg(svg, "text", { x: 140, y: 335, "font-size": 12, class: "muted" }, "左：61 类里的一部分　右：合并后的 39 类（停顿全部变成静音 h#）");
+        ctx.wait(300).then((o) => o && ctx.tween(1500, (t) => lines.forEach((l, i) => { l.setAttribute("x2", K.lerp(110, l._t[0], K.clamp(t * 1.5 - i * 0.04, 0, 1))); l.setAttribute("y2", K.lerp(26 + i * 26, l._t[1], K.clamp(t * 1.5 - i * 0.04, 0, 1))); })));
+      },
+    },
+    {
+      at: 35, title: "三份数据的音素分布像不像", kicker: "第 35–39 格 · 分布检查",
+      html: `<p>作者不直接数个数（测试集本来就小），而是算<b>每个音素在本份数据里的占比</b>，把训练、验证、测试三份的占比叠在一张柱状图里。如果三份数据是从同一个分布里随机抽的，每个音素的三段颜色应该差不多高。</p><p>静音 <code>h#</code> 被去掉了，因为它太多，会把别的柱子压扁。</p>`,
+      cells: [36, 39], highlight: ["phone_vocabs.remove('h#')", "count / sum(train_phone_counts)"],
+      draw(svg, ctx) {
+        const ph = ["aa", "ae", "ah", "d", "eh", "ih", "iy", "k", "l", "n", "r", "s", "t", "w"], r = K.rng(9);
+        const base = ph.map(() => 0.03 + r() * 0.07);
+        const bw = 640 / ph.length, segs = [];
+        ph.forEach((p, i) => { let y = 300; [0, 1, 2].forEach((k) => { const h = (base[i] * (1 + (r() - 0.5) * 0.25)) * 900; const rc = K.svg(svg, "rect", { x: 40 + i * bw + 4, y: 300, width: bw - 8, height: 0, fill: K.colors[k], opacity: 0.85 }); segs.push([rc, y, h]); y -= h; }); K.svg(svg, "text", { x: 40 + i * bw + bw / 2, y: 318, "text-anchor": "middle", "font-size": 12 }, p); });
+        K.svg(svg, "text", { x: 40, y: 22, "font-size": 12, fill: "var(--c1)" }, "■ 训练");
+        K.svg(svg, "text", { x: 100, y: 22, "font-size": 12, fill: "var(--c2)" }, "■ 验证");
+        K.svg(svg, "text", { x: 160, y: 22, "font-size": 12, fill: "var(--c3)" }, "■ 测试");
+        K.svg(svg, "text", { x: 240, y: 22, "font-size": 12, class: "muted" }, "（示意数字：三段高度接近 = 分布相似）");
+        ctx.tween(1400, (t) => segs.forEach(([rc, y, h]) => { rc.setAttribute("y", y - h * t); rc.setAttribute("height", h * t); }));
+      },
+    },
+    {
+      at: 40, title: "读声音，建音素词表", kicker: "第 40–50 格 · 词表",
+      html: `<p>用 <code>cast_column(..., Audio(sampling_rate=16_000))</code> 让数据集在读取时自动解码成 16 kHz 的数组；随机抽一条打印文字、音素、数组长度，再播放出来听。</p><p>然后把三份数据里出现过的所有音素，加上一个空格，排好序编号，得到<b>词表</b>。空格换成更直观的 <code>|</code>（表示音素之间的分隔），最后加上 <code>[UNK]</code>（不认识的符号）和 <code>[PAD]</code>（补齐用，同时也是 CTC 的“空白”）。作者还附了一份 ARPAbet → IPA 国际音标的对照表，本 notebook 没用到。</p>`,
+      cells: [41, 43, 46, 47], highlight: ["Audio(sampling_rate=16_000)", "vocab_dict[\"|\"] = vocab_dict[\" \"]", "vocab_dict[\"[PAD]\"]"],
+      draw(svg, ctx) {
+        const v = ["aa", "ae", "ah", "aw", "ay", "b", "ch", "d", "dh", "dx", "eh", "er", "…", "z", "|", "[UNK]", "[PAD]"];
+        v.forEach((p, i) => { const g = K.node(svg, 30 + (i % 9) * 74, 60 + Math.floor(i / 9) * 70, 66, 50, p + "\n" + (p === "…" ? "" : i < 13 ? String(i) : p === "z" ? "38" : p === "|" ? "39" : p === "[UNK]" ? "40" : "41"), { fs: 12, fill: p === "[PAD]" ? "var(--accent-soft)" : "var(--panel-2)", stroke: p === "[PAD]" ? "var(--accent)" : "var(--line)", bold: p.startsWith("[") || p === "|" }); g.style.opacity = 0; ctx.wait(i * 70).then((o) => o && ctx.tween(250, (t) => (g.style.opacity = t))); });
+        K.svg(svg, "text", { x: 30, y: 35, "font-size": 12, class: "muted" }, "音素词表（编号为示意，以实际排序为准）");
+        K.svg(svg, "text", { x: 30, y: 250, "font-size": 13 }, "| = 音素之间的分隔　[UNK] = 不认识　[PAD] = 补齐，也被当作 CTC 的“空白”");
+      },
+    },
+    {
+      at: 51, title: "处理器：特征提取器 + CTC 分词器", kicker: "第 51–56 格 · Processor",
+      html: `<p><code>Wav2Vec2Processor</code> 由两部分组成：</p><ul class="tight"><li><b>特征提取器</b>：声音不做频谱，直接把原始波形<b>标准化</b>（减均值、除标准差），补齐时用 0；</li><li><b>CTC 分词器</b>：把音素串 <code>sh iy hh ae d</code> 变成编号序列；空格变成 <code>|</code>。</li></ul><p><code>prepare_dataset</code> 对每一条生成 <code>input_values</code>（标准化后的波形）、<code>input_length</code>（长度）和 <code>labels</code>（音素编号）。注意 wav2vec2 吃的是<b>原始波形</b>，它自己用卷积层学“频谱”。</p>`,
+      cells: [54, 55], highlight: ["Wav2Vec2CTCTokenizer.from_pretrained", "do_normalize=True", "processor(batch[\"phonetic\"]).input_ids"],
+      draw(svg, ctx) {
+        const x = AK.word("yes", { seed: 3, sr: SR });
+        AK.drawWave(svg, { x: 30, y: 40, w: 300, h: 100 }, x.x);
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 12 }, "原始波形 → 标准化（均值 0、方差 1）");
+        K.node(svg, 360, 60, 140, 60, "特征提取器", { fill: "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: "var(--c1)" });
+        K.arrow(svg, 330, 90, 358, 90);
+        K.svg(svg, "text", { x: 520, y: 95, "font-size": 13 }, "input_values");
+        K.svg(svg, "text", { x: 30, y: 210, "font-size": 15, "font-family": "var(--mono)" }, "sh iy hh ae d");
+        K.node(svg, 360, 180, 140, 60, "CTC 分词器", { fill: "color-mix(in srgb, var(--c4) 18%, var(--panel))", stroke: "var(--c4)" });
+        K.arrow(svg, 200, 205, 358, 210);
+        const ids = K.svg(svg, "text", { x: 520, y: 215, "font-size": 14, "font-family": "var(--mono)" }, "");
+        const toks = ["sh", "|", "iy", "|", "hh", "|", "ae", "|", "d"], idn = [31, 39, 19, 39, 17, 39, 1, 39, 7];
+        (async () => { for (let i = 0; i < toks.length; i++) { ids.textContent = "[" + idn.slice(0, i + 1).join(", ") + (i < toks.length - 1 ? ", …" : "]"); if (!(await ctx.wait(260))) return; } })();
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12, class: "muted" }, "编号为示意：空格变成 | 分隔符，每个音素一个编号");
+      },
+    },
+    {
+      at: 57, title: "动态补齐与评估指标", kicker: "第 57–61 格 · 数据整理器、WER、CER",
+      html: `<p>每句话长短不一，<code>DataCollatorCTCWithPadding</code> 在组批时<b>按这一批里最长的补齐</b>：音频补 0；标签补 [PAD] 后再换成 <b>-100</b>，告诉损失函数“这些位置不算”。</p><p>评估用 <b>WER</b>（词错误率：把空格隔开的每一块当一个“词”）和 <b>CER</b>（字符错误率）。作者在训练后发现 WER 不合适、CER 更合适，但又指出 CER 也有偏差：一个音素由 1–3 个字母组成（如 <code>ch</code>、<code>ae</code>），错一个音素可能算成两个字符错误。所以最后他又在“音素”层面重算了一次。</p>`,
+      cells: [57, 60], highlight: ["labels_batch[\"input_ids\"]", "-100", "wer_metric.compute", "cer_metric.compute"],
+      draw(svg, ctx) {
+        const L = [0.9, 0.55, 0.75, 0.4];
+        L.forEach((l, i) => {
+          K.svg(svg, "text", { x: 30, y: 60 + i * 60, "font-size": 12 }, `第 ${i + 1} 句`);
+          K.svg(svg, "rect", { x: 100, y: 45 + i * 60, width: 560 * l, height: 24, rx: 4, fill: "var(--c1)", opacity: 0.75 });
+          const p = K.svg(svg, "rect", { x: 100 + 560 * l, y: 45 + i * 60, width: 0, height: 24, rx: 4, fill: "var(--panel-2)", stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+          ctx.wait(400).then((o) => o && ctx.tween(800, (t) => p.setAttribute("width", 560 * (0.9 - l) * t)));
+        });
+        K.svg(svg, "text", { x: 100, y: 30, "font-size": 12, class: "muted" }, "同一批按最长的一句补齐（虚线 = 补的 0 / -100，不参与损失）");
+        K.svg(svg, "text", { x: 30, y: 315, "font-size": 12 }, "这一批没有更长的句子，所以只补到 90%，而不是补到全数据集最长——省计算");
+      },
+    },
+    {
+      at: 62, title: "wav2vec2 XLS-R + CTC 输出层", kicker: "第 62–63 格 · 模型",
+      html: `<p>模型是 <code>facebook/wav2vec2-xls-r-300m</code>：约 3 亿参数（名字里的 300m），Meta 用大量多语言语音<b>自监督</b>预训练而来。“自监督”就是不需要文字标注：把一段语音的某些位置遮住，让模型猜被遮住的是什么声音单元。</p><p>结构是：<b>卷积特征编码器</b>（把波形每 20 毫秒左右压成一个向量）→ <b>Transformer</b>（看上下文）→ 新加的 <b>CTC 输出层</b>（每一帧输出一个音素或空白的概率，大小 = 词表大小）。作者冻结卷积特征编码器，只微调后面；还设置了很强的遮挡增强：时间方向遮挡概率 0.75、每段 10 帧，特征方向 0.25、每段 64。</p><p><b>CTC 在对齐什么？</b>模型每 20 毫秒输出一次，一句话几百帧，音素只有几十个，谁对谁没人标注。CTC 把“合并重复、删掉空白后能得到正确音素串”的<b>所有</b>逐帧写法的概率加起来，让这个总和尽量大。</p>`,
+      cells: [62, 63], highlight: ["facebook/wav2vec2-xls-r-300m", "mask_time_prob=0.75", "ctc_loss_reduction=\"mean\"", "freeze_feature_encoder"],
+      draw(svg, ctx) {
+        const x = AK.word("stop", { seed: 5, sr: SR });
+        AK.drawWave(svg, { x: 30, y: 20, w: 660, h: 50 }, x.x);
+        const T = 24, fw = 660 / T;
+        const cnn = []; for (let i = 0; i < T; i++) cnn.push(K.svg(svg, "rect", { x: 30 + i * fw + 2, y: 95, width: fw - 4, height: 26, rx: 3, fill: "var(--c1)", opacity: 0 }));
+        K.svg(svg, "text", { x: 30, y: 90, "font-size": 11, class: "muted" }, "卷积特征编码器（冻结）：约 20 ms 一帧");
+        const tr = K.svg(svg, "rect", { x: 30, y: 140, width: 660, height: 40, rx: 6, fill: "color-mix(in srgb, var(--c4) 18%, var(--panel))", stroke: "var(--c4)", opacity: 0 });
+        K.svg(svg, "text", { x: 360, y: 165, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "Transformer（看整句上下文）");
+        const out = ["_", "_", "s", "s", "_", "t", "_", "_", "aa", "aa", "aa", "aa", "_", "p", "_", "_", "_", "_", "_", "_", "_", "_", "_", "_"];
+        const os = out.map((o, i) => { const g = K.node(svg, 30 + i * fw + 1, 200, fw - 2, 30, o === "_" ? "·" : o, { fs: 11, fill: o === "_" ? "var(--panel-2)" : "var(--accent-soft)", stroke: o === "_" ? "var(--line)" : "var(--accent)" }); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 30, y: 250, "font-size": 11, class: "muted" }, "CTC 输出层：每帧一个音素或空白（· = 空白，示意）");
+        const res = K.svg(svg, "text", { x: 30, y: 290, "font-size": 18, "font-family": "var(--mono)", "font-weight": 700, fill: "var(--good)" }, "");
+        (async () => {
+          if (!(await ctx.tween(800, (t) => cnn.forEach((c, i) => (c.style.opacity = K.clamp(t * T - i, 0, 1) * 0.6))))) return;
+          if (!(await ctx.tween(400, (t) => (tr.style.opacity = t)))) return;
+          for (const g of os) if (!(await ctx.tween(60, (t) => (g.style.opacity = t)))) return;
+          res.textContent = "合并重复、删空白 → s t aa p";
+        })();
+      },
+    },
+    {
+      at: 64, title: "训练、评估、上传", kicker: "第 64–74 格 · Trainer",
+      html: `<p>用 Hugging Face <code>Trainer</code> 训练：每卡批大小 8、梯度累积 4 次（相当于批 32）、<b>10000 步</b>、学习率 3e-5、前 2000 步预热、半精度 fp16、梯度检查点（省显存）；每 1000 步在验证集上算一次 WER / CER 并存档，最多留 3 个，最后加载最好的那个。<code>group_by_length=True</code> 让长度相近的句子分在同一批，少补零。</p><p>训练完在测试集和训练集上各评估一次（两者对比可以看过拟合），然后保存并上传到 Hugging Face。注意分词器被上传到了另一个仓库名 <code>vitouphy/xls-r-300m-km</code>。</p>`,
+      cells: [65, 67, 69], highlight: ["max_steps=10000", "learning_rate=3e-5", "warmup_steps=2000", "group_by_length=True", "load_best_model_at_end=True"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 600, h: 230 }, [0, 10000], [0, 3.2e-5], { xlabel: "训练步数", yfmt: (v) => (v * 1e5).toFixed(1) + "e-5", xticks: 5 });
+        const lr = (s) => (s < 2000 ? (3e-5 * s) / 2000 : (3e-5 * (10000 - s)) / 8000);
+        const p = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+        const ev = []; for (let s = 1000; s <= 10000; s += 1000) ev.push(K.svg(svg, "circle", { cx: ax.sx(s), cy: ax.sy(lr(s)), r: 0, fill: "var(--warn)" }));
+        K.svg(svg, "text", { x: 80, y: 290, "font-size": 12 }, "蓝线：学习率（2000 步预热后线性下降，Trainer 默认的线性调度）　橙点：每 1000 步评估并存档");
+        ctx.tween(1800, (t) => { let d = ""; for (let s = 0; s <= 10000 * t; s += 100) d += (s ? "L" : "M") + ax.sx(s) + "," + ax.sy(lr(s)); p.setAttribute("d", d); ev.forEach((c, i) => c.setAttribute("r", (i + 1) * 1000 <= 10000 * t ? 5 : 0)); });
+      },
+    },
+    {
+      at: 75, title: "错误分析：逐条解码，算编辑距离", kicker: "第 75–80 格 · 音素层面的评估",
+      html: `<p>作者对测试集逐条预测：取每帧概率最大的符号（<b>贪心解码</b>），用 <code>clean_token_ids</code> 去掉 [PAD] 和空格、合并重复，得到音素序列；为了用字符级的 Levenshtein 库，把每个音素编号转成一个 Unicode 字符，这样“一个音素 = 一个字符”，算出来的 CER 就是<b>音素错误率</b>。再用 <code>editops</code> 列出每一处插入、删除、替换。</p><p>这里的解码函数有两个问题：① <code>collapse_tokens</code> 循环结束后没有把最后一个符号加进去，<b>每条都少最后一个音素</b>；② 先删空白再合并，会把被空白隔开的相同音素误合并。标准做法是先合并重复，再删空白。（实验 C 演示）</p>`,
+      cells: [78, 79], highlight: ["def collapse_tokens", "x not in [PAD_ID, EMPTY_ID]", "chr(x) for x in predicted_ids", "Levenshtein.editops"],
+      draw(svg, ctx) {
+        const fr = ["_", "k", "k", "_", "ae", "ae", "_", "t", "_", "t", "t", "_"];
+        const fw = 50;
+        fr.forEach((f, i) => K.node(svg, 30 + i * fw, 40, fw - 4, 34, f === "_" ? "·" : f, { fs: 12, fill: f === "_" ? "var(--panel-2)" : "var(--accent-soft)", stroke: f === "_" ? "var(--line)" : "var(--accent)" }));
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 12, class: "muted" }, "逐帧最大概率（示意，正确答案是 k ae t t：两个 t 中间隔着空白）");
+        const row = (y, lab, seq, col) => { K.svg(svg, "text", { x: 30, y: y - 8, "font-size": 12, "font-weight": 700, fill: col }, lab); const t = K.svg(svg, "text", { x: 30, y: y + 18, "font-size": 18, "font-family": "var(--mono)" }, seq); t.style.opacity = 0; return t; };
+        const a = row(130, "✓ 标准 CTC：先合并重复，再删空白", "k ae t t", "var(--good)");
+        const b = row(200, "✗ 先删空白，再合并（第 78 格的顺序）", "k ae t", "var(--bad)");
+        const c = row(270, "✗ 再加上漏掉最后一个（第 78 格 collapse_tokens）", "k ae", "var(--bad)");
+        ctx.wait(500).then((o) => o && ctx.tween(400, (t) => (a.style.opacity = t))).then((o) => o && ctx.tween(400, (t) => (b.style.opacity = t))).then((o) => o && ctx.tween(400, (t) => (c.style.opacity = t)));
+      },
+    },
+    {
+      at: 81, title: "插入、删除、替换：模型在哪儿出错", kicker: "第 81–95 格 · 错误统计与混淆矩阵",
+      html: `<p>作者把所有编辑操作分三类统计（注意他的命名是站在“从预测改成标签”的角度）：</p><ul class="tight"><li><b>insert</b>：要插入的音素 = 模型<b>漏写</b>的；</li><li><b>delete</b>：要删掉的音素 = 模型<b>多写</b>的；</li><li><b>replace</b>：替换 = 把 A 写成了 B。</li></ul><p>结论：模型在 ah、t、ih、h# 上多写或漏写；倾向于多写 r、d、k、g。替换次数 ≥ 5 的画成热力图（行 = 模型写的，列 = 应该写的），最常见的是元音之间：<b>ih ↔ ah、ih ↔ eh、ih ↔ iy</b>，以及把 ah 写成 aa、er，eh 写成 ae，er 写成 r。这些都是发音位置很接近的音。</p>`,
+      cells: [83, 85, 94], highlight: ["insertions.append(label_token)", "deletions.append(pred_token)", "sns.heatmap"],
+      draw(svg, ctx) {
+        const rows = ["aa", "ae", "ah", "eh", "er", "ih", "iy", "r"], cols = ["ah", "eh", "er", "ih", "iy"];
+        const pairs = { "ih|ah": 1, "ah|ih": 1, "ih|eh": 0.8, "eh|ih": 0.7, "ih|iy": 0.8, "iy|ih": 0.7, "aa|ah": 0.75, "ae|eh": 0.7, "er|ah": 0.6, "r|er": 0.65 };
+        K.svg(svg, "text", { x: 140, y: 22, "font-size": 12, class: "muted" }, "列 = 应该写的音素");
+        K.svg(svg, "text", { x: 20, y: 22, "font-size": 12, class: "muted" }, "行 = 模型写的");
+        cols.forEach((c, j) => K.svg(svg, "text", { x: 140 + j * 70 + 32, y: 44, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, c));
+        const cells = [];
+        rows.forEach((r, i) => { K.svg(svg, "text", { x: 110, y: 72 + i * 32, "text-anchor": "end", "font-size": 13, "font-weight": 700 }, r); cols.forEach((c, j) => { const v = pairs[r + "|" + c] || 0; cells.push([K.svg(svg, "rect", { x: 140 + j * 70, y: 52 + i * 32, width: 66, height: 28, rx: 3, fill: "var(--panel-2)" }), v]); }); });
+        K.svg(svg, "text", { x: 520, y: 80, "font-size": 12 }, "颜色深浅只表示");
+        K.svg(svg, "text", { x: 520, y: 98, "font-size": 12 }, "作者文字里提到的");
+        K.svg(svg, "text", { x: 520, y: 116, "font-size": 12 }, "混淆对（示意强度），");
+        K.svg(svg, "text", { x: 520, y: 134, "font-size": 12 }, "不是原图的次数");
+        ctx.tween(1400, (t) => cells.forEach(([rc, v]) => (rc.style.fill = `color-mix(in srgb, var(--warn) ${Math.round(v * t * 80)}%, var(--panel-2))`)));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：WER / CER / PER ---------- */
+  const PREDS = [
+    ["one", "一个元音写错（ae→eh）", "sh iy hh eh d ah k ae t"],
+    ["two", "两个短元音互换（iy→ih，ah→ih）", "sh ih hh ae d ih k ae t"],
+    ["miss", "漏写开头的 hh 和结尾的 t", "sh iy ae d ah k ae"],
+    ["extra", "多写了 r 和 d", "sh iy hh ae r d d ah k ae t"],
+    ["ch", "sh 写成 ch（同为 2 个字母）", "ch iy hh ae d ah k ae t"],
+    ["s", "sh 写成 s（2 个字母变 1 个）", "s iy hh ae d ah k ae t"],
+  ];
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 300,
+    controls: [{ id: "p", label: "模型的输出（参考答案：sh iy hh ae d ah k ae t）", value: "one", options: PREDS.map((p) => [p[0], p[1]]) }],
+    note: "浏览器现场算编辑距离（最少几步“增、删、改”能把预测变成答案），再除以答案长度。WER 把空格隔开的每个音素当一个“词”；CER 按字母算（空格也算一个字符）；音素错误率 PER 把每个音素当一个单位，就是作者第 79 格用 chr() 编码后算的东西。",
+    render(svg, v) {
+      const pred = PREDS.find((p) => p[0] === v.p)[2], ref = REF.ph;
+      const w = lev(pred.split(" "), ref.split(" ")), c = lev(pred.split(""), ref.split(""));
+      const wer = w.d / ref.split(" ").length, cer = c.d / ref.length;
+      K.svg(svg, "text", { x: 20, y: 24, "font-size": 12, class: "muted" }, "音素对齐（上 = 模型写的，下 = 正确答案）：");
+      let x = 20;
+      w.ops.forEach((o) => {
+        const col = o[0] === "=" ? "var(--ink-3)" : o[0] === "替换" ? "var(--warn)" : o[0] === "多写" ? "var(--c6)" : "var(--c1)";
+        const wd = 58;
+        K.svg(svg, "rect", { x, y: 40, width: wd - 4, height: 90, rx: 5, fill: o[0] === "=" ? "var(--panel-2)" : `color-mix(in srgb, ${col} 20%, var(--panel))`, stroke: col });
+        K.svg(svg, "text", { x: x + wd / 2 - 2, y: 70, "text-anchor": "middle", "font-size": 15, "font-family": "var(--mono)" }, o[1] || "—");
+        K.svg(svg, "text", { x: x + wd / 2 - 2, y: 100, "text-anchor": "middle", "font-size": 15, "font-family": "var(--mono)", "font-weight": 700 }, o[2] || "—");
+        K.svg(svg, "text", { x: x + wd / 2 - 2, y: 122, "text-anchor": "middle", "font-size": 10, fill: col }, o[0] === "=" ? "" : o[0]);
+        x += wd;
+      });
+      K.svg(svg, "text", { x: 20, y: 170, "font-size": 13, "font-family": "var(--mono)" }, "预测：" + pred);
+      K.svg(svg, "text", { x: 20, y: 194, "font-size": 13, "font-family": "var(--mono)" }, "答案：" + ref);
+      K.svg(svg, "text", { x: 20, y: 230, "font-size": 12, class: "muted" }, `音素层面：编辑距离 ${w.d}，答案有 ${ref.split(" ").length} 个音素`);
+      K.svg(svg, "text", { x: 20, y: 252, "font-size": 12, class: "muted" }, `字符层面：编辑距离 ${c.d}，答案有 ${ref.length} 个字符（含空格）`);
+      return { readout: [
+        { k: "WER（按空格切）", v: (wer * 100).toFixed(1) + "%" },
+        { k: "CER（按字母）", v: (cer * 100).toFixed(1) + "%" },
+        { k: "音素错误率 PER", v: (wer * 100).toFixed(1) + "%", color: "var(--accent)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：CTC 前向算法 ---------- */
+  const TGT = ["k", "ae", "t"];
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "T", label: "帧数 T（模型输出了多少帧）", min: 3, max: 14, step: 1, value: 8 },
+      { id: "sharp", label: "模型有多“确定”（越大，每帧的概率越集中）", min: 0, max: 6, step: 0.2, value: 2.5, fmt: (x) => x.toFixed(1) },
+      { id: "seed", label: "换一组逐帧概率", button: true },
+    ],
+    note: "目标音素串 k ae t（单词 cat）。浏览器生成每帧在 {空白, k, ae, t} 上的概率（越往后越像后面的音素），再用 CTC 前向算法把所有合法路径的概率加起来：路径必须按 空 k 空 ae 空 t 空 的顺序走，每步只能停留、前进一格，或跳过一个空白（相邻音素不同时）。格子越亮 = 走到那里的总概率越大；橙色是概率最大的一条路径。",
+    render(svg, v) {
+      const T = v.T, r = K.rng(5 + v.seed * 11), sym = ["_", ...TGT];
+      // 每帧概率：soft 对齐到 k→ae→t 的大致位置 + 随机扰动
+      const P = [];
+      for (let t = 0; t < T; t++) {
+        const pos = ((t + 0.5) / T) * 3;
+        const logit = [0.6 + 0.8 * r(), ...TGT.map((_, j) => -Math.abs(pos - (j + 0.5)) * 2 + 0.5 * K.randn(r))].map((z) => z * v.sharp);
+        const m = Math.max(...logit), e = logit.map((z) => Math.exp(z - m)), s = e.reduce((a, b) => a + b);
+        P.push(e.map((x) => x / s));
+      }
+      // 扩展序列：_ k _ ae _ t _
+      const ext = ["_"]; TGT.forEach((p) => ext.push(p, "_"));
+      const S = ext.length, idx = (c) => sym.indexOf(c);
+      const A = Array.from({ length: T }, () => new Array(S).fill(0)), B = Array.from({ length: T }, () => new Array(S).fill(-1));
+      A[0][0] = P[0][0]; A[0][1] = P[0][idx(ext[1])];
+      for (let t = 1; t < T; t++) for (let s = 0; s < S; s++) {
+        let a = A[t - 1][s], b = s; if (s > 0 && A[t - 1][s - 1] > 0) { a += A[t - 1][s - 1]; }
+        if (s > 1 && ext[s] !== "_" && ext[s] !== ext[s - 2]) a += A[t - 1][s - 2];
+        A[t][s] = a * P[t][idx(ext[s])];
+      }
+      const total = (A[T - 1][S - 1] || 0) + (A[T - 1][S - 2] || 0);
+      // 维特比最佳路径
+      const V = Array.from({ length: T }, () => new Array(S).fill(0)), BP = Array.from({ length: T }, () => new Array(S).fill(-1));
+      V[0][0] = P[0][0]; V[0][1] = P[0][idx(ext[1])];
+      for (let t = 1; t < T; t++) for (let s = 0; s < S; s++) { let best = V[t - 1][s], bp = s; if (s > 0 && V[t - 1][s - 1] > best) { best = V[t - 1][s - 1]; bp = s - 1; } if (s > 1 && ext[s] !== "_" && ext[s] !== ext[s - 2] && V[t - 1][s - 2] > best) { best = V[t - 1][s - 2]; bp = s - 2; } V[t][s] = best * P[t][idx(ext[s])]; BP[t][s] = bp; }
+      let s = V[T - 1][S - 1] >= V[T - 1][S - 2] ? S - 1 : S - 2; const path = [];
+      for (let t = T - 1; t >= 0; t--) { path.unshift(s); s = BP[t][s]; }
+      const cw = Math.min(40, 520 / T), ch = 30, ox = 90, oy = 20;
+      ext.forEach((e, k) => K.svg(svg, "text", { x: ox - 10, y: oy + k * ch + 20, "text-anchor": "end", "font-size": 13, "font-family": "var(--mono)", "font-weight": e === "_" ? 400 : 700 }, e === "_" ? "空" : e));
+      let mx = 0; A.forEach((row) => row.forEach((q) => (mx = Math.max(mx, q))));
+      for (let t = 0; t < T; t++) for (let k = 0; k < S; k++) K.svg(svg, "rect", { x: ox + t * cw, y: oy + k * ch, width: cw - 2, height: ch - 2, rx: 3, fill: A[t][k] > 0 ? AK.color(Math.pow(A[t][k] / mx, 0.35)) : "var(--panel-2)" });
+      let d = ""; path.forEach((k, t) => (d += (t ? "L" : "M") + (ox + t * cw + cw / 2 - 1) + "," + (oy + k * ch + ch / 2 - 1)));
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--warn)", "stroke-width": 3 });
+      const best = path.map((k) => ext[k]);
+      K.svg(svg, "text", { x: ox, y: oy + S * ch + 22, "font-size": 12, class: "muted" }, "横轴：帧 1…" + T + "　纵轴：扩展后的目标 空 k 空 ae 空 t 空");
+      K.svg(svg, "text", { x: ox, y: oy + S * ch + 44, "font-size": 13, "font-family": "var(--mono)" }, "最佳路径逐帧：" + best.map((x) => (x === "_" ? "·" : x)).join(" "));
+      const nll = total > 0 ? -Math.log(total) : Infinity;
+      return { readout: [
+        { k: "所有路径概率之和", v: total > 0 ? total.toExponential(2) : "0（帧数太少，走不完）", color: total > 0 ? "var(--ink)" : "var(--bad)" },
+        { k: "CTC 损失 = −log(和)", v: isFinite(nll) ? nll.toFixed(2) : "∞", color: "var(--accent)" },
+        { k: "最佳一条路径占比", v: total > 0 ? ((V[T - 1][path[T - 1]] / total) * 100).toFixed(1) + "%" : "—" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：解码顺序 ---------- */
+  const WORDS = [["cat", ["k", "ae", "t"]], ["little", ["l", "ih", "dx", "ah", "l"]], ["book", ["b", "uh", "k"]], ["that time", ["dh", "ae", "t", "t", "ay", "m"]], ["see eat", ["s", "iy", "iy", "t"]]];
+  function framesFor(seq, seed, blankP) {
+    const r = K.rng(seed), out = [];
+    seq.forEach((p, i) => { const n = 1 + Math.floor(r() * 3); for (let k = 0; k < n; k++) out.push(p); if (r() < blankP || seq[i + 1] === p) { const b = 1 + Math.floor(r() * 2); for (let k = 0; k < b; k++) out.push("_"); } });
+    return ["_", ...out, ...(r() < 0.5 ? ["_"] : [])];
+  }
+  const collapse = (a) => a.filter((x, i) => i === 0 || x !== a[i - 1]);
+  const authorCollapse = (a) => { const out = []; let prev = null; a.forEach((t) => { if (t !== prev && prev !== null) out.push(prev); prev = t; }); return out; };
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "w", label: "单词（正确音素见右侧）", value: "that time", options: WORDS.map((w) => [w[0], w[0] + "：" + w[1].join(" ")]) },
+      { id: "bp", label: "模型在音素之间插空白的频率", min: 0, max: 1, step: 0.05, value: 0.5, fmt: (x) => (x * 100).toFixed(0) + "%" },
+      { id: "seed", label: "换一种逐帧写法", button: true },
+    ],
+    note: "假设模型每一帧都“写对了”（逐帧序列是正确答案拉长后的样子）。比较三种解码：标准 CTC（先合并重复再删空白）、第 78 格的顺序（先删空白再合并）、第 78 格的完整实现（再加上漏掉最后一个符号）。相邻两个相同音素（that time 里的 t t、see eat 里的 iy iy）只能靠中间的空白区分。",
+    render(svg, v) {
+      const W = WORDS.find((w) => w[0] === v.w), seq = W[1], fr = framesFor(seq, 21 + v.seed * 3, v.bp);
+      const cw = Math.min(34, 600 / fr.length);
+      fr.forEach((f, i) => K.node(svg, 20 + i * cw, 20, cw - 3, 32, f === "_" ? "·" : f, { fs: 11, fill: f === "_" ? "var(--panel-2)" : "var(--accent-soft)", stroke: f === "_" ? "var(--line)" : "var(--accent)" }));
+      K.svg(svg, "text", { x: 20, y: 72, "font-size": 11, class: "muted" }, `逐帧输出（${fr.length} 帧，· = 空白 [PAD]）`);
+      const std = collapse(fr).filter((x) => x !== "_"), mid = collapse(fr.filter((x) => x !== "_")), auth = authorCollapse(fr.filter((x) => x !== "_"));
+      const rows = [["标准 CTC：先合并，再删空白", std], ["先删空白，再合并", mid], ["第 78 格的实现（另漏最后一个）", auth]];
+      rows.forEach((r, i) => {
+        const ok = r[1].join(" ") === seq.join(" ");
+        K.svg(svg, "text", { x: 20, y: 110 + i * 56, "font-size": 12, "font-weight": 700, fill: ok ? "var(--good)" : "var(--bad)" }, (ok ? "✓ " : "✗ ") + r[0]);
+        K.svg(svg, "text", { x: 20, y: 134 + i * 56, "font-size": 16, "font-family": "var(--mono)" }, r[1].join(" ") || "（空）");
+      });
+      const e = (a) => lev(a, seq).d;
+      return { readout: [
+        { k: "正确答案", v: seq.join(" ") },
+        { k: "标准 CTC 错误数", v: String(e(std)), color: e(std) ? "var(--bad)" : "var(--good)" },
+        { k: "先删空白 错误数", v: String(e(mid)), color: e(mid) ? "var(--bad)" : "var(--good)" },
+        { k: "第 78 格 错误数", v: String(e(auth)), color: e(auth) ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

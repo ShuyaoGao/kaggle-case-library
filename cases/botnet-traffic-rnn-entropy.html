@@ -1,0 +1,623 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>主机流量查僵尸网络</title>
+<meta name="description" content="Kaggle 案例拆解：把 10 台内网主机每天的流量当成时间序列，用 GRU 循环网络预测“正常应该有多少”，再用近似熵衡量流量变得多不规律，从中找出可能被僵尸网络控制的主机。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">时间序列 · 异常检测 · 僵尸网络</div>
+  <h1>主机流量查僵尸网络：先预测“平时该多少”，再看它乱不乱</h1>
+  <p class="en">Botnet Host Prediction using RNN</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">按天汇总</span><span class="tag method">3σ 警戒线</span><span class="tag method">滑动平均</span>
+    <span class="tag method">滑窗构造样本</span><span class="tag method">两层 GRU</span><span class="tag method">相关系数</span><span class="tag method">近似熵 ApEn</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Andrea Sindico</b></span>
+    <span>Kaggle 点赞 <b>123</b>（2026-11 抓取）</span>
+    <span>数据集 <b>crawford/computer-network-traffic</b></span>
+    <span><a href="https://www.kaggle.com/code/asindico/botnet-host-prediction-using-rnn" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">10 台内网主机的流量日志</div><p>每条记录是某天、某台本地主机（编号 0–9）的一笔流量计数 <code>f</code>。作者先按“日期 + 主机”把同一天的记录加起来。<span data-cell="4">出处</span></p></div>
+    <div class="card panel"><h3>要回答什么</h3><div class="big">哪台主机、哪几天“不对劲”</div><p>作者的目标：预测每台主机当天“应该”有多少流量，再和实际比较，猜它是不是成了<b>僵尸网络</b>（被恶意程序远程控制的一群电脑）的一员。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">GRU 预测 + 近似熵</div><p>用前 14 天的流量和星期几，训练两层 GRU 预测下一天；另外用<b>近似熵</b>（ApEn）衡量流量序列有多不规律，并在 30 天滑窗里看它怎么变。<span data-cell="23">出处</span> <span data-cell="36">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">留下一张“日期 : 主机”清单</div><p>notebook 最后一格只写了几组日期和主机编号（如 08-24 : 1），没有文字解释。<span data-cell="37">出处</span> 预测效果和熵值都在运行输出里，源码不带输出。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>Computer Network Traffic</b>（Kaggle 用户 crawford 上传），notebook 读的是其中的 <code>cs448b_ipasn.csv</code>。<span data-cell="2">出处</span> 下面只列 notebook 代码里实际用到的信息；数据集的总行数、时间跨度 notebook 没有写出，这里不列。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">本地主机</div><div class="v">10 台</div></div>
+        <div class="stat-tile"><div class="k">回看天数 look_back</div><div class="v">14</div></div>
+        <div class="stat-tile"><div class="k">每台的训练天数</div><div class="v">70</div></div>
+        <div class="stat-tile"><div class="k">熵的滑窗</div><div class="v">30 天</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">主机编号 0–9 见第 7 格 <span data-cell="7">出处</span>；look_back = 14、训练段取前 look_back × 5 = 70 天见第 23 格 <span data-cell="23">出处</span>；30 天滑窗见第 36 格 <span data-cell="36">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么（代码里用到的）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>白话含义</th><th>类型</th></tr>
+        <tr><td><code>date</code></td><td>记录的日期</td><td>日期</td></tr>
+        <tr><td><code>l_ipn</code></td><td>本地主机编号（local IP number），0–9</td><td>类别</td></tr>
+        <tr><td><code>f</code></td><td>流量计数（作者称 flow）。按天相加后，就是<b>要预测的那个数</b></td><td>数值</td></tr>
+        <tr><td><code>yday</code>、<code>wday</code></td><td>作者新造的列：一年中的第几天、星期几（0 = 周一）<span data-cell="5">出处</span></td><td>整数</td></tr>
+        <tr><td>其他列</td><td>代码没有用到；按天汇总时也被一起相加了</td><td>—</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">这份数据<b>没有现成的“是不是僵尸网络”标签</b>，所以它不是普通的分类题：作者只能靠“预测得准不准”和“序列乱不乱”去找可疑的主机和日期。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="22">
+    <h3>动手试试 A · 用前几天预测明天，偏差大了就报警 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="33">
+    <h3>动手试试 B · 近似熵：规律的流量和“乱跳”的流量差多少 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>目标：预测每台主机的“预期流量”，再与实际比较，猜它是否属于僵尸网络</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>循环神经网络适合预测时间序列；输入是前 n 天的流量加星期几</td><td><span data-cell="17">第 17 格</span></td></tr>
+        <tr><td>据文献，监控流量熵的变化有助于发现网络异常；ApEn 越高，序列越不规律</td><td><span data-cell="29">第 29 格</span>、<span data-cell="34">第 34 格</span></td></tr>
+        <tr><td>最后写下的清单：08-24 : 1，09-04 : 5，09-18 : 4，09-26 : 3 6（没有说明含义）</td><td><span data-cell="37">第 37 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">预测曲线、相关系数（第 27 格）和各主机的熵值（第 33 格）都在运行输出里，Kaggle 下载的源码不带输出，作者文字里也没写具体数值，所以这里不列分数。第 37 格的清单最可能是作者认为可疑的“日期 : 主机”，但原文没有解释，这只是推测。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li>第 27 格：<code>pd.Series(ip0f)</code> 保留了原表的行号（各主机的行交错排列），<code>pd.Series(ypred0)</code> 的行号是 0、1、2……，pandas 按行号对齐后再算相关，实际配对的天数很少、而且错位。<span data-cell="27">第 27 格</span></li>
+        <li>预测的前 14 天直接填 0，而且预测区间包括训练用过的前 70 天，相关系数混进了“考过的题”。<span data-cell="24">第 24 格</span></li>
+        <li>近似熵的容差 <code>r = 3</code> 是绝对数，用在没有缩放的原始流量上（第 30 格重新取了原始值）。日流量的数值如果远大于 3，几乎找不到“相似”的片段，各种序列的 ApEn 都挤在 0 附近，分不出规律和不规律（实验 B 可以验证）。<span data-cell="32">第 32 格</span></li>
+        <li>第 10 格把主机 4 的标题写到了主机 5 的子图上（<code>axarray[2,1]</code> 写了两次）。<span data-cell="10">第 10 格</span></li>
+        <li>第 14 格所有主机都用主机 0 的星期列当横轴；第 11 格前两台用样本标准差，其余用总体标准差，口径不一。<span data-cell="14">第 14 格</span></li>
+        <li>第 12 格把主机 1、4 的最后 5 天、7 天裁掉，原文没有说明原因。<span data-cell="12">第 12 格</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>给每台电脑建一个“平时流量”的预测模型；当天实际流量和预测差太多，或者流量节奏突然变乱，就提醒管理员去查这台机器。</li>
+        <li><b>同类问题：</b>服务器 CPU / 登录次数异常、物联网设备突然大量外发、电商订单量异常、电表读数异常。</li>
+        <li><b>可迁移的套路：</b>按时间汇总 → 每个对象单独看分布和周期 → 用历史预测“正常值” → 残差超过阈值报警 → 再用熵等“规律程度”指标补充。评估时只用训练没见过的日期。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>汇总：<code>groupby(['date','l_ipn']).sum()</code> <span data-cell="4">第 4 格</span></li>
+        <li>探索：直方图 <span data-cell="10">第 10 格</span>、均值 + 3 倍标准差警戒线 <span data-cell="11">第 11 格</span>、星期分布 <span data-cell="14">第 14 格</span>、3 日滑动平均 <span data-cell="15">第 15 格</span></li>
+        <li>预处理：每台主机除以自己的最大值 <span data-cell="20">第 20 格</span>；滑窗造样本 <span data-cell="22">第 22 格</span></li>
+        <li>模型：GRU(64) → GRU(32) → Dense(1)，均方误差，SGD，100 轮 <span data-cell="23">第 23 格</span></li>
+        <li>评估：逐日滚动预测 <span data-cell="24">第 24 格</span>、皮尔逊相关 <span data-cell="27">第 27 格</span></li>
+        <li>异常度量：近似熵 m = 2、r = 3 <span data-cell="31">第 31 格</span>，30 天滑窗熵趋势 <span data-cell="35">第 35 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>这份数据没有“哪台机器中毒了”的标签。没有标准答案时，你怎么判断作者找出来的日期是真异常还是巧合？</li>
+      <li>流量“比预测多很多”和“节奏变乱”是两种不同的信号。僵尸程序每隔固定时间联络一次控制服务器，会让熵变高还是变低？</li>
+      <li>作者用前 70 天训练、然后对全部日期做预测再算相关。怎么改，才能让这个评估真正说明模型对“新的一天”的预测能力？</li>
+      <li>近似熵里的容差 r 应该怎么定？为什么常见做法是取“序列标准差的 0.1–0.25 倍”，而不是一个固定的数？</li>
+      <li>如果公司要用这种方法监控员工电脑的流量，需要注意哪些隐私问题？哪些信息不该收集？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Andrea Sindico，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：crawford, Computer Network Traffic（Kaggle）。
+</footer>
+</main>
+
+<script src="nb/botnet-traffic-rnn-entropy.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 公用：生成一台主机的每日流量（示意） ---------- */
+  // 周一到周五高、周末低，再加噪声；bursts: [[起始日, 持续天数, 倍数]]
+  function hostSeries(seed, days, opt) {
+    opt = opt || {};
+    const r = K.rng(seed), base = opt.base || 100, noise = opt.noise == null ? 0.12 : opt.noise, out = [];
+    for (let d = 0; d < days; d++) {
+      const w = d % 7, week = w >= 5 ? 0.45 : 1 + 0.08 * Math.sin(w);
+      let v = base * week * (1 + K.randn(r) * noise);
+      (opt.bursts || []).forEach((b) => { if (d >= b[0] && d < b[0] + b[1]) v += base * b[2] * (0.7 + 0.6 * r()); });
+      out.push(Math.max(0, v));
+    }
+    return out;
+  }
+  const mean = (a) => a.reduce((s, x) => s + x, 0) / a.length;
+  const std = (a) => { const m = mean(a); return Math.sqrt(a.reduce((s, x) => s + (x - m) * (x - m), 0) / a.length); };
+  function pathOf(ax, xs, ys) { let d = ""; ys.forEach((y, i) => { if (y == null || isNaN(y)) return; d += (d ? "L" : "M") + ax.sx(xs[i]).toFixed(1) + "," + ax.sy(y).toFixed(1); }); return d; }
+
+  /* 近似熵（与作者第 31 格同一公式） */
+  function apen(U, m, r) {
+    const N = U.length;
+    function phi(mm) {
+      const n = N - mm + 1; if (n <= 0) return 0;
+      let s = 0;
+      for (let i = 0; i < n; i++) {
+        let c = 0;
+        for (let j = 0; j < n; j++) {
+          let ok = true;
+          for (let k = 0; k < mm; k++) if (Math.abs(U[i + k] - U[j + k]) > r) { ok = false; break; }
+          if (ok) c++;
+        }
+        s += Math.log(c / n);
+      }
+      return s / n;
+    }
+    return Math.abs(phi(m + 1) - phi(m));
+  }
+
+  const steps = [
+    {
+      at: 0, title: "开场：没有标签的“找内鬼”", kicker: "第 0–3 格 · 目标与读数据",
+      html: `<p>作者的目标写在第一格：预测每台主机“预期”的流量，再和实际比较，猜它是不是属于<b>僵尸网络</b>。僵尸网络是一批被恶意程序悄悄控制的电脑，它们会按指令联络控制服务器、发流量，主人往往毫无察觉。</p><p>动画里 10 台主机每天都在发流量，其中一台的节奏悄悄变了。这份数据<b>没有现成答案</b>，防守方只能靠“和平时不一样”来发现它。</p>`,
+      cells: [0, 2], highlight: ["read_csv"],
+      draw(svg, ctx) {
+        const hosts = [];
+        for (let i = 0; i < 10; i++) {
+          const x = 40 + (i % 5) * 132, y = 50 + Math.floor(i / 5) * 140;
+          const g = K.node(svg, x, y, 110, 46, "主机 " + i);
+          hosts.push({ g, x, y });
+        }
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 13, class: "muted" }, "每台主机每天的流量（示意，第 7 号的节奏会变）");
+        const bars = hosts.map((h) => Array.from({ length: 12 }, (_, j) => K.svg(svg, "rect", { x: h.x + 4 + j * 8.5, y: h.y + 110, width: 6, height: 0, fill: "var(--c1)", opacity: 0.75 })));
+        const lab = K.svg(svg, "text", { x: 380, y: 330, "text-anchor": "middle", "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "");
+        (async () => {
+          for (let day = 0; day < 12; day++) {
+            const r = K.rng(day + 3);
+            if (!(await ctx.tween(160, (t) => bars.forEach((bs, i) => {
+              const odd = i === 7 && day >= 6;
+              const h = odd ? (day % 2 ? 50 : 8) + r() * 6 : 20 + (day % 7 >= 5 ? -10 : 0) + r() * 8;
+              bs[day].setAttribute("height", h * t); bs[day].setAttribute("y", hosts[i].y + 110 - h * t);
+              if (odd) bs[day].style.fill = "var(--c6)";
+            })))) return;
+          }
+          if (ctx.alive()) { hosts[7].g.querySelector("rect").style.stroke = "var(--bad)"; hosts[7].g.querySelector("rect").style.strokeWidth = 3; lab.textContent = "第 6 天起主机 7 时高时低：可疑，但没有人告诉我们答案"; }
+        })();
+      },
+    },
+    {
+      title: "按“日期 + 主机”汇总到每天", kicker: "第 4–5 格 · 汇总与造列",
+      html: `<p>原始日志里同一天、同一台主机有很多条记录。作者用 <code>groupby(['date','l_ipn']).sum()</code> 把它们加起来，得到“每台主机每天一个数”。</p><p>接着造了两列：<code>yday</code>（一年中的第几天，用来画时间轴）和 <code>wday</code>（星期几，后面会喂给模型，因为上班日和周末的流量差别很大）。</p>`,
+      cells: [4, 5], highlight: ["groupby", "dayofweek"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 13, class: "muted" }, "左：一天里零散的多条记录（示意）    右：每台主机每天合成一个总数");
+        const r = K.rng(4), recs = [];
+        for (let i = 0; i < 24; i++) {
+          const host = i % 3, day = Math.floor(i / 8);
+          const v = 5 + Math.round(r() * 20);
+          const x = 40 + (i % 4) * 70, y = 50 + Math.floor(i / 4) * 44;
+          const g = K.node(svg, x, y, 62, 30, `D${day + 1}·H${host} ${v}`, { fill: "var(--panel-2)" });
+          recs.push({ g, host, day, v, x, y });
+        }
+        const sums = {};
+        recs.forEach((d) => { const k = d.day + "-" + d.host; sums[k] = (sums[k] || 0) + d.v; });
+        const cellsOut = [];
+        for (let day = 0; day < 3; day++) for (let h = 0; h < 3; h++) {
+          const x = 440 + h * 90, y = 70 + day * 80;
+          const g = K.node(svg, x, y, 80, 50, `第${day + 1}天\n主机${h}：${sums[day + "-" + h]}`, { fill: "color-mix(in srgb, var(--c3) 14%, var(--panel))", stroke: "var(--c3)" });
+          g.style.opacity = 0; cellsOut.push({ g, x, y, day, h });
+        }
+        ctx.wait(500).then((ok) => ok && ctx.tween(1600, (t) => recs.forEach((d) => {
+          const tgt = cellsOut[d.day * 3 + d.host];
+          d.g.setAttribute("transform", `translate(${(tgt.x + 10 - d.x) * t},${(tgt.y + 10 - d.y) * t})`);
+          d.g.style.opacity = 1 - t * 0.9;
+        }))).then((ok) => ok && ctx.tween(500, (t) => cellsOut.forEach((c) => (c.g.style.opacity = t))));
+      },
+    },
+    {
+      title: "每台主机的流量分布", kicker: "第 6–10 格 · 拆成 10 份、画直方图",
+      html: `<p>作者把汇总表按主机拆成 <code>ip0</code> 到 <code>ip9</code> 十份，并记下每台的最大值 <code>max0…max9</code>（后面归一化要用）。</p><p>然后给每台画一张<b>直方图</b>：把流量从小到大分成 10 个区间，数一数每个区间有多少天。大多数天挤在左边、右边拖着几根孤零零的柱子，那几天就值得多看一眼。</p>`,
+      cells: [7, 10], highlight: ["np.histogram"],
+      notes: { 9: "先对主机 0 试一下 np.histogram，看分箱边界" },
+      draw(svg, ctx) {
+        const all = [];
+        for (let h = 0; h < 10; h++) {
+          const s = hostSeries(10 + h, 120, { bursts: h === 3 ? [[80, 5, 2.5]] : h === 6 ? [[30, 3, 1.8]] : [] });
+          const mx = Math.max(...s), cnt = new Array(10).fill(0);
+          s.forEach((v) => cnt[Math.min(9, Math.floor((v / mx) * 10))]++);
+          all.push(cnt);
+        }
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 13, class: "muted" }, "10 台主机各自的流量直方图（示意数据）：横轴 = 流量区间，柱高 = 天数");
+        const rects = [];
+        all.forEach((cnt, h) => {
+          const ox = 22 + (h % 5) * 138, oy = 60 + Math.floor(h / 5) * 140, cm = Math.max(...cnt);
+          K.svg(svg, "text", { x: ox + 60, y: oy + 112, "text-anchor": "middle", "font-size": 11 }, "主机 " + h);
+          cnt.forEach((c, j) => rects.push({ el: K.svg(svg, "rect", { x: ox + j * 12, y: oy + 95, width: 10, height: 0, fill: j >= 7 && c > 0 ? "var(--c6)" : "var(--c1)" }), h: (c / cm) * 85, oy }));
+        });
+        ctx.tween(1500, (t) => rects.forEach((d) => { d.el.setAttribute("height", d.h * t); d.el.setAttribute("y", d.oy + 95 - d.h * t); }));
+      },
+    },
+    {
+      title: "时间线和 3σ 警戒线", kicker: "第 11 格 · 最朴素的异常检测",
+      html: `<p>这一格把每台主机的流量按日期画成折线，再画一条绿色横线：<b>平均值 + 3 倍标准差</b>。标准差衡量“平时上下波动有多大”。</p><p>如果流量大致像钟形分布，超过这条线的日子非常少见，所以越过它的点就是最直接的可疑信号。缺点是：它只看“多”，看不出“节奏乱了”；而且计算均值时本身就把异常日算进去了。</p>`,
+      cells: [11], highlight: ["3*ip0['f'].std()"],
+      draw(svg, ctx) {
+        const s = hostSeries(21, 120, { bursts: [[70, 4, 2.2], [100, 2, 1.5]] }), xs = s.map((_, i) => i);
+        const ax = K.axes(svg, { x: 50, y: 30, w: 630, h: 250 }, [0, 120], [0, Math.max(...s) * 1.1], { xlabel: "第几天（示意）", yticks: 3 });
+        const m = mean(s), sd = std(s), thr = m + 3 * sd;
+        const p = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 1.6 });
+        const line = K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(0), y1: ax.sy(thr), y2: ax.sy(thr), stroke: "var(--good)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        const lab = K.svg(svg, "text", { x: ax.sx(2), y: ax.sy(thr) - 6, "font-size": 12, fill: "var(--good)" }, "");
+        ctx.tween(1800, (t) => { const n = Math.max(2, Math.round(t * s.length)); p.setAttribute("d", pathOf(ax, xs.slice(0, n), s.slice(0, n))); })
+          .then((ok) => ok && ctx.tween(700, (t) => line.setAttribute("x2", ax.sx(120 * t))))
+          .then((ok) => {
+            if (!ok) return;
+            lab.textContent = "平均 + 3σ";
+            s.forEach((v, i) => { if (v > thr) K.svg(svg, "circle", { cx: ax.sx(i), cy: ax.sy(v), r: 6, fill: "none", stroke: "var(--bad)", "stroke-width": 2 }); });
+            K.svg(svg, "text", { x: 470, y: 50, "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "红圈 = 越过警戒线的日子");
+          });
+      },
+    },
+    {
+      title: "裁掉尾巴，再看两台主机", kicker: "第 12–13 格 · 数据整理",
+      html: `<p>作者重新取了一次数据，把<b>主机 1 的最后 5 天、主机 4 的最后 7 天</b>去掉，再单独把这两台的时间线画出来。</p><p>原文没有解释为什么裁。常见的理由是序列末尾数据不完整（比如最后几天只采到一部分），会被误当成“流量骤降”。这是一个需要写清楚理由的操作：如果裁掉的恰好是异常，就等于把要找的东西扔了。</p>`,
+      cells: [12, 13], highlight: ["len(ip1['f'])-5", "-7]"],
+      draw(svg, ctx) {
+        const s = hostSeries(31, 90).map((v, i) => (i >= 84 ? v * 0.15 : v)), xs = s.map((_, i) => i);
+        const ax = K.axes(svg, { x: 50, y: 30, w: 630, h: 240 }, [0, 90], [0, Math.max(...s) * 1.1], { xlabel: "第几天（示意）", yticks: 3 });
+        K.svg(svg, "path", { d: pathOf(ax, xs.slice(0, 85), s.slice(0, 85)), fill: "none", stroke: "var(--c1)", "stroke-width": 1.6 });
+        const tail = K.svg(svg, "path", { d: pathOf(ax, xs.slice(84), s.slice(84)), fill: "none", stroke: "var(--c6)", "stroke-width": 2.4 });
+        const box = K.svg(svg, "rect", { x: ax.sx(84), y: 30, width: ax.sx(90) - ax.sx(84), height: 240, fill: "var(--c6)", "fill-opacity": 0.1, stroke: "var(--c6)", "stroke-dasharray": "4 3" });
+        const lab = K.svg(svg, "text", { x: ax.sx(84) - 8, y: 50, "text-anchor": "end", "font-size": 12, fill: "var(--c6)" }, "最后几天突然很低（示意）");
+        const cut = K.svg(svg, "text", { x: ax.sx(87), y: 160, "text-anchor": "middle", "font-size": 26 }, "✂");
+        cut.style.opacity = 0;
+        ctx.wait(800).then((ok) => ok && ctx.tween(500, (t) => (cut.style.opacity = t))).then((ok) => ok && ctx.tween(900, (t) => { tail.style.opacity = 1 - t; box.style.opacity = 1 - t * 0.8; }))
+          .then((ok) => { if (ok) lab.textContent = "作者裁掉主机 1 最后 5 天、主机 4 最后 7 天（原因未说明）"; });
+      },
+    },
+    {
+      title: "星期规律和 3 日滑动平均", kicker: "第 14–15 格 · 周期与平滑",
+      html: `<p>第 14 格按星期几把流量加起来：如果是办公电脑，周一到周五多、周末少，这就是<b>周期性</b>。周期越明显，越容易预测，也越容易发现“周末突然很忙”这种怪事。</p><p>第 15 格对主机 0 画了 <b>3 日滑动平均</b>：每天的值换成“它和前两天的平均”，曲线会变平滑，偶然的小抖动被抹掉，真正持续的变化留下来。</p>`,
+      cells: [14, 15], highlight: ["groupby('wday'", "rolling(3)"],
+      draw(svg, ctx) {
+        const names = ["一", "二", "三", "四", "五", "六", "日"], vals = [96, 100, 104, 99, 92, 40, 36];
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 13, class: "muted" }, "按星期几汇总（示意）");
+        const bars = vals.map((v, i) => K.svg(svg, "rect", { x: 40 + i * 40, y: 290, width: 30, height: 0, fill: i >= 5 ? "var(--c4)" : "var(--c1)" }));
+        names.forEach((n, i) => K.svg(svg, "text", { x: 55 + i * 40, y: 308, "text-anchor": "middle", "font-size": 12 }, "周" + n));
+        const s = hostSeries(41, 42, { noise: 0.25 }), xs = s.map((_, i) => i);
+        const ax = K.axes(svg, { x: 360, y: 40, w: 330, h: 240 }, [0, 42], [0, Math.max(...s) * 1.1], { xlabel: "第几天", yticks: 0 });
+        K.svg(svg, "text", { x: 360, y: 26, "font-size": 13, class: "muted" }, "灰：原始    红：3 日滑动平均");
+        K.svg(svg, "path", { d: pathOf(ax, xs, s), fill: "none", stroke: "var(--ink-3)", "stroke-width": 1.2 });
+        const roll = s.map((_, i) => (i < 2 ? null : (s[i] + s[i - 1] + s[i - 2]) / 3));
+        const rp = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.4 });
+        const win = K.svg(svg, "rect", { x: ax.sx(0), y: 40, width: ax.sx(2) - ax.sx(0), height: 240, fill: "var(--c6)", "fill-opacity": 0.12 });
+        ctx.tween(900, (t) => bars.forEach((b, i) => { b.setAttribute("height", vals[i] * 2.2 * t); b.setAttribute("y", 290 - vals[i] * 2.2 * t); }))
+          .then((ok) => ok && ctx.tween(2200, (t) => {
+            const n = 2 + Math.round(t * 40);
+            win.setAttribute("x", ax.sx(n - 2)); rp.setAttribute("d", pathOf(ax, xs.slice(0, n + 1), roll.slice(0, n + 1)));
+          }));
+      },
+    },
+    {
+      title: "为什么用循环网络 + 归一化", kicker: "第 16–20 格 · 准备训练",
+      html: `<p>作者解释：<b>循环神经网络</b>（RNN）的神经元连成环，读到今天的数字时还“记得”前几天读过的内容，所以适合预测时间序列。</p><p>训练前要<b>归一化</b>：每台主机都除以自己的最大值，把流量压到 0 到 1 之间。不同主机的流量可能差几十倍，压到同一尺度后，网络训练更稳定。注意这里用的是全时段的最大值，等于提前“偷看”了以后的数据，严格做法应只用训练段的最大值。</p>`,
+      cells: [17, 18, 20], highlight: ["float(max0)"],
+      draw(svg, ctx) {
+        const A = hostSeries(51, 40, { base: 300 }), B = hostSeries(52, 40, { base: 40 }), xs = A.map((_, i) => i);
+        const ax = K.axes(svg, { x: 50, y: 30, w: 620, h: 250 }, [0, 40], [0, 360], { xlabel: "第几天（示意）", yticks: 4 });
+        const pa = K.svg(svg, "path", { d: pathOf(ax, xs, A), fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+        const pb = K.svg(svg, "path", { d: pathOf(ax, xs, B), fill: "none", stroke: "var(--c2)", "stroke-width": 2 });
+        const lab = K.svg(svg, "text", { x: 60, y: 22, "font-size": 13, "font-weight": 700 }, "归一化前：主机 A（蓝）的流量是主机 B（橙）的好几倍");
+        const ma = Math.max(...A), mb = Math.max(...B);
+        ctx.wait(1000).then((ok) => ok && ctx.tween(1600, (t) => {
+          const ya = A.map((v) => K.lerp(v, (v / ma) * 300, t)), yb = B.map((v) => K.lerp(v, (v / mb) * 300, t));
+          pa.setAttribute("d", pathOf(ax, xs, ya)); pb.setAttribute("d", pathOf(ax, xs, yb));
+        })).then((ok) => { if (ok) lab.textContent = "各自除以最大值之后：两台都在 0–1 之间（图中把 1 画在 300 处），形状一目了然"; });
+      },
+    },
+    {
+      title: "滑窗：用前 14 天配“第 15 天”", kicker: "第 21–22 格 · 构造训练样本",
+      html: `<p><code>create_dataset</code> 把一条长序列切成很多道“练习题”：题目是连续 14 天（每天两个数：流量和星期几），答案是紧接着的第 15 天流量。窗口每次往后挪一天，就多出一道题。</p><p>这是把时间序列变成监督学习的标准做法。顺带一提：循环写的是 <code>range(len - look_back - 1)</code>，最后一道题被漏掉了，影响不大但是个常见的“差一”错误。</p>`,
+      cells: [21, 22], highlight: ["look_back", "dataY.append"],
+      draw(svg, ctx) {
+        const s = hostSeries(61, 30), xs = s.map((_, i) => i), L = 14;
+        const ax = K.axes(svg, { x: 40, y: 20, w: 640, h: 150 }, [0, 30], [0, Math.max(...s) * 1.15], { yticks: 0, xticks: 6 });
+        s.forEach((v, i) => K.svg(svg, "rect", { x: ax.sx(i) + 2, y: ax.sy(v), width: 16, height: ax.sy(0) - ax.sy(v), fill: "var(--ink-3)", opacity: 0.35 }));
+        const win = K.svg(svg, "rect", { x: ax.sx(0), y: 20, width: ax.sx(L) - ax.sx(0), height: 150, fill: "var(--c1)", "fill-opacity": 0.15, stroke: "var(--c1)" });
+        const tgt = K.svg(svg, "rect", { x: ax.sx(L), y: 20, width: ax.sx(L + 1) - ax.sx(L), height: 150, fill: "var(--c6)", "fill-opacity": 0.25, stroke: "var(--c6)" });
+        K.svg(svg, "text", { x: 40, y: 212, "font-size": 13, "font-weight": 700 }, "生成的练习题（每行：14 天 → 第 15 天）");
+        const rows = [];
+        (async () => {
+          for (let k = 0; k < 6; k++) {
+            if (!(await ctx.tween(420, (t) => { win.setAttribute("x", ax.sx(k - 1 + t < 0 ? 0 : k - 1 + t)); tgt.setAttribute("x", ax.sx(L + (k - 1 + t < 0 ? 0 : k - 1 + t))); }))) return;
+            const y = 230 + k * 18;
+            rows.push(K.svg(svg, "text", { x: 40, y, "font-size": 12, "font-family": "var(--mono)" }, `X = 第 ${k + 1}–${k + L} 天 (流量, 星期几)    y = 第 ${k + L + 1} 天流量`));
+            if (!(await ctx.wait(150))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "两层 GRU：边读边记", kicker: "第 23 格 · 训练模型",
+      html: `<p>模型是 <b>GRU(64) → GRU(32) → Dense(1)</b>。GRU 是一种带“门”的循环单元：<b>更新门</b>决定今天的新信息要记多少、旧记忆保留多少，<b>重置门</b>决定算新内容时要不要参考旧记忆。读完 14 天，最后的记忆交给全连接层输出一个数：明天的流量。</p><p>每台主机单独训练一个模型，只用前 70 天（look_back × 5），损失是均方误差，优化器 SGD，100 轮。注意输入里流量在 0–1 之间，而星期几是 0–6，没有缩放。</p>`,
+      cells: [23], highlight: ["GRU(64", "GRU(32)", "look_back*5"],
+      draw(svg, ctx) {
+        const n = 7, xs = Array.from({ length: n }, (_, i) => 70 + i * 85);
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 13, class: "muted" }, "按时间展开（画 7 步示意，实际 14 步）：记忆从左往右传");
+        const c1 = xs.map((x, i) => K.node(svg, x - 30, 150, 60, 44, "GRU64"));
+        const c2 = xs.map((x) => K.node(svg, x - 30, 70, 60, 44, "GRU32"));
+        const ins = xs.map((x, i) => K.svg(svg, "text", { x, y: 250, "text-anchor": "middle", "font-size": 12 }, `第${i + 1}天`));
+        xs.forEach((x) => { K.arrow(svg, x, 236, x, 196); K.arrow(svg, x, 150, x, 116); });
+        for (let i = 0; i < n - 1; i++) { K.arrow(svg, xs[i] + 30, 172, xs[i + 1] - 32, 172); K.arrow(svg, xs[i] + 30, 92, xs[i + 1] - 32, 92); }
+        const out = K.node(svg, xs[n - 1] + 40, 20, 80, 36, "Dense(1)", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        K.arrow(svg, xs[n - 1] + 20, 70, xs[n - 1] + 60, 58);
+        const pred = K.svg(svg, "text", { x: 620, y: 310, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--c6)" }, "");
+        const mem = K.svg(svg, "circle", { cx: xs[0], cy: 172, r: 9, fill: "var(--c6)" });
+        const gate = K.svg(svg, "text", { x: 20, y: 300, "font-size": 12, class: "muted" }, "");
+        (async () => {
+          for (let i = 0; i < n; i++) {
+            const keep = (0.4 + 0.5 * Math.abs(Math.sin(i * 1.7))).toFixed(2);
+            gate.textContent = `第 ${i + 1} 步：更新门 ≈ ${keep}（示意）—— 新信息记多少，旧记忆留多少`;
+            c1[i].querySelector("rect").style.fill = "color-mix(in srgb, var(--c1) 30%, var(--panel))";
+            c2[i].querySelector("rect").style.fill = "color-mix(in srgb, var(--c2) 30%, var(--panel))";
+            if (i < n - 1 && !(await ctx.tween(380, (t) => mem.setAttribute("cx", K.lerp(xs[i], xs[i + 1], t))))) return;
+          }
+          if (ctx.alive()) pred.textContent = "输出：明天的流量（0–1 之间）";
+        })();
+      },
+    },
+    {
+      title: "逐日滚动预测", kicker: "第 24–26 格 · 预测与画图",
+      html: `<p><code>predictFlow</code> 让窗口从头滑到尾：每次拿<b>真实的</b>前 14 天去预测下一天，得到一条预测曲线（红），再乘回最大值还原成原来的单位，和实际曲线（蓝）画在一起。</p><p>两点要注意：前 14 天没法预测，代码直接填了 0；而预测范围包括训练用过的前 70 天，那一段“对得上”并不说明模型真有本事。真正有信息量的是第 70 天以后。</p>`,
+      cells: [24, 25, 26], highlight: ["ypred=[0]*look_back", "np.multiply"],
+      draw(svg, ctx) {
+        const s = hostSeries(71, 110, { bursts: [[88, 4, 1.8]] }), xs = s.map((_, i) => i);
+        const ax = K.axes(svg, { x: 50, y: 30, w: 630, h: 250 }, [0, 110], [0, Math.max(...s) * 1.1], { xlabel: "第几天（示意）", yticks: 3 });
+        K.svg(svg, "rect", { x: ax.sx(0), y: 30, width: ax.sx(70) - ax.sx(0), height: 250, fill: "var(--c3)", "fill-opacity": 0.07 });
+        K.svg(svg, "text", { x: ax.sx(35), y: 46, "text-anchor": "middle", "font-size": 12, fill: "var(--c3)" }, "训练用过的 70 天");
+        K.svg(svg, "path", { d: pathOf(ax, xs, s), fill: "none", stroke: "var(--c1)", "stroke-width": 1.6 });
+        const pred = s.map((v, i) => (i < 14 ? 0 : 0.5 * (s[i - 7] || v) + 0.5 * mean(s.slice(i - 14, i)) * (i % 7 >= 5 ? 0.6 : 1.15)));
+        const pp = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2 });
+        ctx.tween(2600, (t) => { const n = Math.max(2, Math.round(t * s.length)); pp.setAttribute("d", pathOf(ax, xs.slice(0, n), pred.slice(0, n))); })
+          .then((ok) => {
+            if (!ok) return;
+            K.svg(svg, "text", { x: ax.sx(2), y: ax.sy(0) - 8, "font-size": 12, fill: "var(--c6)" }, "← 前 14 天填 0");
+            K.svg(svg, "text", { x: ax.sx(92), y: 70, "font-size": 12, fill: "var(--bad)", "font-weight": 700 }, "实际远超预测 → 可疑");
+          });
+      },
+    },
+    {
+      title: "用相关系数打分", kicker: "第 27 格 · 评估",
+      html: `<p>作者对每台主机算实际流量和预测流量的<b>皮尔逊相关系数</b>：两条曲线同涨同跌就接近 1，毫无关系就接近 0。</p><p>但这一格有个隐蔽的坑：<code>pd.Series(ip0f)</code> 带着原表的行号（10 台主机的行交错排列，主机 0 的行号可能是 0、10、20……），<code>pd.Series(ypred0)</code> 的行号却是 0、1、2……。pandas 会<b>按行号配对</b>，结果只有少数几天配上、还配错了日子。动画演示这种错位。</p>`,
+      cells: [27], highlight: ["corr("],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 13, "font-weight": 700 }, "实际流量（带原表行号）");
+        K.svg(svg, "text", { x: 400, y: 26, "font-size": 13, "font-weight": 700 }, "预测（行号 0, 1, 2…）");
+        const left = [], right = [];
+        for (let i = 0; i < 8; i++) {
+          left.push(K.node(svg, 40, 40 + i * 34, 220, 28, `行号 ${i * 10}：第 ${i + 1} 天`, { fill: "color-mix(in srgb, var(--c1) 12%, var(--panel))" }));
+          right.push(K.node(svg, 410, 40 + i * 34, 220, 28, `行号 ${i}：第 ${i + 1} 天的预测`, { fill: "color-mix(in srgb, var(--c6) 12%, var(--panel))" }));
+        }
+        const msg = K.svg(svg, "text", { x: 30, y: 330, "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "");
+        ctx.wait(700).then(async (ok) => {
+          if (!ok) return;
+          const a = K.arrow(svg, 260, 54, 408, 54, { color: "var(--good)" });
+          if (!(await ctx.wait(600))) return;
+          const b = K.arrow(svg, 260, 88, 408, 88 + 0, { color: "var(--bad)" });
+          b.style.opacity = 0.25;
+          msg.textContent = "只有行号相同的才配对：行号 0 ↔ 0 配上了，行号 10 在右边根本没有（直到第 11 条预测才配上，日子早已错开）";
+        });
+      },
+    },
+    {
+      title: "近似熵：序列有多“乱”", kicker: "第 28–33 格 · 另一种异常度量",
+      html: `<p>作者读到文献说“监控流量熵的变化有助于发现网络异常”，于是用<b>近似熵</b>（ApEn）。做法：取长度为 m 的小片段，数一数和它“差不多”（每个位置相差都不超过 r）的片段有几个；再把片段加长到 m+1 看还剩几个。规律的序列，前 m 天相似，第 m+1 天往往也相似，ApEn 小；乱的序列，ApEn 大。</p><p>作者取 m = 2、r = 3，直接用在<b>原始流量</b>上（第 30 格重新取了没归一化的数据）。r 是绝对数，没有按序列的波动大小调整，这一点请在实验 B 里亲手验证。</p>`,
+      cells: [29, 30, 31, 32, 33], highlight: ["def ApEn", "r = 3"],
+      draw(svg, ctx) {
+        const s = [3, 5, 3, 5, 3, 6, 3, 5, 9, 2, 3, 5, 3, 5, 3];
+        const ax = K.axes(svg, { x: 50, y: 40, w: 630, h: 200 }, [-0.5, 14.5], [0, 11], { yticks: 0, xticks: 0 });
+        const xs = s.map((_, i) => i);
+        K.svg(svg, "path", { d: pathOf(ax, xs, s), fill: "none", stroke: "var(--ink-3)", "stroke-width": 1.2 });
+        const dots = s.map((v, i) => K.svg(svg, "circle", { cx: ax.sx(i), cy: ax.sy(v), r: 5, fill: "var(--c1)" }));
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 13, class: "muted" }, "模板 = 前 2 个点（蓝框），容差带 = ±r（示意 r = 1）");
+        const tpl = [s[0], s[1]], r = 1;
+        const band = [0, 1].map((k) => K.svg(svg, "rect", { x: 0, y: ax.sy(tpl[k] + r), width: 26, height: ax.sy(tpl[k] - r) - ax.sy(tpl[k] + r), fill: "var(--c1)", "fill-opacity": 0.15, stroke: "var(--c1)" }));
+        const lab = K.svg(svg, "text", { x: 50, y: 290, "font-size": 14, "font-weight": 700 }, "");
+        (async () => {
+          let match = 0;
+          for (let j = 0; j < s.length - 1; j++) {
+            if (!(await ctx.tween(240, (t) => band.forEach((b, k) => b.setAttribute("x", ax.sx(j + k) - 13))))) return;
+            const ok = Math.abs(s[j] - tpl[0]) <= r && Math.abs(s[j + 1] - tpl[1]) <= r;
+            if (ok) { match++; dots[j].style.fill = "var(--good)"; dots[j + 1].style.fill = "var(--good)"; }
+            lab.textContent = `和模板相似的片段：${match} 个 / 已比较 ${j + 1} 个`;
+            if (!(await ctx.wait(120))) return;
+          }
+          if (ctx.alive()) K.svg(svg, "text", { x: 50, y: 316, "font-size": 13, class: "muted" }, "相似的多 → 规律 → ApEn 小；中间那段 6、9、2 打乱了节奏");
+        })();
+      },
+    },
+    {
+      title: "熵的趋势：30 天滑窗", kicker: "第 34–36 格 · 看熵怎么随时间变",
+      html: `<p><code>entropyTrend</code> 用 30 天的窗口在序列上滑动，每个位置算一次 ApEn，得到“熵随时间的变化曲线”。某段时间熵突然升高，说明这台主机的流量节奏变乱了，可能有新的程序在不规律地发流量。</p><p>这样做的好处是不只回答“哪台主机乱”，还能回答“从哪天开始乱”。</p>`,
+      cells: [34, 35, 36], highlight: ["def entropyTrend", "days = 30"],
+      draw(svg, ctx) {
+        const base = hostSeries(81, 120, { noise: 0.05 });
+        const r0 = K.rng(9);
+        const s = base.map((v, i) => (i >= 70 && i < 95 ? v * (0.3 + 1.6 * r0()) : v)), xs = s.map((_, i) => i);
+        const sd = std(s.slice(0, 60));
+        const ax = K.axes(svg, { x: 50, y: 20, w: 630, h: 130 }, [0, 120], [0, Math.max(...s) * 1.05], { yticks: 0, xticks: 0 });
+        K.svg(svg, "path", { d: pathOf(ax, xs, s), fill: "none", stroke: "var(--c1)", "stroke-width": 1.4 });
+        const D = 30, ent = [];
+        for (let n = 0; n + D <= s.length; n += 2) ent.push([n + D, apen(s.slice(n, n + D), 2, 0.2 * sd)]);
+        const em = Math.max(...ent.map((e) => e[1])) * 1.15;
+        const ax2 = K.axes(svg, { x: 50, y: 180, w: 630, h: 120 }, [0, 120], [0, em], { yticks: 2, xlabel: "第几天（示意；熵画在窗口末端）" });
+        K.svg(svg, "text", { x: 60, y: 176, "font-size": 12, class: "muted" }, "30 天窗口的 ApEn（浏览器现场计算，r = 0.2 × 前 60 天标准差）");
+        const win = K.svg(svg, "rect", { x: ax.sx(0), y: 20, width: ax.sx(D) - ax.sx(0), height: 130, fill: "var(--c6)", "fill-opacity": 0.12, stroke: "var(--c6)" });
+        const ep = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.2 });
+        ctx.tween(3000, (t) => {
+          const k = Math.max(1, Math.round(t * ent.length));
+          win.setAttribute("x", ax.sx(ent[k - 1][0] - D));
+          ep.setAttribute("d", pathOf(ax2, ent.slice(0, k).map((e) => e[0]), ent.slice(0, k).map((e) => e[1])));
+        });
+      },
+    },
+    {
+      title: "作者留下的清单", kicker: "第 37 格 · 结论",
+      html: `<p>notebook 最后一格只有一行：<code>Date : IP 08-24 : 1 09-04 : 5 09-18 : 4 09-26 : 3 6</code>。最自然的读法是“某月某日 : 可疑主机编号”，例如 8 月 24 日主机 1、9 月 26 日主机 3 和 6。</p><p>但作者没写这些日期是从哪张图、按什么标准挑出来的，也没有标签去核对，所以它只能算<b>待调查的线索</b>，不是检测结论。真正部署时，安全人员会拿这份清单去查这几台机器那几天的详细日志。</p>`,
+      cells: [37],
+      draw(svg, ctx) {
+        const items = [["08-24", "主机 1"], ["09-04", "主机 5"], ["09-18", "主机 4"], ["09-26", "主机 3、6"]];
+        K.svg(svg, "line", { x1: 60, y1: 170, x2: 680, y2: 170, stroke: "var(--ink-3)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "第 37 格原文的四组“日期 : 主机”（位置按日期大致排开）");
+        const pos = [80, 260, 470, 600];
+        const els = items.map((d, i) => {
+          const g = K.svg(svg, "g");
+          K.svg(g, "circle", { cx: pos[i], cy: 170, r: 9, fill: "var(--warn)" });
+          K.svg(g, "text", { x: pos[i], y: i % 2 ? 220 : 130, "text-anchor": "middle", "font-size": 15, "font-weight": 700 }, d[0]);
+          K.svg(g, "text", { x: pos[i], y: i % 2 ? 242 : 108, "text-anchor": "middle", "font-size": 13, fill: "var(--c6)" }, d[1]);
+          g.style.opacity = 0; return g;
+        });
+        K.svg(svg, "text", { x: 30, y: 310, "font-size": 13 }, "→ 线索，不是结论：还需要查这几天的详细日志来确认");
+        (async () => { for (const e of els) { if (!(await ctx.tween(450, (t) => (e.style.opacity = t)))) return; } })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：滑窗 + 线性自回归预测，残差报警 ---------- */
+  function solve(A, b) { // 高斯消元
+    const n = b.length, M = A.map((row, i) => row.concat([b[i]]));
+    for (let c = 0; c < n; c++) {
+      let p = c; for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+      [M[c], M[p]] = [M[p], M[c]];
+      if (Math.abs(M[c][c]) < 1e-12) continue;
+      for (let r = 0; r < n; r++) if (r !== c) { const f = M[r][c] / M[c][c]; for (let k = c; k <= n; k++) M[r][k] -= f * M[c][k]; }
+    }
+    return M.map((row, i) => (Math.abs(row[i]) < 1e-12 ? 0 : row[n] / row[i]));
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "L", label: "回看天数 look_back（作者用 14）", min: 1, max: 21, step: 1, value: 14 },
+      { id: "wd", label: "输入里要不要加“星期几”", value: "yes", options: [["yes", "加（像作者）"], ["no", "不加，只看流量"]] },
+      { id: "amp", label: "第 95 天起注入的异常流量强度（0 = 不注入）", min: 0, max: 3, step: 0.1, value: 1.5, fmt: (v) => v.toFixed(1) + " 倍" },
+      { id: "k", label: "报警阈值：残差超过训练期误差的几倍", min: 1.5, max: 6, step: 0.5, value: 3, fmt: (v) => v.toFixed(1) },
+      { id: "seed", label: "换一台主机", button: true },
+    ],
+    note: "模拟一台办公电脑 140 天的流量（工作日高、周末低）。用前 70 天现场训练一个线性自回归模型（GRU 的简化替身：明天 = 前 L 天的加权和 + 星期几修正），然后像作者那样逐日滚动预测。红点 = 实际与预测之差超过阈值的日子。留意异常过后几天：模型拿“含异常的真实历史”去预测，预测本身也被带高，会出现一串连锁误报。",
+    render(svg, v) {
+      const seed = 300 + v.seed * 13, days = 140, L = v.L;
+      const s = hostSeries(seed, days, { noise: 0.1, bursts: v.amp > 0 ? [[95, 6, v.amp], [110, 3, v.amp * 0.8]] : [] });
+      const mx = Math.max(...s.slice(0, 70)), z = s.map((x) => x / mx);
+      const feat = (i) => { const f = z.slice(i - L, i); if (v.wd === "yes") for (let d = 0; d < 7; d++) f.push(i % 7 === d ? 1 : 0); else f.push(1); return f; };
+      const rows = [], ys = [];
+      for (let i = L; i < 70; i++) { rows.push(feat(i)); ys.push(z[i]); }
+      const p = rows[0].length, A = Array.from({ length: p }, () => new Array(p).fill(0)), b = new Array(p).fill(0);
+      rows.forEach((f, n) => { for (let i = 0; i < p; i++) { b[i] += f[i] * ys[n]; for (let j = 0; j < p; j++) A[i][j] += f[i] * f[j]; } });
+      for (let i = 0; i < p; i++) A[i][i] += 0.05; // 少量岭正则，防止样本太少时解不稳
+      const w = solve(A, b);
+      const pred = s.map((_, i) => (i < L ? null : feat(i).reduce((acc, x, j) => acc + x * w[j], 0) * mx));
+      const resTr = []; for (let i = L; i < 70; i++) resTr.push(s[i] - pred[i]);
+      const sdTr = std(resTr), thr = v.k * sdTr;
+      const ax = K.axes(svg, { x: 50, y: 16, w: 570, h: 300 }, [0, days], [0, Math.max(...s) * 1.08], { xlabel: "第几天", yticks: 3 });
+      K.svg(svg, "rect", { x: ax.sx(0), y: 16, width: ax.sx(70) - ax.sx(0), height: 300, fill: "var(--c3)", "fill-opacity": 0.07 });
+      K.svg(svg, "text", { x: ax.sx(35), y: 32, "text-anchor": "middle", "font-size": 12, fill: "var(--c3)" }, "训练段（前 70 天）");
+      const xs = s.map((_, i) => i);
+      K.svg(svg, "path", { d: pathOf(ax, xs, s), fill: "none", stroke: "var(--c1)", "stroke-width": 1.5 });
+      K.svg(svg, "path", { d: pathOf(ax, xs, pred), fill: "none", stroke: "var(--c6)", "stroke-width": 1.5, "stroke-dasharray": "4 2" });
+      let alarms = 0, hit = 0, fa = 0, sq = 0, n2 = 0;
+      for (let i = 70; i < days; i++) {
+        const e = s[i] - pred[i]; sq += e * e; n2++;
+        if (Math.abs(e) > thr) {
+          alarms++;
+          const truth = v.amp > 0 && ((i >= 95 && i < 101) || (i >= 110 && i < 113));
+          if (truth) hit++; else fa++;
+          K.svg(svg, "circle", { cx: ax.sx(i), cy: ax.sy(s[i]), r: 5, fill: "var(--bad)" });
+        }
+      }
+      if (v.amp > 0) [[95, 6], [110, 3]].forEach((b2) => K.svg(svg, "rect", { x: ax.sx(b2[0]), y: 16, width: ax.sx(b2[0] + b2[1]) - ax.sx(b2[0]), height: 300, fill: "var(--warn)", "fill-opacity": 0.12 }));
+      K.svg(svg, "text", { x: 50, y: 372, "font-size": 12, class: "muted" }, "蓝：实际    红虚线：预测    黄底：注入异常的日子    红点：报警");
+      const truthN = v.amp > 0 ? 9 : 0;
+      return { readout: [
+        { k: "训练期误差（标准差）", v: (sdTr / mx).toFixed(3) + " ×最大值" },
+        { k: "第 70 天后预测误差 RMSE", v: (Math.sqrt(sq / n2) / mx).toFixed(3) + " ×最大值" },
+        { k: "报警天数", v: String(alarms) },
+        { k: "抓到异常日 / 误报", v: `${hit}/${truthN} · ${fa}`, color: fa > 3 ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：近似熵 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "kind", label: "流量的样子", value: "week", options: [["week", "规律：工作日高、周末低"], ["beacon", "规律 + 每 3 天一次固定外联"], ["burst", "规律 + 一段时间忽高忽低"], ["noise", "完全随机"]] },
+      { id: "N", label: "序列长度（天）", min: 20, max: 150, step: 5, value: 120 },
+      { id: "m", label: "模板长度 m（作者用 2）", min: 1, max: 4, step: 1, value: 2 },
+      { id: "rmode", label: "容差 r 怎么定", value: "rel", options: [["rel", "相对：r = 系数 × 标准差"], ["abs", "绝对：r = 3（像作者，用在原始流量上）"]] },
+      { id: "rc", label: "相对模式下的系数", min: 0.05, max: 1, step: 0.05, value: 0.35, fmt: (v) => v.toFixed(2) },
+      { id: "scale", label: "日流量的量级（原始单位）", min: 1, max: 4, step: 1, value: 3, fmt: (v) => "约 " + Math.pow(10, v) },
+    ],
+    note: "按作者第 31 格的公式在浏览器里现场计算 ApEn。先在“相对”模式下比较四种流量；再切到“绝对 r = 3”，把量级调到 1000，会发现四种流量的 ApEn 都挤在 0 附近、分不出高低。另外，把长度拖短到 30 天左右，随机序列的 ApEn 也会明显变小：序列太短时，近似熵本身会偏低。",
+    render(svg, v) {
+      const N = v.N, sc = Math.pow(10, v.scale), r0 = K.rng(17 + v.N);
+      let s = hostSeries(5, N, { noise: 0.04, base: sc });
+      if (v.kind === "beacon") s = s.map((x, i) => (i % 3 === 0 ? x + sc * 0.6 : x));
+      if (v.kind === "burst") s = s.map((x, i) => (i >= N * 0.4 && i < N * 0.75 ? x * (0.2 + 2 * r0()) : x));
+      if (v.kind === "noise") s = s.map(() => sc * (0.2 + 1.2 * r0()));
+      const sd = std(s), r = v.rmode === "rel" ? v.rc * sd : 3;
+      const e = apen(s, v.m, r);
+      const floorVal = Math.log((N - v.m + 1) / (N - v.m)); // 每个片段只和自己相似时的值
+      const ax = K.axes(svg, { x: 60, y: 20, w: 560, h: 260 }, [0, N - 1], [0, Math.max(...s) * 1.1], { xlabel: "第几天（模拟）", yticks: 3 });
+      const xs = s.map((_, i) => i);
+      K.svg(svg, "path", { d: pathOf(ax, xs, s), fill: "none", stroke: "var(--c1)", "stroke-width": 1.8 });
+      s.forEach((x, i) => K.svg(svg, "circle", { cx: ax.sx(i), cy: ax.sy(x), r: 2.2, fill: "var(--c1)" }));
+      const bandH = Math.max(1, ax.sy(0) - ax.sy(r));
+      K.svg(svg, "rect", { x: ax.sx(0) + 4, y: ax.sy(s[0]) - bandH, width: 16, height: 2 * bandH, fill: "var(--c6)", "fill-opacity": 0.25, stroke: "var(--c6)" });
+      K.svg(svg, "text", { x: 60, y: 342, "font-size": 12, class: "muted" }, `红框 = 第 1 天的容差带 ±r（r = ${r < 10 ? r.toFixed(2) : Math.round(r)}）。容差带细到看不见时，几乎没有“相似”的片段。`);
+      return { readout: [
+        { k: "近似熵 ApEn", v: e.toFixed(3), color: "var(--c6)" },
+        { k: "容差 r / 标准差", v: (r / sd).toFixed(3) },
+        { k: "“只和自己相似”时的 ApEn", v: floorVal.toFixed(3), color: "var(--ink-3)" },
+        { k: "判断", v: r / sd < 0.05 ? "r 比波动小太多，分不出规律" : "r 与波动相称", color: r / sd < 0.05 ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

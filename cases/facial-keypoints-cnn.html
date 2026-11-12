@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>人脸关键点</title>
+<meta name="description" content="Kaggle 案例拆解：在 96×96 的灰度人脸照片上，用卷积神经网络直接回归出 15 个关键点的 30 个坐标；顺带剖析缺失值“向前填充”带来的隐蔽错误。">
+<link rel="stylesheet" href="../assets/case.css">
+<style>.pixi { image-rendering: pixelated; }</style>
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">灰度人脸图像 · 关键点回归 · 卷积神经网络</div>
+  <h1>给人脸“打点”：用卷积网络找出眼睛、鼻子、嘴角的位置</h1>
+  <p class="en">Facial Keypoint Detection</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">关键点回归</span><span class="tag method">缺失值处理（向前填充）</span><span class="tag method">字符串转图像</span>
+    <span class="tag method">全连接网络</span><span class="tag method">卷积网络 + LeakyReLU + 批归一化</span><span class="tag method">均方误差 MSE</span><span class="tag method">查找表生成提交</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Karan Jakhar</b></span>
+    <span>Kaggle 点赞 <b>944</b>（2026-11 抓取）</span>
+    <span>比赛 <b>facial-keypoints-detection</b></span>
+    <span><a href="https://www.kaggle.com/code/karanjakhar/facial-keypoint-detection" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">7049 张 96×96 的灰度人脸</div><p>每张脸附带眼睛、眉毛、鼻子、嘴巴周围若干关键点的 x、y 坐标；图片本身以一长串数字字符串存在 CSV 里。<span data-cell="0">出处</span> <span data-cell="12">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">30 个数：15 个点的横纵坐标</div><p>不是分类，而是<b>回归</b>：网络最后一层输出 30 个连续数值，分别对应各关键点的 x 和 y。<span data-cell="22">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">十几层卷积网络 + 均方误差</div><p>先写了一个全连接网络又被覆盖，最终用 32→512 通道的卷积网络，LeakyReLU + 批归一化，损失用 MSE，评估看 MAE。<span data-cell="19">出处</span> <span data-cell="23">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">生成了比赛提交文件</div><p>作者没有在文字里写分数或排名，训练过程和误差都在运行输出里。重点是一条完整的流程：读数据 → 填缺失 → 训练 → 按查找表输出。<span data-cell="34">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">Kaggle 入门比赛 <b>Facial Keypoints Detection</b>。作者在第 0 格介绍了三个 CSV 文件，规模来自代码里的循环次数与图像形状。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">训练图片</div><div class="v">7,049</div></div>
+        <div class="stat-tile"><div class="k">测试图片</div><div class="v">1,783</div></div>
+        <div class="stat-tile"><div class="k">图片尺寸</div><div class="v">96×96 灰度</div></div>
+        <div class="stat-tile"><div class="k">坐标列</div><div class="v">30</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">7049 和 1783 是作者在第 12、27 格写死的循环次数 <span data-cell="12">出处</span> <span data-cell="27">出处</span>；96×96 见第 14 格 <span data-cell="14">出处</span>；30 个输出见第 22 格 <span data-cell="22">出处</span>。作者在第 7 格写到：有 <b>28 列</b>存在缺失值 <span data-cell="7">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">三个文件、每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>文件 / 列</th><th>白话含义</th><th>类型</th></tr>
+        <tr><td><code>training.csv</code> 的 30 个坐标列</td><td><b>要预测的答案</b>：如左眼、右眼等关键点的 x 或 y（单位：像素，0–96）</td><td>小数，有缺失</td></tr>
+        <tr><td><code>training.csv · Image</code></td><td>整张图：9216 个 0–255 的亮度值，用空格连成一个字符串</td><td>长字符串</td></tr>
+        <tr><td><code>test.csv</code></td><td>只有 <code>ImageId</code> 和 <code>Image</code>，没有坐标</td><td>表格</td></tr>
+        <tr><td><code>IdLookupTable.csv</code></td><td>提交时需要哪张图的哪个关键点：<code>RowId</code>、<code>ImageId</code>、<code>FeatureName</code></td><td>表格</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">文件说明见第 0 格 <span data-cell="0">出处</span>，提交格式见第 34 格 <span data-cell="34">出处</span>。</p>
+      <p class="callout">本页所有人脸和关键点都是代码画的卡通示意，不是比赛里的真实照片。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="10">
+    <h3>动手试试 A · 缺失的坐标怎么填：向前填充、均值填充、直接删除 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="25">
+    <h3>动手试试 B · 从像素直接回归眼睛坐标：样本量与像素归一化 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的说明</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>28 列存在缺失值；删行会让数据变少，所以选择填充</td><td><span data-cell="7">第 7 格</span></td></tr>
+        <tr><td>图像是字符串，需要按空格切开、补缺、转成数值再变形</td><td><span data-cell="11">第 11 格</span></td></tr>
+        <tr><td>损失用 MSE（均方误差），评估看 MAE（平均绝对误差）</td><td><span data-cell="19">第 19 格</span></td></tr>
+        <tr><td>验证集取训练数据的 20%</td><td><span data-cell="24">第 24 格</span></td></tr>
+        <tr><td>提交两列：RowId 和 Location，按查找表填</td><td><span data-cell="34">第 34 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">训练和验证的 MAE、比赛得分都只在运行输出里，作者文字中没有写，源码不带输出，这里不列分数。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li><b>向前填充借的是“别人的脸”</b>：第 7 格说“用这一行的前一个值填”，但 <code>fillna(method='ffill')</code> 是沿着列往下填，用的是<b>上一张照片</b>同一个关键点的坐标。两张脸位置不同，这些坐标是错的，却被当成标准答案训练 <span data-cell="8">第 8 格</span>。</li>
+        <li>像素没有除以 255，直接把 0–255 的数送进网络 <span data-cell="14">第 14 格</span>；有批归一化能缓解，但通常还是先缩放到 0–1 更稳。</li>
+        <li>第 20 格建的全连接模型被第 22 格的卷积模型覆盖，从没训练过 <span data-cell="20">第 20 格</span>。</li>
+        <li>第 24 格说训练了 500 次，第 25 格代码写的是 <code>epochs = 50</code> <span data-cell="25">第 25 格</span>。</li>
+        <li>7049、1783 写死在循环里，换数据就会出错；按查找表取值时用 <code>list.index</code> 反复查找，速度也慢 <span data-cell="37">第 37 格</span>。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一张对齐的人脸小图，输出眼睛、鼻子、嘴角等点的位置。</li>
+        <li><b>用途：</b>美颜和贴纸（把眼镜、胡子贴到正确位置）、表情分析、疲劳驾驶检测（眼睛开合）、人脸对齐（识别前先摆正）。</li>
+        <li><b>同类问题：</b>人体姿态估计、手部关键点、动物关键点、医学影像标志点（如头颅测量）、工业零件定位。</li>
+        <li><b>可迁移的套路：</b>坐标当回归目标 → 卷积网络 + 全连接输出 N×2 个数 → MSE 训练、MAE / RMSE 评估；缺失标注用“掩码损失”只在有答案的点上算误差，比随便填一个数更好。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>读 CSV、检查缺失：<span data-cell="2">第 2 格</span> <span data-cell="6">第 6 格</span></li>
+        <li>向前填充：<span data-cell="8">第 8 格</span></li>
+        <li>字符串 → 96×96 数组：<span data-cell="12">第 12 格</span> <span data-cell="14">第 14 格</span></li>
+        <li>标签矩阵：<span data-cell="18">第 18 格</span></li>
+        <li>卷积网络：<span data-cell="22">第 22 格</span></li>
+        <li>编译与训练：<span data-cell="23">第 23 格</span> <span data-cell="25">第 25 格</span></li>
+        <li>测试预测与提交：<span data-cell="33">第 33 格</span> <span data-cell="41">第 41 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>用上一张照片的眼睛坐标去填这一张照片缺失的眼睛坐标，会让模型学到什么错误的东西？你会怎么处理缺失的关键点？</li>
+      <li>关键点检测为什么是“回归”而不是“分类”？如果改成分类（把 96 个像素位置当 96 类），有什么好处和坏处？</li>
+      <li>训练时如果对图片做左右翻转来增加数据，关键点坐标要怎么跟着改？“左眼”和“右眼”会发生什么？</li>
+      <li>预测平均偏差 2 个像素，在 96×96 的图上算准吗？对于贴纸、疲劳检测、医学测量，要求分别有多高？</li>
+      <li>人脸关键点可以用于美颜，也可能用于未经同意的追踪。开发这类应用时应该遵守哪些隐私规则？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Karan Jakhar，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的人脸、关键点与数据表均为代码生成的示意。比赛：Facial Keypoints Detection（Kaggle）。
+</footer>
+</main>
+
+<script src="nb/facial-keypoints-cnn.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 卡通人脸 + 15 个关键点（示意） ---------- */
+  function makeFace(seed) {
+    const r = K.rng(seed);
+    return {
+      cx: 0.5 + (r() - 0.5) * 0.12, cy: 0.52 + (r() - 0.5) * 0.1, w: 0.34 + r() * 0.06, h: 0.42 + r() * 0.06,
+      eyeDx: 0.15 + r() * 0.04, eyeY: -0.08 + (r() - 0.5) * 0.06, eyeR: 0.04 + r() * 0.015,
+      browY: -0.15, noseY: 0.06 + r() * 0.04, mouthY: 0.2 + r() * 0.04, mouthW: 0.1 + r() * 0.04,
+      tone: 0.5 + r() * 0.3, tilt: (r() - 0.5) * 0.25, hair: r() * 0.3,
+    };
+  }
+  function keypoints(F) {
+    const c = Math.cos(F.tilt), s = Math.sin(F.tilt), P = (u, v) => [F.cx + c * u - s * v, F.cy + s * u + c * v];
+    const e = F.eyeDx, ey = F.eyeY, er = F.eyeR * 1.6, by = ey + F.browY * 0.6;
+    return [P(-e, ey), P(e, ey), P(-e + er, ey), P(-e - er, ey), P(e - er, ey), P(e + er, ey), P(-e + er * 0.8, by), P(-e - er * 1.4, by), P(e - er * 0.8, by), P(e + er * 1.4, by), P(0, F.noseY), P(-F.mouthW, F.mouthY), P(F.mouthW, F.mouthY), P(0, F.mouthY - 0.03), P(0, F.mouthY + 0.035)];
+  }
+  function render(F, S) {
+    const img = new Float32Array(S * S), c = Math.cos(-F.tilt), s = Math.sin(-F.tilt);
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      const X = (x + 0.5) / S - F.cx, Y = (y + 0.5) / S - F.cy, u = c * X - s * Y, v = s * X + c * Y;
+      let val = 0.12 + 0.05 * Math.sin(x * 0.3);
+      const fe = (u / F.w) ** 2 + (v / F.h) ** 2;
+      if (fe < 1) {
+        val = F.tone;
+        if (v < -F.h * 0.6) val = F.hair;
+        for (const sd of [-1, 1]) {
+          const d = ((u - sd * F.eyeDx) / F.eyeR) ** 2 + ((v - F.eyeY) / (F.eyeR * 0.6)) ** 2;
+          if (d < 1) val = 0.08;
+          if (Math.abs(v - (F.eyeY + F.browY * 0.6)) < 0.012 && Math.abs(u - sd * F.eyeDx) < F.eyeR * 1.6) val = 0.15;
+        }
+        if (Math.abs(u) < 0.012 && v > F.eyeY + 0.03 && v < F.noseY) val *= 0.8;
+        if (Math.abs(v - F.mouthY) < 0.018 && Math.abs(u) < F.mouthW) val = 0.18;
+      }
+      img[y * S + x] = K.clamp(val, 0, 1);
+    }
+    return img;
+  }
+  const cv = document.createElement("canvas");
+  function drawImg(svg, img, S, x, y, w) {
+    cv.width = S; cv.height = S;
+    const g = cv.getContext("2d"), im = g.createImageData(S, S);
+    for (let i = 0; i < S * S; i++) { const t = img[i] * 255; im.data[i * 4] = t; im.data[i * 4 + 1] = t; im.data[i * 4 + 2] = t; im.data[i * 4 + 3] = 255; }
+    g.putImageData(im, 0, 0);
+    return K.svg(svg, "image", { x, y, width: w, height: w, href: cv.toDataURL(), class: "pixi", preserveAspectRatio: "none" });
+  }
+  function dots(svg, kp, x, y, w, color, r) {
+    const g = K.svg(svg, "g");
+    kp.forEach((p) => { if (p) K.svg(g, "circle", { cx: x + p[0] * w, cy: y + p[1] * w, r: r || 3, fill: color || "var(--c6)", stroke: "#fff", "stroke-width": 0.8 }); });
+    return g;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "比赛与三个文件", kicker: "第 0–2 格 · 开场",
+      html: `<p>作者先说明比赛给了三个 CSV：<code>training.csv</code> 有关键点坐标（如左眼、右眼）和图像；<code>test.csv</code> 只有图像，要我们预测坐标；<code>IdLookupTable.csv</code> 规定了提交时具体要哪些点。</p><p>然后导入 numpy、pandas、matplotlib，把三个文件读进来。</p>`,
+      cells: [0, 2], highlight: ["pd.read_csv"],
+      draw(svg, ctx) {
+        const files = [["training.csv", "30 列坐标 + Image"], ["test.csv", "ImageId + Image"], ["IdLookupTable.csv", "RowId · ImageId · FeatureName"]];
+        files.forEach(([n, d], i) => { const g = K.node(svg, 20, 30 + i * 100, 220, 70, n + "\n" + d, { fs: 12 }); g.style.opacity = 0; ctx.wait(i * 400).then((ok) => ok && (g.style.opacity = 1)); });
+        const F = makeFace(3), S = 48;
+        drawImg(svg, render(F, S), S, 330, 40, 240);
+        const kp = keypoints(F), g = K.svg(svg, "g");
+        K.svg(svg, "text", { x: 450, y: 310, "text-anchor": "middle", "font-size": 12, class: "muted" }, "目标：在脸上点出这些关键点（示意）");
+        (async () => { if (!(await ctx.wait(1300))) return; for (const p of kp) { K.svg(g, "circle", { cx: 330 + p[0] * 240, cy: 40 + p[1] * 240, r: 4.5, fill: "var(--c6)", stroke: "#fff" }); if (!(await ctx.wait(120))) return; } })();
+      },
+    },
+    {
+      at: 3, title: "看一眼数据：一行就是一张脸", kicker: "第 3–4 格 · 探索",
+      html: `<p>作者用 <code>train_data.head().T</code> 把前 5 行“转置”着看：转置后每一列是一张脸，每一行是一个字段，30 个坐标字段和最后的 <code>Image</code> 字段一目了然。</p><p>坐标单位是像素，范围在 0 到 96 之间；<code>Image</code> 是一个很长的字符串，里面是 9216 个用空格隔开的亮度值。</p>`,
+      cells: [4], highlight: [".T"],
+      draw(svg, ctx) {
+        const rows = ["left_eye_center_x", "left_eye_center_y", "right_eye_center_x", "…（共 30 个坐标列）", "Image"];
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 12, class: "muted" }, "head().T：行 = 字段，列 = 前 5 张脸（数值为示意）");
+        const r = K.rng(2);
+        rows.forEach((n, i) => {
+          K.svg(svg, "text", { x: 20, y: 64 + i * 46, "font-size": 12, "font-family": "var(--mono)", fill: i === 4 ? "var(--accent)" : "var(--ink)" }, n);
+          for (let j = 0; j < 5; j++) {
+            const t = i === 4 ? "238 236 …" : i === 3 ? "…" : (30 + r() * 40).toFixed(1);
+            const e = K.svg(svg, "text", { x: 230 + j * 96, y: 64 + i * 46, "font-size": 12, "font-family": "var(--mono)" }, t);
+            e.style.opacity = 0; ctx.wait(100 * (i * 5 + j)).then((ok) => ok && (e.style.opacity = 1));
+          }
+        });
+        for (let j = 0; j < 5; j++) K.svg(svg, "text", { x: 250 + j * 96, y: 290, "text-anchor": "middle", "font-size": 11, class: "muted" }, "第 " + j + " 张");
+      },
+    },
+    {
+      at: 5, title: "缺失值：28 列有空格", kicker: "第 5–7 格 · 检查缺失",
+      html: `<p><code>isnull().any().value_counts()</code> 统计“有缺失的列”有几个。作者的结论：<b>28 列</b>有缺失值。原因是很多照片只标了少数几个关键点（比如只标了眼睛中心）。</p><p>两种选择：删掉有缺失的行（数据会少很多），或者填一个值。作者选了填充，并说“用这一行里的前一个值来填”。下一章我们会看到，代码实际做的和这句话不一样。</p>`,
+      cells: [6, 7], highlight: ["isnull().any().value_counts()"],
+      draw(svg, ctx) {
+        const nR = 10, nC = 12, r = K.rng(5), cells = [];
+        K.svg(svg, "text", { x: 30, y: 24, "font-size": 12, class: "muted" }, "示意：每行一张脸，每列一个坐标；红格 = 缺失");
+        for (let i = 0; i < nR; i++) for (let j = 0; j < nC; j++) {
+          const miss = j > 3 && r() < 0.45;
+          cells.push({ e: K.svg(svg, "rect", { x: 30 + j * 34, y: 36 + i * 26, width: 30, height: 22, rx: 3, fill: "var(--c1)", opacity: 0.6 }), miss });
+        }
+        const lab = K.svg(svg, "text", { x: 470, y: 120, "font-size": 15, "font-weight": 700 }, "");
+        const lab2 = K.svg(svg, "text", { x: 470, y: 150, "font-size": 13 }, "");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1200, (t) => cells.forEach((c, k) => { if (c.miss && k / cells.length < t) { c.e.style.fill = "var(--bad)"; } }))).then((ok) => { if (!ok) return; lab.textContent = "真实数据：28 列有缺失"; lab2.textContent = "很多照片只标了几个点"; });
+      },
+    },
+    {
+      at: 8, title: "向前填充：借来的是“上一张脸”的坐标", kicker: "第 8–10 格 · 填补缺失",
+      html: `<p>作者用 <code>train_data.fillna(method='ffill', inplace=True)</code> 填补缺失，再检查一次，确认已没有空格。</p><p class="callout warn"><code>ffill</code>（向前填充）是<b>沿着每一列从上往下</b>，用上一<b>行</b>的值填这一行的空格。在这张表里，一行是一张脸，所以第 5 张脸缺失的“左眼角坐标”，被填成了第 4 张脸的左眼角坐标。两张脸的位置、大小都不同，填进去的点往往落在错误的地方，却被当作标准答案去训练。</p><p>动手试试 A 可以对比几种填法造成的误差。</p>`,
+      cells: [8, 10], highlight: ["fillna(method = 'ffill',inplace = True)"],
+      draw(svg, ctx) {
+        const S = 48, F1 = makeFace(11), F2 = makeFace(27);
+        const k1 = keypoints(F1), k2 = keypoints(F2);
+        K.svg(svg, "text", { x: 140, y: 24, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "第 4 张脸（上一行）");
+        K.svg(svg, "text", { x: 470, y: 24, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "第 5 张脸（缺了眼角等点）");
+        drawImg(svg, render(F1, S), S, 30, 36, 220); drawImg(svg, render(F2, S), S, 360, 36, 220);
+        dots(svg, k1, 30, 36, 220, "var(--c1)", 4);
+        const known = [0, 1, 10];
+        dots(svg, k2.map((p, i) => (known.includes(i) ? p : null)), 360, 36, 220, "var(--good)", 4);
+        const moving = k1.map((p, i) => (known.includes(i) ? null : K.svg(svg, "circle", { cx: 30 + p[0] * 220, cy: 36 + p[1] * 220, r: 4, fill: "var(--bad)", stroke: "#fff" })));
+        const lab = K.svg(svg, "text", { x: 30, y: 290, "font-size": 13 }, "");
+        K.svg(svg, "text", { x: 30, y: 316, "font-size": 12, class: "muted" }, "绿 = 第 5 张自己标的点；红 = 从第 4 张“借”过来的点；虚线框 = 本该在的位置");
+        ctx.wait(800).then((ok) => ok && ctx.tween(1500, (t) => moving.forEach((m, i) => { if (!m) return; m.setAttribute("cx", K.lerp(30, 360, t) + k1[i][0] * 220); }))).then((ok) => {
+          if (!ok) return;
+          k2.forEach((p, i) => { if (!known.includes(i)) K.svg(svg, "rect", { x: 360 + p[0] * 220 - 5, y: 36 + p[1] * 220 - 5, width: 10, height: 10, fill: "none", stroke: "var(--good)", "stroke-dasharray": "2 2" }); });
+          lab.textContent = "ffill：缺失的点直接照抄上一张脸的坐标";
+        });
+      },
+    },
+    {
+      at: 11, title: "把字符串变回 96×96 的图", kicker: "第 11–16 格 · 处理图像列",
+      html: `<p><code>Image</code> 列是字符串，作者对 7049 行逐行 <code>split(' ')</code>，遇到空字符串就补 <code>'0'</code>，得到 9216 个数字字符串；再用 <code>np.array(..., dtype='float')</code> 转成小数，<code>reshape(-1,96,96,1)</code> 变成“张数 × 96 × 96 × 1 通道”的数组，最后画出第一张看看。</p><p>注意这里像素值仍是 0–255，没有除以 255 缩放到 0–1。</p>`,
+      cells: [12, 14, 16], highlight: ["split(' ')", "reshape(-1,96,96,1)"],
+      draw(svg, ctx) {
+        const S = 16, F = makeFace(5), img = render(F, S);
+        const str = Array.from(img.slice(0, 18), (v) => Math.round(v * 255)).join(" ") + " …";
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 12, "font-family": "var(--mono)" }, "\"" + str + "\"");
+        K.svg(svg, "text", { x: 20, y: 52, "font-size": 12, class: "muted" }, "（示意：16×16 = 256 个数；真实是 96×96 = 9216 个数）");
+        const cs = 15, cells = [];
+        for (let i = 0; i < S * S; i++) { const v = Math.round(img[i] * 255); cells.push(K.svg(svg, "rect", { x: 20 + (i % 40) * 17, y: 70 + Math.floor(i / 40) * 17, width: 15, height: 15, fill: `rgb(${v},${v},${v})` })); }
+        const lab = K.svg(svg, "text", { x: 500, y: 200, "font-size": 13, "font-family": "var(--mono)" }, "");
+        ctx.wait(900).then((ok) => ok && ctx.tween(1800, (t) => cells.forEach((c, i) => { const x0 = 20 + (i % 40) * 17, y0 = 70 + Math.floor(i / 40) * 17, x1 = 200 + (i % S) * cs, y1 = 70 + Math.floor(i / S) * cs; K.set(c, { x: K.lerp(x0, x1, t), y: K.lerp(y0, y1, t), width: 15 - t * 1, height: 15 - t * 1 }); }))).then((ok) => ok && (lab.textContent = "reshape → 96×96×1"));
+      },
+    },
+    {
+      at: 17, title: "30 个坐标就是标签", kicker: "第 17–18 格 · 分离标签",
+      html: `<p>去掉 <code>Image</code> 列，剩下的 30 列就是标签：每行 30 个数，按“某点的 x、某点的 y、下一个点的 x……”排列。作者用循环逐行取出，组成 7049 × 30 的数组 <code>y_train</code>。</p><p>所以这是一个<b>多输出回归</b>问题：输入一张图，同时输出 30 个连续的数。</p>`,
+      cells: [18], highlight: ["drop('Image',axis = 1)"],
+      draw(svg, ctx) {
+        const S = 48, F = makeFace(7), kp = keypoints(F);
+        drawImg(svg, render(F, S), S, 20, 40, 230);
+        K.svg(svg, "text", { x: 135, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "输入：一张图");
+        K.svg(svg, "text", { x: 470, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "输出：30 个数");
+        const items = [];
+        kp.forEach((p, i) => {
+          const d = K.svg(svg, "circle", { cx: 20 + p[0] * 230, cy: 40 + p[1] * 230, r: 0, fill: "var(--c6)", stroke: "#fff" });
+          const tx = K.svg(svg, "text", { x: 300 + (i % 3) * 140, y: 56 + Math.floor(i / 3) * 44, "font-size": 12, "font-family": "var(--mono)" }, `(${(p[0] * 96).toFixed(1)}, ${(p[1] * 96).toFixed(1)})`);
+          tx.style.opacity = 0; items.push([d, tx]);
+        });
+        (async () => { for (const [d, t] of items) { if (!(await ctx.tween(150, (k) => { d.setAttribute("r", 4 * k); t.style.opacity = k; }))) return; } })();
+        K.svg(svg, "text", { x: 300, y: 300, "font-size": 12, class: "muted" }, "15 个点 × (x, y) = 30 个回归目标（坐标为示意）");
+      },
+    },
+    {
+      at: 19, title: "第一版：全连接网络（随后被覆盖）", kicker: "第 19–20 格 · 一个没用上的模型",
+      html: `<p>作者先说明：损失函数用 <b>MSE</b>（均方误差，每个坐标偏差的平方再平均），评估指标用 <b>MAE</b>（平均绝对误差，平均偏了几个像素）。</p><p>第 20 格搭了一个简单的全连接网络：把 96×96 摊平成 9216 个数 → 128 → 64 → 30。不过下一格又把变量 <code>model</code> 换成了卷积网络，这个全连接模型从没被训练过。全连接网络把每个像素当成独立输入，看不到“哪些像素挨在一起”，不适合找位置。</p>`,
+      cells: [20], highlight: ["Flatten(input_shape=(96,96))", "Dense(30)"],
+      draw(svg, ctx) {
+        const layers = [[9216, "摊平 9216"], [128, "Dense 128"], [64, "Dense 64"], [30, "输出 30"]];
+        const xs = [80, 260, 420, 580], nodes = layers.map(([n, l], i) => { const k = Math.min(10, Math.round(Math.log2(n))); return Array.from({ length: k }, (_, j) => [xs[i], 170 + (j - (k - 1) / 2) * 24]); });
+        for (let i = 0; i < 3; i++) nodes[i].forEach((a) => nodes[i + 1].forEach((b) => K.svg(svg, "line", { x1: a[0], y1: a[1], x2: b[0], y2: b[1], stroke: "var(--line)" })));
+        nodes.forEach((ns, i) => { ns.forEach((p) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 7, fill: "var(--panel-2)", stroke: "var(--ink-3)" })); K.svg(svg, "text", { x: xs[i], y: 310, "text-anchor": "middle", "font-size": 12 }, layers[i][1]); });
+        const cross = K.svg(svg, "text", { x: 360, y: 60, "text-anchor": "middle", "font-size": 18, "font-weight": 700, fill: "var(--bad)" }, "");
+        ctx.wait(1500).then((ok) => ok && (cross.textContent = "✗ 下一格被卷积网络覆盖，从未训练"));
+      },
+    },
+    {
+      at: 21, title: "第二版：十几层卷积网络", kicker: "第 21–22 格 · 最终模型",
+      html: `<p>真正用的是一个类似 VGG 的卷积网络：</p><ul class="tight"><li>每组两层 3×3 卷积，通道数从 32、64、96、128、256 一路加到 512；</li><li>每层卷积后接 <b>LeakyReLU</b>（负数不直接变 0，而是乘 0.1 留一点）和<b>批归一化</b>（把每层输出调到稳定的范围）；</li><li>每组之后 2×2 最大池化，96 → 48 → 24 → 12 → 6 → 3；</li><li>最后摊平 → 512 全连接 → Dropout 0.1 → 30 个输出（没有激活函数，直接输出坐标）。</li></ul>`,
+      cells: [22], highlight: ["LeakyReLU(alpha = 0.1)", "BatchNormalization()", "Dense(30)"],
+      draw(svg, ctx) {
+        const blocks = [[96, 32], [48, 64], [24, 96], [12, 128], [6, 256], [3, 512]];
+        const els = blocks.map(([s, c], i) => {
+          const h = 30 + s * 1.9, w = 14 + Math.log2(c) * 4, x = 30 + i * 100;
+          const g = K.svg(svg, "g");
+          K.svg(g, "rect", { x, y: 170 - h / 2, width: w, height: h, rx: 3, fill: "var(--c1)", opacity: 0.8 });
+          K.svg(g, "text", { x: x + w / 2, y: 170 + h / 2 + 16, "text-anchor": "middle", "font-size": 11 }, `${s}×${s}`);
+          K.svg(g, "text", { x: x + w / 2, y: 170 + h / 2 + 30, "text-anchor": "middle", "font-size": 11, class: "muted" }, `${c} 通道`);
+          g.style.opacity = 0; return g;
+        });
+        const fc = K.node(svg, 620, 140, 80, 60, "512\n→ 30", { fs: 12, fill: "var(--accent-soft)", stroke: "var(--accent)" }); fc.style.opacity = 0;
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 12, class: "muted" }, "每格 = 两层 3×3 卷积 + LeakyReLU + 批归一化，之后 2×2 池化");
+        (async () => { for (const e of els) if (!(await ctx.tween(300, (t) => (e.style.opacity = t)))) return; await ctx.tween(300, (t) => (fc.style.opacity = t)); })();
+      },
+    },
+    {
+      at: 23, title: "均方误差，训练 50 轮", kicker: "第 23–25 格 · 编译与训练",
+      html: `<p>编译时用 Adam 优化器、<b>MSE</b> 损失、<b>MAE</b> 指标。训练：<code>epochs = 50</code>、<code>batch_size = 256</code>、<code>validation_split = 0.2</code>（最后 20% 的数据留作验证）。</p><p>为什么训练用 MSE、看结果用 MAE？MSE 对大偏差罚得重（偏 4 像素罚 16，偏 2 像素只罚 4），逼模型别出现离谱的点；MAE 直接告诉人“平均偏了几个像素”，好理解。</p><p class="callout">第 24 格的文字说训练了 500 次，代码里是 50 轮，以代码为准。<code>validation_split</code> 取的是数组<b>末尾</b>的 20%，不是随机抽的。</p>`,
+      cells: [23, 25], highlight: ["loss='mean_squared_error'", "metrics=['mae']", "epochs = 50", "validation_split = 0.2"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 300, h: 230 }, [-5, 5], [0, 25], { xlabel: "预测偏差（像素）", yticks: 5 });
+        let d1 = "", d2 = ""; for (let k = 0; k <= 100; k++) { const e = -5 + k / 10; d1 += (k ? "L" : "M") + ax.sx(e) + "," + ax.sy(e * e); d2 += (k ? "L" : "M") + ax.sx(e) + "," + ax.sy(Math.abs(e)); }
+        const p1 = K.svg(svg, "path", { d: d1, fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 }), p2 = K.svg(svg, "path", { d: d2, fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 70, y: 325, "font-size": 12, fill: "var(--c6)" }, "— MSE：偏差的平方"); K.svg(svg, "text", { x: 210, y: 325, "font-size": 12, fill: "var(--c1)" }, "— MAE：偏差的绝对值");
+        const dot = K.svg(svg, "circle", { cx: 0, cy: 0, r: 6, fill: "var(--c6)" }), dot2 = K.svg(svg, "circle", { cx: 0, cy: 0, r: 6, fill: "var(--c1)" });
+        const t1 = K.svg(svg, "text", { x: 420, y: 100, "font-size": 15, "font-family": "var(--mono)" }, ""), t2 = K.svg(svg, "text", { x: 420, y: 130, "font-size": 15, "font-family": "var(--mono)", fill: "var(--c6)" }, ""), t3 = K.svg(svg, "text", { x: 420, y: 160, "font-size": 15, "font-family": "var(--mono)", fill: "var(--c1)" }, "");
+        K.svg(svg, "text", { x: 420, y: 220, "font-size": 13 }, "epochs = 50 · batch = 256");
+        K.svg(svg, "text", { x: 420, y: 244, "font-size": 13 }, "验证集 = 末尾 20%");
+        ctx.tween(3000, (t) => { const e = -5 + 10 * t; K.set(dot, { cx: ax.sx(e), cy: ax.sy(e * e) }); K.set(dot2, { cx: ax.sx(e), cy: ax.sy(Math.abs(e)) }); t1.textContent = `偏差 ${e.toFixed(1)} 像素`; t2.textContent = `MSE 罚 ${(e * e).toFixed(1)}`; t3.textContent = `MAE 罚 ${Math.abs(e).toFixed(1)}`; });
+      },
+    },
+    {
+      at: 26, title: "准备测试图并预测", kicker: "第 26–33 格 · 推理",
+      html: `<p>测试集的处理和训练集一模一样：1783 行逐行切字符串、补 0、转小数、变形成 96×96×1，画出第一张看看，然后 <code>model.predict(X_test)</code> 一次性得到 1783 × 30 的预测坐标。</p><p>训练和测试的预处理必须完全一致，否则模型在测试时看到的输入和训练时不一样。</p>`,
+      cells: [27, 29, 33], highlight: ["range(0,1783)", "model.predict(X_test)"],
+      draw(svg, ctx) {
+        const S = 40, faces = [makeFace(101), makeFace(102), makeFace(103), makeFace(104)];
+        faces.forEach((F, i) => {
+          const x = 20 + i * 172;
+          drawImg(svg, render(F, S), S, x, 40, 160);
+          const kp = keypoints(F), r = K.rng(i + 50);
+          const g = dots(svg, kp.map(([a, b]) => [a + (r() - 0.5) * 0.03, b + (r() - 0.5) * 0.03]), x, 40, 160, "var(--warn)", 3.5);
+          g.style.opacity = 0; ctx.wait(600 + i * 400).then((ok) => ok && ctx.tween(400, (t) => (g.style.opacity = t)));
+        });
+        K.svg(svg, "text", { x: 20, y: 230, "font-size": 13 }, "测试图（只有图像）→ model.predict → 每张 30 个坐标（黄点，示意）");
+        K.svg(svg, "text", { x: 20, y: 260, "font-size": 12, class: "muted" }, "输出形状：1783 × 30");
+      },
+    },
+    {
+      at: 34, title: "按查找表生成提交文件", kicker: "第 34–42 格 · 提交",
+      html: `<p>比赛不要求每张图都交 30 个数，而是由 <code>IdLookupTable.csv</code> 指定：每一行有 <code>RowId</code>、<code>ImageId</code>、<code>FeatureName</code>（如某个点的 x）。作者：</p><ol class="tight"><li>把 <code>ImageId</code> 减 1 变成 0 开始的行号；</li><li>用 <code>lookid_list.index(f)</code> 找出关键点名称在 30 列里的位置（它利用了“第 1 张图恰好按顺序列出了全部 30 个点”）；</li><li>逐行从预测矩阵里取 <code>pre_list[图][点]</code>，和 <code>RowId</code> 拼成两列 <code>RowId, Location</code> 写成 CSV。</li></ol>`,
+      cells: [35, 37, 38, 41], highlight: ["lookid_data['ImageId']-1", "lookid_list.index(f)", "preded.append(pre_list[x][y])"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 20, y: 26, "font-size": 13, "font-weight": 700 }, "IdLookupTable（示意）");
+        const rows = [[1, 1, "left_eye_center_x"], [2, 1, "left_eye_center_y"], [3, 1, "right_eye_center_x"], [4, 2, "left_eye_center_x"], [5, 2, "nose_tip_y"]];
+        rows.forEach((r, i) => K.svg(svg, "text", { x: 20, y: 54 + i * 26, "font-size": 12, "font-family": "var(--mono)" }, `${r[0]}  ${r[1]}  ${r[2]}`));
+        K.svg(svg, "text", { x: 330, y: 26, "font-size": 13, "font-weight": 700 }, "预测矩阵 1783 × 30");
+        const grid = [];
+        for (let i = 0; i < 6; i++) for (let j = 0; j < 10; j++) grid.push(K.svg(svg, "rect", { x: 330 + j * 32, y: 40 + i * 24, width: 30, height: 22, fill: "var(--panel-2)", stroke: "var(--line)" }));
+        const hl = K.svg(svg, "rect", { x: 0, y: 0, width: 30, height: 22, fill: "none", stroke: "var(--warn)", "stroke-width": 3 }); hl.style.opacity = 0;
+        const rowHl = K.svg(svg, "rect", { x: 14, y: 0, width: 280, height: 22, fill: "var(--warn)", opacity: 0 });
+        const out = K.svg(svg, "text", { x: 20, y: 250, "font-size": 13, "font-family": "var(--mono)" }, "RowId,Location");
+        const picks = [[0, 0], [0, 1], [0, 2], [1, 0], [1, 7]];
+        (async () => {
+          let s = "RowId,Location";
+          for (let k = 0; k < rows.length; k++) {
+            K.set(rowHl, { y: 38 + k * 26, opacity: 0.2 });
+            const [i, j] = picks[k]; K.set(hl, { x: 330 + j * 32, y: 40 + i * 24 }); hl.style.opacity = 1;
+            if (!(await ctx.wait(700))) return;
+            s += `  ${rows[k][0]},${(30 + k * 3.7).toFixed(1)}`; out.textContent = s;
+          }
+        })();
+        K.svg(svg, "text", { x: 20, y: 290, "font-size": 12, class: "muted" }, "每一行查表：第几张图 → 第几个点 → 取出预测值（数值为示意）");
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：缺失值填充 ---------- */
+  const NF = 120, FACES = Array.from({ length: NF }, (_, i) => makeFace(2000 + i)), KPS = FACES.map(keypoints);
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "miss", label: "只标了 3 个点（眼睛中心、鼻尖）的照片比例", min: 0, max: 0.9, step: 0.05, value: 0.6, fmt: (v) => Math.round(v * 100) + "%" },
+      { id: "how", label: "怎么处理缺失", value: "ffill", options: [["ffill", "向前填充 ffill（作者的做法）"], ["mean", "用这一列的平均值填"], ["drop", "删掉有缺失的行"]] },
+      { id: "who", label: "看第几张脸", min: 1, max: 119, step: 1, value: 7 },
+    ],
+    note: "120 张卡通脸，每张都有 15 个点的“真值”。按比例随机让部分照片只保留 3 个点，再用选定的方法补全，计算“被填上的坐标”离真值平均有多远（单位：96×96 图上的像素）。删除法不产生假坐标，但会丢样本。",
+    render(svg, v) {
+      const r = K.rng(9), keep = [0, 1, 10];
+      const missing = FACES.map(() => r() < v.miss);
+      const table = KPS.map((kp, i) => kp.map((p, j) => (missing[i] && !keep.includes(j) ? null : p)));
+      const means = Array.from({ length: 15 }, (_, j) => { const ps = table.map((row) => row[j]).filter(Boolean); return ps.length ? [ps.reduce((a, p) => a + p[0], 0) / ps.length, ps.reduce((a, p) => a + p[1], 0) / ps.length] : [0.5, 0.5]; });
+      const filled = table.map((row) => row.slice());
+      if (v.how === "ffill") { for (let i = 1; i < NF; i++) for (let j = 0; j < 15; j++) if (!filled[i][j]) filled[i][j] = filled[i - 1][j]; }
+      else if (v.how === "mean") filled.forEach((row) => row.forEach((p, j) => { if (!p) row[j] = means[j]; }));
+      let err = 0, cnt = 0;
+      table.forEach((row, i) => row.forEach((p, j) => { if (!p && filled[i][j]) { err += Math.hypot(filled[i][j][0] - KPS[i][j][0], filled[i][j][1] - KPS[i][j][1]) * 96; cnt++; } }));
+      const kept = v.how === "drop" ? missing.filter((m) => !m).length : NF;
+      const i = v.who, S = 48;
+      drawImg(svg, render(FACES[i], S), S, 20, 20, 270);
+      KPS[i].forEach((p, j) => K.svg(svg, "circle", { cx: 20 + p[0] * 270, cy: 20 + p[1] * 270, r: 5, fill: "none", stroke: "var(--good)", "stroke-width": 2 }));
+      if (v.how === "drop" && missing[i]) K.svg(svg, "text", { x: 155, y: 160, "text-anchor": "middle", "font-size": 18, "font-weight": 700, fill: "var(--bad)" }, "这张脸被删掉了");
+      else filled[i].forEach((p, j) => { if (!p) return; const isFill = !table[i][j]; K.svg(svg, "circle", { cx: 20 + p[0] * 270, cy: 20 + p[1] * 270, r: 3.5, fill: isFill ? "var(--bad)" : "var(--good)" }); if (isFill) K.svg(svg, "line", { x1: 20 + p[0] * 270, y1: 20 + p[1] * 270, x2: 20 + KPS[i][j][0] * 270, y2: 20 + KPS[i][j][1] * 270, stroke: "var(--bad)", "stroke-width": 1 }); });
+      K.svg(svg, "text", { x: 20, y: 312, "font-size": 11, class: "muted" }, `第 ${i} 张：${missing[i] ? "只标了 3 个点" : "15 个点都标了"}　绿圈 = 真值，红点 = 填出来的点`);
+      // 右侧：误差条
+      const ax = K.axes(svg, { x: 360, y: 30, w: 250, h: 200 }, [0, 3], [0, 25], { xticks: 0, yticks: 5, ylabel: "填补点的平均误差（像素）" });
+      const res = ["ffill", "mean"].map((how) => {
+        const f = table.map((row) => row.slice());
+        if (how === "ffill") { for (let a = 1; a < NF; a++) for (let j = 0; j < 15; j++) if (!f[a][j]) f[a][j] = f[a - 1][j]; } else f.forEach((row) => row.forEach((p, j) => { if (!p) row[j] = means[j]; }));
+        let e = 0, c = 0; table.forEach((row, a) => row.forEach((p, j) => { if (!p && f[a][j]) { e += Math.hypot(f[a][j][0] - KPS[a][j][0], f[a][j][1] - KPS[a][j][1]) * 96; c++; } }));
+        return c ? e / c : 0;
+      });
+      [["ffill", res[0]], ["均值", res[1]], ["删除", 0]].forEach(([n, val], k) => { K.svg(svg, "rect", { x: ax.sx(k + 0.2), y: ax.sy(val), width: ax.sx(0.6) - ax.sx(0), height: ax.sy(0) - ax.sy(val), fill: k === 0 ? "var(--bad)" : k === 1 ? "var(--warn)" : "var(--good)", opacity: 0.8 }); K.svg(svg, "text", { x: ax.sx(k + 0.5), y: 248, "text-anchor": "middle", "font-size": 12 }, n); });
+      K.svg(svg, "text", { x: 360, y: 280, "font-size": 11, class: "muted" }, "删除法不造假坐标，但样本变少");
+      return { readout: [
+        { k: "被填上的坐标个数", v: String(cnt) },
+        { k: "填补点平均偏离真值", v: cnt ? (err / cnt).toFixed(1) + " 像素" : "—", color: cnt && err / cnt > 4 ? "var(--bad)" : "var(--good)" },
+        { k: "能用于训练的照片", v: `${kept} / ${NF}`, color: kept < NF * 0.5 ? "var(--warn)" : "var(--ink)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：像素 → 眼睛坐标的线性回归 ---------- */
+  const SB = 16, DB = SB * SB, POOL = Array.from({ length: 460 }, (_, i) => { const F = makeFace(5000 + i), kp = keypoints(F); return { x: render(F, SB), y: [kp[0][0], kp[0][1], kp[1][0], kp[1][1]], F }; });
+  const TESTB = POOL.slice(400);
+  function trainGD(n, scale, epochs, lr) {
+    const W = Array.from({ length: 4 }, () => new Float64Array(DB + 1)), tr = POOL.slice(0, n), curve = [];
+    for (let o = 0; o < 4; o++) W[o][DB] = tr.reduce((a, s) => a + s.y[o] * 96, 0) / n;
+    for (let e = 0; e < epochs; e++) {
+      const G = Array.from({ length: 4 }, () => new Float64Array(DB + 1));
+      let L = 0;
+      tr.forEach((s) => { for (let o = 0; o < 4; o++) { let p = W[o][DB]; for (let j = 0; j < DB; j++) p += W[o][j] * s.x[j] * scale; const d = p - s.y[o] * 96; L += d * d; for (let j = 0; j < DB; j++) G[o][j] += d * s.x[j] * scale; G[o][DB] += d; } });
+      for (let o = 0; o < 4; o++) for (let j = 0; j <= DB; j++) W[o][j] -= (lr * G[o][j]) / n;
+      const m = Math.sqrt(L / (n * 4)); curve.push(isFinite(m) ? m : 1e9);
+    }
+    return { W, curve };
+  }
+  const predB = (W, x, scale) => W.map((w) => { let p = w[DB]; for (let j = 0; j < DB; j++) p += w[j] * x[j] * scale; return p; });
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "n", label: "训练样本数", min: 20, max: 400, step: 20, value: 200 },
+      { id: "norm", label: "像素怎么送进模型", value: "1", options: [["1", "缩放到 0–1（除以 255）"], ["255", "原始 0–255（作者的做法）"]] },
+      { id: "ep", label: "梯度下降轮数", min: 10, max: 150, step: 10, value: 80 },
+    ],
+    note: "16×16 的卡通脸，用最简单的“线性回归”从 256 个像素直接预测两只眼睛中心的 4 个坐标（单位：96 像素制），批量梯度下降，学习率固定 0.012，截距先设成平均坐标。左边曲线是训练误差随轮数的变化；右边是 4 张没见过的测试脸，绿圈为真值、黄点为预测。原始 0–255 输入在同一个学习率下会数值爆炸。",
+    render(svg, v) {
+      const scale = v.norm === "1" ? 1 : 255;
+      const { W, curve } = trainGD(v.n, scale, v.ep, 0.012);
+      const bad = !isFinite(curve[curve.length - 1]) || curve[curve.length - 1] > 1e4;
+      const top = bad ? 40 : Math.max(4, Math.ceil(curve[0] * 1.2));
+      const ax = K.axes(svg, { x: 50, y: 20, w: 260, h: 230 }, [0, v.ep], [0, top], { xlabel: "轮数", ylabel: "训练 RMSE（像素）", yticks: 4 });
+      let d = ""; curve.forEach((c, i) => (d += (i ? "L" : "M") + ax.sx(i + 1) + "," + ax.sy(Math.min(top, c))));
+      K.svg(svg, "path", { d, fill: "none", stroke: bad ? "var(--bad)" : "var(--c1)", "stroke-width": 2.5 });
+      if (bad) K.svg(svg, "text", { x: 180, y: 120, "text-anchor": "middle", "font-size": 15, "font-weight": 700, fill: "var(--bad)" }, "误差爆炸（发散）");
+      let te = 0;
+      TESTB.forEach((s) => { const p = predB(W, s.x, scale); for (let o = 0; o < 4; o++) te += (p[o] - s.y[o] * 96) ** 2; });
+      te = Math.sqrt(te / (TESTB.length * 4));
+      TESTB.slice(0, 4).forEach((s, k) => {
+        const x0 = 350 + (k % 2) * 140, y0 = 20 + Math.floor(k / 2) * 140, w = 130;
+        drawImg(svg, render(s.F, 32), 32, x0, y0, w);
+        const p = predB(W, s.x, scale);
+        [[s.y[0], s.y[1]], [s.y[2], s.y[3]]].forEach((q) => K.svg(svg, "circle", { cx: x0 + q[0] * w, cy: y0 + q[1] * w, r: 6, fill: "none", stroke: "var(--good)", "stroke-width": 2 }));
+        if (!bad) [[p[0], p[1]], [p[2], p[3]]].forEach((q) => K.svg(svg, "circle", { cx: x0 + K.clamp(q[0] / 96, -0.1, 1.1) * w, cy: y0 + K.clamp(q[1] / 96, -0.1, 1.1) * w, r: 3.5, fill: "var(--warn)" }));
+      });
+      return { readout: [
+        { k: "训练 RMSE", v: bad ? "发散" : curve[curve.length - 1].toFixed(2) + " 像素", color: bad ? "var(--bad)" : "var(--ink)" },
+        { k: "60 张测试脸 RMSE", v: bad || !isFinite(te) ? "发散" : te.toFixed(2) + " 像素", color: bad ? "var(--bad)" : te < 3 ? "var(--good)" : "var(--warn)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

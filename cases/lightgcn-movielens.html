@@ -1,0 +1,667 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LightGCN 电影推荐</title>
+<meta name="description" content="Kaggle 案例拆解：在 MovieLens 100K 上用 PyTorch 从零实现 LightGCN：用户—电影二部图、对称归一化、三层传播取平均、BPR 损失和负采样，并与微软官方实现对照。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">用户—物品二部图 · 推荐系统 · 图卷积</div>
+  <h1>看过同样电影的人，口味会“传染”：LightGCN 推荐</h1>
+  <p class="en">LightGCN -&gt; Pytorch (From Scratch)</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span><span class="tag ml">数据挖掘</span>
+    <span class="tag method">LightGCN</span><span class="tag method">二部图邻接矩阵</span><span class="tag method">对称归一化</span>
+    <span class="tag method">多层传播取平均</span><span class="tag method">BPR 损失</span><span class="tag method">负采样</span><span class="tag method">Recall / NDCG @K</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Dipanjan Das</b></span>
+    <span>Kaggle 点赞 <b>273</b>（2026-11 抓取）</span>
+    <span>数据集 <b>MovieLens 100K</b>（Kaggle 上的 movielens-100k-dataset）</span>
+    <span><a href="https://www.kaggle.com/code/dipanjandas96/lightgcn-pytorch-from-scratch" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">用户给电影打的 1–5 星</div><p>MovieLens 100K：每行是“某用户给某电影打了几星、什么时候打的”。作者只保留 3 星及以上，当作“喜欢”。<span data-cell="6">出处</span> <span data-cell="7">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">给每个用户推荐 10 部他会喜欢的新电影</div><p>用测试集里他真正喜欢的电影来检查推荐命中了多少（Recall@10 等）。<span data-cell="19">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">LightGCN：在用户—电影图上传播嵌入</div><p>每个用户和电影一个 64 维向量，沿“看过”的连线传播 3 层后取平均，用内积打分；BPR 损失训练 30 轮。<span data-cell="21">出处</span> <span data-cell="30">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">Recall@10 约 0.21，NDCG@10 约 0.35</div><p>作者说自己的 PyTorch 版和微软官方 TensorFlow 版结果相近（第 30 轮）。<span data-cell="48">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead"><b>MovieLens 100K</b> 是明尼苏达大学 GroupLens 实验室公开的经典评分数据：约 10 万条评分，来自 943 个用户、1,682 部电影，每个用户至少评过 20 部（规模来自数据集说明）。本库已有一个用同一数据做协同过滤的案例，这一个换成了<b>图神经网络</b>的做法。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况（数据集说明）</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">评分</div><div class="v">100,000</div></div>
+        <div class="stat-tile"><div class="k">用户</div><div class="v">943</div></div>
+        <div class="stat-tile"><div class="k">电影</div><div class="v">1,682</div></div>
+        <div class="stat-tile"><div class="k">评分范围</div><div class="v">1–5 星</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">作者只保留 ≥ 3 星的评分（<span data-cell="7">第 7 格</span>），再按 8:2 随机切训练和测试（<span data-cell="9">第 9 格</span>）；过滤后的具体行数在运行输出里。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">u.data 的四列</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>作者怎么用</th></tr>
+        <tr><td><code>user_id</code></td><td>用户编号</td><td>重新编码成 0…n-1，成为图上的用户节点</td></tr>
+        <tr><td><code>item_id</code></td><td>电影编号</td><td>重新编码，成为图上的电影节点</td></tr>
+        <tr><td><code>rating</code></td><td>评分 1–5</td><td>≥ 3 保留为一条“喜欢”的边，具体分数不再使用</td></tr>
+        <tr><td><code>timestamp</code></td><td>评分时间</td><td>没有使用</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">列名见 <span data-cell="6">第 6 格</span>。这里没有“要预测的列”：推荐任务的答案是测试集里用户实际喜欢的电影。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="20">
+    <h3>动手试试 A · 推荐的四把尺子：Recall、Precision、NDCG、MAP <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="24">
+    <h3>动手试试 B · 不训练，只传播：口味相近的人和电影会靠拢吗 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="32">
+    <h3>动手试试 C · 现场训练一个迷你 LightGCN：传播层数有用吗 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>指标（第 30 轮，测试集，K = 10）</th><th>作者给出的值</th><th>出处</th></tr>
+        <tr><td>Recall@10</td><td>约 0.21</td><td><span data-cell="48">第 48 格</span></td></tr>
+        <tr><td>Precision@10</td><td>约 0.28</td><td><span data-cell="48">第 48 格</span></td></tr>
+        <tr><td>NDCG@10</td><td>约 0.35</td><td><span data-cell="48">第 48 格</span></td></tr>
+        <tr><td>MAP@10</td><td>约 0.12</td><td><span data-cell="48">第 48 格</span></td></tr>
+        <tr><td>训练损失</td><td>约 0.12</td><td><span data-cell="48">第 48 格</span></td></tr>
+        <tr><td>每轮训练时间：官方 TF 版 / 作者 PyTorch 版</td><td>约 2.5 秒 / 约 8 秒</td><td><span data-cell="48">第 48 格</span></td></tr>
+      </table></div>
+      <p style="font-size:14px">作者结论：自己从零写的 PyTorch 版和微软官方 TensorFlow 版<b>结果很接近</b>，只是更慢（第 48 格）。数值是作者文字里的约数。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li><b>“保存最好模型”实际每轮都保存</b>：第 32 格把 <code>best_ndcg = -1</code> 写在了每一轮循环的里面，所以每一轮的 NDCG 都比 -1 大，每轮都覆盖保存。</li>
+        <li><b>用测试集挑模型</b>：即使修好上一条，按测试集的 NDCG 选“最好的一轮”也等于偷看了考卷，应该另留一份验证集。</li>
+        <li><b>类里用了全局变量</b>：第 22 格 <code>get_A_tilda</code> 和 <code>propagate_through_layers</code> 用的是外面的 <code>n_users</code>、<code>n_items</code>，而不是 <code>self.n_users</code>，换一份数据时容易出错。</li>
+        <li>第 1 格说 LightGCN 是“目前最好的推荐算法”，这是 2020 年写的说法，之后已有很多新方法。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给每个用户一个“可能喜欢”的排序列表：视频、音乐、商品、新闻、课程。</li>
+        <li><b>同类问题：</b>电商“买了又买”、短视频推荐、好友推荐（用户—用户图）、学习平台推荐习题。</li>
+        <li><b>可迁移的套路：</b>只有“谁和谁有过交互”的隐式反馈时 → 建用户—物品二部图 → 给每个节点一个可学习向量 → 沿边传播几层取平均 → 用 BPR 让“交互过的”比“没交互的”分数高。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>隐式反馈：≥ 3 星当作“喜欢” <span data-cell="7">第 7 格</span></li>
+        <li>冷启动过滤：测试集只留训练集里出现过的用户和电影 <span data-cell="13">第 13 格</span></li>
+        <li>评价指标：Recall / Precision / NDCG / MAP @10，并屏蔽训练中已看过的电影 <span data-cell="20">第 20 格</span></li>
+        <li>LightGCN：对称归一化邻接矩阵、3 层传播、层平均 <span data-cell="22">第 22 格</span></li>
+        <li>BPR 损失 + L2 正则（只对初始嵌入） <span data-cell="26">第 26 格</span></li>
+        <li>每批 1024 个用户，各采 1 个正样本、1 个负样本 <span data-cell="28">第 28 格</span></li>
+        <li>与微软 recommenders 库的官方实现对照 <span data-cell="47">第 47 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者把 3 星及以上都当成“喜欢”，1、2 星的评分直接丢掉。打了 1 星说明用户看过但讨厌，这个信息丢掉可惜吗？</li>
+      <li>LightGCN 去掉了普通 GCN 里的权重矩阵和激活函数，只剩“加权平均邻居”。为什么在推荐里这么简单反而效果好？</li>
+      <li>传播层数越多，用户能“借”到越远的口味。为什么作者只用 3 层，而不是 10 层？</li>
+      <li>负样本是从用户没看过的电影里随机挑的。没看过就一定不喜欢吗？这会给训练带来什么偏差？</li>
+      <li>一个新注册、一部电影都没看过的用户，LightGCN 能给他推荐吗？为什么？</li>
+      <li>推荐系统会让人越来越只看到自己喜欢的东西（“信息茧房”）。如果你是平台的工程师，会怎么平衡？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Dipanjan Das，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：GroupLens Research, MovieLens 100K。LightGCN 论文：He et al., SIGIR 2020。
+</footer>
+</main>
+
+<script src="nb/lightgcn-movielens.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* ===== 本页图神经网络小工具（页面专用，不改共用文件） ===== */
+  const G = {};
+  /* 自查开关：网址带 ?fast 时用定时器代替 requestAnimationFrame（无界面截图时动画也能播完），并折叠代码 */
+  G.fast = /[?&]fast/.test(location.search);
+  if (G.fast) window.requestAnimationFrame = (cb) => setTimeout(() => cb(performance.now()), 8);
+  G.selfcheck = function () {
+    if (!G.fast) return;
+    setTimeout(() => {
+      if (/[?&]labs/.test(location.search)) {
+        const box = document.createElement("div"); const m = document.querySelector("main"); m.insertBefore(box, m.firstChild);
+        document.querySelectorAll(".inline-lab").forEach((x) => box.appendChild(x));
+        return;
+      }
+      if (/[?&]nofold/.test(location.search)) return;
+      const b = document.querySelector('[data-a="fold"]'); if (b) b.click();
+    }, 50);
+  };
+  /* 随机“社团图”：n 个点、k 类；同类连边概率 pIn，异类 pOut */
+  G.make = function (seed, n, k, pIn, pOut) {
+    const r = K.rng(seed), cls = [], edges = [], adj = Array.from({ length: n }, () => []);
+    for (let i = 0; i < n; i++) cls.push(i % k);
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+      if (r() < (cls[i] === cls[j] ? pIn : pOut)) { edges.push([i, j]); adj[i].push(j); adj[j].push(i); }
+    }
+    // 保证没有孤立点：孤立点随机连一个同类点
+    for (let i = 0; i < n; i++) if (!adj[i].length) {
+      let j = i; while (j === i || cls[j] !== cls[i]) j = Math.floor(r() * n);
+      edges.push([i, j]); adj[i].push(j); adj[j].push(i);
+    }
+    return { n, k, cls, edges, adj };
+  };
+  G.grav = 1;
+  /* 简单力导向布局（确定性），返回 [[x,y]...] 落在 box 里 */
+  G.layout = function (g, box, seed, iters) {
+    const r = K.rng(seed || 1), n = g.n, P = [];
+    for (let i = 0; i < n; i++) {
+      const a = (2 * Math.PI * g.cls[i]) / Math.max(1, g.k) + r() * 1.2, d = 0.25 + r() * 0.2;
+      P.push([0.5 + Math.cos(a) * d, 0.5 + Math.sin(a) * d]);
+    }
+    const it = iters || 160, kk = 0.6 / Math.sqrt(n);
+    for (let t = 0; t < it; t++) {
+      const D = P.map(() => [0, 0]), temp = 0.05 * (1 - t / it) + 0.002;
+      for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+        let dx = P[i][0] - P[j][0], dy = P[i][1] - P[j][1], d2 = dx * dx + dy * dy + 1e-6, f = (kk * kk) / d2;
+        D[i][0] += dx * f; D[i][1] += dy * f; D[j][0] -= dx * f; D[j][1] -= dy * f;
+      }
+      g.edges.forEach(([a, b]) => {
+        const dx = P[a][0] - P[b][0], dy = P[a][1] - P[b][1], d = Math.sqrt(dx * dx + dy * dy) + 1e-6, f = d / kk;
+        D[a][0] -= (dx / d) * f * d; D[a][1] -= (dy / d) * f * d; D[b][0] += (dx / d) * f * d; D[b][1] += (dy / d) * f * d;
+      });
+      for (let i = 0; i < n; i++) {
+        D[i][0] += (0.5 - P[i][0]) * G.grav; D[i][1] += (0.5 - P[i][1]) * G.grav;
+        const L = Math.sqrt(D[i][0] ** 2 + D[i][1] ** 2) + 1e-9, s = Math.min(L, temp);
+        P[i][0] = K.clamp(P[i][0] + (D[i][0] / L) * s + 0, -2, 3);
+        P[i][1] = K.clamp(P[i][1] + (D[i][1] / L) * s + 0, -2, 3);
+      }
+    }
+    const xs = P.map((p) => p[0]), ys = P.map((p) => p[1]);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys), m = 10;
+    return P.map(([x, y]) => [box.x + m + ((x - x0) / (x1 - x0 || 1)) * (box.w - 2 * m), box.y + m + ((y - y0) / (y1 - y0 || 1)) * (box.h - 2 * m)]);
+  };
+  /* 画图：返回 {nodes, lines} */
+  G.draw = function (svg, g, pos, opt) {
+    opt = opt || {};
+    const lines = g.edges.map(([a, b]) => K.svg(svg, "line", { x1: pos[a][0], y1: pos[a][1], x2: pos[b][0], y2: pos[b][1], stroke: "var(--line)", "stroke-width": opt.ew || 1.2 }));
+    const nodes = pos.map((p, i) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: opt.r || 6, fill: opt.fill ? opt.fill(i) : K.colors[g.cls[i] % 6], stroke: "var(--panel)", "stroke-width": 1.5 }));
+    return { nodes, lines };
+  };
+  /* 一个“消息”小圆点沿边从 a 飞到 b */
+  G.fly = function (svg, ctx, pa, pb, color, ms) {
+    const d = K.svg(svg, "circle", { cx: pa[0], cy: pa[1], r: 4, fill: color || "var(--accent)" });
+    return ctx.tween(ms || 600, (t) => { d.setAttribute("cx", K.lerp(pa[0], pb[0], t)); d.setAttribute("cy", K.lerp(pa[1], pb[1], t)); }).then((ok) => { d.remove(); return ok; });
+  };
+  /* 一轮消息传递：H 是每个点的向量；mode = mean / sum / max；self 是否带上自己 */
+  G.prop = function (H, adj, mode, self) {
+    return H.map((h, i) => {
+      const nb = self ? adj[i].concat([i]) : adj[i];
+      if (!nb.length) return h.slice();
+      const out = h.map(() => (mode === "max" ? -Infinity : 0));
+      nb.forEach((j) => H[j].forEach((v, d) => { if (mode === "max") out[d] = Math.max(out[d], v); else out[d] += v; }));
+      if (mode === "mean") return out.map((v) => v / nb.length);
+      return out;
+    });
+  };
+  /* GCN 式对称归一化传播：D^-1/2 (A+I) D^-1/2 H */
+  G.gcn = function (H, adj) {
+    const deg = adj.map((a) => a.length + 1);
+    return H.map((h, i) => {
+      const out = h.map((v) => v / deg[i]);
+      adj[i].forEach((j) => { const w = 1 / Math.sqrt(deg[i] * deg[j]); H[j].forEach((v, d) => (out[d] += w * v)); });
+      return out;
+    });
+  };
+  /* 多分类逻辑回归（softmax），全批量梯度下降 */
+  G.softmaxFit = function (X, y, K_, epochs, lr, l2) {
+    const D = X[0].length, W = Array.from({ length: K_ }, () => new Array(D + 1).fill(0));
+    for (let e = 0; e < epochs; e++) {
+      const Gr = W.map((w) => w.map(() => 0));
+      for (let i = 0; i < X.length; i++) {
+        const p = G.softmaxP(W, X[i]);
+        for (let c = 0; c < K_; c++) { const g = p[c] - (y[i] === c ? 1 : 0); for (let d = 0; d < D; d++) Gr[c][d] += g * X[i][d]; Gr[c][D] += g; }
+      }
+      for (let c = 0; c < K_; c++) for (let d = 0; d <= D; d++) W[c][d] -= lr * (Gr[c][d] / X.length + (d < D ? (l2 || 0) * W[c][d] : 0));
+    }
+    return W;
+  };
+  G.softmaxP = function (W, x) {
+    const z = W.map((w) => { let s = w[w.length - 1]; for (let d = 0; d < x.length; d++) s += w[d] * x[d]; return s; });
+    const m = Math.max(...z), ex = z.map((v) => Math.exp(v - m)), S = ex.reduce((a, b) => a + b, 0);
+    return ex.map((v) => v / S);
+  };
+  G.argmax = (a) => a.reduce((bi, v, i) => (v > a[bi] ? i : bi), 0);
+  /* 一圈圈扩散的“跳数”环 */
+  G.ring = function (svg, p, r, color) { return K.svg(svg, "circle", { cx: p[0], cy: p[1], r, fill: "none", stroke: color || "var(--accent)", "stroke-width": 2, "stroke-dasharray": "5 4" }); };
+  /* 小工具：节点向量 → 颜色（取最大类的颜色，透明度=置信度） */
+  G.paint = function (el, vec) {
+    const s = vec.reduce((a, b) => a + Math.max(0, b), 0) || 1, c = G.argmax(vec), conf = Math.max(0, vec[c]) / s;
+    K.set(el, { fill: K.colors[c % 6], "fill-opacity": 0.25 + 0.75 * conf });
+  };
+
+
+  const USR = "var(--c1)", MOV = "var(--c2)";
+  /* 小型用户—电影二部图：三种口味 */
+  function makeBip(seed, nu, nm, per, purity) {
+    const r = K.rng(seed), ut = [], mt = [], E = [], has = new Set();
+    for (let u = 0; u < nu; u++) ut.push(u % 3);
+    for (let m = 0; m < nm; m++) mt.push(m % 3);
+    for (let u = 0; u < nu; u++) {
+      let c = 0, tries = 0;
+      while (c < per && tries < 500) {
+        tries++;
+        const m = Math.floor(r() * nm);
+        if (r() < purity ? mt[m] !== ut[u] : false) continue;
+        const k = u + "_" + m; if (has.has(k)) continue;
+        has.add(k); E.push([u, m]); c++;
+      }
+    }
+    return { nu, nm, ut, mt, E };
+  }
+  /* 对称归一化的传播矩阵（稠密，节点数小） */
+  function normAdj(B) {
+    const n = B.nu + B.nm, A = Array.from({ length: n }, () => new Float64Array(n)), deg = new Float64Array(n);
+    B.E.forEach(([u, m]) => { A[u][B.nu + m] = 1; A[B.nu + m][u] = 1; deg[u]++; deg[B.nu + m]++; });
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) if (A[i][j]) A[i][j] = 1 / Math.sqrt(deg[i] * deg[j]);
+    return A;
+  }
+  const matmul = (A, X) => A.map((row) => { const out = new Array(X[0].length).fill(0); for (let j = 0; j < row.length; j++) if (row[j]) { const xj = X[j]; for (let d = 0; d < out.length; d++) out[d] += row[j] * xj[d]; } return out; });
+  function propagate(A, E0, L, mode) {
+    let cur = E0, acc = E0.map((e) => e.slice()), last = E0;
+    for (let l = 0; l < L; l++) { cur = matmul(A, cur); last = cur; acc = acc.map((e, i) => e.map((v, d) => v + cur[i][d])); }
+    return mode === "last" ? last : acc.map((e) => e.map((v) => v / (L + 1)));
+  }
+
+  const steps = [
+    {
+      at: 0, title: "开场：LightGCN 是什么", kicker: "第 0–5 格 · 介绍与导入",
+      html: `<p>作者说明：LightGCN 是微软等团队 2020 年提出的推荐算法，作者参照微软 recommenders 仓库里的 TensorFlow 实现，<b>用 PyTorch 从零重写</b>了一遍，最后还把结果和官方代码对比（第 0–1 格）。</p><p>推荐问题可以画成一张图：一边是用户，一边是电影，用户看过并喜欢某部电影就连一条线。这种只有两类节点、线只连在两类之间的图叫<b>二部图</b>。</p>`,
+      cells: [1, 5],
+      draw(svg, ctx) {
+        const U = [0, 1, 2, 3].map((i) => [140, 60 + i * 72]), M = [0, 1, 2, 3, 4].map((i) => [560, 40 + i * 64]);
+        const E = [[0, 0], [0, 1], [1, 1], [1, 2], [2, 2], [2, 3], [3, 3], [3, 4], [0, 2]];
+        const L = E.map(([u, m]) => { const l = K.svg(svg, "line", { x1: U[u][0], y1: U[u][1], x2: U[u][0], y2: U[u][1], stroke: "var(--ink-3)", "stroke-width": 1.5 }); return { l, u, m }; });
+        U.forEach((p, i) => { K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 16, fill: USR }); K.svg(svg, "text", { x: p[0] - 26, y: p[1] + 5, "text-anchor": "end", "font-size": 12 }, "用户 " + (i + 1)); });
+        M.forEach((p, i) => { K.svg(svg, "rect", { x: p[0] - 14, y: p[1] - 18, width: 28, height: 36, rx: 4, fill: MOV }); K.svg(svg, "text", { x: p[0] + 24, y: p[1] + 5, "font-size": 12 }, "电影 " + "ABCDE"[i]); });
+        K.svg(svg, "text", { x: 260, y: 330, "font-size": 12, class: "muted" }, "连线 = 用户给这部电影打了 ≥ 3 星（示意）");
+        (async () => { for (const o of L) if (!(await ctx.tween(220, (t) => { o.l.setAttribute("x2", K.lerp(U[o.u][0], M[o.m][0], t)); o.l.setAttribute("y2", K.lerp(U[o.u][1], M[o.m][1], t)); }))) return; })();
+      },
+    },
+    {
+      title: "读 MovieLens：只留 3 星以上", kicker: "第 6–8 格 · 数据",
+      html: `<p>读入 <code>u.data</code>（制表符分隔，四列：用户、电影、评分、时间），只保留评分 <b>≥ 3</b> 的行（第 7 格），再看各星级有多少条（第 8 格）。</p><p>这一步把“打分”变成了“喜欢 / 没表态”：3、4、5 星都算一条“喜欢”的边，具体几星不再区分。这种只知道“有没有交互”的数据叫<b>隐式反馈</b>，和网站上的“点击”“看完”是一类。</p>`,
+      cells: [6, 7, 8], highlight: ["df['rating']>=3"],
+      draw(svg, ctx) {
+        const share = [0.06, 0.11, 0.27, 0.34, 0.21]; // 示意比例
+        const bars = K.bars(svg, { x: 60, y: 40, w: 600, h: 230 }, share.map((s, i) => ({ label: i + 1 + " 星", value: 0, color: i >= 2 ? "var(--good)" : "var(--ink-3)" })), { max: 0.4, fmt: (v) => "" });
+        ctx.tween(1000, (t) => bars.forEach((b, i) => { const h = (230 * share[i] * t) / 0.4; b.rect.setAttribute("height", h); b.rect.setAttribute("y", 270 - h); }))
+          .then((ok) => ok && ctx.tween(700, (t) => bars.forEach((b, i) => { if (i < 2) K.set(b.rect, { opacity: 1 - 0.85 * t }); })));
+        K.svg(svg, "text", { x: 60, y: 28, "font-size": 13, "font-weight": 700 }, "≥ 3 星 → 一条“喜欢”的边；1–2 星丢掉（柱高为示意）");
+      },
+    },
+    {
+      title: "切分、编号、过滤“没见过”的人和电影", kicker: "第 9–15 格 · 预处理",
+      html: `<p>随机 8:2 切成训练集和测试集（第 9 格）。用户和电影的编号用 LabelEncoder 重新编成 0、1、2…（第 12 格），方便当作矩阵的行号。</p><p>测试集里如果有训练集没出现过的用户或电影，模型没法给它学向量，作者就把这些行删掉（第 13 格）。这叫处理<b>冷启动</b>：完全新来的人或物，基于交互的推荐方法是“看不见”的。</p>`,
+      cells: [9, 12, 13, 14, 15], highlight: ["test_size = 0.2", "isin(train_user_ids)", "LabelEncoder"],
+      draw(svg, ctx) {
+        const r = K.rng(6), cells = [];
+        K.svg(svg, "text", { x: 40, y: 30, "font-size": 13, "font-weight": 700 }, "每一格 = 一条“喜欢”记录");
+        for (let i = 0; i < 100; i++) { const isTe = r() < 0.2, cold = isTe && r() < 0.15; cells.push({ isTe, cold, e: K.svg(svg, "rect", { x: 40 + (i % 20) * 22, y: 44 + Math.floor(i / 20) * 26, width: 18, height: 20, rx: 3, fill: "var(--ink-3)" }) }); }
+        K.svg(svg, "text", { x: 520, y: 70, "font-size": 13, fill: "var(--c1)" }, "■ 训练 80%");
+        K.svg(svg, "text", { x: 520, y: 96, "font-size": 13, fill: "var(--c4)" }, "■ 测试 20%");
+        K.svg(svg, "text", { x: 520, y: 122, "font-size": 13, fill: "var(--bad)" }, "✕ 测试里训练没见过的");
+        K.svg(svg, "text", { x: 520, y: 140, "font-size": 12, fill: "var(--bad)" }, "　用户 / 电影 → 删掉");
+        ctx.wait(300).then((ok) => ok && ctx.tween(800, (t) => cells.forEach((c, i) => { if (i / 100 < t) K.set(c.e, { fill: c.isTe ? "var(--c4)" : "var(--c1)" }); })))
+          .then((ok) => ok && ctx.tween(600, (t) => cells.forEach((c) => { if (c.cold) K.set(c.e, { fill: "var(--bad)", opacity: 1 - 0.8 * t }); })));
+      },
+    },
+    {
+      title: "每个节点一个 64 维向量，传播 3 层", kicker: "第 16–18 格 · 超参数",
+      html: `<p><code>latent_dim = 64</code>：每个用户、每部电影都用一串 64 个数字（<b>嵌入向量</b>）来表示，一开始是随机的，训练中慢慢学。<code>n_layers = 3</code>：向量要沿着图传播 3 次（第 16–17 格）。</p><p>第 18 格是个小工具：把 scipy 的稀疏矩阵转成 PyTorch 的稀疏张量。图的邻接矩阵绝大部分是 0（一个人只看过很少的电影），用稀疏格式只存非零的位置，省内存也省计算。</p>`,
+      cells: [17, 18], highlight: ["latent_dim = 64", "n_layers = 3", "torch.sparse.FloatTensor"],
+      draw(svg, ctx) {
+        const r = K.rng(8);
+        [["用户 1", USR, 60], ["电影 B", MOV, 200]].forEach(([n, c, y]) => {
+          K.svg(svg, "text", { x: 40, y: y + 16, "font-size": 13, fill: c, "font-weight": 700 }, n);
+          for (let d = 0; d < 32; d++) {
+            const v = K.randn(r) * 0.6, e = K.svg(svg, "rect", { x: 120 + d * 17, y, width: 15, height: 26, rx: 2, fill: v > 0 ? "var(--c3)" : "var(--c6)", opacity: 0 });
+            ctx.wait(d * 30).then((ok) => ok && ctx.tween(200, (t) => K.set(e, { opacity: Math.min(1, Math.abs(v)) * t })));
+          }
+        });
+        K.svg(svg, "text", { x: 120, y: 110, "font-size": 12, class: "muted" }, "64 个数字（这里画了 32 个；绿 = 正，红 = 负，深浅 = 大小，示意）");
+        K.svg(svg, "text", { x: 120, y: 290, "font-size": 13 }, "推荐分 = 用户向量 · 电影向量（对应位置相乘再相加）");
+      },
+    },
+    {
+      title: "推荐的四把尺子", kicker: "第 19–20 格 · 评价指标",
+      html: `<p><code>get_metrics</code>（第 20 格）先用“用户向量 × 电影向量”给每个用户和每部电影打分，把训练集里<b>已经看过的电影分数设成负无穷</b>（不会再推荐），取分数最高的 10 部，再和测试集里他真正喜欢的电影比：</p><ul class="tight"><li><b>Recall@10</b>：他喜欢的电影里，有几成出现在这 10 部中；</li><li><b>Precision@10</b>：这 10 部里有几成是他喜欢的；</li><li><b>NDCG@10</b>：命中的电影排得越靠前分越高；</li><li><b>MAP@10</b>：综合每个命中位置的精确率。</li></ul>`,
+      cells: [20], highlight: ["torch.topk", "-np.inf", "def get_dcg_idcg", "def get_map"],
+      draw(svg, ctx) {
+        const hits = [1, 0, 1, 0, 0, 1, 0, 0, 0, 0];
+        K.svg(svg, "text", { x: 40, y: 34, "font-size": 13, "font-weight": 700 }, "给某用户推荐的前 10 部（✓ = 测试集里他真喜欢）");
+        const boxes = hits.map((h, i) => { const g = K.node(svg, 40 + i * 64, 50, 56, 56, (i + 1) + "\n" + (h ? "✓" : "·"), { stroke: h ? "var(--good)" : "var(--line)", sw: h ? 2.5 : 1 }); g.style.opacity = 0; return g; });
+        (async () => {
+          for (const b of boxes) if (!(await ctx.tween(150, (t) => (b.style.opacity = t)))) return;
+          const lines = ["他在测试集里喜欢 6 部：Recall@10 = 3 / 6 = 0.50", "10 部里命中 3 部：Precision@10 = 3 / 10 = 0.30", "命中在第 1、3、6 位：越靠前权重越大 → NDCG"];
+          for (let i = 0; i < lines.length; i++) { K.svg(svg, "text", { x: 40, y: 160 + i * 34, "font-size": 14 }, lines[i]); if (!(await ctx.wait(500))) return; }
+        })();
+      },
+    },
+    {
+      title: "LightGCN：用户—电影图与对称归一化", kicker: "第 21–22 格 · 模型（核心）",
+      html: `<p><code>get_A_tilda</code> 先建一个 (用户数 + 电影数) 见方的邻接矩阵：右上块是“用户 × 电影”的交互矩阵 R，左下块是它的转置。然后做<b>对称归一化</b>：每个位置除以 √(用户的度 × 电影的度)。</p><p>和普通 GCN 相比，LightGCN 删掉了每层的<b>权重矩阵</b>和<b>激活函数</b>，只保留“邻居向量加权求和”。唯一要学的参数就是第 0 层的嵌入 <code>E0</code>。</p>`,
+      cells: [22], highlight: ["def get_A_tilda", "np.power(rowsum + 1e-9, -0.5)", "def propagate_through_layers", "torch.sparse.mm", "torch.mean(all_layer_embedding"],
+      draw(svg, ctx) {
+        const n = 7, nu = 3, cell = 30, x0 = 60, y0 = 40;
+        const R = [[1, 1, 0, 0], [0, 1, 1, 0], [0, 0, 1, 1]];
+        K.svg(svg, "text", { x: x0, y: 28, "font-size": 12, "font-weight": 700 }, "邻接矩阵（3 个用户 + 4 部电影）");
+        const cells = [];
+        for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+          let v = 0; if (i < nu && j >= nu) v = R[i][j - nu]; if (i >= nu && j < nu) v = R[j][i - nu];
+          const e = K.svg(svg, "rect", { x: x0 + j * cell, y: y0 + i * cell, width: cell - 2, height: cell - 2, fill: "var(--panel-2)", stroke: "var(--line)" });
+          cells.push({ e, v, i, j });
+        }
+        K.svg(svg, "text", { x: x0 + 5 * cell, y: y0 - 4 + 0, "font-size": 11, "text-anchor": "middle", fill: "var(--accent)" }, "R");
+        K.svg(svg, "text", { x: x0 - 8, y: y0 + 5 * cell, "font-size": 11, "text-anchor": "end", fill: "var(--accent)" }, "Rᵀ");
+        const deg = new Array(n).fill(0); cells.forEach((c) => { if (c.v) deg[c.i]++; });
+        const lab = K.svg(svg, "text", { x: 320, y: 120, "font-size": 14, "font-weight": 700 }, "");
+        const lab2 = K.svg(svg, "text", { x: 320, y: 150, "font-size": 12, class: "muted" }, "");
+        (async () => {
+          if (!(await ctx.tween(700, (t) => cells.forEach((c) => { if (c.v) K.set(c.e, { fill: "var(--accent)", "fill-opacity": t }); })))) return;
+          lab.textContent = "第 1 步：有交互的位置填 1";
+          if (!(await ctx.wait(900))) return;
+          lab.textContent = "第 2 步：除以 √(行的度 × 列的度)";
+          lab2.textContent = "热门电影、看片多的用户，每条边的权重被调小";
+          const txt = [];
+          cells.forEach((c) => { if (c.v) { const w = 1 / Math.sqrt(deg[c.i] * deg[c.j]); K.set(c.e, { "fill-opacity": 0.25 + w }); txt.push(K.svg(svg, "text", { x: x0 + c.j * cell + 14, y: y0 + c.i * cell + 19, "text-anchor": "middle", "font-size": 9, fill: "var(--ink)" }, w.toFixed(2))); } });
+        })();
+      },
+    },
+    {
+      title: "传播三层，再把四层取平均", kicker: "第 23–24 格 · 传播与层平均",
+      html: `<p>前向传播（第 22 格的 <code>propagate_through_layers</code>）：E1 = Ã·E0，E2 = Ã·E1，E3 = Ã·E2，最终嵌入 = (E0 + E1 + E2 + E3) / 4。然后按前 n_users 行、后 n_items 行切成用户嵌入和电影嵌入。</p><p>第 1 层：用户得到自己看过的电影的信息；第 2 层：得到“和我看过同一部电影的其他用户”的信息；第 3 层：再往外一圈。<b>取平均</b>让近处的信息和远处的信息都保留下来，避免层数多了所有人变得一样。可学习参数只有 E0（第 24 格打印它的形状：节点数 × 64）。</p>`,
+      cells: [23, 24], highlight: ["LightGCN(train", "parameters())[0].size()"],
+      draw(svg, ctx) {
+        const U = [[120, 100], [120, 240]], M = [[360, 60], [360, 170], [360, 280]], U2 = [[600, 170]];
+        const E = [[U[0], M[0]], [U[0], M[1]], [U[1], M[1]], [U[1], M[2]], [U2[0], M[1]], [U2[0], M[2]]];
+        E.forEach(([a, b]) => K.svg(svg, "line", { x1: a[0], y1: a[1], x2: b[0], y2: b[1], stroke: "var(--line)", "stroke-width": 2 }));
+        [...U, ...U2].forEach((p, i) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 16, fill: USR }));
+        M.forEach((p) => K.svg(svg, "rect", { x: p[0] - 14, y: p[1] - 18, width: 28, height: 36, rx: 4, fill: MOV }));
+        const me = U[0];
+        K.svg(svg, "circle", { cx: me[0], cy: me[1], r: 22, fill: "none", stroke: "var(--warn)", "stroke-width": 3 });
+        const lab = K.svg(svg, "text", { x: 20, y: 330, "font-size": 13, "font-weight": 700 }, "");
+        (async () => {
+          lab.textContent = "第 1 层：我看过的电影把信息传给我";
+          if (!(await Promise.all([G.fly(svg, ctx, M[0], me, MOV, 700), G.fly(svg, ctx, M[1], me, MOV, 700)]).then((a) => a.every(Boolean)))) return;
+          lab.textContent = "第 2 层：看过同一部电影的其他用户 → 电影 → 我";
+          if (!(await Promise.all([G.fly(svg, ctx, U[1], M[1], USR, 600), G.fly(svg, ctx, U2[0], M[1], USR, 600)]).then((a) => a.every(Boolean)))) return;
+          if (!(await G.fly(svg, ctx, M[1], me, USR, 600))) return;
+          lab.textContent = "第 3 层：更远一圈（电影 3 我没看过，但口味已经“传”过来了）";
+          if (!(await G.fly(svg, ctx, M[2], U[1], MOV, 500))) return;
+          if (!(await G.fly(svg, ctx, U[1], M[1], MOV, 500))) return;
+          await G.fly(svg, ctx, M[1], me, MOV, 500);
+        })();
+      },
+    },
+    {
+      title: "BPR 损失：喜欢的要比没看过的分高", kicker: "第 25–26 格 · 损失函数",
+      html: `<p>BPR（贝叶斯个性化排序）不要求模型猜出具体几星，只要求一件事：<b>同一个用户，他喜欢的电影的分数要比随便一部没看过的电影高</b>。损失 = softplus(负样本分 − 正样本分) 的平均，正样本分高出越多，损失越小（第 26 格）。</p><p>另外加一个 L2 正则项：初始嵌入 E0 的平方和，乘以 DECAY = 0.0001（第 30、32 格），防止向量无限变大。</p>`,
+      cells: [26], highlight: ["softplus(neg_scores - pos_scores)", "reg_loss"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 300, h: 240 }, [-4, 4], [0, 4.2], { xlabel: "负样本分 − 正样本分", ylabel: "损失" });
+        let d = ""; for (let x = -4; x <= 4; x += 0.1) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(Math.log(1 + Math.exp(x)));
+        K.svg(svg, "path", { d, fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        const dot = K.svg(svg, "circle", { cx: ax.sx(3), cy: ax.sy(Math.log(1 + Math.exp(3))), r: 7, fill: "var(--warn)" });
+        const pos = K.svg(svg, "rect", { x: 450, y: 270, width: 60, height: 0, fill: "var(--good)" }), neg = K.svg(svg, "rect", { x: 560, y: 270, width: 60, height: 0, fill: "var(--bad)" });
+        K.svg(svg, "text", { x: 480, y: 292, "text-anchor": "middle", "font-size": 12 }, "喜欢的电影");
+        K.svg(svg, "text", { x: 590, y: 292, "text-anchor": "middle", "font-size": 12 }, "没看过的电影");
+        K.svg(svg, "text", { x: 440, y: 40, "font-size": 13, "font-weight": 700 }, "训练过程中的两个分数（示意）");
+        ctx.tween(2200, (t) => {
+          const p = 1 + 3 * t, q = 3.5 - 2.5 * t, x = q - p;
+          dot.setAttribute("cx", ax.sx(K.clamp(x, -4, 4))); dot.setAttribute("cy", ax.sy(Math.log(1 + Math.exp(x))));
+          pos.setAttribute("height", p * 50); pos.setAttribute("y", 270 - p * 50); neg.setAttribute("height", q * 50); neg.setAttribute("y", 270 - q * 50);
+        });
+      },
+    },
+    {
+      title: "每次抽：一个用户、一部喜欢的、一部没看过的", kicker: "第 27–28 格 · 负采样",
+      html: `<p><code>data_loader</code> 每批随机挑 1024 个用户；对每个用户，从他训练集里喜欢的电影中随机抽 1 部当<b>正样本</b>，再随机抽 1 部他<b>没交互过</b>的电影当<b>负样本</b>（第 27–28 格）。三元组（用户, 正, 负）就是 BPR 损失的输入。</p><p>“没交互过”不等于“不喜欢”，可能只是还没发现。这种把未知当作负例的做法叫<b>负采样</b>，是隐式反馈推荐里的常见近似。</p>`,
+      cells: [28], highlight: ["def sample_neg", "random.choice(x)"],
+      draw(svg, ctx) {
+        const movies = 12, liked = new Set([1, 4, 5, 9]);
+        K.svg(svg, "circle", { cx: 90, cy: 170, r: 22, fill: USR });
+        K.svg(svg, "text", { x: 90, y: 210, "text-anchor": "middle", "font-size": 12 }, "抽到的用户");
+        const P = Array.from({ length: movies }, (_, i) => [260 + (i % 6) * 70, 110 + Math.floor(i / 6) * 120]);
+        const rects = P.map((p, i) => K.svg(svg, "rect", { x: p[0] - 16, y: p[1] - 22, width: 32, height: 44, rx: 4, fill: liked.has(i) ? MOV : "var(--panel-2)", stroke: "var(--ink-3)" }));
+        K.svg(svg, "text", { x: 260, y: 60, "font-size": 12 }, "橙色 = 他喜欢过；灰色 = 没交互过");
+        const r = K.rng(3);
+        (async () => {
+          for (let round = 0; round < 3; round++) {
+            const posI = [...liked][Math.floor(r() * 4)]; let negI; do negI = Math.floor(r() * movies); while (liked.has(negI));
+            K.set(rects[posI], { stroke: "var(--good)", "stroke-width": 4 }); K.set(rects[negI], { stroke: "var(--bad)", "stroke-width": 4 });
+            const t1 = K.svg(svg, "text", { x: P[posI][0], y: P[posI][1] + 40, "text-anchor": "middle", "font-size": 12, fill: "var(--good)" }, "正"), t2 = K.svg(svg, "text", { x: P[negI][0], y: P[negI][1] + 40, "text-anchor": "middle", "font-size": 12, fill: "var(--bad)" }, "负");
+            if (!(await ctx.wait(900))) return;
+            K.set(rects[posI], { stroke: "var(--ink-3)", "stroke-width": 1 }); K.set(rects[negI], { stroke: "var(--ink-3)", "stroke-width": 1 }); t1.remove(); t2.remove();
+          }
+        })();
+      },
+    },
+    {
+      title: "训练 30 轮，每轮都在测试集上打分", kicker: "第 29–32 格 · 训练循环",
+      html: `<p>Adam 优化器、学习率 0.005，30 轮，每批 1024 个用户，K = 10（第 29–30 格）。每一轮：按“训练集行数 ÷ 1024”跑若干批，每批前向传播 → BPR 损失 + 正则 → 反向更新；轮末在测试集上算四个指标（第 32 格）。</p><p>注意第 32 格：<code>best_ndcg = -1</code> 写在了每一轮的循环里面，所以每一轮都会被当成“最好”而保存一遍。而且用测试集挑最好的一轮，本身也有偷看考卷的嫌疑。</p>`,
+      cells: [29, 30, 32], highlight: ["lr = 0.005", "EPOCHS = 30", "best_ndcg = -1"],
+      notes: { 32: "best_ndcg = -1 放在了 for epoch 循环内部，每轮都会重置，“只保存最好的一轮”没有生效" },
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 560, h: 240 }, [0, 30], [0, 0.7], { xlabel: "轮数", ylabel: "示意" });
+        const loss = (e) => 0.12 + 0.55 * Math.exp(-e / 4), ndcg = (e) => 0.35 * (1 - Math.exp(-e / 5));
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 }), p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c3)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 470, y: 60, "font-size": 12, fill: "var(--c6)" }, "训练损失 → 约 0.12");
+        K.svg(svg, "text", { x: 470, y: 80, "font-size": 12, fill: "var(--c3)" }, "测试 NDCG@10 → 约 0.35");
+        K.svg(svg, "text", { x: 60, y: 325, "font-size": 11, class: "muted" }, "只有终点数值来自作者第 48 格，曲线形状是示意");
+        ctx.tween(2000, (t) => { let a = "", b = ""; for (let e = 0; e <= 30 * t; e += 0.5) { a += (a ? "L" : "M") + ax.sx(e) + "," + ax.sy(loss(e)); b += (b ? "L" : "M") + ax.sx(e) + "," + ax.sy(ndcg(e)); } p1.setAttribute("d", a); p2.setAttribute("d", b); });
+      },
+    },
+    {
+      title: "曲线与最终指标", kicker: "第 33–37 格 · 结果",
+      html: `<p>作者画了四个指标和三种损失随轮数的变化（第 34–35 格），打印平均每轮训练和评估的时间（第 36 格），以及最后一轮的四个测试指标和训练损失（第 37 格）。</p><p>这些数字在运行输出里；作者在第 48 格用文字总结了第 30 轮的结果：<b>Recall@10 约 0.21，Precision@10 约 0.28，NDCG@10 约 0.35，MAP@10 约 0.12</b>，训练损失约 0.12。</p>`,
+      cells: [34, 35, 36, 37],
+      draw(svg, ctx) {
+        const items = [["Recall@10", 0.21], ["Precision@10", 0.28], ["NDCG@10", 0.35], ["MAP@10", 0.12]];
+        const bars = K.bars(svg, { x: 80, y: 40, w: 560, h: 230 }, items.map(([n], i) => ({ label: n, value: 0, color: K.colors[i] })), { max: 0.4, fmt: (v) => v.toFixed(2) });
+        ctx.tween(1000, (t) => bars.forEach((b, i) => { const v = items[i][1] * t, h = (230 * v) / 0.4; b.rect.setAttribute("height", h); b.rect.setAttribute("y", 270 - h); b.text.setAttribute("y", 265 - h); b.text.textContent = "约 " + v.toFixed(2); }));
+        K.svg(svg, "text", { x: 80, y: 320, "font-size": 12, class: "muted" }, "作者第 48 格给出的第 30 轮约数");
+      },
+    },
+    {
+      title: "和微软官方实现对照", kicker: "第 38–49 格 · 复现检验",
+      html: `<p>最后，作者克隆了微软 <code>recommenders</code> 仓库，用官方的 TensorFlow 版 LightGCN、同样的训练 / 测试数据和同样的超参数（学习率 0.005、30 轮、top_k = 10）跑了一遍（第 39–47 格）。</p><p>作者的结论（第 48 格）：两边结果很接近；官方代码每轮训练约 2.5 秒，作者的 PyTorch 版约 8 秒；评估分别约 0.2 秒和 0.4 秒。<b>用官方实现对照自己的复现</b>，是检验“我有没有写错”的好办法。</p>`,
+      cells: [40, 44, 45, 47], highlight: ["git clone", "prepare_hparams", "model.fit()"],
+      draw(svg, ctx) {
+        K.node(svg, 60, 50, 250, 70, "作者的 PyTorch 版\n（从零手写）", { bold: true, stroke: "var(--c1)", sw: 2 });
+        K.node(svg, 410, 50, 250, 70, "微软官方 TensorFlow 版\n（recommenders 库）", { bold: true, stroke: "var(--c2)", sw: 2 });
+        K.svg(svg, "text", { x: 360, y: 160, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--good)" }, "同样的数据、同样的超参数 → 指标相近");
+        const tm = K.bars(svg, { x: 160, y: 190, w: 420, h: 110 }, [{ label: "PyTorch 版 / 轮", value: 0, color: "var(--c1)" }, { label: "官方 TF 版 / 轮", value: 0, color: "var(--c2)" }], { horizontal: true, labelWidth: 120, max: 9, fmt: (v) => "约 " + v.toFixed(1) + " 秒" });
+        const V = [8, 2.5];
+        ctx.wait(500).then((ok) => ok && ctx.tween(900, (t) => tm.forEach((b, i) => { const w = ((420 - 120 - 50) * V[i] * t) / 9; b.rect.setAttribute("width", w); b.text.setAttribute("x", 160 + 120 + w + 6); b.text.textContent = "约 " + (V[i] * t).toFixed(1) + " 秒"; })));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+  G.selfcheck();
+
+  /* ---------- 实验 A：四个指标（按作者第 20 格的公式） ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "rel", label: "测试集里该用户喜欢的电影数", min: 1, max: 20, step: 1, value: 6 },
+      { id: "hit", label: "前 10 部推荐里命中几部", min: 0, max: 10, step: 1, value: 3 },
+      { id: "posn", label: "命中的电影排在前面还是后面", min: 0, max: 1, step: 0.05, value: 0.3, fmt: (v) => (v < 0.34 ? "靠前" : v < 0.67 ? "居中" : "靠后") },
+    ],
+    note: "按作者第 20 格的公式现场计算：Recall = 命中数 / 他喜欢的总数；Precision = 命中数 / 10；NDCG = Σ 命中/log(位置+1) ÷ 理想情况；MAP = Σ(命中处的累计命中数 / 位置) ÷ 他喜欢的总数。拖“排在前面还是后面”，看哪两个指标会变、哪两个不变。",
+    render(svg, v) {
+      const Kk = 10, h = Math.min(v.hit, v.rel, Kk), hits = new Array(Kk).fill(0);
+      const start = Math.round(v.posn * (Kk - h));
+      for (let i = 0; i < h; i++) hits[start + i] = 1;
+      hits.forEach((x, i) => K.node(svg, 20 + i * 60, 30, 52, 52, (i + 1) + "\n" + (x ? "✓" : "·"), { stroke: x ? "var(--good)" : "var(--line)", sw: x ? 2.5 : 1 }));
+      const recall = h / v.rel, prec = h / Kk;
+      const idcg = Array.from({ length: Math.min(v.rel, Kk) }, (_, i) => 1 / Math.log1p(i + 1)).reduce((a, b) => a + b, 0);
+      const dcg = hits.reduce((s, x, i) => s + x / Math.log1p(i + 1), 0);
+      let cum = 0; const map = hits.reduce((s, x, i) => { cum += x; return s + (cum * x) / (i + 1); }, 0) / v.rel;
+      const items = [["Recall@10", recall], ["Precision@10", prec], ["NDCG@10", dcg / idcg], ["MAP@10", map]];
+      const ax = K.axes(svg, { x: 60, y: 110, w: 560, h: 150 }, [0, 4], [0, 1], { xticks: 0, yticks: 2, yfmt: (x) => x.toFixed(1) });
+      items.forEach(([n, val], i) => {
+        K.svg(svg, "rect", { x: ax.sx(i + 0.2), y: ax.sy(val), width: ax.sx(0.6) - ax.sx(0), height: Math.max(1, ax.sy(0) - ax.sy(val)), fill: K.colors[i], rx: 3 });
+        K.svg(svg, "text", { x: ax.sx(i + 0.5), y: ax.sy(val) - 5, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, val.toFixed(3));
+        K.svg(svg, "text", { x: ax.sx(i + 0.5), y: 280, "text-anchor": "middle", "font-size": 12 }, n);
+      });
+      return { readout: items.map(([n, val]) => ({ k: n, v: val.toFixed(3) })) };
+    },
+  });
+
+  /* ---------- 实验 B：不训练，只传播 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "L", label: "传播层数", min: 0, max: 6, step: 1, value: 0 },
+      { id: "mode", label: "最终嵌入怎么取", value: "mean", options: [["mean", "各层取平均（LightGCN）"], ["last", "只用最后一层"]] },
+      { id: "pur", label: "用户口味有多专一", min: 0.3, max: 1, step: 0.05, value: 0.85, fmt: (v) => (v * 100).toFixed(0) + "%" },
+      { id: "seed", label: "换一批随机初始向量", button: true },
+    ],
+    note: "30 个用户（圆）和 24 部电影（方块），按三种口味（颜色）生成“喜欢”记录，每人 5 部。每个节点先给一个随机的 2 维向量（画成坐标），然后用对称归一化的邻接矩阵传播 L 层。没有任何训练：只看传播本身会不会让同一口味的用户和电影聚到一起。“只用最后一层”拖到 6 层时，注意点会挤成一团（过度平滑）。",
+    render(svg, v) {
+      const B = makeBip(5, 30, 24, 5, v.pur), A = normAdj(B), r = K.rng(40 + v.seed * 9), n = B.nu + B.nm;
+      const E0 = Array.from({ length: n }, () => [K.randn(r), K.randn(r)]);
+      const Ef = propagate(A, E0, v.L, v.mode);
+      const xs = Ef.map((e) => e[0]), ys = Ef.map((e) => e[1]);
+      const cx = xs.reduce((a, b) => a + b, 0) / n, cy = ys.reduce((a, b) => a + b, 0) / n;
+      const sc = Math.max(...Ef.map((e) => Math.max(Math.abs(e[0] - cx), Math.abs(e[1] - cy)))) || 1;
+      const P = Ef.map((e) => [240 + ((e[0] - cx) / sc) * 200, 190 + ((e[1] - cy) / sc) * 165]);
+      B.E.forEach(([u, m]) => K.svg(svg, "line", { x1: P[u][0], y1: P[u][1], x2: P[B.nu + m][0], y2: P[B.nu + m][1], stroke: "var(--line)", "stroke-width": 0.6 }));
+      for (let i = 0; i < n; i++) {
+        const isU = i < B.nu, c = K.colors[[0, 1, 3][isU ? B.ut[i] : B.mt[i - B.nu]]];
+        if (isU) K.svg(svg, "circle", { cx: P[i][0], cy: P[i][1], r: 6, fill: c, stroke: "var(--panel)" });
+        else K.svg(svg, "rect", { x: P[i][0] - 6, y: P[i][1] - 6, width: 12, height: 12, fill: c, stroke: "var(--ink)", "stroke-width": 1 });
+      }
+      // 同口味 vs 不同口味的平均距离
+      let sIn = 0, nIn = 0, sOut = 0, nOut = 0;
+      const tag = (i) => (i < B.nu ? B.ut[i] : B.mt[i - B.nu]);
+      for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) { const d = Math.hypot(P[i][0] - P[j][0], P[i][1] - P[j][1]); if (tag(i) === tag(j)) { sIn += d; nIn++; } else { sOut += d; nOut++; } }
+      const ratio = sOut / nOut / (sIn / nIn);
+      // 给用户 0 推荐：内积最高、没看过的 3 部
+      const seen = new Set(B.E.filter(([u]) => u === 0).map(([, m]) => m));
+      const recs = Array.from({ length: B.nm }, (_, m) => [Ef[0][0] * Ef[B.nu + m][0] + Ef[0][1] * Ef[B.nu + m][1], m]).filter(([, m]) => !seen.has(m)).sort((a, b) => b[0] - a[0]).slice(0, 3);
+      const good = recs.filter(([, m]) => B.mt[m] === B.ut[0]).length;
+      K.svg(svg, "text", { x: 470, y: 40, "font-size": 12, "font-weight": 700 }, "○ 用户　□ 电影");
+      K.svg(svg, "text", { x: 470, y: 62, "font-size": 12 }, "颜色 = 真实口味（模型不知道）");
+      K.svg(svg, "text", { x: 470, y: 110, "font-size": 12, "font-weight": 700 }, "给用户 0 推荐的 3 部：");
+      recs.forEach(([s, m], i) => K.svg(svg, "text", { x: 470, y: 134 + i * 22, "font-size": 12, fill: B.mt[m] === B.ut[0] ? "var(--good)" : "var(--bad)" }, `电影 ${m}（${B.mt[m] === B.ut[0] ? "口味对" : "口味不对"}）`));
+      return { readout: [
+        { k: "不同口味距离 ÷ 同口味距离", v: ratio.toFixed(2), color: ratio > 1.5 ? "var(--good)" : "var(--ink)" },
+        { k: "给用户 0 的推荐对了", v: `${good} / 3` },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：现场训练迷你 LightGCN（BPR） ---------- */
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "L", label: "传播层数（0 = 普通矩阵分解）", min: 0, max: 4, step: 1, value: 2 },
+      { id: "per", label: "每个用户在训练集里喜欢几部", min: 2, max: 10, step: 1, value: 4 },
+      { id: "ep", label: "训练轮数", min: 10, max: 150, step: 10, value: 80 },
+      { id: "seed", label: "重新生成", button: true },
+    ],
+    note: "浏览器里生成 60 个用户、45 部电影（三种口味），每个用户另留 3 部喜欢的电影做测试。嵌入 8 维，按 LightGCN 的公式传播 L 层并取平均，用 BPR 损失 + 小正则现场训练（每轮每个用户抽 3 组“正样本 + 负样本”）。看 Recall@5：这么小的数据上结果波动较大，建议同一设置多点几次“重新生成”，比较 0 层和 2 层的平均水平；每个用户在训练集里看得很少时（拖到 2），多层传播通常更稳。",
+    render(svg, v) {
+      const seed = 13 + v.seed * 11, r = K.rng(seed);
+      const B0 = makeBip(seed, 60, 45, v.per + 3, 0.85);
+      // 每个用户留 2 条做测试
+      const byU = Array.from({ length: 60 }, () => []); B0.E.forEach(([u, m]) => byU[u].push(m));
+      const trE = [], teS = byU.map((ms) => new Set(ms.slice(-3)));
+      byU.forEach((ms, u) => ms.slice(0, -3).forEach((m) => trE.push([u, m])));
+      const B = { nu: 60, nm: 45, ut: B0.ut, mt: B0.mt, E: trE }, A = normAdj(B), n = 105, D = 8;
+      // M = mean_k A^k（对称）
+      let Ak = Array.from({ length: n }, (_, i) => { const row = new Float64Array(n); row[i] = 1; return row; });
+      const M = Ak.map((row) => Float64Array.from(row));
+      for (let l = 0; l < v.L; l++) { Ak = Ak.map((row) => { const out = new Float64Array(n); for (let k = 0; k < n; k++) if (row[k]) { const a = A[k]; for (let j = 0; j < n; j++) if (a[j]) out[j] += row[k] * a[j]; } return out; }); for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) M[i][j] += Ak[i][j]; }
+      for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) M[i][j] /= v.L + 1;
+      const E0 = Array.from({ length: n }, () => Array.from({ length: D }, () => K.randn(r) * 0.1));
+      const seen = byU.map((_, u) => new Set(trE.filter(([uu]) => uu === u).map(([, m]) => m)));
+      const lr = 0.3, reg = 0.05, losses = [];
+      const fin = () => M.map((row) => { const out = new Array(D).fill(0); for (let j = 0; j < n; j++) if (row[j]) for (let d = 0; d < D; d++) out[d] += row[j] * E0[j][d]; return out; });
+      for (let ep = 0; ep < v.ep; ep++) {
+        const F = fin(), gF = Array.from({ length: n }, () => new Array(D).fill(0));
+        let L = 0;
+        for (let u0 = 0; u0 < 180; u0++) {
+          const u = u0 % 60, sv = [...seen[u]]; if (!sv.length) continue;
+          const p = sv[Math.floor(r() * sv.length)]; let q; do q = Math.floor(r() * 45); while (seen[u].has(q));
+          const fu = F[u], fp = F[60 + p], fq = F[60 + q];
+          let x = 0; for (let d = 0; d < D; d++) x += fu[d] * (fq[d] - fp[d]);
+          L += Math.log(1 + Math.exp(x));
+          const s = 1 / (1 + Math.exp(-x));
+          for (let d = 0; d < D; d++) { gF[u][d] += s * (fq[d] - fp[d]); gF[60 + q][d] += s * fu[d]; gF[60 + p][d] -= s * fu[d]; }
+        }
+        losses.push(L / 180);
+        // dE0 = M^T gF = M gF（M 对称）
+        for (let i = 0; i < n; i++) { const row = M[i]; for (let j = 0; j < n; j++) if (row[j]) for (let d = 0; d < D; d++) E0[i][d] -= lr * (row[j] * gF[j][d] / 3 + reg * (i === j ? E0[i][d] : 0)); }
+      }
+      const F = fin();
+      let rec = 0;
+      for (let u = 0; u < 60; u++) {
+        const sc = Array.from({ length: 45 }, (_, m) => [seen[u].has(m) ? -1e9 : F[u].reduce((s, x, d) => s + x * F[60 + m][d], 0), m]).sort((a, b) => b[0] - a[0]).slice(0, 5);
+        rec += sc.filter(([, m]) => teS[u].has(m)).length / teS[u].size;
+      }
+      rec /= 60;
+      const ax = K.axes(svg, { x: 60, y: 20, w: 540, h: 240 }, [0, v.ep], [0, Math.max(...losses) * 1.05], { xlabel: "训练轮数", ylabel: "BPR 损失" });
+      let d = ""; losses.forEach((l, i) => (d += (d ? "L" : "M") + ax.sx(i) + "," + ax.sy(l)));
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--accent)", "stroke-width": 2 });
+      K.svg(svg, "text", { x: 60, y: 325, "font-size": 12, class: "muted" }, `随机推荐的 Recall@5 期望约 ${(5 / (45 - v.per)).toFixed(2)}`);
+      return { readout: [
+        { k: "测试 Recall@5", v: rec.toFixed(3), color: "var(--good)" },
+        { k: "最后一轮损失", v: losses[losses.length - 1].toFixed(3) },
+        { k: "传播层数", v: String(v.L) + (v.L === 0 ? "（矩阵分解）" : "") },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,870 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>语音命令频谱</title>
+<meta name="description" content="Kaggle 案例拆解：一秒钟的语音命令怎样变成电脑能看的“声音照片”——波形、频谱图、梅尔频谱、MFCC、静音切除、降采样和 PCA 找异常录音。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">音频 · 语音命令识别 · 特征工程</div>
+  <h1>把一句“yes”拍成照片：语音识别的第一步</h1>
+  <p class="en">Speech representation and data exploration</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span><span class="tag dm">数据挖掘</span>
+    <span class="tag method">波形</span><span class="tag method">对数频谱图</span><span class="tag method">梅尔频谱 / MFCC</span>
+    <span class="tag method">FFT</span><span class="tag method">VAD 静音切除</span><span class="tag method">降采样</span><span class="tag method">PCA 异常检测</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>DavidS</b></span>
+    <span>Kaggle 点赞 <b>2,456</b>（2026-11 抓取）</span>
+    <span>数据 <b>Kaggle 比赛 tensorflow-speech-recognition-challenge</b></span>
+    <span><a href="https://www.kaggle.com/code/davids1992/speech-representation-and-data-exploration" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">成千上万段一秒钟的口令录音</div><p>每段录音是一个人说一个英文单词，比如 yes、no、up、down、stop、go，按单词分文件夹存放，另外还有一个背景噪声文件夹。<span data-cell="36">出处</span></p></div>
+    <div class="card panel"><h3>要解决什么</h3><div class="big">先搞清楚：声音该怎么交给模型</div><p>这份 notebook 不训练模型，它回答训练之前的问题：声音用什么形式表示最合适，数据里有哪些坑。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">频谱图、MFCC、静音切除、降采样、PCA</div><p>把波形变成对数频谱图和梅尔频谱，比较不同单词的平均频谱，用 PCA 把每段录音压到 3 维，找出离群的怪录音。</p></div>
+    <div class="card panel"><h3>得到了什么</h3><div class="big">一套“六步特征提取”建议</div><p>降采样 → 静音检测 → 补零到等长 → 对数频谱图或 MFCC → 归一化 → 拼接相邻帧。还提醒：同一说话人不能同时出现在训练集和测试集。<span data-cell="34">出处</span> <span data-cell="40">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据来自 Kaggle 比赛 <b>TensorFlow Speech Recognition Challenge</b>。下面的规模信息只写 notebook 文字和代码里能看到的；具体录音条数在运行输出里，源码不带，这里不列。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">采样率</div><div class="v">16,000 Hz</div></div>
+        <div class="stat-tile"><div class="k">每段时长</div><div class="v">约 1 秒</div></div>
+        <div class="stat-tile"><div class="k">作者重点看的单词</div><div class="v">10 个</div></div>
+        <div class="stat-tile"><div class="k">可表示的最高频率</div><div class="v">8,000 Hz</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">16 kHz 和 0–8000 Hz 见第 6、24 格 <span data-cell="6">出处</span> <span data-cell="24">出处</span>；1 秒见第 48 格 <span data-cell="48">出处</span>，有不少录音比 1 秒短；10 个单词见第 53 格 <span data-cell="53">出处</span>；作者说各类别数量基本均衡（背景噪声除外）<span data-cell="38">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每条数据是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>部分</th><th>含义</th><th>例子</th></tr>
+        <tr><td>文件夹名</td><td><b>要预测的答案</b>：录音里说的是哪个词</td><td><code>yes/</code> <code>stop/</code></td></tr>
+        <tr><td>文件名前 8 位</td><td>说话人编号（匿名）</td><td><code>0a7c2a8d</code></td></tr>
+        <tr><td><code>_nohash_0</code></td><td>同一个人说同一个词的第几遍</td><td><code>_nohash_1</code></td></tr>
+        <tr><td>.wav 内容</td><td>一串整数，每秒 16000 个，表示麦克风膜片每一刻的位置</td><td>波形</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">文件名例子 <code>yes/0a7c2a8d_nohash_0.wav</code> 来自第 3 格 <span data-cell="3">出处</span>；作者在第 41 格用文件名第 4–11 位当作说话人编号 <span data-cell="41">出处</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="7">
+    <h3>动手试试 A · 自己“说”一个词，看它的频谱图 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="13">
+    <h3>动手试试 B · 梅尔滤波器和 MFCC 是怎么算出来的 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="23">
+    <h3>动手试试 C · 用音量门限切掉静音 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+  <div data-at="32">
+    <h3>动手试试 D · 降采样会丢掉什么 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab4"></div>
+  </div>
+  <div data-at="61">
+    <h3>动手试试 E · 用 PCA 找出“怪录音” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab5"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>语音识别很少直接用原始波形，常用频谱图或 MFCC 这类“频率”特征</td><td><span data-cell="2">第 2 格</span></td></tr>
+        <tr><td>频谱图取对数后更清楚，也更接近人耳的感受</td><td><span data-cell="4">第 4 格</span></td></tr>
+        <tr><td>每帧约 160 个频率特征，每个约 50 Hz；人耳在 1000–2000 Hz 的分辨率约 3.6 Hz，比频谱图细得多</td><td><span data-cell="10">第 10 格</span></td></tr>
+        <tr><td>传统系统多用 MFCC；端到端神经网络多用原始或梅尔频谱图</td><td><span data-cell="14">第 14 格</span></td></tr>
+        <tr><td>降采样到 8 kHz 几乎听不出差别，数据量减半</td><td><span data-cell="30">第 30 格</span> <span data-cell="33">第 33 格</span></td></tr>
+        <tr><td>录音来源差异很大，必须保证同一说话人不同时出现在训练集和测试集</td><td><span data-cell="40">第 40 格</span></td></tr>
+        <tr><td>stop 和 up 的平均 FFT 很像，但频谱图上能分开，所以“时间顺序”这个维度不能丢</td><td><span data-cell="54">第 54 格</span></td></tr>
+        <tr><td>PCA 能找出离群录音，但这次找到的没有明显问题，数据基本可靠</td><td><span data-cell="67">第 67 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">这份 notebook 是探索性分析，没有训练分类模型，所以没有准确率。录音条数、类别数这些数字在运行输出里，源码不带，这里不列。</p>
+      <h3>读代码时发现的小问题</h3>
+      <ul class="tight">
+        <li>第 66 格打印的文件名是 <code>seven/e4b02540_nohash_0.wav</code>，实际播放的是 <code>seven/b1114e4f_nohash_0.wav</code>，两者对不上。<span data-cell="66">第 66 格</span></li>
+        <li>第 7 格画波形的横轴写成 <code>np.linspace(0, sample_rate/len(samples), sample_rate)</code>，只有录音正好 1 秒时才对；录音更短时点数和样本数对不上。<span data-cell="7">第 7 格</span></li>
+        <li>第 13 格注释说要“加上一阶和二阶差分”，代码只算了二阶差分，图的标题却写 MFCC。<span data-cell="13">第 13 格</span></li>
+        <li>第 9 格作者自己提醒：只用一条录音算均值和标准差做归一化是不对的，应该用整个数据集。<span data-cell="8">第 8 格</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>把任何一段声音变成“频谱图”这种二维图片，后面接卷积网络、循环网络都可以，用来识别口令、说话人、环境声音。</li>
+        <li><b>同类问题：</b>智能音箱的唤醒词、车载语音命令、电话客服按键语音、听诊器心音分类、机器故障声音检测。</li>
+        <li><b>可迁移的套路：</b>先听、先看频谱图 → 切静音、统一长度 → 选特征（频谱图 / 梅尔 / MFCC）→ 按说话人划分训练集和测试集 → 用降维找脏数据。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>对数频谱图：<code>scipy.signal.spectrogram</code>，20 ms 窗 <span data-cell="5">第 5 格</span></li>
+        <li>梅尔频谱与 MFCC：<code>librosa.feature.melspectrogram / mfcc</code> <span data-cell="12">第 12 格</span> <span data-cell="13">第 13 格</span></li>
+        <li>静音切除（手动示范，建议用 webrtcvad）<span data-cell="21">第 21 格</span> <span data-cell="22">第 22 格</span></li>
+        <li>FFT 与降采样：<code>scipy.fftpack.fft</code>、<code>signal.resample</code> <span data-cell="25">第 25 格</span> <span data-cell="27">第 27 格</span></li>
+        <li>按频率看分布：小提琴图 <span data-cell="56">第 56 格</span></li>
+        <li>异常检测：FFT 标准化 + PCA 降到 3 维 <span data-cell="61">第 61 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者说“同一个人的录音不能同时出现在训练集和测试集”。如果随机打乱划分，测试分数会偏高还是偏低？为什么？</li>
+      <li>stop 和 up 的平均频谱几乎一样，频谱图上却能分开。平均频谱丢掉了什么信息？这对选模型有什么启发？</li>
+      <li>电话把声音降到 8 kHz 采样，我们照样听得懂。哪些声音会因此变得难分辨？（提示：s 和 f 这类擦音的能量在哪儿？）</li>
+      <li>MFCC 把特征“去相关”了，作者说神经网络本来就能处理相关特征。那给神经网络用梅尔频谱和用 MFCC，各有什么好处？</li>
+      <li>PCA 找到的离群录音“没什么明显问题”。这说明 PCA 找异常的方法没用吗？什么样的坏数据它容易找到，什么样的找不到？</li>
+      <li>这些录音是真人自愿录的口令。如果要收集你们班同学的声音做一个类似的数据集，需要先征得什么同意、怎么保护大家的隐私？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 DavidS，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的声音都是浏览器里合成的示意声音，不是数据集录音。数据：Kaggle TensorFlow Speech Recognition Challenge。
+</footer>
+</main>
+
+<script src="nb/speech-commands-spectrogram.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* ===== 本页专用：浏览器内的小型音频工具（合成示意声音、FFT、频谱图、梅尔滤波、MFCC） ===== */
+  const AK = {};
+  AK.SR = 16000;
+  // 原地基 2 FFT
+  AK.fft = function (re, im) {
+    const n = re.length;
+    for (let i = 1, j = 0; i < n; i++) {
+      let bit = n >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
+    }
+    for (let len = 2; len <= n; len <<= 1) {
+      const ang = (-2 * Math.PI) / len, wr = Math.cos(ang), wi = Math.sin(ang);
+      for (let i = 0; i < n; i += len) {
+        let cr = 1, ci = 0;
+        for (let k = 0; k < len / 2; k++) {
+          const a = i + k, b = a + len / 2;
+          const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
+          re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+          const nr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = nr;
+        }
+      }
+    }
+  };
+  AK.pow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
+  // 短时傅里叶变换：返回 [帧][频点] 的功率谱
+  AK.stft = function (x, win, hop, nfft) {
+    nfft = nfft || AK.pow2(win);
+    const frames = [], w = new Float32Array(win);
+    for (let i = 0; i < win; i++) w[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (win - 1));
+    for (let s = 0; s + win <= x.length; s += hop) {
+      const re = new Float32Array(nfft), im = new Float32Array(nfft);
+      for (let i = 0; i < win; i++) re[i] = x[s + i] * w[i];
+      AK.fft(re, im);
+      const p = new Float32Array(nfft / 2 + 1);
+      for (let k = 0; k <= nfft / 2; k++) p[k] = (re[k] * re[k] + im[k] * im[k]) / win;
+      frames.push(p);
+    }
+    return frames;
+  };
+  AK.spectrum = function (x) { // 整段 FFT 幅度（取前一半）
+    const n = AK.pow2(x.length), re = new Float32Array(n), im = new Float32Array(n);
+    re.set(x);
+    AK.fft(re, im);
+    const out = new Float32Array(n / 2);
+    for (let k = 0; k < n / 2; k++) out[k] = (2 / x.length) * Math.hypot(re[k], im[k]);
+    return out;
+  };
+  AK.hz2mel = (f) => 2595 * Math.log10(1 + f / 700);
+  AK.mel2hz = (m) => 700 * (Math.pow(10, m / 2595) - 1);
+  // 三角形梅尔滤波器组：返回 nMels 个 {lo, c, hi, w: Float32Array(nBins)}
+  AK.melFB = function (nMels, nfft, sr, fmin, fmax) {
+    fmin = fmin || 0; fmax = fmax || sr / 2;
+    const nb = nfft / 2 + 1, m0 = AK.hz2mel(fmin), m1 = AK.hz2mel(fmax), pts = [];
+    for (let i = 0; i < nMels + 2; i++) pts.push(AK.mel2hz(m0 + ((m1 - m0) * i) / (nMels + 1)));
+    const fb = [];
+    for (let m = 0; m < nMels; m++) {
+      const lo = pts[m], c = pts[m + 1], hi = pts[m + 2], w = new Float32Array(nb);
+      for (let k = 0; k < nb; k++) {
+        const f = (k * sr) / nfft;
+        w[k] = f < lo || f > hi ? 0 : f <= c ? (f - lo) / (c - lo) : (hi - f) / (hi - c);
+      }
+      fb.push({ lo, c, hi, w });
+    }
+    return fb;
+  };
+  AK.applyFB = function (frames, fb) {
+    return frames.map((p) => Float32Array.from(fb, (f) => { let s = 0; for (let k = 0; k < p.length; k++) s += p[k] * f.w[k]; return s; }));
+  };
+  AK.log = (frames, eps) => frames.map((p) => Float32Array.from(p, (v) => Math.log(v + (eps || 1e-10))));
+  AK.db = (frames) => { let mx = 1e-12; frames.forEach((p) => p.forEach((v) => (mx = Math.max(mx, v)))); return frames.map((p) => Float32Array.from(p, (v) => Math.max(-80, 10 * Math.log10((v + 1e-12) / mx)))); };
+  AK.dct = function (v, n) { // DCT-II，取前 n 个系数
+    const N = v.length, out = new Float32Array(n);
+    for (let k = 0; k < n; k++) { let s = 0; for (let i = 0; i < N; i++) s += v[i] * Math.cos((Math.PI * k * (2 * i + 1)) / (2 * N)); out[k] = s * Math.sqrt((k ? 2 : 1) / N); }
+    return out;
+  };
+  // ---- 合成示意声音 ----
+  const VOW = { a: [730, 1090, 2440], e: [530, 1840, 2480], i: [270, 2290, 3010], o: [570, 840, 2410], u: [300, 870, 2240], n: [250, 1700, 2600], l: [360, 1300, 2700], r: [420, 1300, 1600], w: [300, 700, 2200] };
+  function voiced(out, s0, n, f0, F, amp, sr, f0end) {
+    const nh = Math.floor(3800 / f0);
+    const amps = [];
+    for (let k = 1; k <= nh; k++) { let a = 0; F.forEach((f, j) => (a += Math.exp(-Math.pow((k * f0 - f) / (90 + 40 * j), 2)) / (1 + j * 0.6))); amps.push((a + 0.02) / Math.sqrt(k)); }
+    let ph = 0;
+    for (let i = 0; i < n; i++) {
+      const t = i / n, env = Math.min(1, t * 12, (1 - t) * 10), f = f0 + ((f0end || f0) - f0) * t;
+      ph += (2 * Math.PI * f) / sr;
+      let v = 0;
+      for (let k = 1; k <= amps.length; k++) if (k * f < sr / 2) v += amps[k - 1] * Math.sin(k * ph);
+      out[s0 + i] += amp * env * v * 0.35;
+    }
+  }
+  function noiseBand(out, s0, n, lo, hi, amp, r, sr) {
+    const comps = [];
+    for (let j = 0; j < 70; j++) comps.push([lo + r() * (hi - lo), r() * 6.283]);
+    for (let i = 0; i < n; i++) {
+      const t = i / n, env = Math.min(1, t * 6, (1 - t) * 6);
+      let v = 0;
+      for (const c of comps) v += Math.sin((2 * Math.PI * c[0] * i) / sr + c[1]);
+      out[s0 + i] += (amp * env * v) / 9;
+    }
+  }
+  // 一个音段：[类型, 时长秒, 参数]；类型：v 元音/浊音（参数=VOW 键）, f 擦音（[lo,hi]）, b 爆破（[lo,hi]）, s 静音
+  AK.WORDS = {
+    yes: [["v", 0.07, "i"], ["v", 0.2, "e"], ["f", 0.22, [4200, 7600]]],
+    no: [["v", 0.09, "n"], ["v", 0.32, "o"], ["v", 0.08, "u"]],
+    up: [["v", 0.24, "a"], ["s", 0.06], ["b", 0.03, [600, 3000]]],
+    down: [["b", 0.025, [2500, 5000]], ["v", 0.18, "a"], ["v", 0.12, "u"], ["v", 0.09, "n"]],
+    left: [["v", 0.07, "l"], ["v", 0.17, "e"], ["f", 0.11, [1500, 6500]], ["b", 0.03, [3500, 7000]]],
+    right: [["v", 0.07, "r"], ["v", 0.16, "a"], ["v", 0.1, "i"], ["s", 0.04], ["b", 0.03, [3500, 7000]]],
+    on: [["v", 0.28, "o"], ["v", 0.12, "n"]],
+    off: [["v", 0.26, "o"], ["f", 0.17, [1200, 6500]]],
+    stop: [["f", 0.16, [4200, 7600]], ["b", 0.02, [3500, 7000]], ["v", 0.2, "o"], ["s", 0.05], ["b", 0.03, [600, 3000]]],
+    go: [["b", 0.02, [1200, 3000]], ["v", 0.32, "o"], ["v", 0.08, "u"]],
+  };
+  // 合成一个词：opt {sr, dur, f0, start, noise, seed}；返回 {x, segs:[{name,t0,t1}]}
+  AK.word = function (name, opt) {
+    opt = Object.assign({ sr: AK.SR, dur: 1, f0: 130, start: 0.22, noise: 0.004, seed: 1 }, opt || {});
+    const sr = opt.sr, N = Math.round(sr * opt.dur), x = new Float32Array(N), r = K.rng(opt.seed);
+    let t = opt.start;
+    const segs = [];
+    (AK.WORDS[name] || AK.WORDS.yes).forEach((sg, j) => {
+      const n = Math.round(sg[1] * sr), s0 = Math.round(t * sr);
+      if (s0 + n < N) {
+        if (sg[0] === "v") voiced(x, s0, n, opt.f0 * (1 + 0.04 * Math.sin(j)), VOW[sg[2]], sg[2] === "n" ? 0.5 : 1, sr, opt.f0 * (j % 2 ? 0.93 : 1.02));
+        else if (sg[0] === "f") noiseBand(x, s0, n, sg[2][0], Math.min(sg[2][1], sr / 2 - 100), 0.16, r, sr);
+        else if (sg[0] === "b") noiseBand(x, s0, n, sg[2][0], Math.min(sg[2][1], sr / 2 - 100), 0.35, r, sr);
+      }
+      segs.push({ name: sg[0] === "v" ? sg[2] : sg[0] === "f" ? "擦音" : sg[0] === "b" ? "爆破" : "停顿", t0: t, t1: t + sg[1] });
+      t += sg[1];
+    });
+    for (let i = 0; i < N; i++) x[i] += opt.noise * K.randn(r);
+    return { x, segs, sr };
+  };
+  // 环境声 / 其他示意声音
+  AK.sound = function (kind, opt) {
+    opt = Object.assign({ sr: AK.SR, dur: 1, seed: 1 }, opt || {});
+    const sr = opt.sr, N = Math.round(sr * opt.dur), x = new Float32Array(N), r = K.rng(opt.seed);
+    const add = (f, a, s0, n, decay) => { for (let i = 0; i < n && s0 + i < N; i++) x[s0 + i] += a * Math.sin((2 * Math.PI * f * i) / sr) * (decay ? Math.exp(-i / (decay * sr)) : 1); };
+    if (kind === "siren") { let ph = 0; for (let i = 0; i < N; i++) { const f = 900 + 400 * Math.sin((2 * Math.PI * 1.5 * i) / sr); ph += (2 * Math.PI * f) / sr; x[i] = 0.4 * Math.sin(ph) + 0.15 * Math.sin(2 * ph); } }
+    else if (kind === "dog") { [0.1, 0.45].forEach((t0) => { const s0 = Math.round(t0 * sr), n = Math.round(0.18 * sr); voiced(x, s0, n, 420, [800, 1500, 2600], 1.4, sr, 330); noiseBand(x, s0, Math.round(0.05 * sr), 500, 4000, 0.6, r, sr); }); }
+    else if (kind === "rain") { for (let i = 0; i < N; i++) x[i] = 0.12 * K.randn(r); for (let k = 0; k < 40; k++) { const s0 = Math.floor(r() * N); for (let i = 0; i < 120 && s0 + i < N; i++) x[s0 + i] += 0.5 * K.randn(r) * Math.exp(-i / 25); } }
+    else if (kind === "clock") { for (let t0 = 0.05; t0 < opt.dur; t0 += 0.25) { const s0 = Math.round(t0 * sr); add(3000, 0.6, s0, 400, 0.004); add(5200, 0.4, s0, 300, 0.003); } }
+    else if (kind === "engine") { let ph = 0; for (let i = 0; i < N; i++) { ph += (2 * Math.PI * 55) / sr; let v = 0; for (let k = 1; k < 12; k++) v += Math.sin(k * ph + k) / k; x[i] = 0.25 * v * (1 + 0.3 * Math.sin((2 * Math.PI * 8 * i) / sr)) + 0.03 * K.randn(r); } }
+    else if (kind === "bird") { for (let t0 = 0.08; t0 < opt.dur - 0.15; t0 += 0.3) { const s0 = Math.round(t0 * sr), n = Math.round(0.12 * sr); let ph = 0; for (let i = 0; i < n && s0 + i < N; i++) { const f = 3200 + 1600 * (i / n) + 300 * Math.sin(i / 40); ph += (2 * Math.PI * f) / sr; x[s0 + i] += 0.45 * Math.sin(ph) * Math.sin((Math.PI * i) / n); } } }
+    else if (kind === "crying") { [0, 0.5].forEach((t0) => voiced(x, Math.round((t0 + 0.05) * sr), Math.round(0.4 * sr), 450, [1000, 2500, 3500], 1.2, sr, 380)); }
+    else if (kind === "glass") { const s0 = Math.round(0.2 * sr); noiseBand(x, s0, Math.round(0.04 * sr), 2000, 7500, 1.2, r, sr); [2800, 4100, 5600, 6900].forEach((f, j) => add(f, 0.3, s0, Math.round(0.6 * sr), 0.15 + j * 0.03)); }
+    else if (kind === "noise") { for (let i = 0; i < N; i++) x[i] = 0.2 * K.randn(r); }
+    for (let i = 0; i < N; i++) x[i] += 0.003 * K.randn(r);
+    return { x, sr };
+  };
+  // ---- 画图 ----
+  AK.drawWave = function (svg, box, x, opt) {
+    opt = opt || {};
+    K.svg(svg, "rect", { x: box.x, y: box.y, width: box.w, height: box.h, fill: "var(--panel-2)", rx: 4 });
+    let mx = 1e-9; for (let i = 0; i < x.length; i++) mx = Math.max(mx, Math.abs(x[i]));
+    const cols = Math.min(box.w, 600), step = x.length / cols, mid = box.y + box.h / 2, sc = (box.h / 2 - 3) / (opt.max || mx);
+    let d = "";
+    for (let c = 0; c < cols; c++) {
+      let lo = 0, hi = 0;
+      for (let i = Math.floor(c * step); i < Math.floor((c + 1) * step); i++) { lo = Math.min(lo, x[i]); hi = Math.max(hi, x[i]); }
+      const px = box.x + (c / cols) * box.w;
+      d += `M${px.toFixed(1)},${(mid - hi * sc).toFixed(1)}V${(mid - lo * sc + 0.5).toFixed(1)}`;
+    }
+    return K.svg(svg, "path", { d, stroke: opt.color || "var(--c1)", "stroke-width": Math.max(1, box.w / cols) * 0.9, fill: "none" });
+  };
+  AK.color = function (t) { // 频谱图色带：底色 → 蓝 → 橙
+    t = K.clamp(t, 0, 1);
+    return t < 0.55 ? `color-mix(in srgb, var(--c1) ${Math.round((t / 0.55) * 100)}%, var(--panel-2))` : `color-mix(in srgb, var(--warn) ${Math.round(((t - 0.55) / 0.45) * 100)}%, var(--c1))`;
+  };
+  // frames: [时间][频率]，画成热力图；opt {lo, hi, maxT, maxF, fmax(频点上限)}
+  AK.drawSpec = function (svg, box, frames, opt) {
+    opt = opt || {};
+    const g = K.svg(svg, "g");
+    const T = frames.length, Fall = frames[0].length, F = opt.fmax ? Math.min(Fall, opt.fmax) : Fall;
+    let lo = opt.lo, hi = opt.hi;
+    if (lo == null || hi == null) { const v = []; frames.forEach((p) => { for (let k = 0; k < F; k++) v.push(p[k]); }); v.sort((a, b) => a - b); if (lo == null) lo = v[Math.floor(v.length * 0.05)]; if (hi == null) hi = v[Math.floor(v.length * 0.995)]; }
+    const nt = Math.min(T, opt.maxT || 90), nf = Math.min(F, opt.maxF || 64);
+    const cw = box.w / nt, ch = box.h / nf;
+    for (let a = 0; a < nt; a++) for (let b = 0; b < nf; b++) {
+      const t0 = Math.floor((a * T) / nt), t1 = Math.max(t0 + 1, Math.floor(((a + 1) * T) / nt)), f0 = Math.floor((b * F) / nf), f1 = Math.max(f0 + 1, Math.floor(((b + 1) * F) / nf));
+      let s = -Infinity;
+      for (let t = t0; t < t1; t++) for (let f = f0; f < f1; f++) s = Math.max(s, frames[t][f]);
+      K.svg(g, "rect", { x: (box.x + a * cw).toFixed(1), y: (box.y + box.h - (b + 1) * ch).toFixed(1), width: (cw + 0.6).toFixed(1), height: (ch + 0.6).toFixed(1), fill: AK.color((s - lo) / (hi - lo || 1)) });
+    }
+    return g;
+  };
+  // 用 WebAudio 播放（课堂上可以真的听到合成声音）
+  AK.play = function (x, sr) {
+    try {
+      const C = window.AudioContext || window.webkitAudioContext; if (!C) return;
+      const ac = AK._ac || (AK._ac = new C());
+      let mx = 1e-9; for (let i = 0; i < x.length; i++) mx = Math.max(mx, Math.abs(x[i]));
+      const buf = ac.createBuffer(1, x.length, sr), ch = buf.getChannelData(0);
+      for (let i = 0; i < x.length; i++) ch[i] = (0.8 * x[i]) / mx;
+      const src = ac.createBufferSource(); src.buffer = buf; src.connect(ac.destination); src.start();
+    } catch (e) { /* 没有声卡也不影响页面 */ }
+  };
+  // 在实验面板外加一个“播放”按钮
+  AK.playBtn = function (labEl, label, getter) {
+    const b = K.el("button", { class: "btn ghost", style: "margin-top:8px" }, label || "▶ 播放合成声音");
+    b.onclick = () => { const s = getter(); if (s) AK.play(s.x, s.sr); };
+    const ctrl = labEl.querySelector(".ctrl"); (ctrl || labEl).appendChild(b);
+    return b;
+  };
+  /* ===== 音频工具结束 ===== */
+
+
+  const SR = 16000;
+  const cache = {};
+  const W = (name, seed, f0) => cache[name + seed + f0] || (cache[name + seed + f0] = AK.word(name, { seed, f0: f0 || 130, sr: SR }));
+  const logSpec = (x, winMs, hopMs) => AK.log(AK.stft(x, Math.round((winMs * SR) / 1000), Math.round((hopMs * SR) / 1000)));
+
+  const steps = [
+    {
+      at: 0, title: "开场：语音识别比赛与工具包", kicker: "第 0–1 格 · 导入",
+      html: `<p>作者说这是他的第一个 Kaggle notebook，目标是讲清楚<b>语音该怎么表示</b>，再看看这份数据有什么特点。开头导入的工具分三类：读声音（<code>scipy.io.wavfile</code>、<code>librosa</code>）、算频率（<code>scipy.fftpack.fft</code>、<code>signal</code>）、画图（matplotlib、plotly）。</p><p>动画是整个语音识别流程的缩影：麦克风录到的是一串数字（波形），先变成频谱图，再交给模型输出文字。本 notebook 只做前半段。</p>`,
+      draw(svg, ctx) {
+        const items = [["麦克风", "录音"], ["波形", "每秒 16000 个数"], ["频谱图", "本 notebook 的重点"], ["模型", "下一步才做"], ["“yes”", "输出文字"]];
+        const nodes = items.map((d, i) => { const g = K.node(svg, 20 + i * 140, 130, 115, 70, d[0] + "\n" + d[1], { fill: i === 2 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 2 ? "var(--accent)" : "var(--line)", bold: i === 2 }); g.style.opacity = 0; return g; });
+        const arr = [0, 1, 2, 3].map((i) => { const a = K.arrow(svg, 135 + i * 140, 165, 158 + i * 140, 165); a.style.opacity = 0; return a; });
+        const w = W("yes", 1);
+        const wv = AK.drawWave(svg, { x: 160, y: 230, w: 115, h: 60 }, w.x, { color: "var(--c1)" });
+        const sp = AK.drawSpec(svg, { x: 300, y: 230, w: 115, h: 60 }, logSpec(w.x, 20, 10), { maxT: 40, maxF: 24, fmax: 140 });
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 12, class: "muted" }, "示意：下方小图是浏览器合成的“yes”，不是数据集录音");
+        (async () => {
+          for (let i = 0; i < 5; i++) {
+            if (!(await ctx.tween(380, (t) => { nodes[i].style.opacity = t; if (i) arr[i - 1].style.opacity = t; }))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 2, title: "把声音变成频谱图", kicker: "第 2–7 格 · 波形与对数频谱图",
+      html: `<p>人耳有两种理论：按<b>频率</b>听，和按<b>时间</b>听。语音识别里很少直接用原始波形，常用的是<b>频谱图</b>：把录音切成很多 20 ms 的小段，每一小段算一次“里面有哪些频率、各有多强”，再按时间排起来。</p><p>作者的 <code>log_specgram</code> 用汉宁窗、20 ms 窗长、相邻窗重叠 10 ms，最后取对数。取对数是因为人耳对音量的感受接近对数：声音能量翻 10 倍，我们只觉得“响了一些”。</p><p>动画里，橙色小框在波形上滑动，每停一次就在下面“拍”出一列频谱。</p>`,
+      cells: [5, 7], highlight: ["window_size=20", "np.log", "signal.spectrogram"],
+      draw(svg, ctx) {
+        const w = W("yes", 1), frames = logSpec(w.x, 20, 10);
+        const top = { x: 50, y: 30, w: 620, h: 100 }, bot = { x: 50, y: 170, w: 620, h: 140 };
+        AK.drawWave(svg, top, w.x);
+        K.svg(svg, "text", { x: 50, y: 22, "font-size": 12, class: "muted" }, "波形：横轴时间（1 秒），纵轴振幅");
+        K.svg(svg, "text", { x: 50, y: 162, "font-size": 12, class: "muted" }, "对数频谱图：横轴时间，纵轴频率（0–8000 Hz），越亮越强");
+        K.svg(svg, "rect", { x: bot.x, y: bot.y, width: bot.w, height: bot.h, fill: "var(--panel-2)" });
+        const spec = AK.drawSpec(svg, bot, frames, { maxT: 99, maxF: 54 });
+        const cols = Array.from(spec.children);
+        cols.forEach((c) => (c.style.opacity = 0));
+        const nf = 54, box = K.svg(svg, "rect", { x: top.x, y: top.y - 4, width: (top.w * 20) / 1000, height: top.h + 8, fill: "none", stroke: "var(--warn)", "stroke-width": 2 });
+        ["Y", "E", "S"].forEach((s, i) => K.svg(svg, "text", { x: 50 + 620 * (w.segs[i].t0 + (w.segs[i].t1 - w.segs[i].t0) / 2), y: 150, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--ink-3)" }, s));
+        ctx.wait(300).then((ok) => ok && ctx.tween(3200, (t) => {
+          const a = Math.floor(t * 99);
+          box.setAttribute("x", top.x + (top.w * a) / 99);
+          for (let i = 0; i < Math.min(cols.length, (a + 1) * nf); i++) cols[i].style.opacity = 1;
+        }));
+      },
+    },
+    {
+      at: 8, title: "归一化，和人耳比一比分辨率", kicker: "第 8–10 格 · 特征归一化",
+      html: `<p>频谱图要喂给神经网络，先要<b>归一化</b>：每个频率减去平均值、除以标准差，让所有特征都在 0 附近、大小差不多。作者特意提醒：这里只拿一条录音算均值是演示，真做的时候要用<b>整个数据集</b>来算。</p><p>他还算了一笔账：20 ms 窗在 16 kHz 下是 320 个点，得到约 160 个频率格，每格约 50 Hz。可是人耳在 1000–2000 Hz 能分辨约 3.6 Hz 的差别，比频谱图细十几倍。</p>`,
+      cells: [9], highlight: ["np.mean", "np.std"],
+      draw(svg, ctx) {
+        const r = K.rng(4), n = 24, vals = [];
+        for (let i = 0; i < n; i++) vals.push(-6 + 4 * Math.sin(i / 3) + K.randn(r) * 1.4 - i * 0.12);
+        const m = vals.reduce((a, b) => a + b) / n, sd = Math.sqrt(vals.reduce((a, b) => a + (b - m) * (b - m), 0) / n);
+        const ax = K.axes(svg, { x: 50, y: 30, w: 300, h: 260 }, [0, n], [-10, 4], { xticks: 0, xlabel: "某一帧的频率格（示意）" });
+        const bars = vals.map((v, i) => K.svg(svg, "rect", { x: ax.sx(i) + 1, y: ax.sy(Math.max(0, v)), width: 300 / n - 2, height: Math.abs(ax.sy(v) - ax.sy(0)), fill: "var(--c1)", opacity: 0.8 }));
+        const lab = K.svg(svg, "text", { x: 60, y: 22, "font-size": 13, "font-weight": 700 }, "原始对数能量：都是负数，大小不一");
+        ctx.wait(800).then((ok) => ok && ctx.tween(1500, (t) => {
+          bars.forEach((b, i) => { const v = K.lerp(vals[i], (vals[i] - m) / sd, t); b.setAttribute("y", ax.sy(Math.max(0, v))); b.setAttribute("height", Math.abs(ax.sy(v) - ax.sy(0))); });
+          if (t > 0.5) lab.textContent = "减均值、除标准差：围绕 0，尺度统一";
+        }));
+        // 右边：分辨率对比
+        K.svg(svg, "text", { x: 400, y: 50, "font-size": 13, "font-weight": 700 }, "1000–2000 Hz 这一段：");
+        const L = 400, R = 690;
+        K.svg(svg, "text", { x: L, y: 90, "font-size": 12 }, "频谱图：每格 50 Hz → 20 格");
+        for (let i = 0; i < 20; i++) K.svg(svg, "rect", { x: L + (i * (R - L)) / 20, y: 100, width: (R - L) / 20 - 1, height: 26, fill: "var(--c1)", opacity: 0.55 });
+        K.svg(svg, "text", { x: L, y: 170, "font-size": 12 }, "人耳：约 3.6 Hz 就能分辨 → 约 278 格");
+        const ear = [];
+        for (let i = 0; i < 278; i++) ear.push(K.svg(svg, "rect", { x: L + (i * (R - L)) / 278, y: 180, width: Math.max(0.4, (R - L) / 278 - 0.3), height: 0, fill: "var(--c3)" }));
+        ctx.tween(1600, (t) => ear.forEach((e, i) => e.setAttribute("height", K.clamp(t * 300 - i, 0, 1) * 26)));
+        K.svg(svg, "text", { x: L, y: 240, "font-size": 12, class: "muted" }, "数字来自作者第 10 格的文字");
+      },
+    },
+    {
+      at: 11, title: "梅尔频谱、MFCC 与三维频谱", kicker: "第 11–17 格 · 模仿人耳的特征",
+      html: `<p>人耳对低频很敏感（100 Hz 和 200 Hz 差别很明显），对高频很迟钝（7000 Hz 和 7100 Hz 几乎听不出差别）。<b>梅尔刻度</b>就是按人耳感受重新划分频率：低频分得细，高频分得粗。动画里一排三角形滤波器，越往右越宽，每个三角形把它覆盖的频率能量加起来，得到一个“梅尔频带”。</p><p><b>MFCC</b>（梅尔频率倒谱系数）再对梅尔频带做一次离散余弦变换，只留前 13 个数，相当于“描述频谱的大致轮廓”。作者的看法：传统系统爱用 MFCC，神经网络则常直接吃频谱图或梅尔频谱，因为它本来就能处理相关的特征。</p><p>第 16 格把频谱图画成三维曲面：频率、时间、能量三个轴。</p>`,
+      cells: [12, 13, 16], highlight: ["melspectrogram", "n_mels=128", "mfcc(S=log_S, n_mfcc=13)", "go.Surface"],
+      draw(svg, ctx) {
+        const fb = AK.melFB(16, 512, SR, 0, 8000);
+        const ax = K.axes(svg, { x: 50, y: 40, w: 620, h: 120 }, [0, 8000], [0, 1.1], { yticks: 0, xlabel: "频率 Hz（线性刻度）" });
+        K.svg(svg, "text", { x: 50, y: 28, "font-size": 12, class: "muted" }, "16 个梅尔三角滤波器：低频窄、高频宽（真实计算）");
+        const tris = fb.map((f, i) => { const p = K.svg(svg, "path", { d: `M${ax.sx(f.lo)},${ax.sy(0)}L${ax.sx(f.c)},${ax.sy(1)}L${ax.sx(f.hi)},${ax.sy(0)}`, fill: K.colors[i % 6], "fill-opacity": 0.18, stroke: K.colors[i % 6], "stroke-width": 1.5 }); p.style.opacity = 0; return p; });
+        const w = W("yes", 1), pw = AK.stft(w.x, 320, 160, 512), mel = AK.log(AK.applyFB(pw, AK.melFB(40, 512, SR, 0, 8000)));
+        const g1 = AK.drawSpec(svg, { x: 50, y: 215, w: 300, h: 100 }, mel, { maxT: 60, maxF: 40 });
+        const mf = mel.map((v) => AK.dct(v, 13));
+        const g2 = AK.drawSpec(svg, { x: 380, y: 215, w: 290, h: 100 }, mf, { maxT: 60, maxF: 13 });
+        K.svg(svg, "text", { x: 50, y: 208, "font-size": 12 }, "梅尔频谱（40 个频带）");
+        K.svg(svg, "text", { x: 380, y: 208, "font-size": 12 }, "MFCC（每帧 13 个数）");
+        g1.style.opacity = 0; g2.style.opacity = 0;
+        (async () => {
+          for (let i = 0; i < tris.length; i++) if (!(await ctx.tween(110, (t) => (tris[i].style.opacity = t)))) return;
+          if (!(await ctx.tween(600, (t) => (g1.style.opacity = t)))) return;
+          await ctx.tween(600, (t) => (g2.style.opacity = t));
+        })();
+      },
+    },
+    {
+      at: 18, title: "去掉静音：VAD", kicker: "第 18–23 格 · 静音切除",
+      html: `<p>一秒的录音里，真正说话的可能只有一半，前后都是静音。作者建议用 <b>VAD</b>（语音活动检测）把静音切掉，训练数据会少很多，训练也更快。</p><p>他先手动示范：只保留第 4000 到 13000 个采样点（大约 0.25 秒到 0.81 秒），听起来整个词都还在。然后在频谱图上用红线大致标出 Y、E、S 三个字母各自占了哪一段。</p>`,
+      cells: [21, 23], highlight: ["samples[4000:13000]", "xcoords"],
+      draw(svg, ctx) {
+        const w = W("yes", 1), box = { x: 50, y: 40, w: 620, h: 130 };
+        AK.drawWave(svg, box, w.x);
+        const fr = 320, en = [];
+        for (let s = 0; s + fr <= w.x.length; s += fr) { let e = 0; for (let i = 0; i < fr; i++) e += w.x[s + i] * w.x[s + i]; en.push(Math.sqrt(e / fr)); }
+        const mx = Math.max(...en);
+        let d = "";
+        en.forEach((e, i) => (d += (i ? "L" : "M") + (box.x + ((i + 0.5) / en.length) * box.w) + "," + (290 - (e / mx) * 80)));
+        K.svg(svg, "text", { x: 50, y: 200, "font-size": 12, class: "muted" }, "每 20 ms 的音量（均方根）");
+        const curve = K.svg(svg, "path", { d, fill: "none", stroke: "var(--c2)", "stroke-width": 2 });
+        curve.style.opacity = 0;
+        const th = K.svg(svg, "line", { x1: 50, x2: 670, y1: 290 - 0.08 * 80, y2: 290 - 0.08 * 80, stroke: "var(--warn)", "stroke-dasharray": "5 3" });
+        th.style.opacity = 0;
+        const cutL = K.svg(svg, "rect", { x: 50, y: 40, width: 0, height: 130, fill: "var(--panel)", opacity: 0.8 }), cutR = K.svg(svg, "rect", { x: 670, y: 40, width: 0, height: 130, fill: "var(--panel)", opacity: 0.8 });
+        const xA = 50 + (4000 / 16000) * 620, xB = 50 + (13000 / 16000) * 620;
+        const lab = K.svg(svg, "text", { x: 360, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "");
+        ctx.tween(800, (t) => (curve.style.opacity = t))
+          .then((ok) => ok && ctx.tween(500, (t) => (th.style.opacity = t)))
+          .then((ok) => { if (ok) lab.textContent = "保留第 4000–13000 个采样点（作者手动选的范围）"; return ok && ctx.tween(1200, (t) => { cutL.setAttribute("width", (xA - 50) * t); cutR.setAttribute("x", 670 - (670 - xB) * t); cutR.setAttribute("width", (670 - xB) * t); }); });
+      },
+    },
+    {
+      at: 24, title: "降采样到 8 kHz", kicker: "第 24–34 格 · 降维与六步特征流程",
+      html: `<p>16 kHz 采样意味着每秒记 16000 个数，能表示最高 8000 Hz 的声音（采样率的一半，叫<b>奈奎斯特频率</b>）。可人说话的主要能量在更低的频段，电话（GSM）只用 8 kHz 采样，我们照样听得懂。</p><p>作者把一段 happy 录音降到 8 kHz，听起来“几乎没区别”，两张 FFT 图也说明原始录音在 4000 Hz 以上本来就几乎没有能量。数据量一下子减半。最后他总结了一套<b>六步特征提取</b>：降采样 → VAD → 补零 → 对数频谱或 MFCC → 归一化 → 拼接相邻帧。</p>`,
+      cells: [25, 27, 31], highlight: ["signal.resample", "new_sample_rate = 8000", "fft(y)"],
+      draw(svg, ctx) {
+        const w = W("go", 2), spec = AK.spectrum(w.x);
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 200 }, [0, 8000], [0, 1], { yticks: 0, xlabel: "频率 Hz" });
+        const mx = Math.max(...spec), n = spec.length;
+        let d = "";
+        for (let c = 0; c < 300; c++) { let m = 0; for (let k = Math.floor((c * n) / 300); k < Math.floor(((c + 1) * n) / 300); k++) m = Math.max(m, spec[k]); d += (c ? "L" : "M") + ax.sx((c / 300) * 8000) + "," + ax.sy(Math.pow(m / mx, 0.5)); }
+        K.svg(svg, "path", { d, fill: "none", stroke: "var(--c1)", "stroke-width": 1.5 });
+        const gray = K.svg(svg, "rect", { x: ax.sx(4000), y: 30, width: 0, height: 200, fill: "var(--ink-3)", opacity: 0.18 });
+        const ln = K.svg(svg, "line", { x1: ax.sx(4000), x2: ax.sx(4000), y1: 30, y2: 230, stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+        ln.style.opacity = 0;
+        const t1 = K.svg(svg, "text", { x: ax.sx(4000) + 8, y: 50, "font-size": 12, fill: "var(--warn)" }, "8 kHz 采样只能保留到 4000 Hz");
+        t1.style.opacity = 0;
+        K.svg(svg, "text", { x: 60, y: 22, "font-size": 12, class: "muted" }, "合成“go”的 FFT（纵轴取平方根便于观看）");
+        // 下方：采样点变稀
+        const dots = [];
+        for (let i = 0; i < 48; i++) dots.push(K.svg(svg, "circle", { cx: 80 + i * 12, cy: 300 - 22 * Math.sin(i / 2.2), r: 3, fill: "var(--c1)" }));
+        K.svg(svg, "text", { x: 60, y: 266, "font-size": 12, class: "muted" }, "采样点：每两个留一个");
+        ctx.wait(500).then((ok) => ok && ctx.tween(500, (t) => { ln.style.opacity = t; t1.style.opacity = t; }))
+          .then((ok) => ok && ctx.tween(900, (t) => gray.setAttribute("width", (ax.sx(8000) - ax.sx(4000)) * t)))
+          .then((ok) => ok && ctx.tween(900, (t) => dots.forEach((c, i) => { if (i % 2) c.style.opacity = 1 - t; })));
+      },
+    },
+    {
+      at: 35, title: "数一数：每个词有多少录音", kicker: "第 35–38 格 · 类别数量",
+      html: `<p>第二部分是常规的数据盘点。作者列出所有文件夹（每个文件夹是一个标签），再数每个文件夹里有多少 .wav 文件，用柱状图画出来。</p><p>结论：除了 <code>_background_noise_</code>（背景噪声）以外，各个单词的录音数量<b>基本均衡</b>。背景噪声是几段长录音，用途不同：可以切成小段当“没有说话”的样本，或混进其他录音里做数据增强。</p><p>动画的柱子高度只是示意“差不多一样高”，具体数字在原 notebook 的运行输出里。</p>`,
+      cells: [36, 37], highlight: ["os.listdir", "go.Bar"],
+      draw(svg, ctx) {
+        const words = "yes no up down left right on off stop go".split(" ");
+        const r = K.rng(5);
+        const items = words.map((w) => ({ label: w, value: 0.9 + r() * 0.1, color: "var(--c1)" }));
+        items.push({ label: "噪声", value: 0.08, color: "var(--ink-3)" });
+        const b = K.bars(svg, { x: 40, y: 50, w: 640, h: 230 }, items, { fmt: () => "", max: 1.05 });
+        K.svg(svg, "text", { x: 40, y: 30, "font-size": 13, class: "muted" }, "示意：各单词录音数基本均衡（具体条数见原 notebook 输出）");
+        const rects = svg.querySelectorAll("rect");
+        const H = []; rects.forEach((rc) => H.push([+rc.getAttribute("y"), +rc.getAttribute("height")]));
+        rects.forEach((rc) => { rc.setAttribute("y", 280); rc.setAttribute("height", 0); });
+        ctx.tween(1400, (t) => rects.forEach((rc, i) => { const h = H[i][1] * K.clamp(t * 1.6 - i * 0.05, 0, 1); rc.setAttribute("height", h); rc.setAttribute("y", 280 - h); }));
+      },
+    },
+    {
+      at: 39, title: "同一个词，不同的人和设备", kicker: "第 39–47 格 · 说话人与录音环境",
+      html: `<p>作者比较了两个人说的 “on”：两段录音的 FFT 形状差别很大，有的听起来像是从手机通话里录的。还有一段 yes 录音里有奇怪的“断续静音”，可能是压缩造成的。</p><p>由此得出整份 notebook 最重要的提醒：<b>划分训练集和测试集时，同一个说话人不能两边都有。</b>否则模型可能记住了“这个人的嗓音和这个麦克风”，而不是学会“on 这个词”，测试分数会虚高。也要防止模型对特定的录音环境过拟合。</p>`,
+      cells: [41, 46], highlight: ["filename[4:11]"],
+      draw(svg, ctx) {
+        const a = W("on", 3, 110), b = AK.word("on", { seed: 4, f0: 210, sr: SR });
+        // b 模拟“电话音质”：只保留 300–3400 Hz
+        const sa = AK.spectrum(a.x), sb = AK.spectrum(b.x), n = sa.length;
+        for (let k = 0; k < n; k++) { const f = (k / n) * 8000; if (f < 300 || f > 3400) sb[k] *= 0.05; }
+        const ax = K.axes(svg, { x: 60, y: 40, w: 600, h: 220 }, [0, 8000], [0, 1], { yticks: 0, xlabel: "频率 Hz" });
+        const path = (s, col) => { const mx = Math.max(...s); let d = ""; for (let c = 0; c < 300; c++) { let m = 0; for (let k = Math.floor((c * n) / 300); k < Math.floor(((c + 1) * n) / 300); k++) m = Math.max(m, s[k]); d += (c ? "L" : "M") + ax.sx((c / 300) * 8000) + "," + ax.sy(Math.pow(m / mx, 0.5)); } return K.svg(svg, "path", { d, fill: "none", stroke: col, "stroke-width": 1.6 }); };
+        const p1 = path(sa, "var(--c1)"), p2 = path(sb, "var(--c6)");
+        p1.style.opacity = 0; p2.style.opacity = 0;
+        K.svg(svg, "text", { x: 70, y: 30, "font-size": 12, fill: "var(--c1)" }, "■ 说话人 A：嗓音低，频段完整");
+        K.svg(svg, "text", { x: 330, y: 30, "font-size": 12, fill: "var(--c6)" }, "■ 说话人 B：嗓音高，像电话音质（300–3400 Hz）");
+        K.svg(svg, "text", { x: 60, y: 300, "font-size": 13, "font-weight": 700, fill: "var(--warn)" }, "同一个词 “on”，频谱却差很多 → 按说话人划分训练 / 测试集");
+        K.svg(svg, "text", { x: 60, y: 322, "font-size": 12, class: "muted" }, "示意：两条曲线都是合成声音，B 人为加了电话频带限制");
+        ctx.tween(900, (t) => (p1.style.opacity = t)).then((ok) => ok && ctx.tween(900, (t) => (p2.style.opacity = t)));
+      },
+    },
+    {
+      at: 48, title: "不够一秒？补零", kicker: "第 48–50 格 · 录音长度",
+      html: `<p>作者遍历所有录音，数出比 1 秒（16000 个采样点）短的有多少条。他自己都说“很惊讶，数量很多”。</p><p>神经网络通常要求输入一样长，解决办法很简单：在后面<b>补零</b>（补上静音）。第 61 格做 PCA 时就是这么做的：<code>np.append(samples, np.zeros(...))</code>。</p>`,
+      cells: [49], highlight: ["samples.shape[0] < sample_rate"],
+      draw(svg, ctx) {
+        const w = AK.word("go", { seed: 6, start: 0.05, dur: 0.62, sr: SR });
+        const box = { x: 50, y: 60, w: 620 * 0.62, h: 140 };
+        K.svg(svg, "rect", { x: 50, y: 60, width: 620, height: 140, fill: "none", stroke: "var(--line)", "stroke-dasharray": "4 4" });
+        AK.drawWave(svg, box, w.x);
+        K.svg(svg, "text", { x: 50, y: 48, "font-size": 13, "font-weight": 700 }, "这段录音只有 0.62 秒（示意）");
+        const pad = K.svg(svg, "rect", { x: 50 + box.w, y: 60, width: 0, height: 140, fill: "color-mix(in srgb, var(--c3) 20%, var(--panel))", stroke: "var(--c3)" });
+        const pl = K.svg(svg, "text", { x: 50 + box.w + 10, y: 136, "font-size": 13, fill: "var(--c3)", "font-weight": 700 }, "");
+        K.svg(svg, "line", { x1: 50, x2: 670, y1: 230, y2: 230, stroke: "var(--ink-3)" });
+        K.svg(svg, "text", { x: 670, y: 250, "text-anchor": "end", "font-size": 12, class: "muted" }, "1 秒 = 16000 个采样点");
+        ctx.wait(700).then((ok) => ok && ctx.tween(1200, (t) => { pad.setAttribute("width", (620 - box.w) * t); if (t > 0.6) pl.textContent = "补 0（静音）"; }));
+      },
+    },
+    {
+      at: 51, title: "每个词的平均频谱", kicker: "第 51–54 格 · 平均 FFT 与平均频谱图",
+      html: `<p>作者把每个单词所有恰好 1 秒的录音都算一遍 FFT 和频谱图，再求平均，画出“这个词平均长什么样”。</p><p>他发现：每个词的平均 FFT 都不一样，可以考虑用<b>高斯混合模型</b>（GMM，用几个“钟形曲线”叠加来描述一个分布）给每个词建模。但 <b>stop 和 up 的平均 FFT 几乎一样</b>，频谱图上却能分开：stop 开头的 s 是高频，先出现。这说明<b>时间顺序</b>很重要，所以经典系统用隐马尔可夫模型（HMM）描述“先发什么音、后发什么音”。</p>`,
+      cells: [53], highlight: ["np.mean(np.array(vals_all), axis=0)", "to_keep"],
+      draw(svg, ctx) {
+        const avg = (name) => { let acc = null; for (let s = 0; s < 4; s++) { const f = logSpec(AK.word(name, { seed: 20 + s, f0: 100 + s * 30, start: 0.2 + s * 0.02, sr: SR }).x, 20, 10); if (!acc) acc = f.map((p) => Float32Array.from(p)); else f.forEach((p, i) => p.forEach((v, k) => (acc[i][k] += v))); } return acc.map((p) => p.map((v) => v / 4)); };
+        const A = avg("stop"), B = avg("up");
+        K.svg(svg, "text", { x: 50, y: 28, "font-size": 13, "font-weight": 700 }, "stop 的平均频谱图");
+        K.svg(svg, "text", { x: 380, y: 28, "font-size": 13, "font-weight": 700 }, "up 的平均频谱图");
+        const g1 = AK.drawSpec(svg, { x: 50, y: 40, w: 290, h: 170 }, A, { maxT: 50, maxF: 40 }), g2 = AK.drawSpec(svg, { x: 380, y: 40, w: 290, h: 170 }, B, { maxT: 50, maxF: 40 });
+        g1.style.opacity = 0; g2.style.opacity = 0;
+        const ring = K.svg(svg, "rect", { x: 50 + 290 * 0.18, y: 40, width: 290 * 0.18, height: 70, fill: "none", stroke: "var(--warn)", "stroke-width": 2.5, rx: 6 });
+        ring.style.opacity = 0;
+        K.svg(svg, "text", { x: 50, y: 240, "font-size": 12 }, "每张图是 4 段合成录音的平均（示意）。");
+        const note = K.svg(svg, "text", { x: 50, y: 270, "font-size": 13, fill: "var(--warn)", "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 50, y: 300, "font-size": 12, class: "muted" }, "把时间轴压扁成一条平均 FFT，这个“先高频、后低频”的顺序信息就没了");
+        ctx.tween(700, (t) => (g1.style.opacity = t)).then((ok) => ok && ctx.tween(700, (t) => (g2.style.opacity = t)))
+          .then((ok) => ok && ctx.tween(500, (t) => { ring.style.opacity = t; note.textContent = "stop 开头的 s：高频能量先出现"; }));
+      },
+    },
+    {
+      at: 55, title: "同一个频率，在各个词里有多强", kicker: "第 55–59 格 · 小提琴图",
+      html: `<p>作者写了 <code>violinplot_frequency</code>：每个词取 100 段录音，只看频谱图里的某一个频率格（第 20、50、120 格，大约 1000、2500、6000 Hz），把它在所有帧里的强度画成<b>小提琴图</b>（一种把分布形状画出来的箱线图，越胖说明那个数值越常见）。</p><p>如果某个频率在不同词里分布差别很大，它就是区分这些词的好线索。动画里用合成声音算了第 120 格（约 6000 Hz），红色的 yes、stop 带 s 音，分布往上伸得更高。</p>`,
+      cells: [56], highlight: ["spec[:, freq_ind]", "sns.violinplot"],
+      draw(svg, ctx) {
+        const words = "yes no up down left right on off stop go".split(" ");
+        const ax = K.axes(svg, { x: 60, y: 30, w: 620, h: 240 }, [0, words.length], [-24, 0], { xticks: 0, ylabel: "对数能量" });
+        K.svg(svg, "text", { x: 70, y: 22, "font-size": 12, class: "muted" }, "频率格 120（约 6000 Hz）在各个词里的强度分布（合成声音，真实计算）");
+        const shapes = [];
+        words.forEach((wd, i) => {
+          const v = [];
+          for (let s = 0; s < 3; s++) logSpec(AK.word(wd, { seed: 40 + s, f0: 110 + 25 * s, sr: SR }).x, 20, 10).forEach((p) => v.push(Math.max(-24, p[120])));
+          const bins = new Array(24).fill(0); v.forEach((x) => bins[K.clamp(Math.floor(x + 24), 0, 23)]++);
+          const mx = Math.max(...bins), cx = ax.sx(i + 0.5);
+          let L = "", R = "";
+          bins.forEach((b, j) => { const y = ax.sy(j - 24 + 0.5), hw = (b / mx) * 26; L += (j ? "L" : "M") + (cx - hw) + "," + y; R = "L" + (cx + hw) + "," + y + R; });
+          const p = K.svg(svg, "path", { d: L + R + "Z", fill: wd === "yes" || wd === "stop" ? "var(--c6)" : "var(--c1)", "fill-opacity": 0.35, stroke: wd === "yes" || wd === "stop" ? "var(--c6)" : "var(--c1)" });
+          p.style.opacity = 0; shapes.push(p);
+          K.svg(svg, "text", { x: cx, y: 290, "text-anchor": "middle", "font-size": 12 }, wd);
+        });
+        (async () => { for (const p of shapes) if (!(await ctx.tween(160, (t) => (p.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      at: 60, title: "PCA：找出“怪录音”", kicker: "第 60–67 格 · 异常检测",
+      html: `<p>数据里会不会混进坏掉的录音？作者把每段录音补零到 1 秒，算 FFT（8000 个数），标准化后用 <b>PCA</b>（主成分分析：找出数据变化最大的几个方向，把 8000 维压成 3 维）画成三维散点图。离大部队很远的点，就是可疑录音。</p><p>他找到 <code>yes/e4b02540_nohash_0.wav</code>、<code>go/0487ba9b_nohash_0.wav</code> 等几个离群点，听了听，结论是“没什么明显问题，数据里装的是该装的东西”。这种方法通常能找到失真的录音。</p>`,
+      cells: [61], highlight: ["PCA(n_components=3)", "np.zeros((sample_rate - samples.shape[0], ))"],
+      draw(svg, ctx) {
+        const r = K.rng(8), pts = [];
+        for (let i = 0; i < 160; i++) { const c = i % 4; pts.push({ x0: 360 + K.randn(r) * 200, y0: 170 + K.randn(r) * 90, x1: 330 + [-60, 40, 0, 70][c] + K.randn(r) * 45, y1: 170 + [-20, 30, 50, -40][c] + K.randn(r) * 35, out: false }); }
+        [[600, 70], [110, 280], [640, 260]].forEach((p) => pts.push({ x0: 360 + K.randn(r) * 200, y0: 170 + K.randn(r) * 90, x1: p[0], y1: p[1], out: true }));
+        const els = pts.map((p) => K.svg(svg, "circle", { cx: p.x0, cy: p.y0, r: 4, fill: "var(--c1)", opacity: 0.6 }));
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 12, class: "muted" }, "示意：每个点是一段录音；8000 维 FFT → PCA → 2 维");
+        const it = K.svg(svg, "text", { x: 20, y: 320, "font-size": 13 }, "");
+        ctx.wait(400).then((ok) => ok && ctx.tween(2000, (t) => { els.forEach((e, i) => { e.setAttribute("cx", K.lerp(pts[i].x0, pts[i].x1, t)); e.setAttribute("cy", K.lerp(pts[i].y0, pts[i].y1, t)); }); }))
+          .then((ok) => { if (!ok) return; it.textContent = "红圈：离群点 → 拿出来听一听，再决定留不留"; pts.forEach((p, i) => { if (p.out) { K.set(els[i], { fill: "var(--c6)", opacity: 1 }); K.svg(svg, "circle", { cx: p.x1, cy: p.y1, r: 13, fill: "none", stroke: "var(--c6)", "stroke-width": 2 }); } }); });
+      },
+    },
+    {
+      at: 68, title: "下一步：神经网络怎样听懂一句话", kicker: "第 68–69 格 · 编码器-解码器与 CTC",
+      html: `<p>最后作者给出思路：近年的主流是神经网络，两种常见架构是<b>编码器-解码器</b>（先把整段声音读完压成一份“摘要”，再一个字一个字写出来）和<b>循环网络 + CTC 损失</b>。另外还有经典的 HMM 方法（Kaldi 工具包），以及很深的卷积网络：因为这个比赛词表很小、每段只有一个词，他猜卷积网络可能会赢。</p><p><b>CTC 在对齐什么？</b>频谱图有 100 帧，单词 yes 只有 3 个字母，没人告诉模型“哪一帧对应哪个字母”。CTC 让模型每一帧都输出一个字母或“空白”，再把<b>连续重复的合并、空白删掉</b>，得到最终文字。动画演示的就是这个“合并”过程。</p>`,
+      draw(svg, ctx) {
+        const seq = ["_", "_", "y", "y", "_", "e", "e", "e", "_", "s", "s", "s", "_", "_"];
+        const w = W("yes", 1);
+        const sp = AK.drawSpec(svg, { x: 40, y: 30, w: 640, h: 90 }, logSpec(w.x, 20, 10).slice(15, 85), { maxT: 70, maxF: 30 });
+        K.svg(svg, "text", { x: 40, y: 22, "font-size": 12, class: "muted" }, "频谱图被切成一帧一帧（示意）");
+        const cw = 640 / seq.length;
+        const boxes = seq.map((c, i) => { const g = K.node(svg, 40 + i * cw + 2, 150, cw - 4, 40, c === "_" ? "空" : c, { fill: c === "_" ? "var(--panel-2)" : "var(--accent-soft)", stroke: c === "_" ? "var(--line)" : "var(--accent)", bold: c !== "_" }); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 40, y: 142, "font-size": 12 }, "① 每一帧输出一个字母或“空白”");
+        const l2 = K.svg(svg, "text", { x: 40, y: 228, "font-size": 12 }, "");
+        const out = K.svg(svg, "text", { x: 360, y: 290, "text-anchor": "middle", "font-size": 30, "font-weight": 700, fill: "var(--good)" }, "");
+        (async () => {
+          for (let i = 0; i < seq.length; i++) if (!(await ctx.tween(110, (t) => (boxes[i].style.opacity = t)))) return;
+          if (!(await ctx.wait(500))) return;
+          l2.textContent = "② 合并连续重复的字母，删掉空白";
+          if (!(await ctx.tween(900, (t) => boxes.forEach((b, i) => { if (seq[i] === "_" || seq[i] === seq[i - 1]) b.style.opacity = 1 - 0.85 * t; })))) return;
+          out.textContent = "y e s";
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：词 → 频谱图 ---------- */
+  const words = "yes no up down left right on off stop go".split(" ");
+  let curA = null;
+  const labA = document.getElementById("lab1");
+  K.lab(labA, {
+    width: 640, height: 360,
+    controls: [
+      { id: "w", label: "说哪个词（合成示意声音）", value: "yes", options: words.map((w) => [w, w]) },
+      { id: "f0", label: "嗓音高低（基频 Hz）", min: 80, max: 260, step: 5, value: 130 },
+      { id: "win", label: "窗长（毫秒，作者用 20）", min: 5, max: 64, step: 1, value: 20 },
+      { id: "log", label: "能量刻度", value: "log", options: [["log", "取对数（作者的做法）"], ["lin", "不取对数（线性）"]] },
+    ],
+    note: "浏览器现场合成声音，再做短时傅里叶变换。窗长短 → 时间上清楚、频率上模糊；窗长长 → 反过来。点“播放”可以听到合成的声音。",
+    render(svg, v) {
+      curA = AK.word(v.w, { f0: v.f0, seed: 3, sr: SR });
+      const win = Math.round((v.win * SR) / 1000), hop = Math.max(1, Math.round(win / 2));
+      let fr = AK.stft(curA.x, win, hop);
+      if (v.log === "log") fr = AK.log(fr);
+      AK.drawWave(svg, { x: 40, y: 20, w: 580, h: 90 }, curA.x);
+      K.svg(svg, "rect", { x: 40, y: 130, width: 580, height: 200, fill: "var(--panel-2)" });
+      AK.drawSpec(svg, { x: 40, y: 130, w: 580, h: 200 }, fr, { maxT: 100, maxF: 60, lo: v.log === "log" ? undefined : 0 });
+      K.svg(svg, "text", { x: 40, y: 350, "font-size": 12, class: "muted" }, "上：波形（1 秒）　下：频谱图，纵轴 0–8000 Hz");
+      const bins = (AK.pow2(win) / 2 + 1);
+      return { readout: [
+        { k: "帧数", v: String(fr.length) },
+        { k: "每帧频率格数", v: String(bins) },
+        { k: "每格宽度", v: (SR / AK.pow2(win)).toFixed(1) + " Hz" },
+        { k: "每帧时长", v: v.win + " ms" },
+      ] };
+    },
+  });
+  AK.playBtn(labA, "▶ 播放合成声音", () => curA);
+
+  /* ---------- 实验 B：梅尔滤波 + MFCC ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "w", label: "说哪个词", value: "stop", options: words.map((w) => [w, w]) },
+      { id: "nm", label: "梅尔滤波器个数（作者用 128）", min: 8, max: 128, step: 4, value: 40 },
+      { id: "nc", label: "保留几个 MFCC 系数（作者用 13）", min: 4, max: 30, step: 1, value: 13 },
+    ],
+    note: "浏览器里真算：功率谱 × 三角滤波器 → 取对数 → 离散余弦变换。读数里的“还原误差”是只用前几个 MFCC 系数还原梅尔频谱时丢掉的细节。",
+    render(svg, v) {
+      const w = AK.word(v.w, { seed: 5, sr: SR }), pw = AK.stft(w.x, 400, 160, 512);
+      const fb = AK.melFB(v.nm, 512, SR, 0, 8000), mel = AK.log(AK.applyFB(pw, fb));
+      const ax = K.axes(svg, { x: 40, y: 16, w: 580, h: 70 }, [0, 8000], [0, 1.05], { yticks: 0, xticks: 4 });
+      fb.forEach((f, i) => K.svg(svg, "path", { d: `M${ax.sx(f.lo)},${ax.sy(0)}L${ax.sx(f.c)},${ax.sy(1)}L${ax.sx(f.hi)},${ax.sy(0)}`, fill: "none", stroke: K.colors[i % 6], "stroke-width": 1 }));
+      K.svg(svg, "text", { x: 40, y: 122, "font-size": 12 }, "梅尔频谱（" + v.nm + " 个频带）");
+      AK.drawSpec(svg, { x: 40, y: 130, w: 280, h: 200 }, mel, { maxT: 60, maxF: Math.min(64, v.nm) });
+      const mf = mel.map((p) => AK.dct(p, v.nc));
+      K.svg(svg, "text", { x: 340, y: 122, "font-size": 12 }, "MFCC（每帧 " + v.nc + " 个数）");
+      AK.drawSpec(svg, { x: 340, y: 130, w: 280, h: 200 }, mf, { maxT: 60, maxF: v.nc });
+      // 用前 nc 个系数逆变换，算还原误差
+      let err = 0, tot = 0;
+      mel.forEach((p, t) => {
+        const N = p.length, c = mf[t]; let mean = 0; p.forEach((x) => (mean += x / N));
+        for (let i = 0; i < N; i++) { let s = 0; for (let k = 0; k < c.length; k++) s += c[k] * Math.sqrt((k ? 2 : 1) / N) * Math.cos((Math.PI * k * (2 * i + 1)) / (2 * N)); err += (s - p[i]) * (s - p[i]); tot += (p[i] - mean) * (p[i] - mean); }
+      });
+      K.svg(svg, "text", { x: 40, y: 360, "font-size": 12, class: "muted" }, "上：三角滤波器在线性频率轴上的位置　横轴：时间");
+      return { readout: [
+        { k: "每帧特征数（梅尔）", v: String(v.nm) },
+        { k: "每帧特征数（MFCC）", v: String(v.nc) },
+        { k: "压缩比", v: (v.nm / v.nc).toFixed(1) + " 倍" },
+        { k: "还原误差（占起伏）", v: ((err / tot) * 100).toFixed(1) + "%", color: err / tot > 0.3 ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：VAD ---------- */
+  let curC = null;
+  const labC = document.getElementById("lab3");
+  K.lab(labC, {
+    width: 640, height: 300,
+    controls: [
+      { id: "w", label: "说哪个词", value: "yes", options: words.map((w) => [w, w]) },
+      { id: "nz", label: "背景噪声大小", min: 0, max: 0.08, step: 0.002, value: 0.01, fmt: (x) => x.toFixed(3) },
+      { id: "th", label: "音量门限（占最大音量的比例）", min: 0.01, max: 0.5, step: 0.01, value: 0.08, fmt: (x) => (x * 100).toFixed(0) + "%" },
+    ],
+    note: "最简单的 VAD：每 20 ms 算一次音量，超过门限就算“在说话”，保留第一段到最后一段说话之间的部分。噪声一大，门限就得跟着调高，否则静音切不掉；门限太高又会把轻的辅音切掉。",
+    render(svg, v) {
+      const w = AK.word(v.w, { seed: 7, noise: v.nz, sr: SR }), fr = 320, en = [];
+      for (let s = 0; s + fr <= w.x.length; s += fr) { let e = 0; for (let i = 0; i < fr; i++) e += w.x[s + i] * w.x[s + i]; en.push(Math.sqrt(e / fr)); }
+      const mx = Math.max(...en), on = en.map((e) => e / mx > v.th);
+      const a = on.indexOf(true), b = on.lastIndexOf(true);
+      AK.drawWave(svg, { x: 40, y: 20, w: 580, h: 120 }, w.x);
+      const fw = 580 / en.length;
+      if (a >= 0) { K.svg(svg, "rect", { x: 40, y: 20, width: a * fw, height: 120, fill: "var(--panel)", opacity: 0.75 }); K.svg(svg, "rect", { x: 40 + (b + 1) * fw, y: 20, width: (en.length - b - 1) * fw, height: 120, fill: "var(--panel)", opacity: 0.75 }); }
+      const base = 270;
+      en.forEach((e, i) => K.svg(svg, "rect", { x: 40 + i * fw + 0.5, y: base - (e / mx) * 100, width: fw - 1, height: (e / mx) * 100, fill: on[i] ? "var(--c2)" : "var(--ink-3)", opacity: 0.8 }));
+      K.svg(svg, "line", { x1: 40, x2: 620, y1: base - v.th * 100, y2: base - v.th * 100, stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+      K.svg(svg, "text", { x: 40, y: 292, "font-size": 12, class: "muted" }, "下：每 20 ms 的音量，彩色 = 超过门限（判为说话），灰色 = 静音");
+      let lost = 0, tot = 0;
+      w.segs.forEach((sg) => { if (sg.name === "停顿") return; const i0 = Math.floor((sg.t0 * SR) / fr), i1 = Math.ceil((sg.t1 * SR) / fr); for (let i = i0; i < i1; i++) { tot++; if (a < 0 || i < a || i > b) lost++; } });
+      curC = a < 0 ? null : { x: w.x.slice(a * fr, (b + 1) * fr), sr: SR };
+      return { readout: [
+        { k: "保留时长", v: a < 0 ? "0 秒" : (((b - a + 1) * fr) / SR).toFixed(2) + " 秒" },
+        { k: "数据量减少", v: a < 0 ? "100%" : ((1 - ((b - a + 1) * fr) / w.x.length) * 100).toFixed(0) + "%" },
+        { k: "被误切的发音帧", v: tot ? ((lost / tot) * 100).toFixed(0) + "%" : "0%", color: lost ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+  AK.playBtn(labC, "▶ 播放切过的声音", () => curC);
+
+  /* ---------- 实验 D：降采样 ---------- */
+  let curD = null;
+  const labD = document.getElementById("lab4");
+  K.lab(labD, {
+    width: 640, height: 300,
+    controls: [
+      { id: "w", label: "说哪个词", value: "stop", options: words.map((w) => [w, w]) },
+      { id: "sr", label: "降到多少采样率", value: "8000", options: [["16000", "16000 Hz（原样）"], ["8000", "8000 Hz（作者的做法，电话音质）"], ["4000", "4000 Hz"], ["2000", "2000 Hz"]] },
+    ],
+    note: "降采样前先把新奈奎斯特频率以上的成分滤掉（这里直接在频谱上置零），再每隔几个点取一个。读数里的“丢失能量”是被滤掉的那部分能量占比。s、f 这类擦音能量多在高频，降得越狠越容易丢。",
+    render(svg, v) {
+      const w = AK.word(v.w, { seed: 9, sr: SR }), nsr = +v.sr, spec = AK.spectrum(w.x), n = spec.length;
+      let tot = 0, kept = 0;
+      for (let k = 0; k < n; k++) { const e = spec[k] * spec[k], f = (k / n) * 8000; tot += e; if (f < nsr / 2) kept += e; }
+      const ax = K.axes(svg, { x: 50, y: 20, w: 570, h: 220 }, [0, 8000], [0, 1], { yticks: 0, xlabel: "频率 Hz" });
+      const mx = Math.max(...spec);
+      let dk = "", dl = "";
+      for (let c = 0; c < 300; c++) { let m = 0; for (let k = Math.floor((c * n) / 300); k < Math.floor(((c + 1) * n) / 300); k++) m = Math.max(m, spec[k]); const f = (c / 300) * 8000, p = ax.sx(f) + "," + ax.sy(Math.pow(m / mx, 0.5)); if (f < nsr / 2) dk += (dk ? "L" : "M") + p; else dl += (dl ? "L" : "M") + p; }
+      K.svg(svg, "path", { d: dk, fill: "none", stroke: "var(--c1)", "stroke-width": 1.5 });
+      if (dl) K.svg(svg, "path", { d: dl, fill: "none", stroke: "var(--ink-3)", "stroke-width": 1, opacity: 0.6 });
+      if (nsr < 16000) { K.svg(svg, "rect", { x: ax.sx(nsr / 2), y: 20, width: ax.sx(8000) - ax.sx(nsr / 2), height: 220, fill: "var(--ink-3)", opacity: 0.12 }); K.svg(svg, "line", { x1: ax.sx(nsr / 2), x2: ax.sx(nsr / 2), y1: 20, y2: 240, stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "5 3" }); }
+      // 生成降采样后的声音用于播放：频域置零后逆变换太重，这里用简单的滑动平均低通 + 抽取
+      const step = SR / nsr, out = new Float32Array(Math.floor(w.x.length / step));
+      for (let i = 0; i < out.length; i++) { let s = 0; for (let j = 0; j < step; j++) s += w.x[i * step + j] || 0; out[i] = s / step; }
+      curD = { x: out, sr: nsr };
+      return { readout: [
+        { k: "每秒采样点", v: nsr.toLocaleString() },
+        { k: "数据量", v: ((nsr / SR) * 100).toFixed(0) + "%" },
+        { k: "能表示的最高频率", v: nsr / 2 + " Hz" },
+        { k: "丢失能量", v: ((1 - kept / tot) * 100).toFixed(1) + "%", color: 1 - kept / tot > 0.1 ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+  AK.playBtn(labD, "▶ 播放降采样后的声音", () => curD);
+
+  /* ---------- 实验 E：PCA 异常检测 ---------- */
+  let pcaData = null;
+  function buildPCA(nBad) {
+    const SR2 = 8000, X = [], tag = [];
+    const r = K.rng(77);
+    for (let i = 0; i < 90; i++) { const wd = words[i % 10]; X.push(AK.word(wd, { sr: SR2, seed: 100 + i, f0: 95 + r() * 150, start: 0.1 + r() * 0.3, noise: 0.002 + r() * 0.01 }).x); tag.push(wd); }
+    const bad = [["noise", "整段噪声"], ["clip", "削波失真"], ["hum", "电流嗡嗡声"], ["silence", "几乎无声"], ["tone", "单一哨音"]];
+    for (let j = 0; j < nBad; j++) {
+      const k = bad[j][0], x = AK.word(words[j], { sr: SR2, seed: 900 + j }).x;
+      if (k === "noise") for (let i = 0; i < x.length; i++) x[i] = 0.3 * K.randn(r);
+      if (k === "clip") for (let i = 0; i < x.length; i++) x[i] = K.clamp(x[i] * 40, -0.3, 0.3);
+      if (k === "hum") for (let i = 0; i < x.length; i++) x[i] += 0.5 * Math.sin((2 * Math.PI * 50 * i) / SR2) + 0.3 * Math.sin((2 * Math.PI * 150 * i) / SR2);
+      if (k === "silence") for (let i = 0; i < x.length; i++) x[i] = 0.002 * K.randn(r);
+      if (k === "tone") for (let i = 0; i < x.length; i++) x[i] = 0.4 * Math.sin((2 * Math.PI * 2800 * i) / SR2);
+      X.push(x); tag.push(bad[j][1]);
+    }
+    // 每段录音 → FFT 幅度 → 汇成 64 个频带
+    const F = X.map((x) => { const s = AK.spectrum(x), n = s.length, o = new Float64Array(64); for (let k = 0; k < n; k++) o[Math.floor((k * 64) / n)] += s[k]; return Array.from(o, (v) => Math.log(v + 1e-6)); });
+    const d = 64, n = F.length, mu = new Array(d).fill(0), sd = new Array(d).fill(0);
+    F.forEach((f) => f.forEach((v, j) => (mu[j] += v / n)));
+    F.forEach((f) => f.forEach((v, j) => (sd[j] += ((v - mu[j]) ** 2) / n)));
+    const Z = F.map((f) => f.map((v, j) => (v - mu[j]) / (Math.sqrt(sd[j]) + 1e-9)));
+    // 幂迭代求前 2 个主成分
+    const comps = [];
+    for (let c = 0; c < 2; c++) {
+      let v = Array.from({ length: d }, (_, j) => Math.sin(j + c + 1));
+      for (let it = 0; it < 60; it++) {
+        const nv = new Array(d).fill(0);
+        Z.forEach((z) => { let s = 0; for (let j = 0; j < d; j++) s += z[j] * v[j]; for (let j = 0; j < d; j++) nv[j] += s * z[j]; });
+        comps.forEach((u) => { let s = 0; for (let j = 0; j < d; j++) s += nv[j] * u[j]; for (let j = 0; j < d; j++) nv[j] -= s * u[j]; });
+        const nn = Math.hypot(...nv); v = nv.map((x) => x / nn);
+      }
+      comps.push(v);
+    }
+    const P = Z.map((z) => comps.map((u) => z.reduce((s, x, j) => s + x * u[j], 0)));
+    return { P, tag, nGood: 90 };
+  }
+  K.lab(document.getElementById("lab5"), {
+    width: 640, height: 400,
+    controls: [
+      { id: "nb", label: "混进几条坏录音", min: 0, max: 5, step: 1, value: 3 },
+      { id: "k", label: "离中心多远算异常（几倍平均距离）", min: 1.5, max: 5, step: 0.1, value: 2.5, fmt: (x) => x.toFixed(1) },
+    ],
+    note: "浏览器里合成 90 段正常口令录音（10 个词 × 不同嗓音、不同起始时间），再混进几条坏录音，照作者的步骤：FFT → 标准化 → PCA。第一次计算约需一秒。",
+    render(svg, v) {
+      if (!pcaData || pcaData.nb !== v.nb) { pcaData = buildPCA(v.nb); pcaData.nb = v.nb; }
+      const { P, tag, nGood } = pcaData;
+      const xs = P.map((p) => p[0]), ys = P.map((p) => p[1]);
+      const pad = 0.5, ax = K.axes(svg, { x: 50, y: 20, w: 560, h: 320 }, [Math.min(...xs) - pad, Math.max(...xs) + pad], [Math.min(...ys) - pad, Math.max(...ys) + pad], { xlabel: "主成分 1", ylabel: "主成分 2" });
+      const cx = xs.slice(0, nGood).reduce((a, b) => a + b, 0) / nGood, cy = ys.slice(0, nGood).reduce((a, b) => a + b, 0) / nGood;
+      const dist = P.map((p) => Math.hypot(p[0] - cx, p[1] - cy)), md = dist.reduce((a, b) => a + b, 0) / dist.length;
+      let tp = 0, fp = 0;
+      P.forEach((p, i) => {
+        const flag = dist[i] > v.k * md, bad = i >= nGood;
+        if (flag && bad) tp++; if (flag && !bad) fp++;
+        K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: bad ? 6 : 4, fill: bad ? "var(--c6)" : "var(--c1)", opacity: 0.75 });
+        if (flag) K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 11, fill: "none", stroke: "var(--warn)", "stroke-width": 2 });
+        if (bad) { const right = ax.sx(p[0]) > 500; K.svg(svg, "text", { x: ax.sx(p[0]) + (right ? -10 : 10), y: ax.sy(p[1]) - 10, "text-anchor": right ? "end" : "start", "font-size": 11, fill: "var(--c6)" }, tag[i]); }
+      });
+      K.svg(svg, "text", { x: 50, y: 394, "font-size": 12, class: "muted" }, "蓝点 = 正常口令　红点 = 坏录音　橙圈 = 被判为异常");
+      return { readout: [
+        { k: "录音总数", v: String(P.length) },
+        { k: "找到的坏录音", v: `${tp} / ${v.nb}`, color: tp === v.nb ? "var(--good)" : "var(--bad)" },
+        { k: "误报的正常录音", v: String(fp), color: fp ? "var(--warn)" : "var(--good)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

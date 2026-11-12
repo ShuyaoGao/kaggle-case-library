@@ -1,0 +1,677 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>灾难推文识别</title>
+<meta name="description" content="Kaggle 案例拆解：从探索分析、推文清洗、修正错误标签到微调 BERT，判断一条推文是否在报告真实灾难。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">文本数据 · 二分类 · 预训练语言模型</div>
+  <h1>灾难推文识别：“着火了”是真火灾，还是夸张修辞？</h1>
+  <p class="en">NLP with Disaster Tweets - EDA, Cleaning and BERT</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span><span class="tag dl">深度学习</span>
+    <span class="tag method">元特征 EDA</span><span class="tag method">n-gram 分析</span><span class="tag method">词向量覆盖率</span><span class="tag method">推文清洗</span>
+    <span class="tag method">修正错误标签</span><span class="tag method">按 keyword 分层交叉验证</span><span class="tag method">BERT 微调</span><span class="tag method">宏平均 F1</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Gunes Evitan</b></span>
+    <span>Kaggle 点赞 <b>4,520</b>（2026-11 抓取）</span>
+    <span>比赛 <b>nlp-getting-started</b></span>
+    <span><a href="https://www.kaggle.com/code/gunesevitan/nlp-with-disaster-tweets-eda-cleaning-and-bert" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">1 万多条带关键词的英文推文</div><p>训练集 7,613 条（灾难 3,271，非灾难 4,342）<span data-cell="16">出处</span>，测试集 3,263 条（比赛数据说明）。每条有关键词、地点和推文原文。</p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这条推文是否在说真实的灾难</div><p>target = 1 表示真实灾难，0 表示不是。比赛按 F1 分数排名，作者用宏平均 F1 来对应。<span data-cell="39">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">大量 EDA + 清洗 + BERT 微调</div><p>看缺失值、元特征、n-gram；按 GloVe / FastText 的词表清洗推文；修正 18 组互相矛盾的标签；按 keyword 分层做 2 折交叉验证，微调 12 层 BERT。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一份“新手把 NLP 学透”的笔记</div><p>作者说清洗前词向量能覆盖 50% 以上的词表、80% 以上的文本<span data-cell="27">出处</span>；并公开指出测试集标签可在网上找到，满分毫无意义。<span data-cell="49">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">Kaggle 入门比赛 <b>Natural Language Processing with Disaster Tweets</b> 的数据，原始来源是 Figure Eight 公司人工标注的 “Disasters on social media”。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">训练集推文</div><div class="v">7,613</div></div>
+        <div class="stat-tile"><div class="k">测试集推文</div><div class="v">3,263</div></div>
+        <div class="stat-tile"><div class="k">真实灾难（训练）</div><div class="v" style="color:var(--c6)">3,271 · 43%</div></div>
+        <div class="stat-tile"><div class="k">非灾难（训练）</div><div class="v" style="color:var(--c1)">4,342 · 57%</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">训练集两类条数与比例见第 15、16 格 <span data-cell="16">出处</span>；keyword 缺失约 0.8%、location 缺失约 33% 见第 5 格 <span data-cell="5">出处</span>；测试集条数来自比赛数据说明。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>id</code></td><td>推文编号</td><td>整数</td></tr>
+        <tr><td><code>keyword</code></td><td>推文里的灾难关键词（如 fire、flood），少量缺失</td><td>文本 / 类别</td></tr>
+        <tr><td><code>location</code></td><td>用户自填的所在地，约三分之一缺失，格式很乱</td><td>文本</td></tr>
+        <tr><td><code>text</code></td><td>推文原文</td><td>文本</td></tr>
+        <tr><td><code>target</code></td><td><b>要预测的答案</b>：1 = 真实灾难，0 = 不是</td><td>类别</td></tr>
+      </table></div>
+      <p style="font-size:13.5px;color:var(--ink-2);margin:10px 0 4px">notebook 里出现过的真实推文（第 35 格，作者重新核对过标签）：</p>
+      <ul class="tight" style="font-size:13.5px">
+        <li><code>CLEARED:incident with injury:I-495 inner loop Exit 31 - MD 97/Georgia Ave Silver Spring</code> → 作者标为 1</li>
+        <li><code>Caution: breathing may be hazardous to your health.</code> → 作者标为 1</li>
+        <li><code>To fight bioterrorism sir.</code> → 作者标为 0</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="30">
+    <h3>动手试试 A · 输入一条推文，看作者的清洗规则和 9 个元特征 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="44">
+    <h3>动手试试 B · BERT 的输入三件套，和一张“注意力”热力图 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的数字和结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>keyword 缺失约 0.8%、location 缺失约 33%，训练集和测试集比例相同，很可能来自同一个样本</td><td><span data-cell="5">第 5 格</span></td></tr>
+        <tr><td>location 是用户自填，太脏，不适合当特征；keyword 有信号</td><td><span data-cell="7">第 7 格</span></td></tr>
+        <tr><td>灾难推文更正式、词更长（多来自新闻机构）；非灾难推文错别字更多</td><td><span data-cell="10">第 10 格</span></td></tr>
+        <tr><td>类别比例 57% : 43%，基本平衡，不需要按 target 分层</td><td><span data-cell="15">第 15 格</span></td></tr>
+        <tr><td>清洗前 GloVe 和 FastText 都覆盖 50% 以上词表、80% 以上文本</td><td><span data-cell="27">第 27 格</span></td></tr>
+        <tr><td>有 18 条推文在重复出现时被标了不同标签，作者逐条重新标注</td><td><span data-cell="33">第 33 格</span></td></tr>
+        <tr><td>BERT 用 12 层、隐藏维度 768、12 个注意力头的 uncased 版本</td><td><span data-cell="41">第 41 格</span></td></tr>
+        <tr><td>BERT 后面不加额外的 Dense 或池化层；用 SGD，因为其他优化器难以收敛</td><td><span data-cell="43">第 43 格</span></td></tr>
+        <tr><td>测试集标签可以在网上找到，“满分”没有意义</td><td><span data-cell="49">第 49 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">每一折每一轮的精确率、召回率、F1 都在运行输出和学习曲线里，源码不带输出，作者的文字里也没有写具体分数，所以这里不列。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一条新推文（可附关键词），输出“真实灾难”的概率，供应急部门优先查看。</li>
+        <li><b>同类问题：</b>舆情预警、谣言初筛、客服工单紧急程度判断、医疗咨询分诊、招聘广告真假识别。</li>
+        <li><b>可迁移的套路：</b>先 EDA 找“哪些列能用” → 对照预训练词表清洗文本 → 检查重复样本的标签冲突 → 用预训练模型的 [CLS] 向量接一个小分类头微调。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>缺失值填充：no_keyword / no_location <span data-cell="6">第 6 格</span></li>
+        <li>9 个元特征：词数、去重词数、停用词数、URL 数等 <span data-cell="11">第 11 格</span></li>
+        <li>n-gram 统计（1、2、3 元） <span data-cell="17">第 17 格</span></li>
+        <li>词向量覆盖率检查（GloVe、FastText） <span data-cell="28">第 28 格</span></li>
+        <li>基于规则的推文清洗 <span data-cell="30">第 30 格</span></li>
+        <li>冲突标签重标 <span data-cell="35">第 35 格</span></li>
+        <li>StratifiedKFold（按 keyword 分层，2 折） <span data-cell="37">第 37 格</span></li>
+        <li>BERT（TF Hub）+ [CLS] → Dense(sigmoid)，SGD(lr=1e-4, momentum=0.8) <span data-cell="44">第 44 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者说 location 太脏不能用。你能想出一种办法，把“自由填写的地点”变成有用的特征吗？代价是什么？</li>
+      <li>清洗规则是作者对着训练集和测试集里的生词一条条手写的（几百条 re.sub）。这样做有什么好处？换一份新数据时会遇到什么问题？</li>
+      <li>同一条推文在数据里出现多次、却被标成不同答案。作者凭自己的理解重新标注，这样做合理吗？还有别的处理办法吗？</li>
+      <li>BERT 已经能处理大小写和标点，为什么作者还要先把推文清洗一遍？清洗会不会反而丢掉信息（比如 “!!!”）？</li>
+      <li>测试集的标签在网上可以找到。比赛里出现“满分”说明了什么？你在做课程项目时，怎样避免类似的“泄漏”？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Gunes Evitan，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Kaggle, Natural Language Processing with Disaster Tweets（原始来源 Figure Eight, Disasters on social media）。BERT：Devlin et al. (2019)。
+</footer>
+</main>
+
+<script src="nb/disaster-tweets-bert.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* 调试用：地址后加 #fast 时动画瞬间完成（便于截图自查），正常访问不受影响 */
+  if (/fast/.test(location.hash + location.search)) { K.tween = (ms, fn, c) => { fn(1, 1); return Promise.resolve(!c || c.alive()); }; K.wait = (ms, c) => Promise.resolve(!c || c.alive()); }
+  if (/labsonly/.test(location.hash + location.search)) document.head.appendChild(K.el("style", null, ".hero,.topbar,section.block:not(#pipeline),.walk-top,.ch-head,.ch-body,.ch-cells>:not(.inline-lab),#pipeline>h2,#pipeline>.lead{display:none!important}.chapter{margin:0!important;padding:0!important;border:0!important}"));
+  if (/fast/.test(location.hash + location.search) && !/nofold/.test(location.hash + location.search)) setTimeout(() => { const b = document.querySelector('[data-a="fold"]'); if (b) b.click(); }, 50);
+  /* ---------- 本页文本类辅助函数（页面自带，不依赖外部库） ---------- */
+  const MONO = "font-family:var(--mono)";
+  const chipW = (t, fs) => Math.max(26, String(t).length * (fs || 13) * 0.61 + 14);
+  /* 词块：圆角矩形 + 等宽文字；返回 {g, rect, text, w} */
+  function chip(svg, x, y, t, opt) {
+    opt = opt || {};
+    const fs = opt.fs || 13, w = opt.w || chipW(t, fs), h = opt.h || 24;
+    const g = K.svg(svg, "g");
+    const color = opt.color || "var(--c1)";
+    const rect = K.svg(g, "rect", { x, y, width: w, height: h, rx: 5, fill: opt.fill || `color-mix(in srgb, ${color} 16%, var(--panel))`, stroke: opt.stroke || color, "stroke-width": 1.2 });
+    const text = K.svg(g, "text", { style: MONO, x: x + w / 2, y: y + h / 2 + fs * 0.36, "text-anchor": "middle", "font-size": fs, fill: opt.ink || "var(--ink)" }, t);
+    return { g, rect, text, w, h };
+  }
+  /* 一行词块，超宽自动换行；返回 [{...chip, x, y}] */
+  function chipRow(svg, x, y, tokens, maxW, opt) {
+    opt = opt || {};
+    const out = [], gap = opt.gap == null ? 6 : opt.gap, lh = (opt.h || 24) + 8;
+    let cx = x, cy = y;
+    tokens.forEach((t, i) => {
+      const o = typeof opt.style === "function" ? Object.assign({}, opt, opt.style(t, i)) : opt;
+      const w = chipW(t, o.fs);
+      if (cx + w > x + maxW && cx > x) { cx = x; cy += lh; }
+      const c = chip(svg, cx, cy, t, o);
+      c.x = cx; c.y = cy; out.push(c);
+      cx += w + gap;
+    });
+    return out;
+  }
+  /* 矩阵：rows×cols 的格子，vals[r][c]；返回 cells[r][c] = {rect, text} */
+  function matrix(svg, x, y, rowLab, colLab, vals, opt) {
+    opt = opt || {};
+    const cw = opt.cw || 46, ch = opt.ch || 28, lw = opt.lw || 70, fmt = opt.fmt || ((v) => String(v));
+    const max = opt.max || Math.max(1e-9, ...vals.flat().map(Math.abs));
+    colLab.forEach((c, j) => K.svg(svg, "text", { style: MONO, x: x + lw + j * cw + cw / 2, y: y - 8, "text-anchor": opt.rotate ? "start" : "middle", "font-size": opt.colFs || 12, fill: "var(--ink-2)", transform: opt.rotate ? `rotate(-40 ${x + lw + j * cw + cw / 2} ${y - 8})` : null }, c));
+    const cells = rowLab.map((r, i) => {
+      K.svg(svg, "text", { x: x + lw - 8, y: y + i * ch + ch / 2 + 4, "text-anchor": "end", "font-size": opt.rowFs || 12, fill: "var(--ink-2)" }, r);
+      return colLab.map((c, j) => {
+        const v = vals[i][j];
+        const rect = K.svg(svg, "rect", { x: x + lw + j * cw + 1, y: y + i * ch + 1, width: cw - 2, height: ch - 2, rx: 3, fill: v ? K.heat(Math.abs(v) / max * 0.85) : "var(--panel-2)", stroke: "var(--line)" });
+        const text = K.svg(svg, "text", { style: MONO, x: x + lw + j * cw + cw / 2, y: y + i * ch + ch / 2 + 4, "text-anchor": "middle", "font-size": opt.fs || 12, fill: v ? "var(--ink)" : "var(--ink-3)" }, fmt(v));
+        return { rect, text };
+      });
+    });
+    return cells;
+  }
+  /* sklearn CountVectorizer 默认分词：小写，token_pattern = \b\w\w+\b（单个字符的词被丢掉） */
+  const skTok = (s) => (String(s).toLowerCase().match(/\b\w\w+\b/g) || []);
+  /* NLTK 英文停用词表 */
+  const STOP = new Set(("i me my myself we our ours ourselves you you're you've you'll you'd your yours yourself yourselves he him his himself she she's her hers herself it it's its itself they them their theirs themselves what which who whom this that that'll these those am is are was were be been being have has had having do does did doing a an the and but if or because as until while of at by for with about against between into through during before after above below to from up down in out on off over under again further then once here there when where why how all any both each few more most other some such no nor not only own same so than too very s t can will just don don't should should've now d ll m o re ve y ain aren aren't couldn couldn't didn didn't doesn doesn't hadn hadn't hasn hasn't haven haven't isn isn't ma mightn mightn't mustn mustn't needn needn't shan shan't shouldn shouldn't wasn wasn't weren weren't won won't wouldn wouldn't").split(" "));
+  /* 在实验面板左侧插入一个文本输入框 */
+  function addTextInput(labEl, label, value, onChange, opt) {
+    opt = opt || {};
+    const ctrl = labEl.querySelector(".ctrl");
+    const wrap = K.el("div");
+    wrap.innerHTML = `<label>${K.esc(label)}</label>`;
+    const inp = K.el(opt.area ? "textarea" : "input", { type: "text", spellcheck: "false" });
+    inp.value = value;
+    inp.style.cssText = "width:100%;font:inherit;font-size:14px;padding:6px 8px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);resize:vertical;" + (opt.area ? "min-height:64px;" : "");
+    inp.addEventListener("input", () => onChange(inp.value));
+    wrap.appendChild(inp);
+    ctrl.insertBefore(wrap, ctrl.firstChild);
+    return inp;
+  }
+  const fadeIn = (els, t) => els.forEach((e) => e && (e.style.opacity = t));
+  const hide = (els) => els.forEach((e) => e && (e.style.opacity = 0));
+  /* 按 case.js 的切章规则（每章从 at 或 min(cells) 开始）自动生成 kicker 里的“第 a–b 格”，kicker 原文只保留“·”后面的阶段名 */
+  function autoKicker(steps) {
+    const N = (window.CASE_NB || { cells: [] }).cells.length;
+    const st = steps.map((s) => ({ s, a: s.at != null ? s.at : Math.min.apply(null, s.cells) })).sort((x, y) => x.a - y.a);
+    st.forEach((o, k) => {
+      const to = k + 1 < st.length ? st[k + 1].a - 1 : N - 1;
+      const stage = String(o.s.kicker || "").split("·").pop().trim();
+      o.s.kicker = (to > o.a ? `第 ${o.a}–${to} 格` : `第 ${o.a} 格`) + (stage ? " · " + stage : "");
+    });
+    return steps;
+  }
+
+  /* ---------- 作者第 30 格 clean() 的部分规则（顺序照原文；原文有几百条，这里选代表性的） ---------- */
+  const RULES = [
+    ["特殊字符", [[/\x89Û_/g, ""], [/åÊ/g, ""], [/JapÌ_n/g, "Japan"]]],
+    ["缩写展开", [[/he's/g, "he is"], [/there's/g, "there is"], [/We're/g, "We are"], [/That's/g, "That is"], [/won't/g, "will not"], [/they're/g, "they are"], [/Can't/g, "Cannot"], [/wasn't/g, "was not"], [/aren't/g, "are not"], [/isn't/g, "is not"], [/What's/g, "What is"], [/haven't/g, "have not"], [/It's/g, "It is"], [/You're/g, "You are"], [/I'm/g, "I am"], [/i'm/g, "I am"], [/don't/g, "do not"], [/can't/g, "cannot"], [/we're/g, "we are"], [/you're/g, "you are"], [/it's/g, "it is"], [/didn't/g, "did not"]]],
+    ["HTML 实体", [[/&gt;/g, ">"], [/&lt;/g, "<"], [/&amp;/g, "&"]]],
+    ["口语和错字", [[/w\/e/g, "whatever"], [/w\//g, "with"], [/USAgov/g, "USA government"], [/recentlu/g, "recently"], [/Ph0tos/g, "Photos"]]],
+    ["话题标签和用户名", [[/cnnbrk/g, "CNN Breaking News"], [/Daesh/g, "ISIS"], [/CDCgov/g, "Centers for Disease Control and Prevention"], [/listenlive/g, "listen live"], [/IdentityTheft/g, "Identity Theft"], [/savebees/g, "save bees"]]],
+    ["删除网址", [[/https?:\/\/t.co\/[A-Za-z0-9]+/g, ""]]],
+    ["标点与词分开", "punct"],
+    ["缩写词与地名", [[/MH370/g, "Malaysia Airlines Flight 370"], [/okwx/g, "Oklahoma City Weather"], [/cawx/g, "California Weather"], [/usNWSgov/g, "United States National Weather Service"]]],
+  ];
+  function cleanTweet(t) {
+    const log = [];
+    RULES.forEach(([name, rs]) => {
+      const before = t;
+      if (rs === "punct") {
+        for (const p of "@#!?+&*[]-%.:/();$=><|{}^'`") t = t.split(p).join(" " + p + " ");
+        t = t.split("...").join(" ... ");
+        if (!t.includes("...")) t = t.split("..").join(" ... ");
+      } else rs.forEach(([re, rep]) => (t = t.replace(re, rep)));
+      if (t !== before) log.push(name);
+    });
+    return { text: t.replace(/\s+/g, " ").trim(), log };
+  }
+  /* 第 11 格的 9 个元特征（作者的停用词来自 wordcloud 库，这里用 NLTK 表近似） */
+  const PUN = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+  function metaFeatures(x) {
+    const w = x.split(/\s+/).filter(Boolean);
+    return [
+      ["word_count 词数", w.length],
+      ["unique_word_count 去重词数", new Set(w).size],
+      ["stop_word_count 停用词数", x.toLowerCase().split(/\s+/).filter((t) => STOP.has(t)).length],
+      ["url_count 网址数", x.toLowerCase().split(/\s+/).filter((t) => t.includes("http")).length],
+      ["mean_word_length 平均词长", w.length ? +(w.reduce((s, t) => s + t.length, 0) / w.length).toFixed(2) : 0],
+      ["char_count 字符数", x.length],
+      ["punctuation_count 标点数", [...x].filter((c) => PUN.includes(c)).length],
+      ["hashtag_count # 个数", [...x].filter((c) => c === "#").length],
+      ["mention_count @ 个数", [...x].filter((c) => c === "@").length],
+    ];
+  }
+  /* 示意用的小 WordPiece 词表（真实 BERT 词表有约 3 万个片段） */
+  const WP = new Set(("the a an and or of to in on at for with is are was were be been it this that there they we you i he she my our your " +
+    "fire fires wild forest house home building buildings flood flooding earth quake storm hurricane rain water police people killed dead injured help " +
+    "news breaking california city road roads closed near now just after before evacuation town emergency crash train plane bomb attack " +
+    "so not no like love song this hot burning burn bus music video watch out new world day time year all my got get go going ca la usa " +
+    "##s ##ed ##ing ##ly ##er ##fire ##quake ##ation ##ated ##e ##d ##y ##es ##storm ##fall evac ##uate ##uated ##uation wild land ##slide " +
+    "! ? . , : ; - ' \" # @ & / ( ) ... 1 2 3 4 5 6 7 8 9 0 cnn report reports reported").split(/\s+/));
+  const WPL = [...WP];
+  function wordpiece(text) {
+    const basic = text.toLowerCase().replace(/([!?.,:;\-'"#@&/()])/g, " $1 ").split(/\s+/).filter(Boolean);
+    const out = [];
+    basic.forEach((w) => {
+      if (WP.has(w)) return out.push(w);
+      let s = 0; const pieces = [];
+      while (s < w.length) {
+        let e = w.length, cur = null;
+        while (e > s) { const sub = (s ? "##" : "") + w.slice(s, e); if (WP.has(sub)) { cur = sub; break; } e--; }
+        if (!cur) { pieces.length = 0; pieces.push("[UNK]"); break; }
+        pieces.push(cur); s = e;
+      }
+      out.push(...pieces);
+    });
+    return out;
+  }
+  const tokId = (t) => (t === "[CLS]" ? 101 : t === "[SEP]" ? 102 : t === "[PAD]" ? 0 : t === "[UNK]" ? 100 : 1000 + WPL.indexOf(t));
+  const DISASTER = new Set(["fire", "##fire", "flood", "flooding", "quake", "##quake", "earth", "storm", "hurricane", "killed", "dead", "injured", "evacuate", "evacuated", "evac", "##uated", "##uation", "emergency", "crash", "bomb", "attack", "burning", "police", "wild", "land", "##slide"]);
+
+  const steps = [
+    {
+      at: 0, title: "开场：一份新手的学习笔记", kicker: "· 开场",
+      html: `<p>作者在开头写明：这是他刚开始学 NLP 时把学到的东西整理成的 notebook，借鉴了 5 份其他高赞 notebook（列在第 0 格）。第 1 格从 TensorFlow 官方仓库下载 BERT 的分词脚本 <code>tokenization.py</code>，第 2 格导入 pandas、seaborn、sklearn、TensorFlow 等库。</p>`,
+      cells: [0],
+    },
+    {
+      at: 3, title: "缺失值与 keyword / location", kicker: "· 认识数据",
+      html: `<p>读入训练集和测试集后，作者先看两列可能有缺失的字段：keyword 缺约 0.8%，location 缺约 33%，而且训练集和测试集的缺失比例几乎一样，说明两份数据很可能来自同一个样本。缺失处分别填上 <code>no_keyword</code>、<code>no_location</code>。</p><p>接着看取值：location 是用户自己写的，五花八门，作者判断它太脏，不当特征；keyword 有信号，因为有些词只会出现在一种语境里。</p>`,
+      cells: [5, 6, 7], highlight: ["fillna(f'no_{col}')"],
+      async draw(svg, ctx) {
+        const rows = [["ablaze", "", "Forest fire near La Ronge…"], ["", "Birmingham", "Just happened a terrible car crash"], ["flood", "", "Heavy rain, roads flooded…"], ["fire", "Earth ♥", "This song is fire!!!"], ["quake", "", "Felt the earthquake just now"]];
+        const cols = ["keyword", "location", "text"], xs = [30, 180, 340], w = [140, 150, 360];
+        cols.forEach((c, j) => K.svg(svg, "text", { style: MONO, x: xs[j] + 6, y: 36, "font-size": 13, fill: "var(--ink-2)" }, c));
+        const blanks = [];
+        rows.forEach((r, i) => r.forEach((v, j) => {
+          const y = 48 + i * 46;
+          K.svg(svg, "rect", { x: xs[j], y, width: w[j] - 6, height: 38, rx: 5, fill: v ? "var(--panel-2)" : "color-mix(in srgb, var(--bad) 12%, var(--panel))", stroke: v ? "var(--line)" : "var(--bad)" });
+          const t = K.svg(svg, "text", { style: MONO, x: xs[j] + 8, y: y + 24, "font-size": 12, fill: v ? "var(--ink)" : "var(--bad)" }, v || "NaN");
+          if (!v) blanks.push({ t, j });
+        }));
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12, class: "muted" }, "示意表格（推文为自编），真实缺失比例：keyword ≈ 0.8%，location ≈ 33%");
+        if (!(await ctx.wait(700))) return;
+        for (const b of blanks) {
+          if (!(await ctx.tween(300, (t) => (b.t.style.opacity = 1 - t)))) return;
+          b.t.textContent = b.j ? "no_location" : "no_keyword"; b.t.style.fill = "var(--c3)";
+          if (!(await ctx.tween(300, (t) => (b.t.style.opacity = t)))) return;
+        }
+        const x1 = K.svg(svg, "line", { x1: 180, y1: 44, x2: 324, y2: 280, stroke: "var(--bad)", "stroke-width": 3, opacity: 0 });
+        const t1 = K.svg(svg, "text", { x: 190, y: 330, "font-size": 13, fill: "var(--bad)", "font-weight": 700, opacity: 0 }, "location：太脏，不用");
+        const t2 = K.svg(svg, "text", { x: 30, y: 330, "font-size": 13, fill: "var(--c3)", "font-weight": 700, opacity: 0 }, "keyword：有信号");
+        await ctx.tween(500, (t) => fadeIn([x1, t1, t2], t));
+      },
+    },
+    {
+      at: 10, title: "9 个元特征", kicker: "· 特征 EDA",
+      html: `<p><b>元特征</b>是“关于文字的统计数字”，不看词义，只数数：词数、去重词数、停用词数、网址数、平均词长、字符数、标点数、# 个数、@ 个数。</p><p>作者把每个元特征按“灾难 / 非灾难”画分布，发现灾难推文更像新闻：更正式、词更长；非灾难推文来自个人，错字多。动画在一条自编推文上真算这 9 个数。</p>`,
+      cells: [11, 12], highlight: ["mean_word_length", "punctuation_count"],
+      async draw(svg, ctx) {
+        const tw = "BREAKING: Wildfire near the highway, evacuation ordered http://t.co/x1 #fire @cnn";
+        K.svg(svg, "text", { style: MONO, x: 20, y: 30, "font-size": 12 }, tw);
+        K.svg(svg, "text", { x: 20, y: 50, "font-size": 12, class: "muted" }, "示例推文（自编）");
+        const mf = metaFeatures(tw);
+        for (let i = 0; i < mf.length; i++) {
+          const y = 66 + i * 29;
+          K.svg(svg, "text", { style: MONO, x: 40, y: y + 16, "font-size": 13 }, mf[i][0]);
+          const v = K.svg(svg, "text", { style: MONO, x: 400, y: y + 16, "font-size": 14, "font-weight": 700, fill: "var(--c2)" }, "");
+          const bar = K.svg(svg, "rect", { x: 460, y: y + 4, width: 0, height: 16, rx: 3, fill: "var(--c2)", "fill-opacity": 0.6 });
+          if (!(await ctx.tween(220, (t) => { v.textContent = String(Math.round(mf[i][1] * t * 100) / 100); bar.setAttribute("width", Math.min(220, mf[i][1] * 2.4) * t); }))) return;
+        }
+      },
+    },
+    {
+      at: 14, title: "目标比例与 n-gram", kicker: "· 目标与词组",
+      html: `<p>目标分布：非灾难 57%（4,342 条），灾难 43%（3,271 条），基本平衡，所以交叉验证时不必按 target 分层。</p><p>然后统计最常见的 <b>n-gram</b>（连续 n 个词组成的片段）：单个词里两类共有的多是标点和停用词；灾难推文的二元组、三元组已经很能说明问题，非灾难推文的二元组多和 reddit、youtube 有关。动画在一条自编推文上真算 1、2、3 元组。</p>`,
+      cells: [16, 17], highlight: ["generate_ngrams", "n_gram"],
+      async draw(svg, ctx) {
+        const toks = "forest fire near la ronge sask canada".split(" ");
+        const ng = (n) => toks.slice(0, toks.length - n + 1).map((_, i) => toks.slice(i, i + n).join(" "));
+        const pie = [[0.57, "var(--c1)", "非灾难 57%"], [0.43, "var(--c6)", "灾难 43%"]];
+        let a0 = -Math.PI / 2;
+        const cx = 90, cy = 120, R = 70;
+        for (const [f, c, l] of pie) {
+          const a1 = a0 + f * 2 * Math.PI, path = K.svg(svg, "path", { d: "", fill: c });
+          const s = a0;
+          if (!(await ctx.tween(500, (t) => { const e = s + (a1 - s) * t; path.setAttribute("d", `M${cx},${cy} L${cx + R * Math.cos(s)},${cy + R * Math.sin(s)} A${R},${R} 0 ${e - s > Math.PI ? 1 : 0} 1 ${cx + R * Math.cos(e)},${cy + R * Math.sin(e)} Z`); }))) return;
+          a0 = a1;
+        }
+        K.svg(svg, "text", { x: 30, y: 220, "font-size": 12, fill: "var(--c1)" }, "非灾难 4,342 · 57%");
+        K.svg(svg, "text", { x: 30, y: 240, "font-size": 12, fill: "var(--c6)" }, "灾难 3,271 · 43%");
+        K.svg(svg, "text", { x: 200, y: 30, "font-size": 12, class: "muted" }, "示例推文（自编，已去停用词）的 1 / 2 / 3 元组");
+        for (let n = 1; n <= 3; n++) {
+          K.svg(svg, "text", { x: 200, y: 64 + (n - 1) * 92, "font-size": 13, "font-weight": 700, fill: K.colors[n + 1] }, `${n}-gram`);
+          const cs = chipRow(svg, 270, 46 + (n - 1) * 92, ng(n), 440, { fs: 12, h: 22, color: K.colors[n + 1] });
+          hide(cs.map((c) => c.g));
+          for (const c of cs) if (!(await ctx.tween(120, (t) => (c.g.style.opacity = t)))) return;
+        }
+      },
+    },
+    {
+      at: 24, title: "词向量的覆盖率", kicker: "· 对照词表",
+      html: `<p>后面要用预训练的词向量（GloVe 840B 和 FastText Crawl，每个词 300 维），而推文里很多“词”在词向量词典里查不到（叫 OOV，词表外词），比如 “fire!!!”、“#Hiroshima”。</p><p>作者写了 <code>check_embeddings_coverage</code>：词表覆盖率 = 查得到的不同词 / 全部不同词；文本覆盖率 = 查得到的词出现总次数 / 全部词出现总次数。清洗前两种词向量都能覆盖 50% 以上的词表、80% 以上的文本。动画里的“词典”是示意。</p>`,
+      cells: [27, 28], highlight: ["vocab_coverage", "text_coverage"],
+      async draw(svg, ctx) {
+        const words = [["fire", 6, 1], ["the", 9, 1], ["near", 3, 1], ["fire!!!", 2, 0], ["#hiroshima", 1, 0], ["flood", 4, 1], ["evacuation", 2, 1], ["w/", 1, 0], ["wildfire", 3, 1], ["@cnnbrk", 1, 0], ["&amp;", 2, 0], ["killed", 2, 1]];
+        K.svg(svg, "text", { x: 20, y: 26, "font-size": 12, class: "muted" }, "推文词表（示意）：词 × 出现次数；绿 = 词向量词典里有，红 = 查不到（OOV）");
+        const cs = [];
+        words.forEach(([w, n, ok], i) => {
+          const x = 20 + (i % 4) * 175, y = 44 + Math.floor(i / 4) * 44;
+          const c = chip(svg, x, y, `${w} ×${n}`, { w: 165, fs: 12, color: "var(--ink-3)", ink: "var(--ink-2)" });
+          cs.push({ c, ok });
+        });
+        for (const { c, ok } of cs) {
+          if (!(await ctx.wait(140))) return;
+          c.rect.style.stroke = ok ? "var(--good)" : "var(--bad)"; c.rect.style.fill = `color-mix(in srgb, ${ok ? "var(--good)" : "var(--bad)"} 15%, var(--panel))`;
+        }
+        const vc = words.filter((w) => w[2]).length / words.length, tot = words.reduce((s, w) => s + w[1], 0), tc = words.filter((w) => w[2]).reduce((s, w) => s + w[1], 0) / tot;
+        const bars = [["词表覆盖率", vc, "var(--c1)"], ["文本覆盖率", tc, "var(--c3)"]];
+        for (let k = 0; k < 2; k++) {
+          const y = 200 + k * 50;
+          K.svg(svg, "text", { x: 20, y: y + 18, "font-size": 13 }, bars[k][0]);
+          K.svg(svg, "rect", { x: 120, y, width: 500, height: 26, rx: 13, fill: "var(--panel-2)" });
+          const r = K.svg(svg, "rect", { x: 120, y, width: 0, height: 26, rx: 13, fill: bars[k][2] });
+          const t = K.svg(svg, "text", { style: MONO, x: 630, y: y + 18, "font-size": 13 }, "");
+          if (!(await ctx.tween(600, (u) => { r.setAttribute("width", 500 * bars[k][1] * u); t.textContent = (bars[k][1] * u * 100).toFixed(0) + "%"; }))) return;
+        }
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 12, class: "muted" }, "原文：清洗前 GloVe / FastText 覆盖 50%+ 词表、80%+ 文本（第 27 格）");
+      },
+    },
+    {
+      at: 29, title: "清洗推文", kicker: "· 文本清洗",
+      html: `<p>作者的 <code>clean()</code> 有几百行 <code>re.sub</code>，按类别依次处理：乱码特殊字符 → 缩写展开（they're → they are）→ HTML 实体（&amp;amp; → &amp;）→ 口语和错字 → 把话题标签、用户名拆成正常词 → 删网址 → 把标点和词分开 → 展开缩写词和地名。</p><p>原则只有一个：让推文里的词尽量能在词向量词典里查到。清洗后再算一次覆盖率，然后删掉占用 10GB 以上内存的词向量。动画按其中几条规则在浏览器里真算。</p>`,
+      cells: [30, 32], highlight: ["def clean(tweet)", "https?:\\/\\/t.co\\/[A-Za-z0-9]+"],
+      notes: { 31: "这两格只是释放内存：词向量加起来超过 10GB，清洗完就不再需要。" },
+      async draw(svg, ctx) {
+        let t = "@cnnbrk: they're evacuating!!! Wildfire &amp; smoke http://t.co/Ab12 #CAfire";
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 12, class: "muted" }, "示例推文（自编），依次套用作者的几类规则");
+        const line = K.svg(svg, "text", { style: MONO, x: 20, y: 52, "font-size": 13 }, t);
+        let y = 84;
+        for (const [name, rs] of RULES) {
+          const before = t;
+          if (rs === "punct") { t = cleanTweet(t).text; } else rs.forEach(([re, rep]) => (t = t.replace(re, rep)));
+          if (t === before) continue;
+          if (!(await ctx.wait(500))) return;
+          K.svg(svg, "text", { x: 20, y, "font-size": 12, fill: "var(--warn)", "font-weight": 700 }, "✓ " + name);
+          K.svg(svg, "text", { style: MONO, x: 160, y, "font-size": 12 }, t.replace(/\s+/g, " ").slice(0, 78));
+          line.textContent = t.replace(/\s+/g, " ");
+          y += 34;
+        }
+        const final = cleanTweet("@cnnbrk: they're evacuating!!! Wildfire &amp; smoke http://t.co/Ab12 #CAfire").text;
+        K.svg(svg, "text", { x: 20, y: y + 16, "font-size": 12, class: "muted" }, "清洗结果（标点已和词分开）：");
+        chipRow(svg, 20, y + 26, final.split(" "), 680, { fs: 11, h: 20, gap: 4, style: (w) => (/^[^\w]+$/.test(w) ? { color: "var(--warn)" } : { color: "var(--c3)" }) });
+      },
+    },
+    {
+      at: 33, title: "修正互相矛盾的标签", kicker: "· 标签噪声",
+      html: `<p>同一条推文在训练集里出现了好几次，却被标了不同的答案：作者找到了 <b>18</b> 条这样的推文。可能是不同的人标注、理解不同。</p><p>作者新建一列 <code>target_relabeled</code>，逐条读这些推文，按自己的判断统一成 0 或 1。后面训练用的是这一列。</p>`,
+      cells: [34, 35], highlight: ["target_relabeled", "nunique()"],
+      async draw(svg, ctx) {
+        const tw = [["To fight bioterrorism sir.", [1, 0, 1], 0], ["Caution: breathing may be hazardous to your health.", [0, 1], 1], ["CLEARED:incident with injury:I-495 inner loop Exit 31…", [0, 1, 1], 1]];
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 12, class: "muted" }, "第 35 格里的真实推文：同一句话多次出现，标签不一致 → 作者统一重标");
+        for (let k = 0; k < tw.length; k++) {
+          const y = 44 + k * 96;
+          K.svg(svg, "text", { style: MONO, x: 20, y: y + 16, "font-size": 12 }, tw[k][0]);
+          const labs = tw[k][1].map((v, j) => chip(svg, 20 + j * 60, y + 30, "y=" + v, { w: 52, color: v ? "var(--c6)" : "var(--c1)", fs: 12 }));
+          if (!(await ctx.wait(500))) return;
+          const arrow = K.arrow(svg, 220, y + 42, 330, y + 42, { color: "var(--warn)" });
+          const fin = chip(svg, 340, y + 30, "target_relabeled = " + tw[k][2], { color: tw[k][2] ? "var(--c6)" : "var(--c1)", fs: 12 });
+          hide([arrow, fin.g]);
+          if (!(await ctx.tween(400, (t) => { fadeIn([arrow, fin.g], t); labs.forEach((l, j) => (l.g.style.opacity = tw[k][1][j] === tw[k][2] ? 1 : 1 - 0.7 * t)); }))) return;
+        }
+      },
+    },
+    {
+      at: 36, title: "按 keyword 分层的交叉验证", kicker: "· 验证方案",
+      html: `<p>作者发现官方切分训练集和测试集时，每个 keyword 组都按比例分到了两边。为了让验证集和测试集“长得一样”，他用 <code>StratifiedKFold(n_splits=2)</code>，把 <b>keyword</b> 当作分层依据（而不是 target），并打乱顺序。</p><p>这样每一折的训练集和验证集里都有所有 keyword 的推文。</p>`,
+      cells: [37], highlight: ["StratifiedKFold(n_splits=K", "K = 2"],
+      async draw(svg, ctx) {
+        const kws = [["fire", "var(--c6)"], ["flood", "var(--c1)"], ["quake", "var(--c2)"], ["storm", "var(--c4)"]];
+        const items = [];
+        kws.forEach(([k, c], i) => { for (let j = 0; j < 6; j++) items.push({ k, c, i, j }); });
+        K.svg(svg, "text", { x: 20, y: 26, "font-size": 12, class: "muted" }, "每个方块 = 一批推文，颜色 = keyword（示意）");
+        const els = items.map((d, n) => K.svg(svg, "rect", { x: 30 + (n % 12) * 26, y: 50 + Math.floor(n / 12) * 26, width: 22, height: 22, rx: 4, fill: d.c }));
+        kws.forEach(([k, c], i) => K.svg(svg, "text", { x: 30 + i * 80, y: 130, "font-size": 12, fill: c }, "■ " + k));
+        K.svg(svg, "text", { x: 30, y: 190, "font-size": 13, "font-weight": 700 }, "折 1 · 训练");
+        K.svg(svg, "text", { x: 380, y: 190, "font-size": 13, "font-weight": 700 }, "折 1 · 验证");
+        if (!(await ctx.wait(600))) return;
+        const cnt = { L: {}, R: {} };
+        await ctx.tween(1200, (t) => items.forEach((d, n) => {
+          const side = d.j % 2 ? "R" : "L", base = side === "L" ? 30 : 380;
+          const pos = d.i * 3 + Math.floor(d.j / 2);
+          const tx = base + (pos % 6) * 26, ty = 205 + Math.floor(pos / 6) * 26;
+          els[n].setAttribute("x", K.lerp(30 + (n % 12) * 26, tx, t)); els[n].setAttribute("y", K.lerp(50 + Math.floor(n / 12) * 26, ty, t));
+        }));
+        void cnt;
+        K.svg(svg, "text", { x: 30, y: 330, "font-size": 12, class: "muted" }, "两边每种 keyword 都有 3 块：这就是“按 keyword 分层”");
+      },
+    },
+    {
+      at: 38, title: "评价指标：宏平均 F1", kicker: "· 评价",
+      html: `<p>排行榜用的是 F 分数，作者用 <b>宏平均 F1</b> 来对应：分别把“灾难”和“非灾难”当正类各算一次 F1，再取平均。</p><p>他还指出：精确率、召回率、F1 是“整体指标”，必须在整个训练集或验证集上算，按批次算既误导又慢。所以写了一个 Keras 回调 <code>ClassificationReport</code>，每轮结束后在完整的训练集和验证集上算一次。</p>`,
+      cells: [39, 40], highlight: ["average='macro'", "on_epoch_end"],
+      async draw(svg, ctx) {
+        const TP = 40, FP = 10, FN = 15, TN = 60;
+        const L = [["TP 真灾难判对", TP, "var(--c3)"], ["FP 误报", FP, "var(--warn)"], ["FN 漏报", FN, "var(--bad)"], ["TN 非灾难判对", TN, "var(--c1)"]];
+        L.forEach((d, i) => {
+          const g = K.node(svg, 40 + (i % 2) * 150, 40 + Math.floor(i / 2) * 110, 140, 100, `${d[0]}\n${d[1]}`, { stroke: d[2], fill: `color-mix(in srgb, ${d[2]} 14%, var(--panel))` });
+          g.style.opacity = 0;
+          ctx.wait(150 + i * 200).then((ok) => ok && ctx.tween(300, (t) => (g.style.opacity = t)));
+        });
+        K.svg(svg, "text", { x: 40, y: 280, "font-size": 12, class: "muted" }, "示意数字，用来演示公式");
+        const p1 = TP / (TP + FP), r1 = TP / (TP + FN), f1 = 2 * p1 * r1 / (p1 + r1);
+        const p0 = TN / (TN + FN), r0 = TN / (TN + FP), f0 = 2 * p0 * r0 / (p0 + r0);
+        const lines = [`灾难类：精确率 ${p1.toFixed(2)}，召回率 ${r1.toFixed(2)}，F1 ${f1.toFixed(2)}`, `非灾难类：精确率 ${p0.toFixed(2)}，召回率 ${r0.toFixed(2)}，F1 ${f0.toFixed(2)}`, `宏平均 F1 = (${f1.toFixed(2)} + ${f0.toFixed(2)}) / 2 = ${((f1 + f0) / 2).toFixed(3)}`];
+        if (!(await ctx.wait(1100))) return;
+        for (let i = 0; i < 3; i++) {
+          const t = K.svg(svg, "text", { x: 360, y: 90 + i * 40, "font-size": i === 2 ? 15 : 13, "font-weight": i === 2 ? 700 : 400, opacity: 0 }, lines[i]);
+          if (!(await ctx.tween(350, (u) => (t.style.opacity = u)))) return;
+        }
+        K.svg(svg, "text", { x: 360, y: 230, "font-size": 12, class: "muted" }, "F1 = 2 × 精确率 × 召回率 / (精确率 + 召回率)");
+      },
+    },
+    {
+      at: 41, title: "BERT：读过整本维基百科的模型", kicker: "· 预训练模型",
+      html: `<p><b>BERT</b> 是 Google 2018 年发布的预训练语言模型，作者用的是英文 uncased 版：<b>12 层</b> Transformer、隐藏维度 <b>768</b>、<b>12 个注意力头</b>，在维基百科和 BooksCorpus 上预训练过，输入先转小写。</p><p>每一层的核心是<b>自注意力</b>：每个词都看一遍句子里所有其他词，按相关程度加权汇总信息。<code>trainable=True</code> 表示微调时这 12 层的参数也会一起更新。动画里的注意力权重是示意。</p>`,
+      cells: [42], highlight: ["hub.KerasLayer", "trainable=True"],
+      async draw(svg, ctx) {
+        const sents = [["forest", "fire", "near", "the", "town"], ["this", "new", "song", "is", "fire"]];
+        const W = (a, b) => { const S = { fire: { forest: 0.9, town: 0.5, song: 0.9, new: 0.3 } }; return (S[a] && S[a][b]) || (a === b ? 0.2 : 0.08); };
+        for (let k = 0; k < 2; k++) {
+          const y = 60 + k * 150, ws = sents[k], xs = ws.map((_, i) => 60 + i * 120);
+          const cs = ws.map((w, i) => chip(svg, xs[i] - 40, y, w, { w: 80, color: w === "fire" ? "var(--c6)" : "var(--c1)" }));
+          const fi = ws.indexOf("fire");
+          const lines = ws.map((w, j) => {
+            if (j === fi) return null;
+            const x1 = xs[fi], x2 = xs[j], mid = (x1 + x2) / 2, h = 30 + Math.abs(x1 - x2) * 0.25;
+            return K.svg(svg, "path", { d: `M${x1},${y + 26} Q${mid},${y + 26 + h} ${x2},${y + 26}`, fill: "none", stroke: "var(--c2)", "stroke-width": 0, opacity: 0.85 });
+          });
+          if (!(await ctx.tween(800, (t) => lines.forEach((l, j) => l && (l.style.strokeWidth = 1 + 9 * W("fire", ws[j]) * t))))) return;
+          K.svg(svg, "text", { x: 680, y: y + 18, "text-anchor": "end", "font-size": 13, "font-weight": 700, fill: k ? "var(--c1)" : "var(--c6)" }, k ? "→ 夸人，非灾难" : "→ 真火灾");
+          void cs;
+        }
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 12, class: "muted" }, "fire 对句中其他词的注意力（线越粗越在意，权重为示意）");
+        K.svg(svg, "text", { x: 20, y: 330, "font-size": 12, class: "muted" }, "真实 BERT：12 层 × 12 个头，每层都做一次这样的“互相看”");
+      },
+    },
+    {
+      at: 43, title: "输入三件套与分类头", kicker: "· 编码与建模",
+      html: `<p><code>DisasterDetector.encode</code> 把每条清洗后的推文变成 BERT 要的三样东西：先用 WordPiece 切成子词，截到 max_seq_length − 2，前后加 <b>[CLS]</b> 和 <b>[SEP]</b>，再补 0 到 128 位：</p><ul class="tight"><li><code>input_word_ids</code>：每个子词在 BERT 词表里的编号</li><li><code>input_mask</code>：真实子词为 1，填充为 0</li><li><code>segment_ids</code>：单句任务全为 0</li></ul><p><code>build_model</code> 取 BERT 最后一层输出里 <b>[CLS] 位置</b>的 768 维向量，直接接 <code>Dense(1, sigmoid)</code>，不加其他层；优化器用 SGD(lr=0.0001, momentum=0.8)，作者说其他优化器难以收敛。</p>`,
+      cells: [44], highlight: ["['[CLS]'] + text + ['[SEP]']", "sequence_output[:, 0, :]", "SGD(learning_rate=self.lr, momentum=0.8)"],
+      async draw(svg, ctx) {
+        const toks = ["[CLS]"].concat(wordpiece("Wildfire near town evacuated")).concat(["[SEP]"]);
+        const L = 10, all = toks.concat(new Array(Math.max(0, L - toks.length)).fill("[PAD]")).slice(0, L);
+        const cw = 60, x0 = 104;
+        const rows = [["子词", (t) => t], ["input_word_ids", (t) => String(tokId(t))], ["input_mask", (t) => (t === "[PAD]" ? "0" : "1")], ["segment_ids", () => "0"]];
+        rows.forEach(([n], r) => K.svg(svg, "text", { style: MONO, x: x0 - 8, y: 46 + r * 40, "text-anchor": "end", "font-size": 11, fill: "var(--ink-2)" }, n));
+        for (let j = 0; j < L; j++) {
+          const t = all[j];
+          rows.forEach(([n, f], r) => chip(svg, x0 + j * cw, 30 + r * 40, f(t), { w: cw - 6, fs: 11, h: 24, color: t === "[PAD]" ? "var(--ink-3)" : t === "[CLS]" || t === "[SEP]" ? "var(--c2)" : r ? "var(--c1)" : "var(--c4)", ink: t === "[PAD]" ? "var(--ink-3)" : "var(--ink)" }));
+          if (!(await ctx.wait(140))) return;
+        }
+        K.svg(svg, "text", { x: 20, y: 200, "font-size": 11, class: "muted" }, "（长度缩成 10 便于观看，原文 128；[CLS]=101、[SEP]=102、[PAD]=0 为 BERT 词表规定，其余编号示意）");
+        const bert = K.node(svg, 110, 222, 440, 46, "BERT 12 层 → 每个位置一个 768 维向量", { stroke: "var(--c4)", fill: "color-mix(in srgb, var(--c4) 12%, var(--panel))" });
+        const a = K.arrow(svg, x0 + 30, 270, x0 + 30, 300, { color: "var(--c2)", sw: 2.5 });
+        const head = K.node(svg, 40, 300, 280, 34, "[CLS] 向量 → Dense(1, sigmoid) → P(灾难)", { stroke: "var(--c6)", fs: 12 });
+        hide([bert, a, head]);
+        if (!(await ctx.tween(400, (t) => (bert.style.opacity = t)))) return;
+        await ctx.tween(500, (t) => fadeIn([a, head], t));
+      },
+    },
+    {
+      at: 45, title: "训练 2 折、预测取平均", kicker: "· 训练与预测",
+      html: `<p><code>DisasterDetector(bert_layer, max_seq_length=128, lr=0.0001, epochs=10, batch_size=32)</code>：在 2 折交叉验证的每一折上各训练一个模型，训练 10 轮，每轮由回调记录精确率、召回率、F1。<code>plot_learning_curve</code> 画出验证指标和损失曲线。</p><p>预测测试集时，把 2 个模型的输出概率<b>取平均</b>，再四舍五入成 0/1 写进提交文件。曲线是示意。</p>`,
+      cells: [46, 48], highlight: ["epochs=10", "/ len(self.models)"],
+      async draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 300, h: 230 }, [1, 10], [0.5, 0.9], { xticks: 9, yticks: 4, xlabel: "epoch", ylabel: "验证 F1（示意）", xfmt: (v) => v.toFixed(0), yfmt: (v) => v.toFixed(1) });
+        const f = [[0.62, 0.72, 0.77, 0.79, 0.8, 0.81, 0.81, 0.82, 0.81, 0.82], [0.6, 0.7, 0.76, 0.78, 0.8, 0.8, 0.81, 0.81, 0.82, 0.81]];
+        const ps = f.map((_, k) => K.svg(svg, "path", { d: "", fill: "none", stroke: k ? "var(--c2)" : "var(--c1)", "stroke-width": 2.5 }));
+        if (!(await ctx.tween(1400, (t) => ps.forEach((p, k) => { const n = Math.max(1, Math.round(t * 10)); p.setAttribute("d", f[k].slice(0, n).map((v, i) => (i ? "L" : "M") + ax.sx(i + 1) + "," + ax.sy(v)).join("")); })))) return;
+        K.svg(svg, "text", { x: 70, y: 320, "font-size": 12, fill: "var(--c1)" }, "— 折 1 模型");
+        K.svg(svg, "text", { x: 170, y: 320, "font-size": 12, fill: "var(--c2)" }, "— 折 2 模型");
+        const m1 = K.node(svg, 420, 60, 120, 40, "模型 1：0.86", { stroke: "var(--c1)" }), m2 = K.node(svg, 420, 130, 120, 40, "模型 2：0.74", { stroke: "var(--c2)" });
+        const a1 = K.arrow(svg, 540, 80, 590, 112), a2 = K.arrow(svg, 540, 150, 590, 120);
+        const av = K.node(svg, 592, 96, 120, 44, "平均 0.80\n→ 判为 1", { stroke: "var(--c6)", bold: true, fs: 12 });
+        hide([m1, m2, a1, a2, av]);
+        if (!(await ctx.tween(400, (t) => fadeIn([m1, m2], t)))) return;
+        await ctx.tween(500, (t) => fadeIn([a1, a2, av], t));
+        K.svg(svg, "text", { x: 420, y: 210, "font-size": 12, class: "muted" }, "一条测试推文的两个概率（示意）");
+      },
+    },
+    {
+      at: 49, title: "关于“测试集答案”", kicker: "· 诚实的提醒",
+      html: `<p>作者公开指出：这个入门比赛的测试集标签可以在 Figure Eight 的网站上找到（数据集名 “Disasters on social media”），这就是排行榜上有人拿满分的原因。他读入这份数据，演示了如何生成一份“完美提交”，并引用 Kaggle 官方说明：使用标签的人没有资格拿 AutoML 奖。</p><p>他的态度是：入门比赛是为了学习和分享，满分没有意义。最后两格把预处理好的数据存成 pickle，方便别人直接复用。</p>`,
+      cells: [50, 52], highlight: ["perfect_submission"],
+      async draw(svg, ctx) {
+        const a = K.node(svg, 40, 120, 180, 70, "模型的预测\n（真本事）", { stroke: "var(--c3)" });
+        const b = K.node(svg, 500, 120, 180, 70, "网上找到的答案\n（泄漏的标签）", { stroke: "var(--bad)" });
+        const lb = K.node(svg, 270, 30, 180, 56, "排行榜", { bold: true });
+        const ar1 = K.arrow(svg, 130, 118, 300, 88, { color: "var(--c3)" }), ar2 = K.arrow(svg, 590, 118, 420, 88, { color: "var(--bad)", dash: "5 3" });
+        const t = K.svg(svg, "text", { x: 360, y: 260, "text-anchor": "middle", "font-size": 15, "font-weight": 700, fill: "var(--bad)" }, "满分 ≠ 学会了");
+        hide([a, b, lb, ar1, ar2, t]);
+        if (!(await ctx.tween(400, (u) => fadeIn([lb, a], u)))) return;
+        if (!(await ctx.tween(400, (u) => fadeIn([ar1], u)))) return;
+        if (!(await ctx.tween(400, (u) => fadeIn([b, ar2], u)))) return;
+        await ctx.tween(400, (u) => fadeIn([t], u));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), autoKicker(steps));
+
+  /* ---------- 实验 A：清洗 + 元特征 ---------- */
+  let tweetA = "@cnnbrk: they're evacuating!!! Wildfire &amp; smoke near LA http://t.co/Ab12 #CAfire";
+  const labA = K.lab(document.getElementById("lab1"), {
+    width: 640, height: 320,
+    controls: [{ id: "which", label: "元特征算在哪个版本上", value: "raw", options: [["raw", "原始推文（作者第 11 格的做法）"], ["clean", "清洗后的推文"]] }],
+    note: "清洗只实现了第 30 格几百条规则里的代表性几十条（缩写、HTML 实体、网址、标点分离等），规则顺序与原文一致。停用词用 NLTK 表近似作者用的 wordcloud 停用词表。",
+    render(svg, v) {
+      const r = cleanTweet(tweetA);
+      K.svg(svg, "text", { x: 10, y: 18, "font-size": 13, class: "muted" }, "原始推文");
+      K.svg(svg, "text", { style: MONO, x: 10, y: 40, "font-size": 12 }, tweetA.slice(0, 90));
+      K.svg(svg, "text", { x: 10, y: 68, "font-size": 13, class: "muted" }, "触发的规则：" + (r.log.join(" → ") || "无"));
+      K.svg(svg, "text", { x: 10, y: 96, "font-size": 13, class: "muted" }, "清洗后（按空格切开）");
+      const cs = chipRow(svg, 10, 106, r.text.split(" ").filter(Boolean), 620, { fs: 11, h: 20, gap: 4, style: (w) => (/^[^\w]+$/.test(w) ? { color: "var(--warn)" } : { color: "var(--c3)" }) });
+      const y0 = (cs.length ? cs[cs.length - 1].y : 106) + 44;
+      const mf = metaFeatures(v.which === "clean" ? r.text : tweetA);
+      K.svg(svg, "text", { x: 10, y: y0, "font-size": 13, class: "muted" }, `9 个元特征（算在${v.which === "clean" ? "清洗后" : "原始"}推文上）`);
+      mf.forEach(([k, val], i) => {
+        const x = 10 + (i % 3) * 210, y = y0 + 14 + Math.floor(i / 3) * 44;
+        K.svg(svg, "rect", { x, y, width: 200, height: 38, rx: 8, fill: "var(--panel-2)" });
+        K.svg(svg, "text", { x: x + 8, y: y + 15, "font-size": 11, class: "muted" }, k);
+        K.svg(svg, "text", { style: MONO, x: x + 8, y: y + 32, "font-size": 14, "font-weight": 700 }, String(val));
+      });
+      return { readout: [{ k: "触发规则类别", v: String(r.log.length) }, { k: "清洗后词数", v: String(r.text.split(" ").filter(Boolean).length) }, { k: "删掉的网址", v: String((tweetA.match(/https?:\/\/t.co\/[A-Za-z0-9]+/g) || []).length) }] };
+    },
+  });
+  addTextInput(document.getElementById("lab1"), "输入一条英文推文", tweetA, (s) => { tweetA = s; labA.update(); });
+
+  /* ---------- 实验 B：BERT 输入与示意注意力 ---------- */
+  let tweetB = "Forest fire near La Ronge, residents evacuated";
+  const hash = (s) => { let h = 2166136261; for (const c of s) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return h >>> 0; };
+  const vec = (t) => { const r = K.rng(hash(t)); const v = Array.from({ length: 8 }, () => K.randn(r) * 0.5); v.push(DISASTER.has(t) ? 2 : 0); return v; };
+  const labB = K.lab(document.getElementById("lab2"), {
+    width: 640, height: 420,
+    controls: [
+      { id: "L", label: "max_seq_length（原文 128）", min: 6, max: 24, step: 1, value: 14 },
+      { id: "T", label: "注意力“温度”（越小越集中）", min: 0.3, max: 3, step: 0.1, value: 1, fmt: (v) => v.toFixed(1) },
+    ],
+    note: "上方三行按作者 encode() 的规则真算（WordPiece 用一张约 200 片段的小词表示意，生词会变 [UNK]）。下方热力图是示意注意力：每个子词用一个由哈希生成的小向量，灾难相关子词多一维“灾难感”，[CLS] 取所有向量的平均，权重 = softmax(q·k / 温度)。不是 BERT 的真实权重。",
+    render(svg, v) {
+      let sub = wordpiece(cleanTweet(tweetB).text.toLowerCase());
+      sub = sub.slice(0, v.L - 2);
+      const toks = ["[CLS]"].concat(sub, ["[SEP]"]);
+      const all = toks.concat(new Array(v.L - toks.length).fill("[PAD]"));
+      const cw = Math.min(46, 560 / v.L), x0 = 70;
+      [["子词", (t) => t], ["ids", (t) => String(tokId(t))], ["mask", (t) => (t === "[PAD]" ? "0" : "1")]].forEach(([n, f], r) => {
+        K.svg(svg, "text", { style: MONO, x: x0 - 6, y: 24 + r * 30, "text-anchor": "end", "font-size": 11, fill: "var(--ink-2)" }, n);
+        all.forEach((t, j) => chip(svg, x0 + j * cw, 8 + r * 30, f(t).length > 6 ? f(t).slice(0, 5) + "…" : f(t), { w: cw - 3, fs: 9, h: 22, color: t === "[PAD]" ? "var(--ink-3)" : t[0] === "[" ? "var(--c2)" : "var(--c4)", ink: t === "[PAD]" ? "var(--ink-3)" : "var(--ink)" }));
+      });
+      // 示意注意力（只算真实子词 + [CLS]）
+      const real = toks.slice(0, -1).slice(0, 12);
+      const V = real.map((t) => (t === "[CLS]" ? null : vec(t)));
+      const mean = V.filter(Boolean).reduce((a, b) => a.map((x, i) => x + b[i] / Math.max(1, V.filter(Boolean).length)), new Array(9).fill(0));
+      const E = V.map((x) => x || mean);
+      const A = E.map((q) => { const s = E.map((k) => q.reduce((acc, x, i) => acc + x * k[i], 0) / v.T); const m = Math.max(...s); const e = s.map((x) => Math.exp(x - m)); const z = e.reduce((a, b) => a + b, 0); return e.map((x) => x / z); });
+      const n = real.length, cs2 = Math.min(26, 300 / n), hx = 120, hy = 128;
+      real.forEach((t, i) => {
+        K.svg(svg, "text", { style: MONO, x: hx - 6, y: hy + i * cs2 + cs2 * 0.68, "text-anchor": "end", "font-size": 10, fill: DISASTER.has(t) ? "var(--c6)" : "var(--ink-2)" }, t);
+        K.svg(svg, "text", { style: MONO, x: hx + i * cs2 + cs2 / 2, y: hy - 6, "text-anchor": "start", "font-size": 10, fill: DISASTER.has(t) ? "var(--c6)" : "var(--ink-2)", transform: `rotate(-50 ${hx + i * cs2 + cs2 / 2} ${hy - 6})` }, t);
+        real.forEach((_, j) => K.svg(svg, "rect", { x: hx + j * cs2, y: hy + i * cs2, width: cs2 - 1, height: cs2 - 1, fill: K.heat(Math.min(1, A[i][j] * 2.2)) }));
+      });
+      const bx = hx + n * cs2 + 30;
+      K.svg(svg, "text", { x: bx, y: hy + 4, "font-size": 12, class: "muted" }, "[CLS] 这一行（示意）");
+      real.forEach((t, j) => {
+        const y = hy + 14 + j * 22;
+        K.svg(svg, "text", { style: MONO, x: bx + 80, y: y + 13, "text-anchor": "end", "font-size": 11 }, t);
+        K.svg(svg, "rect", { x: bx + 86, y: y + 2, width: 200 * A[0][j], height: 14, rx: 3, fill: DISASTER.has(t) ? "var(--c6)" : "var(--c1)" });
+      });
+      const top = real.map((t, j) => [t, A[0][j]]).slice(1).sort((a, b) => b[1] - a[1])[0];
+      return { readout: [
+        { k: "子词数（不含特殊符号）", v: String(sub.length) },
+        { k: "填充 [PAD] 个数", v: String(v.L - toks.length) },
+        { k: "[UNK] 个数", v: String(sub.filter((t) => t === "[UNK]").length), color: sub.includes("[UNK]") ? "var(--warn)" : "" },
+        { k: "[CLS] 最关注（示意）", v: top ? top[0] : "—" },
+      ] };
+    },
+  });
+  addTextInput(document.getElementById("lab2"), "输入一条英文推文", tweetB, (s) => { tweetB = s; labB.update(); });
+
+})();
+</script>
+</body>
+</html>

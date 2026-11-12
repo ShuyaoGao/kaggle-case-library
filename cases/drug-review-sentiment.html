@@ -1,0 +1,563 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>药物评论推荐</title>
+<meta name="description" content="Kaggle 案例拆解：用 Drugs.com 上病人写的药物评论做情感分析——n 元词组、保留否定词的清洗、全连接网络、LightGBM、哈佛情感词典——再把三种情感分合成推荐分，按病症给药物排序。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">医疗文本 · 情感分析 · 推荐</div>
+  <h1>药物评论里的好评差评：从病人留言到用药推荐</h1>
+  <p class="en">Recommendation Medicines by using a review</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span><span class="tag dl">深度学习</span>
+    <span class="tag method">n 元词组</span><span class="tag method">停用词（保留否定词）</span><span class="tag method">词干化</span>
+    <span class="tag method">词袋 CountVectorizer</span><span class="tag method">全连接神经网络</span><span class="tag method">LightGBM</span>
+    <span class="tag method">TextBlob</span><span class="tag method">情感词典</span><span class="tag method">加权推荐分</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>choco（chocozzz），Hanyang University TEAM-EDA</b></span>
+    <span>Kaggle 点赞 <b>507</b>（2026-11 抓取）</span>
+    <span>数据集 <b>jessicali9530/kuc-hackathon-winter-2018</b> + <b>jylee4/dictionary</b></span>
+    <span><a href="https://www.kaggle.com/code/chocozzz/recommendation-medicines-by-using-a-review" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">病人在药评网站上写的评论</div><p>每条有药名、病症、评论原文、1–10 分评分、日期，以及多少人觉得这条评论“有用”。来自 UCI 的 Drug Review 数据集，从在线药评网站爬取 <span data-cell="4">出处</span> <span data-cell="10">出处</span>。</p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">评论是好评还是差评，再给药物排名</div><p>评分 &gt; 5 记为正面（1），≤ 5 记为负面（0）<span data-cell="79">出处</span>；最终目标是“按病症推荐合适的药” <span data-cell="124">出处</span>。</p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">三种情感分 × 归一化的“有用数”</div><p>4 元词组 + 全连接神经网络；LightGBM（有用数、日期、文本统计、TextBlob 情感值）；哈佛通用情感词典。三者相加，再乘以按病症归一化的“有用数”，得到推荐分 <span data-cell="121">出处</span>。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">每个病症下药物的推荐分表</div><p>作者描述了流程和局限 <span data-cell="124">出处</span> <span data-cell="126">出处</span>，没有用文字写准确率；第 90 格提到神经网络“准确率低”，所以改用机器学习 <span data-cell="90">出处</span>。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据来自 KUC Hackathon Winter 2018 使用的 <b>UCI Drug Review Dataset (Drugs.com)</b>，已分好训练文件 <code>drugsComTrain_raw.csv</code> 和测试文件 <code>drugsComTest_raw.csv</code> <span data-cell="6">出处</span>。另用了 Kaggle 上的哈佛 General Inquirer 情感词典 <code>inquirerbasic.csv</code> <span data-cell="112">出处</span>。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者文字里写到的规模</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">不同药名</div><div class="v">3,671</div></div>
+        <div class="stat-tile"><div class="k">不同病症</div><div class="v">917</div></div>
+        <div class="stat-tile"><div class="k">每个病症平均药数</div><div class="v">约 4</div></div>
+        <div class="stat-tile"><div class="k">有用数 最大−最小</div><div class="v">1291</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">药名、病症数量见第 13 格 <span data-cell="13">出处</span>；有用数的极差 1291、标准差约 36 见第 50 格 <span data-cell="50">出处</span>；缺失值不到 1%，直接删除 <span data-cell="54">出处</span>。训练集和测试集的行数是第 7 格打印的，源码不带输出，这里不列。</p>
+      <p class="callout">真实数据里的“脏”样例（作者第 16、17 格展示的）：病症一栏里出现了 <code>3&lt;/span&gt; users found this comment helpful.</code> 这样的文字，是网页爬取时把“几人觉得有用”误抓进了病症 <span data-cell="16">出处</span>。评论里还有 <code>\r\n</code> 换行符、<code>&amp;#039;</code> 这样的 HTML 转义字符（应为撇号 '）<span data-cell="22">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么（作者第 10 格）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>白话含义</th><th>类型</th></tr>
+        <tr><td><code>uniqueID</code></td><td>评论编号（作者确认没有同一人写多条）<span data-cell="11">出处</span></td><td>编号</td></tr>
+        <tr><td><code>drugName</code></td><td>药名</td><td>类别</td></tr>
+        <tr><td><code>condition</code></td><td>病症（用这个药治什么）</td><td>类别</td></tr>
+        <tr><td><code>review</code></td><td>病人写的评论原文（英文）</td><td>文本</td></tr>
+        <tr><td><code>rating</code></td><td>1–10 星评分；作者把 &gt; 5 当作<b>正面</b>，这是要预测的答案</td><td>数值</td></tr>
+        <tr><td><code>date</code></td><td>评论日期</td><td>日期</td></tr>
+        <tr><td><code>usefulCount</code></td><td>多少人点了“这条评论有用”</td><td>数值</td></tr>
+      </table></div>
+      <p class="callout warn">本页实验里出现的英文例句是我们自己编的，用来演示处理步骤，不是数据集里的真实评论。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="75">
+    <h3>动手试试 A · 一句评论的清洗流水线：保留 not 有多重要 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="117">
+    <h3>动手试试 B · 用情感词典给评论打分 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="121">
+    <h3>动手试试 C · 推荐分怎么合成，排名就怎么变 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>排名前 8 的病症各有约 100 种药；也有很多病症只有 1 种药，不适合做推荐，删掉</td><td><span data-cell="16">第 16 格</span> <span data-cell="18">第 18 格</span></td></tr>
+        <tr><td>单个词、两个词的高频词在好评差评里差不多；3 元词组开始有区别；“4 元词组分得最清楚”，所以神经网络用 4 元词组</td><td><span data-cell="30">第 30 格</span> <span data-cell="34">第 34 格</span> <span data-cell="36">第 36 格</span></td></tr>
+        <tr><td>评分集中在 10、9、1、8，10 分的数量是其他的两倍多：正面多于负面，反应很极端</td><td><span data-cell="39">第 39 格</span></td></tr>
+        <tr><td>平均评分随年份变化，但按月份差不多；按日期（发薪日）也没有明显差别</td><td><span data-cell="45">第 45 格</span> <span data-cell="47">第 47 格</span></td></tr>
+        <tr><td>停用词里有很多 not 类词，对情感很关键，要从停用词表里拿出来</td><td><span data-cell="72">第 72 格</span></td></tr>
+        <tr><td>TextBlob 用电影评论训练，不一定适合药评，所以补充哈佛情感词典</td><td><span data-cell="111">第 111 格</span></td></tr>
+        <tr><td>作者自述三点局限：情感词太少时词典不可靠；有用数会随评论“年龄”累积；乘有用数时没考虑正负方向</td><td><span data-cell="126">第 126 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">准确率、混淆矩阵、相关系数都在运行输出里，源码不带输出，作者文字也没写具体数值，这里不列。</p>
+      <p class="callout warn"><b>读原 notebook 时要注意：</b>① 第 83 格对测试集用的是 <code>fit_transform</code> 而不是 <code>transform</code>：测试集重新建了一套词表，第 k 列在训练集和测试集里代表的是<b>不同的 4 元词组</b>，神经网络在测试集上的输入是错位的，这很可能就是第 90 格说“准确率低”的原因之一。② 第 80 格把原来分好的训练/测试合并后重新随机切分。③ 第 121 格把神经网络的<b>概率</b>、LightGBM 的<b>0/1 类别</b>、词典的 0/0.5/1 直接相加，三者尺度不同；“有用数归一化”用的是除以该病症在测试集里的评论条数。④ 第 53 格缺失值数量 1200 是手写的常数。⑤ 第 36 格“4 元词组最好”是看高频词表得出的判断，没有做对比实验。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>读一条药评，判断病人满意还是不满意；汇总同一病症下各种药的口碑。<b>它反映的是病人的主观感受，不是疗效证据；用药必须遵医嘱，不能按评论自己选药。</b></li>
+        <li><b>同类问题：</b>医院、医生的在线评价，不良反应报告的自动筛查，电商、外卖、电影评论的情感分析。</li>
+        <li><b>可迁移的套路：</b>先看清文本里的脏数据（HTML、转义符、爬虫错误）→ 去停用词时<b>保留否定词</b> → 词表只在训练集上 <code>fit</code>，测试集只 <code>transform</code> → 通用情感工具要检查是否适合本领域 → 合成多个分数时先统一尺度。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>n 元词组统计 <span data-cell="29">第 29 格</span></li>
+        <li>删爬虫错误、删单药病症 <span data-cell="61">第 61 格</span> <span data-cell="66">第 66 格</span></li>
+        <li>保留否定词 <span data-cell="73">第 73 格</span>、清洗与词干化 <span data-cell="75">第 75 格</span></li>
+        <li>CountVectorizer(ngram_range=(4,4), max_features=20000) <span data-cell="81">第 81 格</span></li>
+        <li>全连接网络 200-300-100-1 <span data-cell="85">第 85 格</span></li>
+        <li>LightGBM + 早停 <span data-cell="91">第 91 格</span> <span data-cell="107">第 107 格</span></li>
+        <li>TextBlob 情感值 <span data-cell="96">第 96 格</span>、文本统计特征 <span data-cell="102">第 102 格</span></li>
+        <li>情感词典 Positiv_ratio <span data-cell="117">第 117 格</span></li>
+        <li>有用数归一化与推荐分 <span data-cell="120">第 120 格</span> <span data-cell="121">第 121 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>“This drug did not work” 去掉停用词后如果把 not 也去掉，会变成什么？为什么情感分析里否定词这么重要？还有哪些词（比如 but、never）也有类似作用？</li>
+      <li>第 83 格对测试集用了 <code>fit_transform</code>。请用自己的话解释：为什么训练集和测试集必须共用同一张“词表”？</li>
+      <li>评分 6 分算正面、5 分算负面，这个分界线合理吗？如果改成 ≥ 8 为正、≤ 4 为负、中间去掉，模型会更好还是更差？</li>
+      <li>一种药的评论都是好评，就应该推荐给病人吗？评论者是谁（坚持用下去的人？放弃的人？）会影响这个结论吗？</li>
+      <li>作者把三种分数直接相加。如果其中一种分数范围是 0–1 的概率、另一种只能是 0 或 1，相加之后谁的“话语权”更大？应该怎样合成更合理？</li>
+      <li>按网上评论给药物排名，用在医疗场景里有什么风险？谁应该对这样的推荐负责？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 choco（Kaggle 账号 chocozzz）及 Hanyang University TEAM-EDA 成员，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据、例句和小词典均为模拟示意。数据集：UCI Drug Review Dataset (Drugs.com)，Kaggle 上传者 jessicali9530；情感词典 jylee4/dictionary（Harvard General Inquirer）。按评论推荐药物不能代替医生处方。
+</footer>
+</main>
+
+<script>/* 自查开关：网址带 #fast 时让动画在无界面截图里也能走完 */ if (/fast/.test(location.hash)) window.requestAnimationFrame = (f) => setTimeout(() => f(performance.now()), 4);</script>
+<script src="nb/drug-review-sentiment.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const fade = (els, v) => els.forEach((e) => (e.style.opacity = v));
+  const chip = (svg, x, y, text, opt) => { opt = opt || {}; const w = Math.max(36, text.length * (opt.fs || 12) * 0.62 + 16); const g = K.node(svg, x, y, w, opt.h || 28, text, { fs: opt.fs || 12, stroke: opt.stroke || "var(--line)", color: opt.color, fill: opt.fill }); g._w = w; return g; };
+
+  /* 自编例句与简化处理（示意） */
+  const STOP = ["i", "me", "my", "we", "our", "you", "your", "he", "she", "it", "its", "they", "them", "their", "what", "which", "who", "this", "that", "these", "those", "am", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "having", "do", "does", "did", "doing", "a", "an", "the", "and", "but", "if", "or", "because", "as", "until", "while", "of", "at", "by", "for", "with", "about", "against", "between", "into", "through", "during", "before", "after", "above", "below", "to", "from", "up", "down", "in", "out", "on", "off", "over", "under", "again", "further", "then", "once", "here", "there", "when", "where", "why", "how", "all", "any", "both", "each", "few", "more", "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very", "can", "will", "just", "don't", "should", "now", "didn't", "doesn't", "isn't", "wasn't", "haven't", "couldn't", "wouldn't", "aren't", "hasn't", "hadn't", "weren't", "shouldn't"];
+  const NOT_STOP = ["aren't", "couldn't", "didn't", "doesn't", "don't", "hadn't", "hasn't", "haven't", "isn't", "mightn't", "mustn't", "needn't", "no", "nor", "not", "shan't", "shouldn't", "wasn't", "weren't", "wouldn't"];
+  const stem = (w) => w.replace(/(ational|tional)$/, "tion").replace(/(ies)$/, "i").replace(/(ing|edly|ed|ly|ness|ment|s)$/, "").replace(/(e)$/, "") || w;
+
+  const steps = [
+    {
+      at: 0, title: "开场：一道开放的黑客松题目", kicker: "第 0–3 格 · 背景",
+      html: `<p>这是韩国大学生 Kaggle 黑客松 KUC Hackathon Winter 2018 的作品，题目是“你能用药物评论数据做什么？”，没有固定目标，由各队自定 <span data-cell="0">第 0 格</span> <span data-cell="2">第 2 格</span>。作者团队来自汉阳大学 TEAM-EDA，这是他们第一次做自然语言处理。</p><p>他们给自己定的题目是：<b>根据评论，给每种病症推荐合适的药</b>。动画示意整条流水线：评论 → 三种情感分 → 乘以“有用数” → 按病症排序。</p>`,
+      cells: [0, 2],
+      draw(svg, ctx) {
+        const nodes = [[20, 140, 120, "病人评论\n+ 评分"], [190, 50, 150, "① 4 元词组\n神经网络"], [190, 140, 150, "② LightGBM\n文本统计 + TextBlob"], [190, 230, 150, "③ 哈佛情感词典"], [400, 140, 120, "三者相加\n× 有用数"], [570, 140, 130, "每个病症的\n药物排名"]];
+        const els = nodes.map(([x, y, w, t], i) => { const g = K.node(svg, x, y - 25, w, 54, t, { fs: 12, stroke: i === 5 ? "var(--accent)" : "var(--line)", bold: i === 5 }); g.style.opacity = 0; return g; });
+        const arr = [[140, 140, 188, 50], [140, 140, 188, 140], [140, 140, 188, 230], [340, 50, 398, 140], [340, 140, 398, 140], [340, 230, 398, 140], [520, 140, 568, 140]].map((a) => { const e = K.arrow(svg, ...a); e.style.opacity = 0; return e; });
+        (async () => {
+          const order = [[0], [0, 1, 2], [1, 2, 3], [3, 4, 5], [4], [6], [5]];
+          const map = [[els[0]], [arr[0], arr[1], arr[2]], [els[1], els[2], els[3]], [arr[3], arr[4], arr[5]], [els[4]], [arr[6]], [els[5]]];
+          for (const g of map) if (!(await ctx.tween(300, (t) => fade(g, t)))) return;
+        })();
+      },
+    },
+    {
+      at: 4, title: "读数据：药名、病症、评论、评分", kicker: "第 4–12 格 · 读入",
+      html: `<p>数据来自 UCI，是从在线药评网站爬下来的 <span data-cell="4">第 4 格</span>。读入训练和测试两个文件 <span data-cell="6">第 6 格</span>。作者解释了数据结构 <span data-cell="10">第 10 格</span>：一个病人买了治自己病症的药，写下评论和 1–10 分评分；别人读了觉得有用，就点一下，<code>usefulCount</code> 加 1。</p><p>作者还核对了评论编号：没有同一个人写多条评论 <span data-cell="11">第 11 格</span>。动画把一条评论记录拆成几个字段（内容为示意）。</p>`,
+      cells: [6, 12], highlight: ["drugsComTrain_raw.csv"],
+      draw(svg, ctx) {
+        const fields = [["drugName", "某降压药", "var(--c1)"], ["condition", "High Blood Pressure", "var(--c2)"], ["review", "\"…worked well, no side effects…\"", "var(--c3)"], ["rating", "9 / 10", "var(--c6)"], ["date", "2016-05-20", "var(--c4)"], ["usefulCount", "27", "var(--c5)"]];
+        K.svg(svg, "text", { x: 20, y: 26, "font-size": 12, class: "muted" }, "一条记录（字段名真实，内容为示意）");
+        const card = K.svg(svg, "rect", { x: 20, y: 40, width: 260, height: 260, rx: 10, fill: "var(--panel-2)", stroke: "var(--line)" });
+        const lines = fields.map((f, i) => K.svg(svg, "rect", { x: 36, y: 60 + i * 38, width: 220, height: 22, rx: 4, fill: f[2], opacity: 0.5 }));
+        const outs = fields.map((f, i) => { const g = K.svg(svg, "g"); K.svg(g, "text", { x: 330, y: 76 + i * 38, "font-size": 13, "font-weight": 700, fill: f[2] }, f[0]); K.svg(g, "text", { x: 450, y: 76 + i * 38, "font-size": 12 }, f[1]); g.style.opacity = 0; return g; });
+        (async () => { for (let i = 0; i < fields.length; i++) { if (!(await ctx.tween(300, (t) => { outs[i].style.opacity = t; K.set(lines[i], { x: 36 + 260 * t * 0 }); }))) return; } })();
+      },
+    },
+    {
+      at: 13, title: "病症与药物：一个病有几种药", kicker: "第 13–19 格 · 探索①",
+      html: `<p>药名有 3671 种、病症有 917 种，平均每个病症约 4 种药 <span data-cell="13">第 13 格</span>。按病症数药物种类画前 20 名：排名前 8 的病症各有约 100 种药 <span data-cell="16">第 16 格</span>。</p><p>作者还发现了爬虫错误：病症一栏里出现了 “3&lt;/span&gt; users found this comment helpful.” 这样的文字 <span data-cell="17">第 17 格</span>。再看倒数 20 名：这些病症都只有 1 种药，从“推荐”的角度看没法比较，后面会删掉 <span data-cell="18">第 18 格</span>。</p>`,
+      cells: [15, 17], highlight: ["nunique()", "users found this comment helpful"],
+      draw(svg, ctx) {
+        const vals = [100, 98, 96, 95, 94, 92, 90, 88, 60, 45, 35, 30];
+        K.svg(svg, "text", { x: 30, y: 24, "font-size": 12, class: "muted" }, "每个病症有几种药（前几名约 100，条高为示意）");
+        const bars = vals.map((v, i) => K.svg(svg, "rect", { x: 30 + i * 34, y: 260, width: 26, height: 0, rx: 3, fill: "var(--c3)" }));
+        const tail = [1, 1, 1, 1, 1, 1].map((v, i) => K.svg(svg, "rect", { x: 470 + i * 34, y: 260, width: 26, height: 0, rx: 3, fill: "var(--ink-3)" }));
+        K.svg(svg, "text", { x: 470, y: 280, "font-size": 12 }, "倒数几名：只有 1 种药");
+        K.svg(svg, "text", { x: 30, y: 280, "font-size": 12 }, "排名靠前的病症");
+        const err = K.node(svg, 380, 40, 320, 40, "condition = \"3</span> users found…\"", { fs: 12, stroke: "var(--bad)", color: "var(--bad)" });
+        err.style.opacity = 0;
+        ctx.tween(1200, (t) => { bars.forEach((b, i) => K.set(b, { y: 260 - 2 * vals[i] * t, height: 2 * vals[i] * t })); tail.forEach((b) => K.set(b, { y: 260 - 4 * t, height: 4 * t })); })
+          .then((ok) => ok && ctx.tween(500, (t) => (err.style.opacity = t)))
+          .then((ok) => { if (ok) K.svg(svg, "text", { x: 380, y: 100, "font-size": 12, fill: "var(--bad)" }, "↑ 爬虫错误：把“几人觉得有用”抓进了病症"); });
+      },
+    },
+    {
+      at: 20, title: "看评论原文与词云", kicker: "第 20–26 格 · 探索②",
+      html: `<p>作者读了几条评论原文，发现要清理的东西：<code>\\r\\n</code> 这样的 HTML 换行符、括号里表达情绪的话、全大写的强调词（如 MUCH）<span data-cell="20">第 20 格</span>，还有 <code>didn&amp;#039;t</code> 这样的转义错误（应为 didn't）和省略号 <span data-cell="22">第 22 格</span>。</p><p>然后画了全部评论的<b>词云</b> <span data-cell="26">第 26 格</span>：出现越多的词字号越大。动画用几个常见的药评词示意词云的样子（词和大小都是示意）。</p>`,
+      cells: [21, 26], highlight: ["WordCloud"],
+      draw(svg, ctx) {
+        const words = [["side effects", 40], ["pain", 34], ["day", 30], ["taking", 28], ["weight", 24], ["feel", 22], ["doctor", 20], ["months", 18], ["sleep", 16], ["anxiety", 16], ["dose", 14], ["work", 14], ["better", 13], ["period", 12]];
+        const r = K.rng(4), placed = [];
+        const els = words.map(([w, s], i) => {
+          let x, y, tries = 0;
+          do { x = 60 + r() * 520; y = 50 + r() * 250; tries++; } while (tries < 60 && placed.some((p) => Math.abs(p[0] - x) < (p[2] + w.length * s * 0.3) && Math.abs(p[1] - y) < (p[3] + s) * 0.6));
+          placed.push([x, y, w.length * s * 0.3, s]);
+          const t = K.svg(svg, "text", { x, y, "font-size": s, "font-weight": 700, fill: K.colors[i % 6], "text-anchor": "middle" }, w); t.style.opacity = 0; return t;
+        });
+        K.svg(svg, "text", { x: 20, y: 330, "font-size": 11, class: "muted" }, "示意词云：词的选择和大小都是编的");
+        (async () => { for (const e of els) if (!(await ctx.tween(140, (t) => (e.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      at: 27, title: "1 到 4 元词组：哪种最能分出好评差评", kicker: "第 27–36 格 · 探索③",
+      html: `<p>把 1–5 分当负面、6–10 分当正面 <span data-cell="27">第 27 格</span>，分别统计最常见的“n 元词组”：相邻的 n 个词连在一起算一个单位 <span data-cell="29">第 29 格</span>。</p><ul class="tight"><li>1 元（单个词）：好评差评的前 5 个词几乎一样，分不开 <span data-cell="30">第 30 格</span></li><li>2 元：好一些，出现了 side effects、weight gain、highly recommend <span data-cell="32">第 32 格</span></li><li>3 元：差别明显了，如 bad side effects；但还可能漏掉前面的 not <span data-cell="34">第 34 格</span></li><li>4 元：作者认为“分得最清楚”，后面的神经网络就用 4 元词组 <span data-cell="36">第 36 格</span></li></ul><p>动画演示同一句话（自编）怎样切成 1、2、3、4 元词组。</p>`,
+      cells: [29, 35], highlight: ["def generate_ngrams", "generate_ngrams(sent,4)"],
+      draw(svg, ctx) {
+        const toks = ["did", "not", "help", "my", "pain", "at", "all"];
+        K.svg(svg, "text", { x: 20, y: 26, "font-size": 12, class: "muted" }, "自编例句：did not help my pain at all");
+        const rowY = [60, 120, 180, 240];
+        const out = [];
+        (async () => {
+          for (let n = 1; n <= 4; n++) {
+            K.svg(svg, "text", { x: 20, y: rowY[n - 1] + 20, "font-size": 13, "font-weight": 700 }, n + " 元");
+            let x = 70;
+            for (let i = 0; i + n <= toks.length; i++) {
+              const t = toks.slice(i, i + n).join(" ");
+              const c = chip(svg, x, rowY[n - 1], t, { fs: 11, stroke: t.includes("not help") ? "var(--bad)" : "var(--line)", color: t.includes("not help") ? "var(--bad)" : null });
+              c.style.opacity = 0; out.push(c); x += c._w + 6;
+              if (!(await ctx.tween(110, (u) => (c.style.opacity = u)))) return;
+            }
+          }
+          K.svg(svg, "text", { x: 20, y: 310, "font-size": 12, fill: "var(--bad)" }, "n 越大，“not help”这样的否定组合越能完整保留；但每个词组出现的次数也越少");
+        })();
+      },
+    },
+    {
+      at: 37, title: "评分分布与时间", kicker: "第 37–47 格 · 探索④",
+      html: `<p>评分分布 <span data-cell="38">第 38 格</span>：大多数人打 10、9、1、8 分，10 分的数量是其他分数的两倍多，说明正面多于负面，而且反应很<b>极端</b> <span data-cell="39">第 39 格</span>。</p><p>再看时间：每年的评论数、每年的平均分 <span data-cell="42">第 42 格</span>，按月、按日期的平均分。作者发现平均分随年份变化，但按月份差不多 <span data-cell="45">第 45 格</span>；“发薪日”那几天也没有明显差别 <span data-cell="47">第 47 格</span>。动画示意评分的“两头高、中间低”形状（柱高为示意）。</p>`,
+      cells: [38, 42], highlight: ["value_counts()"],
+      draw(svg, ctx) {
+        const v = [0.13, 0.04, 0.04, 0.03, 0.05, 0.04, 0.06, 0.12, 0.17, 0.32];
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 230 }, [0.5, 10.5], [0, 0.35], { xticks: 0, yticks: 0 });
+        const bars = v.map((p, i) => { K.svg(svg, "text", { x: ax.sx(i + 1), y: 280, "text-anchor": "middle", "font-size": 13 }, i + 1); return K.svg(svg, "rect", { x: ax.sx(i + 1) - 22, y: ax.sy(0), width: 44, height: 0, rx: 3, fill: i < 5 ? "var(--c6)" : "var(--c1)" }); });
+        K.svg(svg, "text", { x: 60, y: 304, "font-size": 12, class: "muted" }, "评分 1–10（柱高为示意，只表达作者描述的形状）");
+        K.svg(svg, "text", { x: 70, y: 50, "font-size": 12, fill: "var(--c6)" }, "■ 1–5 分 → 负面 0");
+        K.svg(svg, "text", { x: 70, y: 70, "font-size": 12, fill: "var(--c1)" }, "■ 6–10 分 → 正面 1");
+        ctx.tween(1200, (t) => bars.forEach((b, i) => K.set(b, { y: ax.sy(v[i] * t), height: ax.sy(0) - ax.sy(v[i] * t) })));
+      },
+    },
+    {
+      at: 48, title: "“有用数”与缺失值", kicker: "第 48–58 格 · 探索⑤与清洗",
+      html: `<p><code>usefulCount</code> 的分布非常不均：最大和最小差 1291，标准差约 36 <span data-cell="50">第 50 格</span>。作者的解释：越多人找的药，评论被看得越多，不管写得好坏，有用数都会很高。所以建模时要<b>按病症归一化</b>，考虑不同病症的“热度”不同。</p><p>缺失值不到 1%，直接删除 <span data-cell="54">第 54 格</span> <span data-cell="57">第 57 格</span>。注意第 53 格算缺失比例时，缺失条数 1200 是手写进去的常数。动画示意：热门病症和冷门病症的有用数差几十倍，除以各自的评论数后才好比较。</p>`,
+      cells: [48, 53, 57], highlight: ["usefulCount", "1200/df_all.shape[0]"],
+      draw(svg, ctx) {
+        const grp = [["热门病症 A", [120, 90, 60, 40, 30], 200], ["冷门病症 B", [6, 4, 3], 6]];
+        K.svg(svg, "text", { x: 20, y: 26, "font-size": 12, class: "muted" }, "示意数字");
+        const rows = [];
+        grp.forEach(([n, vals, cnt], g) => {
+          const y0 = 60 + g * 130;
+          K.svg(svg, "text", { x: 20, y: y0 - 10, "font-size": 13, "font-weight": 700 }, n + `（共 ${cnt} 条评论）`);
+          vals.forEach((v, i) => rows.push({ r: K.svg(svg, "rect", { x: 20 + i * 60, y: y0, width: 50, height: 0, rx: 3, fill: g ? "var(--c4)" : "var(--c2)" }), v, cnt, y0, t: K.svg(svg, "text", { x: 45 + i * 60, y: y0 + 96, "text-anchor": "middle", "font-size": 11 }, String(v)) }));
+        });
+        const lab = K.svg(svg, "text", { x: 360, y: 120, "font-size": 14, "font-weight": 700 }, "原始有用数：A 远远压过 B");
+        const H = (v, mx) => 80 * v / mx;
+        ctx.tween(900, (t) => rows.forEach((o) => K.set(o.r, { y: o.y0 + 80 - H(o.v, 120) * t, height: H(o.v, 120) * t })))
+          .then((ok) => ok && ctx.wait(800))
+          .then((ok) => ok && ctx.tween(900, (t) => rows.forEach((o) => { const nv = o.v / o.cnt, h = K.lerp(H(o.v, 120), H(nv, 1), t); K.set(o.r, { y: o.y0 + 80 - h, height: h }); o.t.textContent = t > 0.5 ? nv.toFixed(2) : String(o.v); })))
+          .then((ok) => { if (ok) lab.textContent = "除以病症的评论数后：可以放在一起比了"; });
+      },
+    },
+    {
+      at: 59, title: "清洗病症：去掉爬虫错误和只有一种药的病", kicker: "第 59–66 格 · 清洗",
+      html: `<p>先删掉病症里含有 <code>&lt;/span&gt;</code> 的记录 <span data-cell="61">第 61 格</span>，这些都是爬虫错误。再找出只有 1 种药的病症 <span data-cell="65">第 65 格</span>，把它们的评论也删掉 <span data-cell="66">第 66 格</span>：只有一种药，就谈不上“推荐哪一种”。</p><p>动画示意：错误病症和单药病症被筛掉，剩下的病症都至少有 2 种药可以比较。</p>`,
+      cells: [61, 66], highlight: ["'</span>' in j", "df_condition_1"],
+      draw(svg, ctx) {
+        const items = [["Depression", 4, 0], ["3</span> users found…", 1, 1], ["Birth Control", 5, 0], ["某罕见病", 1, 2], ["Pain", 4, 0], ["4</span> users found…", 1, 1], ["Insomnia", 3, 0], ["某罕见病 2", 1, 2]];
+        const els = items.map(([n, k, bad], i) => { const g = K.svg(svg, "g"); K.node(g, 30, 30 + i * 36, 220, 30, n, { fs: 12, stroke: bad === 1 ? "var(--bad)" : bad === 2 ? "var(--warn)" : "var(--line)" }); for (let j = 0; j < k; j++) K.svg(g, "circle", { cx: 280 + j * 22, cy: 45 + i * 36, r: 8, fill: "var(--c" + ((j % 5) + 1) + ")" }); return [g, bad]; });
+        K.svg(svg, "text", { x: 280, y: 22, "font-size": 11, class: "muted" }, "圆点 = 药（示意）");
+        const t1 = K.svg(svg, "text", { x: 420, y: 100, "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "");
+        const t2 = K.svg(svg, "text", { x: 420, y: 130, "font-size": 13, fill: "var(--warn)", "font-weight": 700 }, "");
+        ctx.wait(600).then((ok) => { if (ok) t1.textContent = "① 删爬虫错误"; return ok && ctx.tween(600, (t) => els.forEach(([g, b]) => { if (b === 1) g.style.opacity = 1 - 0.85 * t; })); })
+          .then((ok) => { if (ok) t2.textContent = "② 删只有 1 种药的病症"; return ok && ctx.tween(600, (t) => els.forEach(([g, b]) => { if (b === 2) g.style.opacity = 1 - 0.85 * t; })); });
+      },
+    },
+    {
+      at: 67, title: "清洗评论：去停用词但保留否定词，再词干化", kicker: "第 67–76 格 · 文本预处理",
+      html: `<p><b>停用词</b>是 the、is、and 这类到处都有、本身没什么意思的词，通常删掉。但作者注意到 NLTK 的英文停用词表里有很多否定词（not、no、didn't、isn't……），它们对情感至关重要，所以把这 20 个词从停用词表里<b>拿出来保留</b> <span data-cell="72">第 72 格</span> <span data-cell="73">第 73 格</span>。</p><p>清洗函数 <code>review_to_words</code> 依次做 <span data-cell="75">第 75 格</span>：去 HTML → 非字母变空格 → 全部小写 → 去停用词 → <b>词干化</b>（把 working、worked、works 都还原成 work）→ 用空格拼回。注意第 2 步会把撇号也变成空格，didn't 会被拆成 didn 和 t。下面的实验 A 可以输入句子逐步看。</p>`,
+      cells: [73, 75], highlight: ["not_stop", "stops.remove(i)", "SnowballStemmer", "re.sub('[^a-zA-Z]', ' ', review_text)"],
+      draw(svg, ctx) {
+        const stages = [
+          ["原文", ["The", "pills", "did", "NOT", "work", "&#039;", "felt", "worse", "!"]],
+          ["小写 + 只留字母", ["the", "pills", "did", "not", "work", "felt", "worse"]],
+          ["去停用词（保留 not）", ["pills", "not", "work", "felt", "worse"]],
+          ["词干化", ["pill", "not", "work", "felt", "wors"]],
+        ];
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 12, class: "muted" }, "自编例句，逐步处理");
+        (async () => {
+          for (let s = 0; s < stages.length; s++) {
+            const [name, toks] = stages[s], y = 44 + s * 72;
+            K.svg(svg, "text", { x: 20, y: y + 18, "font-size": 12, "font-weight": 700 }, name);
+            let x = 170;
+            for (const t of toks) {
+              const c = chip(svg, x, y, t, { fs: 12, stroke: t.toLowerCase() === "not" ? "var(--good)" : "var(--line)", color: t.toLowerCase() === "not" ? "var(--good)" : null });
+              c.style.opacity = 0; x += c._w + 6;
+              if (!(await ctx.tween(90, (u) => (c.style.opacity = u)))) return;
+            }
+            if (!(await ctx.wait(250))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 77, title: "4 元词组 + 全连接神经网络", kicker: "第 77–88 格 · 模型①",
+      html: `<p>评分 &gt; 5 记为 1，否则 0 <span data-cell="79">第 79 格</span>；合并后的数据按 67:33 重新随机切分 <span data-cell="80">第 80 格</span>。用 <code>CountVectorizer</code> 只取 4 元词组、至少在 2 条评论里出现、最多 20000 个，把每条评论变成 20000 维的计数向量，这叫<b>词袋</b> <span data-cell="81">第 81 格</span>。</p><p>网络是 4 层全连接：20000 → 200 → 300 → 100 → 1，中间有批归一化和 50% 的 Dropout（训练时随机关掉一半神经元，防止死记硬背），最后一层 sigmoid 输出正面概率 <span data-cell="85">第 85 格</span>，训练 10 轮 <span data-cell="87">第 87 格</span>。<b>关键问题</b>：第 83 格对测试集也用了 <code>fit_transform</code>，测试集重新建了一张词表，同一列在两边代表不同的词组，见动画。</p>`,
+      cells: [79, 81, 83, 85], highlight: ["ngram_range=(4, 4)", "pipeline.fit_transform(df_test['review_clean'])", "Dense(200, input_shape=(20000,))"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 20, y: 26, "font-size": 13, "font-weight": 700 }, "词表在训练集上建好，测试集应该“照着同一张表”数");
+        const trV = ["not work at all", "side effect gone", "highly recommend this", "gain lot of weight"];
+        const teV = ["worst pill ever take", "not work at all", "help sleep through night", "side effect gone"];
+        const col = (x, title, voc, c) => { K.svg(svg, "text", { x, y: 60, "font-size": 12, "font-weight": 700, fill: c }, title); return voc.map((v, i) => { const g = K.svg(svg, "g"); K.node(g, x, 72 + i * 44, 40, 34, "第" + i + "列", { fs: 11 }); K.node(g, x + 46, 72 + i * 44, 200, 34, v, { fs: 11, stroke: c }); g.style.opacity = 0; return g; }); };
+        const a = col(30, "训练集 fit_transform 建的词表", trV, "var(--c1)");
+        const b = col(400, "测试集又 fit_transform：新词表", teV, "var(--bad)");
+        const warn = K.svg(svg, "text", { x: 30, y: 270, "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "");
+        const warn2 = K.svg(svg, "text", { x: 30, y: 294, "font-size": 12 }, "");
+        (async () => {
+          for (const g of a) if (!(await ctx.tween(200, (t) => (g.style.opacity = t)))) return;
+          for (const g of b) if (!(await ctx.tween(200, (t) => (g.style.opacity = t)))) return;
+          warn.textContent = "同样是“第 0 列”，训练时代表 not work at all，测试时代表 worst pill ever take";
+          warn2.textContent = "正确做法：测试集用 pipeline.transform()，沿用训练集的词表";
+        })();
+      },
+    },
+    {
+      at: 89, title: "LightGBM：有用数、日期、文本统计与 TextBlob", kicker: "第 89–109 格 · 模型②",
+      html: `<p>为了改善神经网络“准确率低”的问题，作者转向机器学习 <span data-cell="90">第 90 格</span>。先用 <b>LightGBM</b>（一种很快的梯度提升树）只拿 <code>usefulCount</code> 一个特征试试 <span data-cell="91">第 91 格</span>。</p><p>然后加特征：日期的年、月、日 <span data-cell="95">第 95 格</span>；<b>TextBlob</b> 给出的情感极性（−1 到 1），分别对清洗后和原始评论算 <span data-cell="96">第 96 格</span> <span data-cell="99">第 99 格</span>；文本统计：句数、词数、不同词数、字母数、标点数、全大写词数、首字母大写词数、停用词数、平均词长 <span data-cell="102">第 102 格</span>；季节 <span data-cell="104">第 104 格</span>。共 16 个特征再训练一次 <span data-cell="107">第 107 格</span>，并画特征重要性 <span data-cell="109">第 109 格</span>。动画演示梯度提升“一棵棵小树接力”。</p>`,
+      cells: [91, 96, 102, 107], highlight: ["feats = ['usefulCount']", "TextBlob", "count_words_upper", "LGBMClassifier"],
+      draw(svg, ctx) {
+        const feats = ["usefulCount", "year", "TextBlob 极性", "词数", "全大写词数", "标点数", "季节"];
+        feats.forEach((f, i) => K.node(svg, 20, 30 + i * 40, 150, 32, f, { fs: 12 }));
+        const trees = [];
+        for (let t = 0; t < 5; t++) {
+          const x = 260 + t * 85, g = K.svg(svg, "g"); g.style.opacity = 0;
+          K.svg(g, "path", { d: `M${x},90 L${x - 22},140 M${x},90 L${x + 22},140 M${x - 22},140 L${x - 32},190 M${x - 22},140 L${x - 10},190`, stroke: "var(--good)", "stroke-width": 2, fill: "none" });
+          K.svg(g, "circle", { cx: x, cy: 90, r: 7, fill: "var(--good)" });
+          K.svg(g, "text", { x, y: 220, "text-anchor": "middle", "font-size": 11 }, "第 " + (t + 1) + " 棵");
+          trees.push(g);
+        }
+        const err = K.svg(svg, "text", { x: 260, y: 270, "font-size": 13, "font-weight": 700 }, "");
+        const vals = [0.42, 0.33, 0.27, 0.23, 0.21];
+        (async () => {
+          for (let t = 0; t < 5; t++) { if (!(await ctx.tween(350, (u) => (trees[t].style.opacity = u)))) return; err.textContent = `每棵树改正前面的错误 → 损失 ${vals[t].toFixed(2)}（示意）`; }
+          K.svg(svg, "text", { x: 260, y: 300, "font-size": 12, class: "muted" }, "TextBlob 的情感词典来自电影评论（第 111 格）");
+        })();
+      },
+    },
+    {
+      at: 110, title: "哈佛情感词典：数好词和坏词", kicker: "第 110–118 格 · 模型③",
+      html: `<p>作者意识到 TextBlob 是用电影评论训练的，未必适合药评 <span data-cell="111">第 111 格</span>，于是加了第三种方法：哈佛 General Inquirer 情感词典 <span data-cell="112">第 112 格</span>。从词典里取出标为 Positiv 和 Negativ 的词，去掉数字和 # 号，得到正面词表和负面词表 <span data-cell="114">第 114 格</span>。</p><p>对测试集每条评论数正面词、负面词 <span data-cell="116">第 116 格</span>，算 <b>Positiv_ratio = 正面词数 /（正面词数 + 负面词数）</b>：≥ 0.5 判正面 1，&lt; 0.5 判负面 0，一个情感词都没有的判中性 0.5 <span data-cell="117">第 117 格</span> <span data-cell="118">第 118 格</span>。注意词典里是原形词，而评论已经词干化，部分词会对不上。</p>`,
+      cells: [114, 116, 117], highlight: ["Positiv_word_list", "Positiv_ratio", "x>=0.5"],
+      draw(svg, ctx) {
+        const toks = ["pill", "help", "pain", "but", "terribl", "nausea", "good", "sleep"];
+        const pol = { help: 1, good: 1, terribl: -1, nausea: -1, pain: -1 };
+        let x = 30; const cs = toks.map((t) => { const c = chip(svg, x, 60, t, { fs: 13 }); x += c._w + 8; return [c, t]; });
+        K.svg(svg, "text", { x: 30, y: 40, "font-size": 12, class: "muted" }, "一条清洗后的评论（自编，词干化后）");
+        const pc = K.svg(svg, "text", { x: 30, y: 160, "font-size": 15, "font-weight": 700, fill: "var(--good)" }, "");
+        const nc = K.svg(svg, "text", { x: 30, y: 190, "font-size": 15, "font-weight": 700, fill: "var(--bad)" }, "");
+        const rr = K.svg(svg, "text", { x: 30, y: 240, "font-size": 16, "font-weight": 700 }, "");
+        const nt = K.svg(svg, "text", { x: 30, y: 280, "font-size": 12, class: "muted" }, "");
+        (async () => {
+          let p = 0, n = 0;
+          for (const [c, t] of cs) {
+            if (!(await ctx.wait(280))) return;
+            if (pol[t] === 1) { p++; K.set(c.querySelector("rect"), { stroke: "var(--good)", fill: "color-mix(in srgb, var(--good) 18%, var(--panel))" }); }
+            else if (pol[t] === -1) { n++; K.set(c.querySelector("rect"), { stroke: "var(--bad)", fill: "color-mix(in srgb, var(--bad) 18%, var(--panel))" }); }
+            pc.textContent = "正面词：" + p; nc.textContent = "负面词：" + n;
+          }
+          const r = p / (p + n);
+          rr.textContent = `Positiv_ratio = ${p} / (${p} + ${n}) = ${r.toFixed(2)} → ${r >= 0.5 ? "正面 1" : "负面 0"}`;
+          nt.textContent = "示意：哪些词算正面/负面是为了演示设定的，不是哈佛词典的原始标注";
+        })();
+      },
+    },
+    {
+      at: 119, title: "合成推荐分，按病症给药排序", kicker: "第 119–126 格 · 推荐与局限",
+      html: `<p>先把有用数除以该病症在测试集里的评论条数，作为“可信度” <span data-cell="119">第 119 格</span> <span data-cell="120">第 120 格</span>。然后 <b>推荐分 = (神经网络概率 + LightGBM 类别 + 词典情感) × 归一化有用数</b> <span data-cell="121">第 121 格</span>，最后按“病症 + 药名”求平均，得到每个病症下各药的推荐分 <span data-cell="122">第 122 格</span>。</p><p>作者在最后诚实地写了三点局限 <span data-cell="126">第 126 格</span>：情感词少时词典不可靠；越早的评论有用数越容易累积；乘有用数时没区分正负（一条很“有用”的差评，反而会把分数往上推）。动画示意这个公式。</p>`,
+      cells: [120, 121, 122], highlight: ["df_test['usefulCount']/df_test['user_size']", "df_test['total_pred'] = (df_test['deep_pred'] + df_test['machine_pred'] + df_test['sentiment_by_dic'])*df_test['usefulCount']"],
+      draw(svg, ctx) {
+        const parts = [["神经网络概率", "0.83", "var(--c1)"], ["LightGBM 类别", "1", "var(--c2)"], ["词典情感", "0.5", "var(--c3)"]];
+        const els = parts.map(([n, v, c], i) => { const g = K.node(svg, 30 + i * 150, 60, 140, 60, n + "\n" + v, { fs: 12, stroke: c, sw: 2 }); g.style.opacity = 0; return g; });
+        const plus = [1, 2].map((i) => { const t = K.svg(svg, "text", { x: 30 + i * 150 - 8, y: 96, "text-anchor": "middle", "font-size": 18, "font-weight": 700 }, "+"); t.style.opacity = 0; return t; });
+        const mul = K.node(svg, 500, 60, 180, 60, "× 有用数 / 该病症评论数\n= 0.12", { fs: 12, stroke: "var(--warn)", sw: 2 }); mul.style.opacity = 0;
+        const res = K.svg(svg, "text", { x: 30, y: 170, "font-size": 15, "font-weight": 700 }, "");
+        const rank = [["药 A", 0.42], ["药 B", 0.35], ["药 C", 0.2], ["药 D", 0.08]];
+        const bars = rank.map(([n, v], i) => { K.svg(svg, "text", { x: 30, y: 216 + i * 30, "font-size": 12 }, n); return K.svg(svg, "rect", { x: 80, y: 202 + i * 30, width: 0, height: 20, rx: 3, fill: "var(--accent)" }); });
+        K.svg(svg, "text", { x: 400, y: 230, "font-size": 12, class: "muted" }, "某病症下的推荐排名（示意数字）");
+        (async () => {
+          for (let i = 0; i < 3; i++) { if (!(await ctx.tween(300, (t) => { els[i].style.opacity = t; if (i) plus[i - 1].style.opacity = t; }))) return; }
+          if (!(await ctx.tween(400, (t) => (mul.style.opacity = t)))) return;
+          res.textContent = "(0.83 + 1 + 0.5) × 0.12 ≈ 0.28";
+          await ctx.tween(900, (t) => bars.forEach((b, i) => K.set(b, { width: 600 * rank[i][1] * t })));
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+  if (/fold/.test(location.hash)) { const fb = document.querySelector('[data-a="fold"]'); if (fb) fb.click(); }
+  if (/labs/.test(location.hash)) { const box = document.createElement("div"); box.className = "wrap"; document.querySelectorAll(".inline-lab").forEach((l) => box.appendChild(l)); document.querySelector("main").style.display = "none"; document.body.appendChild(box); }  // 自查用：只看实验
+
+  /* ---------- 实验 A：清洗流水线 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "s", label: "选一句自编的英文药评", value: "0", options: [["0", "This medicine did not help my pain at all."], ["1", "I was NOT expecting it to work, but it really works!"], ["2", "Side effects were terrible &#039;never again&#039;."], ["3", "Didn't cause any weight gain, highly recommend."]] },
+      { id: "keep", label: "停用词表里的否定词", value: "keep", options: [["keep", "保留否定词（作者的做法）"], ["drop", "照原表一起删掉"]] },
+      { id: "n", label: "最后切成几元词组", min: 1, max: 4, step: 1, value: 2 },
+    ],
+    note: "浏览器里现场跑一遍第 75 格的步骤：去 HTML 转义 → 非字母变空格 → 小写 → 去停用词 → 词干化（这里用的是简化版规则，不是 Snowball 原版）→ 切 n 元词组。看“保留否定词”切换时，结果里的 not 去哪了。",
+    render(svg, v) {
+      const raw = ["This medicine did not help my pain at all.", "I was NOT expecting it to work, but it really works!", "Side effects were terrible &#039;never again&#039;.", "Didn't cause any weight gain, highly recommend."][+v.s];
+      const stops = new Set(STOP.concat(NOT_STOP)); if (v.keep === "keep") NOT_STOP.forEach((w) => stops.delete(w));
+      const s1 = raw.replace(/&#039;/g, "'");
+      const s2 = s1.replace(/[^a-zA-Z]/g, " ");
+      const toks = s2.toLowerCase().split(/\s+/).filter(Boolean);
+      const kept = toks.filter((w) => !stops.has(w));
+      const st = kept.map(stem);
+      const grams = []; for (let i = 0; i + v.n <= st.length; i++) grams.push(st.slice(i, i + v.n).join(" "));
+      const rows = [["原文", [raw]], ["去转义", [s1]], ["只留字母 + 小写", toks], ["去停用词", kept], ["词干化", st], [v.n + " 元词组", grams.length ? grams : ["（词太少，切不出）"]]];
+      let y = 16;
+      rows.forEach(([name, items]) => {
+        K.svg(svg, "text", { x: 6, y: y + 18, "font-size": 12, "font-weight": 700 }, name);
+        let x = 120, lineY = y;
+        items.forEach((t) => {
+          const w = Math.min(500, t.length * 7.2 + 14);
+          if (x + w > 636) { x = 120; lineY += 30; }
+          const neg = t.length < 25 && (/^(not|no|nor|never|didn|t)$/.test(t) || / not|not | no |^no /.test(" " + t + " "));
+          K.node(svg, x, lineY, w, 24, t, { fs: 12, stroke: neg ? "var(--good)" : "var(--line)", color: neg ? "var(--good)" : null });
+          x += w + 5;
+        });
+        y = lineY + 34;
+      });
+      const hasNot = st.some((w) => /^(not|no|nor|didn)$/.test(w));
+      return { readout: [
+        { k: "去停用词后剩几个词", v: kept.length + " 个" },
+        { k: "否定词还在吗", v: hasNot ? "在" : "没了", color: hasNot ? "var(--good)" : "var(--bad)" },
+        { k: v.n + " 元词组个数", v: grams.length + " 个" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：情感词典打分 ---------- */
+  const POS = ["good", "great", "help", "helped", "helps", "relief", "better", "best", "love", "recommend", "works", "work", "worked", "effective", "happy", "amazing", "improved", "calm", "easy"];
+  const NEG = ["bad", "worse", "worst", "terrible", "pain", "nausea", "headache", "awful", "sick", "anxiety", "depressed", "tired", "horrible", "problem", "gain", "never", "hate", "dizzy", "useless"];
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "s", label: "选一句自编的评论", value: "0", options: [["0", "It helped my headache and I feel better, great relief."], ["1", "Terrible nausea and dizzy all day, worst pill."], ["2", "Did not help at all."], ["3", "Took it for two weeks."], ["4", "No more pain, no anxiety, I love it."]] },
+      { id: "neg", label: "遇到 not / no 时", value: "ignore", options: [["ignore", "不管（作者的做法）"], ["flip", "把后一个情感词的正负翻转"]] },
+    ],
+    note: "小词典是为了演示编的（正面 19 个、负面 19 个），不是哈佛 General Inquirer 的原表。规则照第 117 格：Positiv_ratio ≥ 0.5 判正面，< 0.5 判负面，一个情感词都没有判 0.5（中性）。看看“Did not help at all”和“No more pain”会被判成什么。",
+    render(svg, v) {
+      const raw = ["It helped my headache and I feel better, great relief.", "Terrible nausea and dizzy all day, worst pill.", "Did not help at all.", "Took it for two weeks.", "No more pain, no anxiety, I love it."][+v.s];
+      const toks = raw.toLowerCase().replace(/[^a-z]/g, " ").split(/\s+/).filter(Boolean);
+      let p = 0, n = 0, flip = false; const marks = [];
+      toks.forEach((t) => {
+        let pol = POS.includes(t) ? 1 : NEG.includes(t) ? -1 : 0;
+        if (v.neg === "flip" && (t === "not" || t === "no")) { flip = true; marks.push([t, "n"]); return; }
+        if (pol && flip) { pol = -pol; flip = false; }
+        if (pol > 0) p++; else if (pol < 0) n++;
+        marks.push([t, pol > 0 ? "p" : pol < 0 ? "m" : ""]);
+      });
+      let x = 10, y = 20;
+      marks.forEach(([t, m]) => {
+        const w = t.length * 8 + 16; if (x + w > 630) { x = 10; y += 34; }
+        K.node(svg, x, y, w, 26, t, { fs: 13, stroke: m === "p" ? "var(--good)" : m === "m" ? "var(--bad)" : m === "n" ? "var(--warn)" : "var(--line)", color: m === "p" ? "var(--good)" : m === "m" ? "var(--bad)" : m === "n" ? "var(--warn)" : null, fill: m === "p" ? "color-mix(in srgb, var(--good) 15%, var(--panel))" : m === "m" ? "color-mix(in srgb, var(--bad) 15%, var(--panel))" : null });
+        x += w + 6;
+      });
+      const r = p + n ? p / (p + n) : NaN, lab = isNaN(r) ? 0.5 : r >= 0.5 ? 1 : 0;
+      // 比例条
+      const by = 170;
+      K.svg(svg, "rect", { x: 10, y: by, width: 600, height: 30, rx: 6, fill: "var(--panel-2)", stroke: "var(--line)" });
+      if (!isNaN(r)) { K.svg(svg, "rect", { x: 10, y: by, width: 600 * r, height: 30, rx: 6, fill: "var(--good)", opacity: 0.6 }); }
+      K.svg(svg, "line", { x1: 310, x2: 310, y1: by - 6, y2: by + 36, stroke: "var(--ink)", "stroke-dasharray": "4 3" });
+      K.svg(svg, "text", { x: 314, y: by - 10, "font-size": 11 }, "0.5");
+      K.svg(svg, "text", { x: 10, y: by + 60, "font-size": 14, "font-weight": 700 }, isNaN(r) ? "没有情感词 → 中性 0.5" : `Positiv_ratio = ${p}/(${p}+${n}) = ${r.toFixed(2)} → ${lab ? "正面 1" : "负面 0"}`);
+      K.svg(svg, "text", { x: 10, y: by + 90, "font-size": 12, class: "muted" }, "绿框 = 正面词，红框 = 负面词，黄框 = 否定词");
+      return { readout: [
+        { k: "正面词", v: p + " 个", color: "var(--good)" },
+        { k: "负面词", v: n + " 个", color: "var(--bad)" },
+        { k: "判定", v: lab === 0.5 ? "中性 0.5" : lab ? "正面 1" : "负面 0" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：推荐分合成 ---------- */
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "f", label: "推荐分公式", value: "orig", options: [["orig", "作者：(三分相加) × 有用数"], ["mean", "只看三分平均，不乘有用数"], ["sign", "按正负加权：(三分平均 − 0.5) × 有用数"]] },
+      { id: "pop", label: "药 D 的差评有多“热门”（有用数倍数）", min: 1, max: 10, step: 0.5, value: 4, fmt: (v) => v + " 倍" },
+      { id: "seed", label: "重新生成评论", button: true },
+    ],
+    note: "某个病症下 4 种药，每种 30 条模拟评论；每条评论有三种情感分（神经网络概率、LightGBM 0/1、词典 0/0.5/1）和有用数。药 D 口碑最差，但它的差评被很多人点了“有用”。看作者的公式下，药 D 会不会反而排到前面（这正是第 126 格作者自己提到的第 3 点局限）。",
+    render(svg, v) {
+      const r = K.rng(11 + v.seed * 7);
+      const drugs = [["药 A", 0.85, 1], ["药 B", 0.7, 1], ["药 C", 0.55, 1], ["药 D", 0.3, v.pop]];
+      const scores = drugs.map(([name, q, pop]) => {
+        let tot = 0, mean = 0;
+        for (let i = 0; i < 30; i++) {
+          const pos = r() < q;
+          const deep = K.clamp((pos ? 0.75 : 0.3) + K.randn(r) * 0.15, 0, 1), mach = r() < (pos ? 0.85 : 0.2) ? 1 : 0, dic = r() < 0.2 ? 0.5 : r() < (pos ? 0.8 : 0.3) ? 1 : 0;
+          const use = (pos ? 1 : pop) * (5 + r() * 10) / 120;
+          const m3 = (deep + mach + dic) / 3;
+          tot += v.f === "orig" ? (deep + mach + dic) * use : v.f === "mean" ? m3 : (m3 - 0.5) * use;
+          mean += m3 / 30;
+        }
+        return { name, q, s: tot / 30, mean };
+      });
+      const order = scores.slice().sort((a, b) => b.s - a.s);
+      const mx = Math.max(...scores.map((s) => Math.abs(s.s)), 1e-6);
+      K.svg(svg, "text", { x: 10, y: 22, "font-size": 13, "font-weight": 700 }, "排名（按推荐分从高到低）");
+      order.forEach((d, i) => {
+        const y = 40 + i * 52;
+        K.svg(svg, "text", { x: 10, y: y + 24, "font-size": 14, "font-weight": 700 }, `${i + 1}. ${d.name}`);
+        const w = 360 * Math.abs(d.s) / mx;
+        K.svg(svg, "rect", { x: d.s >= 0 ? 260 : 260 - w, y: y + 6, width: w, height: 26, rx: 4, fill: d.name === "药 D" ? "var(--bad)" : "var(--c1)" });
+        K.svg(svg, "text", { x: 90, y: y + 24, "font-size": 12, class: "muted" }, `真实好评率 ${Math.round(d.q * 100)}%`);
+      });
+      K.svg(svg, "line", { x1: 260, x2: 260, y1: 36, y2: 250, stroke: "var(--ink-3)" });
+      K.svg(svg, "text", { x: 10, y: 280, "font-size": 12, class: "muted" }, "模拟数据；条向右 = 推荐分为正，向左 = 为负");
+      const posD = order.findIndex((d) => d.name === "药 D") + 1;
+      return { readout: [
+        { k: "排第一的药", v: order[0].name },
+        { k: "口碑最差的药 D 排第", v: posD + " 名", color: posD < 4 ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

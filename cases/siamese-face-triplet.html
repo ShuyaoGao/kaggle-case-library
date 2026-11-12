@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>孪生网络人脸验证</title>
+<meta name="description" content="Kaggle 案例拆解：用孪生网络和三元组损失做人脸验证：不认“这是谁”，只判断“两张脸是不是同一个人”，可以用在训练时没见过的人身上。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">人脸图像 · 相似度判断 · 度量学习</div>
+  <h1>孪生网络：不问“你是谁”，只问“是不是同一个人”</h1>
+  <p class="en">Face Recognition: Siamese w/ Triplet loss</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">孪生网络</span><span class="tag method">三元组损失</span><span class="tag method">Xception 迁移学习</span>
+    <span class="tag method">L2 归一化嵌入</span><span class="tag method">距离阈值</span><span class="tag method">自定义训练步</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Nikit Periwal</b></span>
+    <span>Kaggle 点赞 <b>601</b>（2026-11 抓取）</span>
+    <span>数据集 <b>stoicstatic/face-recognition-dataset</b>（源自 LFW）</span>
+    <span><a href="https://www.kaggle.com/code/stoicstatic/face-recognition-siamese-w-triplet-loss" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">1324 个人的人脸照片</div><p>从 LFW 名人照片里用 Haar 级联检测器裁出的人脸，每人 2–50 张，128×128 彩色。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>要判断什么</h3><div class="big">两张脸是不是同一个人</div><p>网络输出一个“距离”：小于阈值 1.3 判为同一人，否则判为不同人。<span data-cell="30">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">三胞胎一起看：锚点、同一人、另一人</div><p>同一个 Xception 编码器把三张脸都变成 256 维向量，三元组损失要求“锚点离同一人近、离另一人远，还要拉开一段间隔”。<span data-cell="20">出处</span></p></div>
+    <div class="card panel"><h3>特别在哪里</h3><div class="big">没见过的人也能比</div><p>普通 CNN 分类器有 1324 个出口，来了第 1325 个人就要重训；孪生网络只学“怎么量距离”，作者测试时用的全是训练里没出现过的人。<span data-cell="4">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>Face Recognition Dataset</b> 中的 “Extracted Faces” 部分，源自公开的 LFW（Labeled Faces in the Wild，网络上收集的名人新闻照片）。每个人一个文件夹，文件夹和图片都用数字命名。以下规模来自作者第 0 格的说明。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">不同的人</div><div class="v">1324</div></div>
+        <div class="stat-tile"><div class="k">每人照片</div><div class="v">2–50 张</div></div>
+        <div class="stat-tile"><div class="k">图片尺寸</div><div class="v">128×128×3</div></div>
+        <div class="stat-tile"><div class="k">训练 / 测试（按人切）</div><div class="v">90% / 10%</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">规模见第 0 格 <span data-cell="0">出处</span>；按人切分 0.9 见第 4 格 <span data-cell="4">出处</span>。三元组的具体数量在运行输出里，源码不带输出，这里不写。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">一个训练样本长什么样</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>部分</th><th>含义</th><th>格式</th></tr>
+        <tr><td>锚点 anchor</td><td>某人的一张照片</td><td><code>(文件夹, "i.jpg")</code></td></tr>
+        <tr><td>正例 positive</td><td><b>同一个人</b>的另一张照片</td><td><code>(同一文件夹, "j.jpg")</code></td></tr>
+        <tr><td>负例 negative</td><td>随机挑的<b>另一个人</b>的一张照片</td><td><code>(别的文件夹, 随机编号)</code></td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">没有“这是谁”的标签，只有“谁和谁是同一个人”。每人最多取 20 张照片两两配成锚点和正例 <span data-cell="6">出处</span>。</p>
+      <p class="callout">人脸属于敏感的个人生物信息。LFW 是公开的研究数据集，但把人脸识别用到现实里，需要当事人知情同意，并遵守个人信息保护的法律。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="20">
+    <h3>动手试试 A · 用三元组损失现场训练一个“量脸尺” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="30">
+    <h3>动手试试 B · 阈值定多少：放错人 vs 拦错人 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>孪生网络不把图片分到固定类别，只输出两张图之间的距离</td><td><span data-cell="12">第 12 格</span></td></tr>
+        <tr><td>测试准确率定义为“锚点到正例的距离 &lt; 锚点到负例的距离”的三元组比例</td><td><span data-cell="23">第 23 格</span></td></tr>
+        <tr><td>训练 128 轮（为了不超过 Kaggle 的时间限制），准确率创新高时保存权重</td><td><span data-cell="24">第 24 格</span></td></tr>
+        <tr><td>实际使用时距离 ≤ 1.3 判为同一人，并画混淆矩阵</td><td><span data-cell="30">第 30 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">准确率、损失曲线和混淆矩阵的具体数字都在运行输出里，Kaggle 下载的源码不带输出，作者文字里也没写，这里不列分数。</p>
+      <h3>读代码时发现的小问题</h3>
+      <ul class="tight">
+        <li>第 22 格文字说测试函数“在训练数据上预测”，第 23 格代码实际用的是 <code>test_triplet</code>（测试集），是文字写错了。</li>
+        <li>第 17 格先算了 <code>encoded_a/p/n</code>，下一行又重新调用编码器，前面三个变量没被用上（不影响结果，但多建了一遍计算图）。</li>
+        <li>第 26 格把“均值 + 1 个标准差”叫作“第 75 百分位”（75th Quartile），这两个不是一回事。</li>
+        <li>第 31 格的混淆矩阵只用了测试集的第一批 256 个三元组（循环里有 <code>break</code>），不是全部测试数据。</li>
+        <li>负例是随机挑的，大多数“另一个人”和锚点差别很大，属于容易的负例；FaceNet 论文专门挑“难负例”来训练，实验 A 可以对比。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给两张脸，输出距离；给一张脸和一个库，找出最近的人或判断“库里没有”。</li>
+        <li><b>同类问题：</b>手机刷脸解锁、签名真伪比对、商品“找同款”、鲸鱼尾鳍 / 动物个体识别、指纹和声纹比对。</li>
+        <li><b>和普通 CNN 分类的区别：</b>分类器学“每一类长什么样”，类别数固定；孪生网络学“怎么量相似度”，新来的人只要拍一张照片存进库，不用重训。这种做法叫<b>度量学习</b>。</li>
+        <li><b>“孪生”的意思：</b>三张图走的是<b>同一个</b>编码器、共用同一套权重，像同一把尺子量三次。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>按人切分训练 / 测试 <span data-cell="4">第 4 格</span></li>
+        <li>三元组生成：同人两两配对 + 随机负例 <span data-cell="6">第 6 格</span></li>
+        <li>编码器：ImageNet 预训练 Xception，只放开最后 27 层，接 512 → 256 全连接和 L2 归一化 <span data-cell="15">第 15 格</span></li>
+        <li>距离层：平方欧氏距离 ‖f(A)−f(P)‖²、‖f(A)−f(N)‖² <span data-cell="17">第 17 格</span></li>
+        <li>三元组损失 max(d_ap − d_an + 1.0, 0)，自定义 <code>train_step</code> <span data-cell="20">第 20 格</span></li>
+        <li>Adam（学习率 1e-3） <span data-cell="21">第 21 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>为什么作者要按“人”切分训练集和测试集，而不是把所有照片打乱再切？如果按照片切，测试准确率会偏高还是偏低？</li>
+      <li>手机刷脸解锁和公司门禁，阈值应该定得一样吗？“把陌生人认成机主”和“机主自己刷不开”哪个更不能接受？</li>
+      <li>负例随便挑和专挑“长得像的人”，训练出来的模型会有什么区别？挑得太难又可能出什么问题？</li>
+      <li>如果训练数据里某些肤色、年龄的人很少，模型对这些人的误判率会怎样？这会带来什么社会问题？</li>
+      <li>同样的“孪生网络 + 距离”思路，还能用在哪些不是人脸的地方？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Nikit Periwal（stoicstatic），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意，页面中没有使用任何真实人脸图片。数据集：Face Recognition Dataset（源自 LFW）。
+</footer>
+</main>
+
+<script src="nb/siamese-face-triplet.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+  /* 画一张卡通脸（示意，不是真人） */
+  function face(svg, x, y, s, color, v) {
+    v = v || 0;
+    const g = K.svg(svg, "g");
+    K.svg(g, "circle", { cx: x, cy: y, r: s, fill: `color-mix(in srgb, ${color} 30%, var(--panel))`, stroke: color, "stroke-width": 2 });
+    K.svg(g, "circle", { cx: x - s * 0.35, cy: y - s * 0.2 + v, r: s * 0.1, fill: "var(--ink)" });
+    K.svg(g, "circle", { cx: x + s * 0.35, cy: y - s * 0.2 + v, r: s * 0.1, fill: "var(--ink)" });
+    K.svg(g, "path", { d: `M${x - s * 0.35},${y + s * 0.35} Q${x},${y + s * (0.55 + v * 0.02)} ${x + s * 0.35},${y + s * 0.35}`, fill: "none", stroke: "var(--ink)", "stroke-width": 1.6 });
+    return g;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "人脸验证：比的是“像不像”", kicker: "第 0–2 格 · 介绍",
+      html: `<p>作者要做的是<b>人脸验证</b>：给两张脸，判断是不是同一个人。他用的是<b>孪生网络</b>（Siamese Network）：同一个编码器分别处理两张图，输出两个向量，再算它们之间的距离。</p><p>动画左边是普通分类器：每个人一个出口，来了新人没有出口可去；右边是孪生网络：两张图走同一个编码器，只比距离。</p>`,
+      cells: [0], highlight: ["Siamese Networks"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 14, "font-weight": 700 }, "普通分类器");
+        face(svg, 60, 160, 30, "var(--c2)");
+        K.node(svg, 110, 135, 80, 50, "CNN");
+        ["张三", "李四", "王五", "…第 1324 人"].forEach((n, i) => { K.arrow(svg, 190, 160, 228, 80 + i * 55); K.node(svg, 230, 64 + i * 55, 100, 32, n, { fs: 12 }); });
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 12, fill: "var(--bad)" }, "新来的第 1325 人：没有出口");
+        K.svg(svg, "text", { x: 390, y: 28, "font-size": 14, "font-weight": 700, fill: "var(--accent)" }, "孪生网络");
+        const f1 = face(svg, 420, 100, 28, "var(--c1)"), f2 = face(svg, 420, 240, 28, "var(--c1)", 3);
+        const e1 = K.node(svg, 475, 75, 100, 50, "编码器", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const e2 = K.node(svg, 475, 215, 100, 50, "同一个编码器", { fill: "var(--accent-soft)", stroke: "var(--accent)", fs: 12 });
+        K.svg(svg, "text", { x: 525, y: 172, "text-anchor": "middle", "font-size": 12, fill: "var(--accent)" }, "共享权重 ⇅");
+        const d = K.svg(svg, "text", { x: 640, y: 175, "text-anchor": "middle", "font-size": 15, "font-weight": 700 }, "");
+        const v1 = K.svg(svg, "circle", { cx: 590, cy: 100, r: 6, fill: "var(--c1)" }), v2 = K.svg(svg, "circle", { cx: 590, cy: 240, r: 6, fill: "var(--c1)" });
+        hide([e1, e2, v1, v2]);
+        ctx.tween(500, (t) => [e1, e2].forEach((e) => (e.style.opacity = t)))
+          .then((ok) => ok && ctx.tween(500, (t) => [v1, v2].forEach((e) => (e.style.opacity = t))))
+          .then((ok) => ok && ctx.tween(1000, (t) => { K.set(v1, { cx: 590 + 40 * t, cy: 100 + 60 * t }); K.set(v2, { cx: 590 + 40 * t, cy: 240 - 60 * t }); d.textContent = t > 0.9 ? "距离 0.4 → 同一人" : ""; }));
+        K.svg(svg, "text", { x: 390, y: 320, "font-size": 12, class: "muted" }, "卡通脸为示意");
+      },
+    },
+    {
+      title: "按“人”切分训练集和测试集", kicker: "第 3–4 格 · 读数据",
+      html: `<p>作者固定随机种子 5，打乱 1324 个人的文件夹，前 90% 的人做训练、后 10% 的人做测试。关键在于：<b>切的是“人”，不是“照片”</b>。测试集里的每个人，模型在训练时一张都没见过。</p><p>这正好检验孪生网络的本事：能不能给陌生人“量距离”。</p>`,
+      cells: [4], highlight: ["num_train = int(len(folders)*split)", "split_dataset(ROOT, split=0.9)"],
+      draw(svg, ctx) {
+        const N = 40, r = K.rng(5), order = Array.from({ length: N }, (_, i) => i).sort(() => r() - 0.5);
+        const els = order.map((p, k) => face(svg, 40 + (k % 10) * 66, 60 + Math.floor(k / 10) * 66, 20, K.colors[p % 6]));
+        K.svg(svg, "text", { x: 20, y: 330, "font-size": 12, class: "muted" }, "每张卡通脸代表一个人的文件夹（示意）；灰框里的人只出现在测试集");
+        const box = K.svg(svg, "rect", { x: 418, y: 233, width: 290, height: 60, rx: 8, fill: "none", stroke: "var(--c2)", "stroke-width": 2.5, "stroke-dasharray": "6 4" });
+        box.style.opacity = 0;
+        ctx.wait(500).then((ok) => ok && ctx.tween(900, (t) => { box.style.opacity = t; els.forEach((e, k) => { if (k >= 36) e.style.opacity = 1; else if (k >= 30) e.style.opacity = 1; }); }));
+        K.svg(svg, "text", { x: 425, y: 225, "font-size": 12, fill: "var(--c2)", "font-weight": 700 }, "测试集：10% 的人");
+      },
+    },
+    {
+      title: "组三元组：锚点、正例、负例", kicker: "第 5–7 格 · 构造训练样本",
+      html: `<p>每个人取最多 20 张照片，<b>两两配对</b>：一张当锚点（anchor），另一张当正例（positive，同一个人）；再从别的人里随机挑一张当负例（negative）。</p><p>动画：同一个人的 4 张照片两两组合，能配出 6 对；每对再随机配一个“外人”。</p>`,
+      cells: [6, 7], highlight: ["for j in range(i+1, num_files):", "neg_folder = random.choice(folders)", "triplets.append((anchor, positive, negative))"],
+      draw(svg, ctx) {
+        const ph = [0, 1, 2, 3].map((k) => face(svg, 60 + k * 70, 60, 24, "var(--c1)", k - 1));
+        K.svg(svg, "text", { x: 20, y: 110, "font-size": 12, class: "muted" }, "同一个人的 4 张照片");
+        const pairs = []; for (let i = 0; i < 4; i++) for (let j = i + 1; j < 4; j++) pairs.push([i, j]);
+        const rows = pairs.map((p, k) => {
+          const g = K.svg(svg, "g"), y = 140 + k * 32;
+          K.svg(g, "text", { x: 350, y: y + 5, "font-size": 12 }, `锚点 ${p[0]}.jpg`);
+          K.svg(g, "text", { x: 450, y: y + 5, "font-size": 12, fill: "var(--good)" }, `正例 ${p[1]}.jpg`);
+          K.svg(g, "text", { x: 560, y: y + 5, "font-size": 12, fill: "var(--bad)" }, `负例 别人`);
+          g.style.opacity = 0; return g;
+        });
+        K.svg(svg, "text", { x: 350, y: 120, "font-size": 13, "font-weight": 700 }, "生成的三元组");
+        (async () => { for (const g of rows) if (!(await ctx.tween(300, (t) => (g.style.opacity = t)))) return; })();
+        face(svg, 160, 260, 26, "var(--c6)");
+        K.svg(svg, "text", { x: 200, y: 265, "font-size": 12, fill: "var(--bad)" }, "← 随机挑的外人");
+      },
+    },
+    {
+      title: "批生成器：边读边喂", kicker: "第 8–11 格 · 数据管道",
+      html: `<p>三元组只记录文件名，真正的图片在 <code>get_batch</code> 里按批读出：每批 256 组（训练时设为 128），读图、转 RGB，再用 Inception 系列的 <code>preprocess_input</code> 把像素缩放到 −1 到 1。用 <code>yield</code> 一批一批地吐出来，不用一次把几万张图都塞进内存。</p><p>第 11 格画出 6 组三元组看看效果（运行输出不在源码里）。</p>`,
+      cells: [9, 11], highlight: ["yield ([anchor, positive, negative])", "preprocess_input(anchor)"],
+      draw(svg, ctx) {
+        K.node(svg, 30, 140, 140, 60, "三元组清单\n（只有文件名）", { fs: 12 });
+        const belt = K.svg(svg, "line", { x1: 180, y1: 170, x2: 690, y2: 170, stroke: "var(--line)", "stroke-width": 8 });
+        K.svg(svg, "text", { x: 420, y: 70, "text-anchor": "middle", "font-size": 12, class: "muted" }, "get_batch：读一批 → 预处理 → yield 交给模型");
+        const boxes = [];
+        for (let k = 0; k < 4; k++) {
+          const g = K.svg(svg, "g");
+          ["var(--c1)", "var(--c1)", "var(--c6)"].forEach((c, i) => face(g, 0 + i * 30, 0, 12, c));
+          boxes.push(g);
+        }
+        ctx.tween(3000, (t) => boxes.forEach((g, k) => { const x = 200 + ((t * 600 + k * 150) % 600) * 0.8; g.setAttribute("transform", `translate(${x},150)`); }));
+        K.svg(svg, "text", { x: 200, y: 230, "font-size": 12, class: "muted" }, "每组 = 锚点、正例（蓝）、负例（红）");
+      },
+    },
+    {
+      title: "孪生网络和普通 CNN 有什么不同", kicker: "第 12–13 格 · 原理",
+      html: `<p>作者在这里点明：孪生网络<b>不把图片分到某一类</b>，只算两张图的距离。训练时调整权重，让同一个人的照片距离变小、不同人的距离变大。</p><p>动画：训练前，嵌入空间里各人的点混在一起；训练后，每个人的照片聚成一小团，不同人分得很开。</p>`,
+      cells: [12], highlight: ["does not classify the images into certain categories"],
+      draw(svg, ctx) {
+        const r = K.rng(3), P = [];
+        for (let p = 0; p < 6; p++) { const ang = p * Math.PI / 3, cx = 360 + Math.cos(ang) * 120, cy = 175 + Math.sin(ang) * 110; for (let k = 0; k < 7; k++) P.push({ p, x0: 120 + r() * 480, y0: 40 + r() * 270, x1: cx + K.randn(r) * 16, y1: cy + K.randn(r) * 14 }); }
+        const els = P.map((d) => K.svg(svg, "circle", { cx: d.x0, cy: d.y0, r: 6, fill: K.colors[d.p] }));
+        const lab = K.svg(svg, "text", { x: 20, y: 28, "font-size": 13, "font-weight": 700 }, "训练前：嵌入空间一团乱");
+        K.svg(svg, "text", { x: 20, y: 330, "font-size": 12, class: "muted" }, "同色 = 同一个人的不同照片（示意）");
+        ctx.wait(700).then((ok) => ok && ctx.tween(2200, (t) => { els.forEach((e, i) => K.set(e, { cx: K.lerp(P[i].x0, P[i].x1, t), cy: K.lerp(P[i].y0, P[i].y1, t) })); if (t > 0.5) lab.textContent = "训练后：同一人聚成团，不同人分开"; }));
+      },
+    },
+    {
+      title: "编码器：Xception + L2 归一化", kicker: "第 14–15 格 · 迁移学习",
+      html: `<p>编码器用在 ImageNet 上预训练好的 <b>Xception</b>（Inception V3 的改进版），去掉分类头、全局平均池化；<b>冻结</b>除最后 27 层以外的所有层，只微调后面一点。后面接 Dense 512 → BatchNorm → Dense 256，最后一层 <b>L2 归一化</b>：把向量长度统一缩放成 1。</p><p>归一化之后所有人脸向量都落在一个“球面”上，两点间平方距离只会在 0 到 4 之间，后面的间隔 1.0 和阈值 1.3 才有固定的意义。</p>`,
+      cells: [14, 15], highlight: ["len(pretrained_model.layers)-27", "tf.math.l2_normalize(x, axis=1)"],
+      draw(svg, ctx) {
+        const L = 14, xs = [];
+        for (let i = 0; i < L; i++) { const frozen = i < L - 3; xs.push(K.svg(svg, "rect", { x: 20 + i * 26, y: 110, width: 22, height: 110, rx: 3, fill: frozen ? "color-mix(in srgb, var(--c1) 30%, var(--panel))" : "color-mix(in srgb, var(--c2) 45%, var(--panel))", stroke: frozen ? "var(--c1)" : "var(--c2)" })); }
+        K.svg(svg, "text", { x: 20, y: 96, "font-size": 12, fill: "var(--c1)" }, "Xception：前面的层冻结 🔒");
+        K.svg(svg, "text", { x: 300, y: 245, "font-size": 12, fill: "var(--c2)" }, "最后 27 层可训练");
+        K.node(svg, 400, 135, 80, 60, "512\n256", { fs: 12 });
+        K.arrow(svg, 384, 165, 398, 165); K.arrow(svg, 480, 165, 520, 165);
+        const cx = 610, cy = 165, R = 80;
+        K.svg(svg, "circle", { cx, cy, r: R, fill: "none", stroke: "var(--ink-3)", "stroke-dasharray": "4 4" });
+        K.svg(svg, "text", { x: cx, y: 60, "text-anchor": "middle", "font-size": 12 }, "L2 归一化：长度都变成 1");
+        const r = K.rng(9), pts = [];
+        for (let k = 0; k < 10; k++) { const a = r() * Math.PI * 2, m = 0.3 + r() * 1.2; pts.push({ a, m, e: K.svg(svg, "circle", { cx: cx + Math.cos(a) * R * m, cy: cy + Math.sin(a) * R * m, r: 5, fill: K.colors[k % 6] }) }); }
+        ctx.wait(600).then((ok) => ok && ctx.tween(1400, (t) => pts.forEach((p) => { const m = K.lerp(p.m, 1, t); K.set(p.e, { cx: cx + Math.cos(p.a) * R * m, cy: cy + Math.sin(p.a) * R * m }); })));
+      },
+    },
+    {
+      title: "距离层：同一个编码器用三次", kicker: "第 16–18 格 · 孪生网络",
+      html: `<p>网络有三个输入口：锚点、正例、负例。三张图都送进<b>同一个</b>编码器（共享全部权重），得到三个 256 维向量；自定义的 <code>DistanceLayer</code> 计算两个平方欧氏距离：</p><p><code>d_ap = ‖f(A) − f(P)‖²</code>，<code>d_an = ‖f(A) − f(N)‖²</code></p><p>“孪生”说的就是这种共享：不是三个网络，而是一个网络用三次。</p>`,
+      cells: [17], highlight: ["ap_distance = tf.reduce_sum(tf.square(anchor - positive), -1)", "an_distance = tf.reduce_sum(tf.square(anchor - negative), -1)"],
+      draw(svg, ctx) {
+        const ys = [70, 170, 270], cs = ["var(--c1)", "var(--c1)", "var(--c6)"], ln = ["锚点 A", "正例 P", "负例 N"];
+        ys.forEach((y, i) => { face(svg, 50, y, 24, cs[i], i === 1 ? 2 : 0); K.svg(svg, "text", { x: 50, y: y + 42, "text-anchor": "middle", "font-size": 11 }, ln[i]); K.arrow(svg, 78, y, 198, 170); });
+        K.node(svg, 200, 130, 140, 80, "同一个编码器\n（共享权重）", { fill: "var(--accent-soft)", stroke: "var(--accent)", bold: true });
+        const outs = ys.map((y, i) => { K.arrow(svg, 340, 170, 418, y); return K.svg(svg, "circle", { cx: 430, cy: y, r: 9, fill: cs[i] }); });
+        const l1 = K.svg(svg, "line", { x1: 440, y1: 70, x2: 440, y2: 170, stroke: "var(--good)", "stroke-width": 3 });
+        const l2 = K.svg(svg, "path", { d: "M440,70 Q520,170 440,270", fill: "none", stroke: "var(--bad)", "stroke-width": 3 });
+        const t1 = K.svg(svg, "text", { x: 460, y: 125, "font-size": 13, fill: "var(--good)", "font-weight": 700 }, "d_ap 要小");
+        const t2 = K.svg(svg, "text", { x: 500, y: 230, "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "d_an 要大");
+        hide([...outs, l1, l2, t1, t2]);
+        ctx.wait(500).then((ok) => ok && ctx.tween(600, (t) => outs.forEach((o) => (o.style.opacity = t)))).then((ok) => ok && ctx.tween(700, (t) => [l1, l2, t1, t2].forEach((o) => (o.style.opacity = t))));
+      },
+    },
+    {
+      title: "三元组损失：拉近、推远、留出间隔", kicker: "第 19–21 格 · 损失函数",
+      html: `<p>损失只有一行：<code>loss = max(d_ap − d_an + margin, 0)</code>，间隔 margin = 1.0。意思是：</p><ul class="tight"><li>负例比正例远出至少 1.0 → 损失为 0，这组不用再学；</li><li>否则就要把正例拉近、把负例推远。</li></ul><p>因为要算三个距离，作者自己写了 <code>train_step</code>：用 GradientTape 记录前向计算，求梯度，再让 Adam（学习率 1e-3）更新权重。</p>`,
+      cells: [20, 21], highlight: ["loss = tf.maximum(ap_distance - an_distance + self.margin, 0.0)", "margin=1.0"],
+      draw(svg, ctx) {
+        const ax = { x: 60, y: 250 }, S = 140;
+        const A = K.svg(svg, "circle", { cx: 360, cy: 170, r: 10, fill: "var(--c1)" });
+        K.svg(svg, "text", { x: 360, y: 150, "text-anchor": "middle", "font-size": 12 }, "A");
+        const ring = K.svg(svg, "circle", { cx: 360, cy: 170, r: 0, fill: "none", stroke: "var(--warn)", "stroke-dasharray": "5 4", "stroke-width": 2 });
+        const P = K.svg(svg, "circle", { cx: 520, cy: 100, r: 9, fill: "none", stroke: "var(--c1)", "stroke-width": 3 });
+        const N = K.svg(svg, "circle", { cx: 420, cy: 240, r: 9, fill: "var(--c6)" });
+        const lt = K.svg(svg, "text", { x: 20, y: 30, "font-size": 14, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 12, class: "muted" }, "空心蓝 = 正例 P，红 = 负例 N，虚线圈 = 正例距离 + 间隔（示意）");
+        ctx.tween(2600, (t) => {
+          const px = K.lerp(520, 400, t), py = K.lerp(100, 150, t), nx = K.lerp(420, 620, t), ny = K.lerp(240, 280, t);
+          K.set(P, { cx: px, cy: py }); K.set(N, { cx: nx, cy: ny });
+          const dap = Math.hypot(px - 360, py - 170) / 100, dan = Math.hypot(nx - 360, ny - 170) / 100;
+          K.set(ring, { r: Math.sqrt(dap * dap + 1) * 100 });
+          const L = Math.max(dap * dap - dan * dan + 1, 0);
+          lt.textContent = `d_ap = ${(dap * dap).toFixed(2)}，d_an = ${(dan * dan).toFixed(2)}，损失 = ${L.toFixed(2)}`;
+        });
+      },
+    },
+    {
+      title: "训练 128 轮，每轮在陌生人上考试", kicker: "第 22–24 格 · 训练循环",
+      html: `<p>每一轮：按批喂训练三元组、记录平均损失；然后跑 <code>test_on_triplets</code>，在<b>测试集（训练里没见过的人）</b>上看有多少三元组满足 d_ap &lt; d_an，这个比例就是作者定义的准确率。准确率创新高就保存权重。</p><p>测试时还记录了 d_ap 和 d_an 的均值、标准差，用来观察两类距离分得开不开。</p>`,
+      cells: [23, 24], highlight: ["accuracy = np.sum(np.array(pos_scores) < np.array(neg_scores)) / len(pos_scores)", "epochs = 128"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [0, 4], [0, 1], { xlabel: "平方距离（示意分布）", yticks: 0 });
+        const g = (x, m, s) => Math.exp(-0.5 * ((x - m) / s) ** 2);
+        const pa = K.svg(svg, "path", { fill: "color-mix(in srgb, var(--c1) 35%, transparent)", stroke: "var(--c1)" }), na = K.svg(svg, "path", { fill: "color-mix(in srgb, var(--c6) 35%, transparent)", stroke: "var(--c6)" });
+        const ep = K.svg(svg, "text", { x: 470, y: 50, "font-size": 13, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 70, y: 50, "font-size": 12, fill: "var(--c1)" }, "■ d_ap 同一人");
+        K.svg(svg, "text", { x: 70, y: 70, "font-size": 12, fill: "var(--c6)" }, "■ d_an 不同人");
+        ctx.tween(2800, (t) => {
+          const mp = K.lerp(1.6, 0.6, t), mn = K.lerp(2.0, 2.7, t), sp = K.lerp(0.5, 0.35, t);
+          const path = (m, s) => { let d = `M${ax.sx(0)},${ax.sy(0)}`; for (let x = 0; x <= 4.001; x += 0.05) d += `L${ax.sx(x)},${ax.sy(g(x, m, s) * 0.9)}`; return d + `L${ax.sx(4)},${ax.sy(0)}Z`; };
+          pa.setAttribute("d", path(mp, sp)); na.setAttribute("d", path(mn, 0.45));
+          ep.textContent = "第 " + Math.round(1 + t * 127) + " 轮";
+        });
+      },
+    },
+    {
+      title: "看曲线：两类距离有没有分开", kicker: "第 25–26 格 · 评估",
+      html: `<p>作者画了四张图：训练损失、测试准确率、d_ap 和 d_an 的均值变化，以及“d_ap 均值 + 标准差”和“d_an 均值 − 标准差”的对比。如果蓝线一直在绿线下面，说明大部分同一人的距离都小于大部分不同人的距离。</p><p class="note">作者把“均值 ± 1 个标准差”标成 “75th Quartile”，严格说不对：正态分布下均值 + 1 个标准差大约是第 84 百分位。</p>`,
+      cells: [26], highlight: ["ap_75quartile = (ap_mean+ap_stds)", "an_75quartile = (an_mean-an_stds)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [0, 128], [0, 3], { xlabel: "训练轮数", ylabel: "平方距离" });
+        const r = K.rng(4);
+        const mk = (f) => { let d = ""; for (let e = 0; e <= 128; e += 2) d += (e ? "L" : "M") + ax.sx(e) + "," + ax.sy(f(e) + K.randn(r) * 0.03); return d; };
+        const a = K.svg(svg, "path", { d: mk((e) => 0.6 + 1.0 * Math.exp(-e / 25) + 0.35), fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const b = K.svg(svg, "path", { d: mk((e) => 2.6 - 0.6 * Math.exp(-e / 25) - 0.45), fill: "none", stroke: "var(--c3)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 520, y: 210, "font-size": 12, fill: "var(--c1)" }, "d_ap 均值 + 标准差");
+        K.svg(svg, "text", { x: 520, y: 70, "font-size": 12, fill: "var(--c3)" }, "d_an 均值 − 标准差");
+        K.svg(svg, "text", { x: 70, y: 320, "font-size": 12, class: "muted" }, "曲线形状为示意，不是作者的运行结果");
+        [a, b].forEach((p) => { const L = p.getTotalLength(); p.style.strokeDasharray = L; p.style.strokeDashoffset = L; });
+        ctx.tween(2000, (t) => [a, b].forEach((p) => (p.style.strokeDashoffset = p.getTotalLength() * (1 - t))));
+      },
+    },
+    {
+      title: "取出编码器，用阈值 1.3 下判断", kicker: "第 27–32 格 · 使用模型",
+      html: `<p>训练完把编码器单独取出来存好。真正使用时只需要它：两张脸各编码一次，算平方距离，<b>≤ 1.3 判“同一人”，否则“不同人”</b>。作者用测试集的一批三元组做了混淆矩阵：锚点-正例应判“相同”，锚点-负例应判“不同”。</p><p>动画：两张新脸进编码器，距离和阈值比大小。</p>`,
+      cells: [28, 30, 31], highlight: ["def classify_images(face_list1, face_list2, threshold=1.3):", "prediction = np.where(distance<=threshold, 0, 1)"],
+      draw(svg, ctx) {
+        const cases = [["var(--c1)", "var(--c1)", 0.62], ["var(--c1)", "var(--c6)", 2.31], ["var(--c4)", "var(--c4)", 1.42]];
+        const ax = K.axes(svg, { x: 380, y: 60, w: 300, h: 200 }, [0, 3], [0, 1], { xlabel: "平方距离", yticks: 0 });
+        K.svg(svg, "line", { x1: ax.sx(1.3), x2: ax.sx(1.3), y1: 60, y2: 260, stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+        K.svg(svg, "text", { x: ax.sx(1.3), y: 52, "text-anchor": "middle", "font-size": 12, fill: "var(--warn)" }, "阈值 1.3");
+        K.svg(svg, "text", { x: ax.sx(0.6), y: 90, "text-anchor": "middle", "font-size": 12, fill: "var(--good)" }, "同一人");
+        K.svg(svg, "text", { x: ax.sx(2.3), y: 90, "text-anchor": "middle", "font-size": 12, fill: "var(--bad)" }, "不同人");
+        const gs = cases.map((c, i) => {
+          const g = K.svg(svg, "g"), y = 70 + i * 90;
+          face(g, 60, y, 24, c[0]); face(g, 130, y, 24, c[1], 2);
+          K.svg(g, "text", { x: 180, y: y + 5, "font-size": 13 }, "距离 " + c[2].toFixed(2) + (c[2] <= 1.3 ? " → 同一人" : " → 不同人"));
+          const dot = K.svg(g, "circle", { cx: ax.sx(c[2]), cy: 120 + i * 50, r: 7, fill: c[2] <= 1.3 ? "var(--good)" : "var(--bad)" });
+          g.style.opacity = 0; return g;
+        });
+        K.svg(svg, "text", { x: 20, y: 330, "font-size": 12, class: "muted" }, "第三对其实是同一人，但距离略大于 1.3 被拒（示意“拒错人”）");
+        (async () => { for (const g of gs) if (!(await ctx.tween(500, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ===== 模拟“人脸特征”：身份 + 很强的光照干扰 + 噪声 ===== */
+  const DIN = 8, DO = 3;
+  function people(seed, n, m) {   // n 个人，每人 m 张
+    const r = K.rng(seed), L = [1, 0.8, -0.6, 0.5, 0.9, -0.4, 0.3, 0.7].map((x) => x / 1.85), out = [];
+    for (let p = 0; p < n; p++) {
+      const id = Array.from({ length: DIN }, () => K.randn(r));
+      for (let k = 0; k < m; k++) { const light = K.randn(r) * 2.2; out.push({ p, x: id.map((v, i) => v + light * L[i] * 4.5 + K.randn(r) * 0.35) }); }
+    }
+    return out;
+  }
+  function enc(W, x) { const u = W.map((row) => row.reduce((s, w, i) => s + w * x[i], 0)); const n = Math.hypot(...u) || 1e-9; return { e: u.map((v) => v / n), n }; }
+  const d2 = (a, b) => a.reduce((s, x, k) => s + (x - b[k]) ** 2, 0);
+  function trainTriplet(data, opt) {
+    const r = K.rng(opt.seed), W = Array.from({ length: DO }, () => Array.from({ length: DIN }, () => K.randn(r) * 0.5)), losses = [];
+    const byP = {}; data.forEach((d, i) => (byP[d.p] = byP[d.p] || []).push(i));
+    for (let st = 0; st < opt.steps; st++) {
+      const G = W.map(() => Array(DIN).fill(0)); let Ls = 0;
+      for (let b = 0; b < 16; b++) {
+        const a = Math.floor(r() * data.length), same = byP[data[a].p];
+        let p = same[Math.floor(r() * same.length)]; if (p === a) p = same[(same.indexOf(a) + 1) % same.length];
+        const ea = enc(W, data[a].x), ep = enc(W, data[p].x);
+        let n, en;
+        if (opt.hard) {   // 在 12 个随机外人里挑离锚点最近的
+          let best = 1e9; for (let c = 0; c < 12; c++) { let q; do q = Math.floor(r() * data.length); while (data[q].p === data[a].p); const eq = enc(W, data[q].x), dd = d2(ea.e, eq.e); if (dd < best) { best = dd; n = q; en = eq; } }
+        } else { do n = Math.floor(r() * data.length); while (data[n].p === data[a].p); en = enc(W, data[n].x); }
+        const L = d2(ea.e, ep.e) - d2(ea.e, en.e) + opt.margin;
+        if (L <= 0) continue;
+        Ls += L;
+        // 三元组损失对三个嵌入的梯度，再穿过 L2 归一化传回线性层
+        const ge = [ea.e.map((_, k) => 2 * (en.e[k] - ep.e[k])), ea.e.map((_, k) => -2 * (ea.e[k] - ep.e[k])), ea.e.map((_, k) => 2 * (ea.e[k] - en.e[k]))];
+        [[ea, a], [ep, p], [en, n]].forEach(([E, idx], j) => {
+          const g = ge[j], dp = g.reduce((s, x, k) => s + x * E.e[k], 0), gu = g.map((x, k) => (x - E.e[k] * dp) / E.n);
+          for (let k = 0; k < DO; k++) for (let i = 0; i < DIN; i++) G[k][i] += gu[k] * data[idx].x[i];
+        });
+      }
+      for (let k = 0; k < DO; k++) for (let i = 0; i < DIN; i++) W[k][i] -= opt.lr * G[k][i] / 16;
+      losses.push(Ls / 16);
+    }
+    return { W, losses };
+  }
+  function tripletAcc(W, data, seed) {
+    const r = K.rng(seed); let ok = 0, T = 600;
+    const E = data.map((d) => enc(W, d.x).e), byP = {}; data.forEach((d, i) => (byP[d.p] = byP[d.p] || []).push(i));
+    for (let t = 0; t < T; t++) {
+      const a = Math.floor(r() * data.length), same = byP[data[a].p].filter((i) => i !== a), p = same[Math.floor(r() * same.length)];
+      let n; do n = Math.floor(r() * data.length); while (data[n].p === data[a].p);
+      if (d2(E[a], E[p]) < d2(E[a], E[n])) ok++;
+    }
+    return ok / T;
+  }
+  /* 球面上的点投影到平面（绕竖轴转 30°、绕横轴转 20°） */
+  function proj(e) { const ca = Math.cos(0.5), sa = Math.sin(0.5), cb = Math.cos(0.35), sb = Math.sin(0.35); const x = e[0] * ca + e[2] * sa, z0 = -e[0] * sa + e[2] * ca, y = e[1] * cb - z0 * sb, z = e[1] * sb + z0 * cb; return [x, y, z]; }
+  const TRAIN = people(11, 8, 8), TEST = people(99, 6, 8);
+
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "steps", label: "训练步数（每步 16 组三元组）", min: 0, max: 600, step: 20, value: 300 },
+      { id: "margin", label: "间隔 margin（作者用 1.0）", min: 0, max: 2, step: 0.1, value: 1.0, fmt: (v) => v.toFixed(1) },
+      { id: "hard", label: "负例怎么挑", value: "0", options: [["0", "随机挑（作者的做法）"], ["1", "挑离锚点最近的外人（难负例）"]] },
+      { id: "seed", label: "换一组初始权重", button: true },
+    ],
+    note: "每张“照片”是 8 个模拟特征 = 这个人自己的长相 + 一个很强的光照干扰 + 噪声。编码器是 8→3 的线性层再做 L2 归一化（和作者一样），所以所有点都落在单位球面上，这里画的是球的投影，淡色点在球的背面。左球：训练过的 8 个人（同色同人，第 7、8 人带黑边）；右球：从没见过的 6 个人。",
+    render(svg, v) {
+      const res = trainTriplet(TRAIN, { seed: 19 + v.seed * 7, steps: v.steps, margin: v.margin, lr: 0.15, hard: v.hard === "1" });
+      const circ = (cx, cy, data, title) => {
+        K.svg(svg, "circle", { cx, cy, r: 110, fill: "var(--panel-2)", stroke: "var(--line)" });
+        K.svg(svg, "ellipse", { cx, cy, rx: 110, ry: 30, fill: "none", stroke: "var(--line)", "stroke-dasharray": "3 4" });
+        K.svg(svg, "text", { x: cx, y: cy - 128, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, title);
+        data.map((d) => ({ d, q: proj(enc(res.W, d.x).e) })).sort((a, b) => a.q[2] - b.q[2]).forEach(({ d, q }) => {
+          K.svg(svg, "circle", { cx: cx + q[0] * 110, cy: cy - q[1] * 110, r: q[2] > 0 ? 5.5 : 4, fill: K.colors[d.p % 6], stroke: d.p >= 6 ? "var(--ink)" : "none", opacity: q[2] > 0 ? 0.95 : 0.35 });
+        });
+      };
+      circ(150, 160, TRAIN, "训练集 8 人");
+      circ(470, 160, TEST, "陌生人 6 人");
+      // 损失小图
+      const L = res.losses;
+      if (L.length) {
+        const ax = K.axes(svg, { x: 60, y: 300, w: 520, h: 40 }, [0, L.length], [0, Math.max(0.5, ...L.slice(0, 5))], { xticks: 0, yticks: 0 });
+        let dd = "", s = L[0]; L.forEach((l, k) => { s = 0.85 * s + 0.15 * l; dd += (k ? "L" : "M") + ax.sx(k) + "," + ax.sy(s); });
+        K.svg(svg, "path", { d: dd, fill: "none", stroke: "var(--accent)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 590, y: 330, "font-size": 11, class: "muted" }, "损失");
+      }
+      const accTr = tripletAcc(res.W, TRAIN, 1), accTe = tripletAcc(res.W, TEST, 2);
+      return { readout: [
+        { k: "训练集三元组准确率", v: (accTr * 100).toFixed(1) + "%" },
+        { k: "陌生人三元组准确率", v: (accTe * 100).toFixed(1) + "%", color: accTe > 0.85 ? "var(--good)" : "var(--warn)" },
+        { k: "最后 20 步平均损失", v: L.length ? (L.slice(-20).reduce((a, b) => a + b, 0) / Math.min(20, L.length)).toFixed(3) : "—" },
+      ] };
+    },
+  });
+
+  /* 实验 B：阈值 */
+  let model = null;
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "th", label: "阈值（作者用 1.3）", min: 0, max: 4, step: 0.05, value: 1.3, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "用实验 A 的方法（随机负例、间隔 1.0、训练 300 步）训练好编码器，再在 6 个陌生人身上算全部“同一人”配对和同样数量的“不同人”配对的平方距离。拖动阈值，看两种错误此消彼长。",
+    render(svg, v) {
+      if (!model) {
+        model = trainTriplet(TRAIN, { seed: 19, steps: 300, margin: 1.0, lr: 0.15, hard: false }).W;
+        const E = TEST.map((d) => enc(model, d.x).e), pos = [], neg = [], r = K.rng(3);
+        for (let i = 0; i < E.length; i++) for (let j = i + 1; j < E.length; j++) if (TEST[i].p === TEST[j].p) pos.push(d2(E[i], E[j]));
+        while (neg.length < pos.length) { const i = Math.floor(r() * E.length), j = Math.floor(r() * E.length); if (TEST[i].p !== TEST[j].p) neg.push(d2(E[i], E[j])); }
+        model = { W: model, pos, neg };
+      }
+      const { pos, neg } = model, th = v.th;
+      const ax = K.axes(svg, { x: 50, y: 20, w: 560, h: 220 }, [0, 4], [0, 1], { xlabel: "平方距离", yticks: 0 });
+      const hist = (arr, color, off) => { const B = 32, c = Array(B).fill(0); arr.forEach((x) => c[Math.min(B - 1, Math.floor(x / 4 * B))]++); const mx = Math.max(...model.pos.map(() => 0), 1); const top = Math.max(...c, 1);
+        c.forEach((n, b) => K.svg(svg, "rect", { x: ax.sx(b * 4 / B) + off, y: ax.sy(n / top * 0.95), width: 560 / B / 2 - 1, height: ax.sy(0) - ax.sy(n / top * 0.95), fill: color, opacity: 0.8 })); };
+      hist(pos, "var(--c1)", 0); hist(neg, "var(--c6)", 560 / 32 / 2);
+      K.svg(svg, "line", { x1: ax.sx(th), x2: ax.sx(th), y1: 20, y2: 240, stroke: "var(--warn)", "stroke-width": 2.5, "stroke-dasharray": "6 3" });
+      K.svg(svg, "text", { x: ax.sx(th) + 6, y: 34, "font-size": 12, fill: "var(--warn)" }, "← 判同一人 | 判不同人 →");
+      K.svg(svg, "text", { x: 60, y: 296, "font-size": 12, fill: "var(--c1)" }, "■ 同一人的配对（" + pos.length + " 对）");
+      K.svg(svg, "text", { x: 260, y: 296, "font-size": 12, fill: "var(--c6)" }, "■ 不同人的配对（" + neg.length + " 对）");
+      const FR = pos.filter((x) => x > th).length / pos.length, FA = neg.filter((x) => x <= th).length / neg.length;
+      return { readout: [
+        { k: "准确率", v: ((1 - (FR + FA) / 2) * 100).toFixed(1) + "%" },
+        { k: "拒错人（本人刷不开）", v: (FR * 100).toFixed(1) + "%", color: FR > 0.1 ? "var(--bad)" : "var(--ink)" },
+        { k: "放错人（陌生人通过）", v: (FA * 100).toFixed(1) + "%", color: FA > 0.05 ? "var(--bad)" : "var(--ink)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

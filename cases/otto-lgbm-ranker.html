@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>购物会话排序学习</title>
+<meta name="description" content="Kaggle 案例拆解：OTTO 电商推荐比赛中用 polars 造会话特征、用 LightGBM 的 LambdaRank 排序模型给候选商品重新排序，并生成每个会话的前 20 个推荐。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">点击流 · 推荐系统 · 排序学习</div>
+  <h1>购物会话排序：用户接下来会点哪个商品？让模型学会“排队”</h1>
+  <p class="en">[polars] Proof of concept: LGBM Ranker</p>
+  <div class="tags">
+    <span class="tag dm">数据挖掘</span><span class="tag ml">机器学习</span>
+    <span class="tag method">召回 + 重排序</span><span class="tag method">会话特征</span><span class="tag method">时间衰减分</span>
+    <span class="tag method">行为类型加权</span><span class="tag method">LightGBM LGBMRanker</span><span class="tag method">LambdaRank / NDCG</span>
+    <span class="tag method">polars</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Radek Osmulski</b></span>
+    <span>Kaggle 点赞 <b>544</b>（2026-11 抓取）</span>
+    <span>比赛 <b>OTTO – Multi-Objective Recommender System</b>（otto-recommender-system）</span>
+    <span><a href="https://www.kaggle.com/code/radek1/polars-proof-of-concept-lgbm-ranker" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">德国电商 OTTO 的用户浏览会话</div><p>每一行是一次行为：哪个会话、哪个商品（aid）、哪种动作（点击 / 加购物车 / 下单）。作者用的是自己整理好的 parquet 版本。<span data-cell="0">出处</span> <span data-cell="12">出处</span></p></div>
+    <div class="card panel"><h3>要做什么</h3><div class="big">给每个会话排出用户最可能接着互动的 20 个商品</div><p>不是判断“买不买”，而是把候选商品<b>排顺序</b>，越可能被点、被加购、被下单的越靠前。<span data-cell="32">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">LightGBM 排序模型（LambdaRank）</div><p>给每个行为造 4 个特征（倒数第几步、会话长度、时间衰减分、按类型加权的衰减分），以会话为组训练 <code>LGBMRanker</code>。<span data-cell="6">出处</span> <span data-cell="23">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一套能跑通的“排序学习管道”</div><p>作者明说“不指望这个 notebook 拿到特别好的分数”，目的是提供底层管道，供大家加候选、加特征继续改进。<span data-cell="0">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">OTTO 是德国的大型网上商城。比赛给的是匿名的用户会话：一个会话就是一个用户一段时间内的连续浏览记录。作者用自己转成 parquet 的两份数据：本地验证用的 <code>test.parquet</code> + <code>test_labels.parquet</code>（当训练集），以及比赛真正的测试集。<span data-cell="0">出处</span> <span data-cell="4">出处</span> <span data-cell="29">出处</span> 数据规模作者没有写，这里不列。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">行为表里用到的列</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>session</code></td><td>会话编号（一个用户的一段浏览）</td><td>整数</td></tr>
+        <tr><td><code>aid</code></td><td>商品编号</td><td>整数</td></tr>
+        <tr><td><code>type</code></td><td>行为类型：0 = 点击 clicks，1 = 加购物车 carts，2 = 下单 orders</td><td>类别</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">类型编码见第 12 格 <span data-cell="12">出处</span>。数据里还有时间戳，但这份代码没有直接用它，行为的先后顺序靠行的排列来算。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">“答案”长什么样</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th></tr>
+        <tr><td><code>session</code></td><td>会话编号</td></tr>
+        <tr><td><code>type</code></td><td>clicks / carts / orders</td></tr>
+        <tr><td><code>ground_truth</code></td><td>这个会话<b>之后</b>真的点了 / 加购了 / 买了哪些商品（一个列表）</td></tr>
+      </table></div>
+      <p class="callout">作者把答案“摊开”后贴回行为表：如果一行的（会话、类型、商品）出现在答案里，标 <code>gt = 1</code>，否则 0。这就是排序模型要学的目标。<span data-cell="13">出处</span> <span data-cell="16">出处</span></p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead">工业推荐系统常分两步：先“召回”一小批候选，再用排序模型“重排”。这份 notebook 只做第二步，候选就是会话里已经出现过的商品。</p>
+  <div id="pipe"></div>
+  <div data-at="8">
+    <h3>实验 A · 时间衰减分是怎么算的 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labScore"></div>
+  </div>
+  <div data-at="26">
+    <h3>实验 B · 逐点学习 vs 成对学习：谁排得更好 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labRank"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者做到了什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>重排序模型是处理这类“类别数极多”数据的业界标准做法（引用他人的讨论帖）</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>用 polars 写了 4 个特征函数，串成一条处理管道</td><td><span data-cell="6">第 6 格</span> <span data-cell="7">第 7 格</span></td></tr>
+        <tr><td>把会话之后真实发生的行为贴成 0/1 标签</td><td><span data-cell="16">第 16 格</span></td></tr>
+        <tr><td>LGBMRanker：objective = lambdarank，metric = ndcg，boosting = dart，20 棵树</td><td><span data-cell="23">第 23 格</span></td></tr>
+        <tr><td>每个测试会话按分数取前 20 个商品，生成提交文件</td><td><span data-cell="32">第 32 格</span> <span data-cell="34">第 34 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">作者没有在 notebook 里写验证分数或排行榜成绩，只说“不指望拿到特别好的分数”，所以这里不列分数。</p>
+      <p class="callout warn"><b>值得商榷的地方：</b>①第 19 格用 <code>groupby('session')</code> 数每个会话有几行当作 <code>group</code>，polars 的分组默认不保证顺序，组的顺序可能和训练行的顺序对不上（排序模型要求两者严格一致）；②第 6 格按类型加权时是<b>除以</b>权重（加购 6、下单 3），会把加购、下单的分数压低，和“越重要的行为权重越大”的直觉相反，作者没有解释；③商品编号 <code>aid</code> 被当成数值特征，编号大小本身没有意义；④候选只有会话里已经出现过的商品，从没看过的商品永远推荐不出来；⑤三种行为（点击、加购、下单）提交的是同一份前 20 名。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>电商“猜你喜欢”、搜索结果排序、新闻信息流排序、短视频下一条推荐。</li>
+        <li><b>可迁移的套路：</b>召回候选（规则、共现矩阵、向量检索）→ 为每个“用户-候选”对造特征 → 以“一次请求 / 一个会话”为组训练排序模型 → 用 NDCG、Recall@20 等排序指标评估 → 取前 N 个。</li>
+        <li><b>作者建议的改进：</b>用共现矩阵（co-visitation matrix）生成新的候选，再交给这个排序器。<span data-cell="0">出处</span></li>
+        <li><b>和“预测打分”的区别：</b>排序学习不关心分数绝对值，只关心同一组里谁排在谁前面，所以训练时必须告诉模型“哪些行属于同一组”。<span data-cell="18">出处</span></li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>polars 窗口函数造会话特征 <span data-cell="6">第 6 格</span></li>
+        <li>标签展开与左连接 <span data-cell="13">第 13 格</span> <span data-cell="16">第 16 格</span></li>
+        <li>会话分组长度 <span data-cell="19">第 19 格</span></li>
+        <li>LGBMRanker（LambdaRank） <span data-cell="23">第 23 格</span> <span data-cell="26">第 26 格</span></li>
+        <li>按会话取前 20 <span data-cell="32">第 32 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>“预测这个商品会不会被点”和“把这些商品排个先后”有什么不同？为什么推荐更关心后者？</li>
+      <li>为什么最近一次看过的商品，往往最可能被再次点击？有没有反例？</li>
+      <li>作者把“加购”的分数除以 6、“下单”除以 3。你觉得应该乘还是除？理由是什么？</li>
+      <li>候选只来自会话里出现过的商品。用户从没看过的好商品怎么才能被推荐出来？</li>
+      <li>如果告诉模型的“分组”和真实的会话对不上，会发生什么？</li>
+      <li>点击、加购、下单三个目标用同一份推荐，合理吗？你会怎么分别对待？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Radek Osmulski，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：OTTO – Multi-Objective Recommender System 比赛（作者整理的 radek1/otto-train-and-test-data-for-local-validation 等数据集）。
+</footer>
+</main>
+
+<script src="nb/otto-lgbm-ranker.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const tint = (c, p) => `color-mix(in srgb, ${c} ${p}%, var(--panel))`;
+  const fadeIn = (ctx, els, ms) => ctx.tween(ms || 500, (t) => els.forEach((e) => (e.style.opacity = t)));
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+  const TYPES = [["点击", "var(--c1)"], ["加购", "var(--c4)"], ["下单", "var(--c3)"]];
+  const TW = { 0: 1, 1: 6, 2: 3 };
+  /* 第 6 格的公式：r = 倒数第几步（最后一步 = 0），L = 会话长度 */
+  const logRec = (r, L) => (L === 1 ? 1 : Math.pow(2, 0.1 + (0.9 / (L - 1)) * (L - r - 1)) - 1);
+
+  const steps = [
+    {
+      at: 0, title: "推荐的两段式：先召回，再重排", kicker: "第 0–1 格 · 思路",
+      html: `<p>作者引用一篇讨论帖：面对商品种类极多的数据，业界标准做法是<b>重排序模型</b>。完整的推荐系统分两步：先用便宜的方法从海量商品里<b>召回</b>几十上百个候选（比如共现矩阵：经常被一起看的商品），再用更精细的模型给候选<b>排序</b>。<span data-cell="0">出处</span></p><p>这份 notebook 只做排序这一步，作者说它“不指望拿到很好的分数”，而是把训练排序模型需要的底层管道搭好，供大家在上面加候选、加特征。数据处理用的是用 Rust 写的、速度很快的表格库 <b>polars</b>。</p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        const r = K.rng(3), dots = [];
+        for (let i = 0; i < 160; i++) dots.push(K.svg(svg, "circle", { cx: 30 + r() * 180, cy: 40 + r() * 260, r: 3, fill: "var(--ink-3)", opacity: 0.6 }));
+        K.svg(svg, "text", { x: 120, y: 26, "text-anchor": "middle", "font-size": 13 }, "海量商品");
+        const f1 = K.node(svg, 240, 140, 110, 60, "召回\n（本 notebook 不做）", { fs: 11, stroke: "var(--ink-3)" });
+        const cand = []; for (let i = 0; i < 12; i++) cand.push(K.svg(svg, "circle", { cx: 400 + (i % 3) * 22, cy: 100 + Math.floor(i / 3) * 34, r: 7, fill: "var(--c1)" }));
+        K.svg(svg, "text", { x: 422, y: 80, "text-anchor": "middle", "font-size": 12 }, "候选");
+        const f2 = K.node(svg, 490, 140, 100, 60, "排序模型\nLGBMRanker", { fs: 11, bold: true, stroke: "var(--accent)" });
+        const top = []; for (let i = 0; i < 5; i++) { const t = K.node(svg, 620, 60 + i * 46, 70, 36, "#" + (i + 1), { fs: 12, stroke: "var(--good)" }); top.push(t); }
+        K.svg(svg, "text", { x: 655, y: 46, "text-anchor": "middle", "font-size": 12 }, "推荐前 N");
+        const a = [K.arrow(svg, 212, 170, 238, 170), K.arrow(svg, 350, 170, 390, 160), K.arrow(svg, 470, 170, 488, 170), K.arrow(svg, 590, 170, 618, 170)];
+        hide([f1, f2, ...cand, ...top, ...a]);
+        (async () => {
+          for (const e of [[a[0], f1], [a[1], ...cand], [a[2], f2], [a[3], ...top]]) if (!(await fadeIn(ctx, e, 450))) return;
+        })();
+      },
+    },
+    {
+      title: "会话数据：一行就是一次点击、加购或下单", kicker: "第 2–4 格 · 读数据",
+      html: `<p>安装并导入 polars，读入作者为本地验证准备的数据：<code>test.parquet</code>（会话行为）和 <code>test_labels.parquet</code>（每个会话之后真实发生了什么）。注意这里把“本地验证的测试集”拿来当<b>训练集</b>用，因为只有它带答案。<span data-cell="4">出处</span></p>`,
+      cells: [4], highlight: ["test_labels.parquet"],
+      draw(svg, ctx) {
+        const r = K.rng(8);
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 13, class: "muted" }, "三个会话的行为序列（示意）：时间从左到右");
+        const els = [];
+        [7, 4, 10].forEach((L, s) => {
+          const y = 70 + s * 90;
+          K.svg(svg, "text", { x: 30, y: y + 5, "font-size": 13, "font-weight": 700 }, "会话 " + (s + 1));
+          K.svg(svg, "line", { x1: 100, y1: y, x2: 690, y2: y, stroke: "var(--line)" });
+          for (let i = 0; i < L; i++) {
+            const t = r() < 0.75 ? 0 : r() < 0.6 ? 1 : 2, x = 120 + i * 55;
+            const g = K.svg(svg, "g");
+            K.svg(g, "circle", { cx: x, cy: y, r: 13, fill: TYPES[t][1] });
+            K.svg(g, "text", { x, y: y + 30, "text-anchor": "middle", "font-size": 10, "font-family": "var(--mono)" }, "aid" + Math.floor(r() * 90 + 10));
+            g.style.opacity = 0; els.push(g);
+          }
+        });
+        TYPES.forEach(([n, c], i) => K.svg(svg, "text", { x: 400 + i * 90, y: 26, "font-size": 12, fill: c }, "● " + n));
+        (async () => { for (const e of els) if (!(await fadeIn(ctx, [e], 90))) return; })();
+      },
+    },
+    {
+      title: "给每个行为造特征：倒数第几步、会话多长、时间衰减分", kicker: "第 5–10 格 · 特征工程",
+      html: `<p>作者说这些就是做“共现矩阵”时用的打分，已知有信号，所以喂给排序模型。四个特征依次算：<span data-cell="5">出处</span> <span data-cell="6">出处</span></p><ul class="tight"><li><code>action_num_reverse_chrono</code>：这是会话里倒数第几个行为（最后一个 = 0）</li><li><code>session_length</code>：会话一共几个行为</li><li><code>log_recency_score</code>：越靠后的行为分越高。按位置在 0.1 到 1 之间线性插值，再算 2<sup>x</sup> − 1，所以最后一步得 1、最早一步约 0.07；只有一个行为的会话记为 1</li><li><code>type_weighted_log_recency_score</code>：上面的分<b>除以</b>类型权重（点击 1、加购 6、下单 3）</li></ul><p>用一个小函数 <code>apply</code> 把四个函数按顺序套上去。<span data-cell="7">出处</span> <span data-cell="8">出处</span></p>`,
+      cells: [6, 7, 8], highlight: ["2**linear_interpolation - 1", "type_weights = {0:1, 1:6, 2:3}", "df['log_recency_score'] / df['type']"],
+      draw(svg, ctx) {
+        const L = 10, types = [0, 0, 1, 0, 0, 2, 0, 0, 1, 0];
+        const ax = K.axes(svg, { x: 60, y: 24, w: 600, h: 230 }, [0, L], [0, 1.05], { xticks: 0, yticks: 4, ylabel: "分数" });
+        const bars = types.map((t, i) => {
+          const r = L - 1 - i, s = logRec(r, L), sw = s / TW[t];
+          const x = ax.sx(i) + 8;
+          const b1 = K.svg(svg, "rect", { x, y: ax.sy(0), width: 22, height: 0, fill: "var(--ink-3)", opacity: 0.6 });
+          const b2 = K.svg(svg, "rect", { x: x + 24, y: ax.sy(0), width: 22, height: 0, fill: TYPES[t][1] });
+          K.svg(svg, "text", { x: x + 23, y: 276, "text-anchor": "middle", "font-size": 11 }, TYPES[t][0]);
+          K.svg(svg, "text", { x: x + 23, y: 292, "text-anchor": "middle", "font-size": 10, class: "muted" }, "倒数" + r);
+          return [b1, s, b2, sw];
+        });
+        K.svg(svg, "text", { x: 60, y: 318, "font-size": 12 }, "灰柱 = log_recency_score；彩柱 = 除以类型权重之后（按第 6 格公式现算，会话长度 10）");
+        ctx.tween(1500, (t) => bars.forEach(([b1, s, b2, sw]) => { const h1 = (ax.sy(0) - ax.sy(s)) * t, h2 = (ax.sy(0) - ax.sy(sw)) * t; b1.setAttribute("y", ax.sy(0) - h1); b1.setAttribute("height", h1); b2.setAttribute("y", ax.sy(0) - h2); b2.setAttribute("height", h2); }));
+      },
+    },
+    {
+      title: "把答案贴上去：之后真的发生的行为标 1", kicker: "第 11–17 格 · 构造标签",
+      html: `<p>答案表里每个会话、每种类型对应一个商品列表。作者先把类型文字换成 0/1/2，再把列表“摊开”成一行一个商品，统一数据类型，加一列 <code>gt = 1</code>。<span data-cell="12">出处</span> <span data-cell="13">出处</span> <span data-cell="15">出处</span></p><p>最后按（会话、类型、商品）三列<b>左连接</b>到行为表上，没对上的填 0。<span data-cell="16">出处</span> 也就是说：一行“点击了商品 X”只有在“之后也点击了 X”时才算正例。</p>`,
+      cells: [12, 13, 14, 15, 16], highlight: ["explode('ground_truth')", "how='left', on=['session', 'type', 'aid']"],
+      draw(svg, ctx) {
+        K.node(svg, 30, 40, 260, 70, "答案：会话 1 · clicks\n[aid 42, aid 17]", { fs: 12, stroke: "var(--good)" });
+        const ex = [K.node(svg, 30, 140, 200, 36, "会话1 · 点击 · aid 42 · gt=1", { fs: 11 }), K.node(svg, 30, 186, 200, 36, "会话1 · 点击 · aid 17 · gt=1", { fs: 11 })];
+        const rows = [["点击 aid 42", 1], ["点击 aid 88", 0], ["加购 aid 42", 0], ["点击 aid 17", 1], ["点击 aid 53", 0]];
+        K.svg(svg, "text", { x: 400, y: 30, "font-size": 13, "font-weight": 700 }, "行为表（会话 1）");
+        const tags = rows.map(([n, g], i) => {
+          K.node(svg, 400, 44 + i * 52, 170, 40, n, { fs: 12 });
+          const t = K.svg(svg, "text", { x: 590, y: 70 + i * 52, "font-size": 15, "font-weight": 700, fill: g ? "var(--good)" : "var(--ink-3)" }, "gt = " + g);
+          t.style.opacity = 0; return t;
+        });
+        const a = K.arrow(svg, 230, 180, 395, 160, { dash: "5 4" });
+        const note = K.svg(svg, "text", { x: 400, y: 320, "font-size": 12, fill: "var(--warn)" }, "“加购 aid 42”类型不同，没对上 → 0");
+        hide([...ex, a, note]);
+        (async () => {
+          if (!(await fadeIn(ctx, ex, 600))) return;
+          if (!(await fadeIn(ctx, [a], 400))) return;
+          for (const t of tags) if (!(await fadeIn(ctx, [t], 250))) return;
+          await fadeIn(ctx, [note], 400);
+        })();
+      },
+    },
+    {
+      title: "告诉排序模型：哪些行属于同一个会话", kicker: "第 18–20 格 · 分组",
+      html: `<p>排序模型只在<b>同一组内部</b>比较谁该排前面，所以要额外给它一个 <code>group</code> 数组：第 1 个会话有几行、第 2 个会话有几行……<span data-cell="18">出处</span> 作者用 <code>groupby('session')</code> 数出每个会话的行数。<span data-cell="19">出处</span> <span data-cell="20">出处</span></p><p class="callout warn">LightGBM 要求 group 的顺序和训练数据行的顺序<b>完全一致</b>。polars 的 <code>groupby</code> 默认不保证输出顺序（需要 <code>maintain_order=True</code>），这里有对不齐的风险：组边界错了，模型就会拿 A 会话的行和 B 会话的行互相比较。</p>`,
+      cells: [19, 20], highlight: ["df.groupby('session')"],
+      draw(svg, ctx) {
+        const sizes = [3, 5, 2, 4], cols = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c5)"];
+        let k = 0; const cells = [];
+        sizes.forEach((n, s) => { for (let i = 0; i < n; i++) { cells.push(K.svg(svg, "rect", { x: 40 + k * 44, y: 70, width: 40, height: 40, rx: 4, fill: tint(cols[s], 40), stroke: cols[s] })); k++; } });
+        K.svg(svg, "text", { x: 40, y: 56, "font-size": 12 }, "训练数据的行（颜色 = 实际所属会话）");
+        K.svg(svg, "text", { x: 40, y: 160, "font-size": 12, fill: "var(--good)" }, "group = [3, 5, 2, 4]（顺序一致）");
+        K.svg(svg, "text", { x: 40, y: 260, "font-size": 12, fill: "var(--bad)" }, "group = [5, 2, 3, 4]（顺序被打乱）");
+        const brk = (y, arr, c) => { let x = 40; const out = []; arr.forEach((n) => { const b = K.svg(svg, "path", { d: `M${x + 2},${y} L${x + 2},${y + 10} L${x + n * 44 - 6},${y + 10} L${x + n * 44 - 6},${y}`, fill: "none", stroke: c, "stroke-width": 2.5 }); b.style.opacity = 0; out.push(b); x += n * 44; }); return out; };
+        const g1 = brk(118, sizes, "var(--good)"), g2 = brk(218, [5, 2, 3, 4], "var(--bad)");
+        const mis = []; let k2 = 0; sizes.forEach((n) => { for (let i = 0; i < n; i++) { mis.push(K.svg(svg, "rect", { x: 40 + k2 * 44, y: 170, width: 40, height: 40, rx: 4, fill: cells[k2].style.fill, stroke: cells[k2].style.stroke })); k2++; } });
+        mis.forEach((m) => (m.style.opacity = 0));
+        (async () => {
+          if (!(await fadeIn(ctx, g1, 600))) return;
+          if (!(await fadeIn(ctx, mis, 400))) return;
+          await fadeIn(ctx, g2, 600);
+        })();
+      },
+    },
+    {
+      title: "LGBMRanker：用 LambdaRank 学会“排队”", kicker: "第 21–26 格 · 训练",
+      html: `<p>导入 LightGBM 的 <code>LGBMRanker</code>，目标函数 <b>lambdarank</b>，评估指标 <b>ndcg</b>，提升方式 <b>dart</b>（训练中随机丢弃一些树，防过拟合），只用 20 棵树。<span data-cell="23">出处</span></p><p>LambdaRank 的想法：在同一组里，看<b>每一对</b>商品的先后有没有排错；排错的一对，按“交换它俩会让 NDCG 变化多少”加权去修正。<b>NDCG</b>（归一化折损累计增益）衡量的是“对的东西是不是排在前面”，排第 1 比排第 5 得分高得多。</p><p>特征 6 个：商品编号、行为类型和前面造的 4 个特征；目标是 <code>gt</code>，分组用上一章的会话长度。<span data-cell="25">出处</span> <span data-cell="26">出处</span></p><p class="callout warn">商品编号 <code>aid</code> 被当成一个数值特征放进模型，编号的大小没有意义，树模型可能会学到“编号大于某个数”这类偶然规律。</p>`,
+      cells: [23, 25, 26], highlight: ['objective="lambdarank"', 'metric="ndcg"', "group=session_lengths_train"],
+      draw(svg, ctx) {
+        const items = [["A", 0], ["B", 0], ["C", 1], ["D", 0], ["E", 1]];
+        let order = [0, 1, 2, 3, 4];
+        const els = items.map(([n, g], i) => K.node(svg, 60, 30 + i * 56, 120, 44, "商品 " + n + (g ? " ✓" : ""), { bold: !!g, stroke: g ? "var(--good)" : "var(--line)", fill: g ? tint("var(--good)", 15) : "var(--panel-2)" }));
+        const ndcg = (ord) => { let dcg = 0, idcg = 0; ord.forEach((it, i) => { if (items[it][1]) dcg += 1 / Math.log2(i + 2); }); [1, 1].forEach((_, i) => (idcg += 1 / Math.log2(i + 2))); return dcg / idcg; };
+        const tN = K.svg(svg, "text", { x: 260, y: 60, "font-size": 18, "font-weight": 700, "font-family": "var(--mono)" }, "NDCG = " + ndcg(order).toFixed(3));
+        const tS = K.svg(svg, "text", { x: 260, y: 100, "font-size": 13 }, "");
+        K.svg(svg, "text", { x: 260, y: 160, "font-size": 12, class: "muted" }, "✓ = 之后真的被互动（gt = 1）");
+        K.svg(svg, "text", { x: 260, y: 182, "font-size": 12, class: "muted" }, "每一步把一对排错的商品对调，");
+        K.svg(svg, "text", { x: 260, y: 204, "font-size": 12, class: "muted" }, "对 NDCG 影响越大的对调越优先（示意）");
+        const place = (ms) => ctx.tween(ms, (t) => order.forEach((it, pos) => { const g = els[it], cur = +(g.dataset.y || 30 + it * 56), tgt = 30 + pos * 56; g.setAttribute("transform", `translate(0, ${K.lerp(cur, tgt, t) - (30 + it * 56)})`); if (t === 1) g.dataset.y = tgt; }));
+        const swaps = [[1, 2], [0, 1], [3, 4], [2, 3]];
+        (async () => {
+          for (const [a, b] of swaps) {
+            if (!(await ctx.wait(700))) return;
+            tS.textContent = `对调第 ${a + 1}、${b + 1} 名`;
+            [order[a], order[b]] = [order[b], order[a]];
+            if (!(await place(500))) return;
+            tN.textContent = "NDCG = " + ndcg(order).toFixed(3);
+          }
+          tS.textContent = "两个 ✓ 都排到最前 → NDCG = 1";
+        })();
+      },
+    },
+    {
+      title: "给测试会话打分", kicker: "第 27–30 格 · 预测",
+      html: `<p>读入比赛真正的测试集，套上同一条特征管道，再让排序模型给每一行打分。<span data-cell="29">出处</span> <span data-cell="30">出处</span> 排序模型给出的分数本身没有“概率”的意思，只有在同一个会话里比大小才有意义。</p>`,
+      cells: [29, 30], highlight: ["test = apply(test, pipeline)", "ranker.predict"],
+      draw(svg, ctx) {
+        const r = K.rng(12), rows = [];
+        for (let i = 0; i < 7; i++) {
+          const y = 40 + i * 40, s = r() * 2 - 0.6;
+          K.node(svg, 40, y, 200, 32, `会话 9 · aid ${Math.floor(r() * 90 + 10)}`, { fs: 12 });
+          const b = K.svg(svg, "rect", { x: 300, y: y + 8, width: 0, height: 16, rx: 2, fill: s > 0 ? "var(--accent)" : "var(--bad)" });
+          const t = K.svg(svg, "text", { x: 560, y: y + 21, "font-size": 12, "font-family": "var(--mono)" }, "score " + s.toFixed(2));
+          t.style.opacity = 0; rows.push([b, s, t]);
+        }
+        K.svg(svg, "line", { x1: 400, x2: 400, y1: 34, y2: 320, stroke: "var(--ink-3)", "stroke-dasharray": "3 3" });
+        K.svg(svg, "text", { x: 404, y: 330, "font-size": 11, class: "muted" }, "0（分数可正可负，示意）");
+        ctx.tween(1200, (t) => rows.forEach(([b, s, tx]) => { const w = Math.abs(s) * 100 * t; b.setAttribute("x", s > 0 ? 400 : 400 - w); b.setAttribute("width", w); tx.style.opacity = t; }));
+      },
+    },
+    {
+      title: "每个会话取前 20 名，三种行为共用一份", kicker: "第 31–34 格 · 生成提交",
+      html: `<p>按会话、分数从高到低排序，每个会话取前 20 个商品。<span data-cell="32">出处</span> 比赛要求分别预测点击、加购、下单三种行为，作者给三种都提交了<b>同一份</b>前 20 名，写成 CSV。<span data-cell="33">出处</span> <span data-cell="34">出处</span></p><p>这是一个“最小可运行版本”。作者在开头就说明，要提高成绩，可以加入用共现矩阵生成的新候选。</p>`,
+      cells: [32, 33, 34], highlight: ["pl.col('aid').limit(20).list()", "for session_type in ['clicks', 'carts', 'orders']"],
+      draw(svg, ctx) {
+        const top = K.node(svg, 40, 130, 180, 80, "会话 9 的前 20 名\naid 42 17 88 …", { bold: true, stroke: "var(--accent)" });
+        const outs = ["9_clicks", "9_carts", "9_orders"].map((n, i) => { const g = K.node(svg, 400, 50 + i * 90, 260, 60, n + " → 同一份 20 个", { fs: 12, stroke: TYPES[i][1] }); g.style.opacity = 0; return g; });
+        const as = outs.map((_, i) => { const a = K.arrow(svg, 220, 170, 398, 80 + i * 90); a.style.opacity = 0; return a; });
+        (async () => { for (let i = 0; i < 3; i++) if (!(await fadeIn(ctx, [as[i], outs[i]], 400))) return; })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：时间衰减分 ---------- */
+  K.lab(document.getElementById("labScore"), {
+    width: 660, height: 300,
+    controls: [
+      { id: "L", label: "会话长度（行为个数）", min: 1, max: 20, step: 1, value: 10 },
+      { id: "mode", label: "类型权重怎么用", value: "div", options: [["div", "除以权重（原文第 6 格）"], ["mul", "乘以权重（对照）"], ["none", "不考虑类型"]] },
+      { id: "seed", label: "换一个会话", button: true },
+    ],
+    note: "按原文公式现算：x = 0.1 + 0.9 ×（L − 倒数位置 − 1）/（L − 1），分数 = 2^x − 1；会话只有 1 个行为时记为 1。类型权重：点击 1、加购 6、下单 3。看看“除以”和“乘以”时，加购、下单的柱子怎么变。",
+    render(svg, v) {
+      const r = K.rng(60 + v.seed * 9), L = v.L, types = [];
+      for (let i = 0; i < L; i++) types.push(r() < 0.7 ? 0 : r() < 0.6 ? 1 : 2);
+      const sc = types.map((t, i) => { const s = logRec(L - 1 - i, L); return v.mode === "div" ? s / TW[t] : v.mode === "mul" ? s * TW[t] : s; });
+      const mx = Math.max(1.05, ...sc);
+      const ax = K.axes(svg, { x: 60, y: 20, w: 580, h: 220 }, [0, L], [0, mx], { xticks: 0, yticks: 4, ylabel: "特征值" });
+      const bw = Math.min(40, (580 / L) * 0.7);
+      sc.forEach((s, i) => {
+        const x = ax.sx(i + 0.5) - bw / 2;
+        K.svg(svg, "rect", { x, y: ax.sy(s), width: bw, height: ax.sy(0) - ax.sy(s), fill: TYPES[types[i]][1], rx: 2 });
+        if (L <= 14) K.svg(svg, "text", { x: x + bw / 2, y: 258, "text-anchor": "middle", "font-size": 11 }, TYPES[types[i]][0]);
+      });
+      K.svg(svg, "text", { x: 60, y: 280, "font-size": 12, class: "muted" }, "← 更早的行为　　　　　　　　　　　　　　　　　　　　最近的行为 →");
+      const best = sc.indexOf(Math.max(...sc));
+      return { readout: [
+        { k: "最后一步的分数", v: sc[L - 1].toFixed(3) },
+        { k: "分数最高的是", v: `倒数第 ${L - 1 - best} 步（${TYPES[types[best]][0]}）` },
+        { k: "最早一步的分数", v: sc[0].toFixed(3) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：逐点 vs 成对 ---------- */
+  function makeSessions(seed, n) {
+    const r = K.rng(seed), S = [];
+    for (let s = 0; s < n; s++) {
+      const L = 4 + Math.floor(r() * 10), items = [];
+      for (let i = 0; i < L; i++) {
+        const t = r() < 0.7 ? 0 : r() < 0.6 ? 1 : 2, rec = logRec(L - 1 - i, L), rep = r() < 0.25 ? 1 : 0;
+        // 隐藏规律（示意）：最近、加购过、重复看过的更可能再互动；会话长度带来整体偏移
+        const z = -3.2 + 2.6 * rec + (t === 1 ? 1.4 : t === 2 ? 0.6 : 0) + 1.0 * rep + 0.08 * L;
+        items.push({ f: [rec, t === 1 ? 1 : 0, t === 2 ? 1 : 0, rep, L / 10], y: r() < K.sigmoid(z) ? 1 : 0 });
+      }
+      S.push(items);
+    }
+    return S;
+  }
+  function ndcgAt(items, sc, k) {
+    const ord = items.map((_, i) => i).sort((a, b) => sc[b] - sc[a]);
+    let dcg = 0; ord.slice(0, k).forEach((i, p) => { if (items[i].y) dcg += 1 / Math.log2(p + 2); });
+    const pos = items.filter((x) => x.y).length; let idcg = 0; for (let p = 0; p < Math.min(k, pos); p++) idcg += 1 / Math.log2(p + 2);
+    return idcg ? dcg / idcg : null;
+  }
+  const dot = (w, f) => w.reduce((s, x, j) => s + x * f[j], 0);
+  K.lab(document.getElementById("labRank"), {
+    width: 660, height: 300,
+    controls: [
+      { id: "epochs", label: "训练轮数", min: 1, max: 60, step: 1, value: 20 },
+      { id: "n", label: "训练会话数", min: 50, max: 600, step: 50, value: 300 },
+      { id: "seed", label: "重新生成会话", button: true },
+    ],
+    note: "模拟会话：每个候选有 5 个特征（时间衰减分、是否加购、是否下单、是否重复看过、会话长度），按一个隐藏规律决定之后有没有再互动。现场训练两个线性模型：逐点（逻辑回归，把每行当独立的“是/否”题）和成对（RankNet 式，只学同一会话里“正例分数要高于负例”）。在另外 300 个会话上算 NDCG@5。基线是“只按时间衰减分排”。注意右侧：成对模型给“会话长”的权重始终是 0，因为同一会话里每行的会话长度都一样，比较先后时它帮不上忙。",
+    render(svg, v) {
+      const tr = makeSessions(100 + v.seed * 7, v.n), te = makeSessions(9000 + v.seed, 300);
+      const m = 5, wP = new Array(m).fill(0); let bP = 0; const wR = new Array(m).fill(0);
+      const curve = [], LR = 0.003;
+      const evalW = (w, b) => { let s = 0, c = 0; te.forEach((it) => { const v2 = ndcgAt(it, it.map((x) => dot(w, x.f) + (b || 0)), 5); if (v2 != null) { s += v2; c++; } }); return s / c; };
+      for (let ep = 0; ep < v.epochs; ep++) {
+        tr.forEach((it) => {
+          it.forEach((x) => { const e = K.sigmoid(dot(wP, x.f) + bP) - x.y; for (let j = 0; j < m; j++) wP[j] -= LR * e * x.f[j]; bP -= LR * e; });
+          const pos = it.filter((x) => x.y), neg = it.filter((x) => !x.y);
+          pos.forEach((p) => neg.forEach((q) => { const d = dot(wR, p.f) - dot(wR, q.f), g = -K.sigmoid(-d); for (let j = 0; j < m; j++) wR[j] -= LR * g * (p.f[j] - q.f[j]); }));
+        });
+        curve.push([evalW(wP, bP), evalW(wR, 0)]);
+      }
+      const base = evalW([1, 0, 0, 0, 0], 0);
+      const ax = K.axes(svg, { x: 60, y: 20, w: 420, h: 240 }, [1, Math.max(2, v.epochs)], [0.4, 1], { xticks: 4, yticks: 3, xlabel: "训练轮数", ylabel: "测试 NDCG@5" });
+      const line = (k, c) => { let d = ""; curve.forEach((p, i) => (d += (i ? "L" : "M") + ax.sx(i + 1) + "," + ax.sy(K.clamp(p[k], 0.4, 1)))); K.svg(svg, "path", { d, fill: "none", stroke: c, "stroke-width": 2.4 }); };
+      line(0, "var(--c2)"); line(1, "var(--c1)");
+      K.svg(svg, "line", { x1: ax.sx(1), x2: ax.sx(Math.max(2, v.epochs)), y1: ax.sy(base), y2: ax.sy(base), stroke: "var(--ink-3)", "stroke-dasharray": "5 4" });
+      K.svg(svg, "text", { x: 500, y: 60, "font-size": 12, fill: "var(--c1)" }, "— 成对（RankNet 式）");
+      K.svg(svg, "text", { x: 500, y: 82, "font-size": 12, fill: "var(--c2)" }, "— 逐点（逻辑回归）");
+      K.svg(svg, "text", { x: 500, y: 104, "font-size": 12, class: "muted" }, "- - 只按时间衰减分排");
+      const names = ["衰减分", "加购", "下单", "重复看", "会话长"];
+      K.svg(svg, "text", { x: 500, y: 150, "font-size": 12, "font-weight": 700 }, "成对模型学到的权重");
+      names.forEach((n, j) => { const w = wR[j]; K.svg(svg, "text", { x: 500, y: 172 + j * 20, "font-size": 11 }, n); K.svg(svg, "rect", { x: 570 + (w < 0 ? w * 20 : 0), y: 162 + j * 20, width: Math.abs(w) * 20, height: 12, fill: w >= 0 ? "var(--good)" : "var(--bad)" }); });
+      const last = curve[curve.length - 1];
+      return { readout: [
+        { k: "成对 NDCG@5", v: last[1].toFixed(3), color: "var(--c1)" },
+        { k: "逐点 NDCG@5", v: last[0].toFixed(3), color: "var(--c2)" },
+        { k: "只按衰减分", v: base.toFixed(3), color: "var(--ink-3)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

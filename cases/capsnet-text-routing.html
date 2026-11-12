@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>胶囊网络入门</title>
+<meta name="description" content="Kaggle 案例拆解：胶囊网络用“向量”代替单个神经元，用动态路由代替最大池化，作者把它接在双向 GRU 后面做 DonorsChoose 项目申请审核预测。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">文本 · 二分类 · 胶囊网络</div>
+  <h1>胶囊网络：神经元抱成团，投票决定往哪走</h1>
+  <p class="en">Beginner's Guide to Capsule Networks</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">胶囊（向量神经元）</span><span class="tag method">squash 激活</span><span class="tag method">动态路由</span>
+    <span class="tag method">双向 GRU</span><span class="tag method">fastText 词向量</span><span class="tag method">K 折</span><span class="tag method">排名平均</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Zafar（fizzbuzz）</b></span>
+    <span>Kaggle 点赞 <b>762</b>（2026-11 抓取）</span>
+    <span>数据 <b>DonorsChoose.org Application Screening</b> 比赛（作者预处理的小样本）</span>
+    <span><a href="https://www.kaggle.com/code/fizzbuzz/beginner-s-guide-to-capsule-networks" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">老师们写的项目申请书</div><p>DonorsChoose 是美国的公益众筹平台，老师在上面申请教学物资。作者把申请文本合成一列 <code>application_text</code>。<span data-cell="21">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这份申请会不会被批准</div><p>标签列 <code>project_is_approved</code>，0 或 1，输出是被批准的概率。<span data-cell="20">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">词向量 → 双向 GRU → 胶囊层</div><p>先用 GRU 读每个词，再让 10 个 16 维的“胶囊”通过 5 轮<b>动态路由</b>汇总信息，最后一层 sigmoid 输出概率。<span data-cell="15">出处</span></p></div>
+    <div class="card panel"><h3>特别在哪里</h3><div class="big">一个“胶囊”是一组神经元</div><p>普通神经元输出一个数，胶囊输出一个向量：长度表示“这个东西在不在”，方向表示“它长什么样”。下层胶囊像投票一样，商量好再把信息送给上层，代替 CNN 里“只留最大值”的池化。<span data-cell="1">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据来自 Kaggle 比赛 <b>DonorsChoose.org Application Screening</b>：预测教师提交的项目申请会不会通过审核。作者另外上传了自己预处理好的小样本（<code>train_small.csv</code>）和精简版词向量，因为 Kaggle 内核有运行时间限制。<span data-cell="18">出处</span></p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">实际跑的设置（括号内是作者完整训练用的值）</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">每段文本取前几个词</div><div class="v">10（300）</div></div>
+        <div class="stat-tile"><div class="k">折数</div><div class="v">2（10）</div></div>
+        <div class="stat-tile"><div class="k">批大小</div><div class="v">128（256）</div></div>
+        <div class="stat-tile"><div class="k">词向量</div><div class="v">fastText 300 维</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">见第 19 格的注释 <span data-cell="19">出处</span>。词向量来源是 fastText Common Crawl（kernel-metadata 里的数据源）。样本行数在运行输出里，这里不写。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">用到的列</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>application_text</code></td><td>作者预处理时拼好的申请文本（项目标题、描述、需求等合成一段）</td><td>文本</td></tr>
+        <tr><td><code>project_is_approved</code></td><td><b>要预测的答案</b>：1 = 申请通过，0 = 没通过</td><td>0 / 1</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">缺失文本用 <code>_NAN_</code> 填上，不在词向量里的词记为未知词 <code>_UNK_</code>，不够长的用补位词补齐 <span data-cell="20">出处</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="12">
+    <h3>动手试试 A · squash：把向量长度压成“概率” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="14">
+    <h3>动手试试 B · 动态路由：下层胶囊投票 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>胶囊网络在 Toxic Comment 比赛里表现很好，这里拿来做 DonorsChoose 的文本分类</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>胶囊层代替池化层：得到平移不变性，又不丢细节</td><td><span data-cell="8">第 8 格</span></td></tr>
+        <tr><td>受 Kaggle 时间限制，内核里只用小模型、小样本；提交用的是作者离线训练的 10 折预测做排名平均</td><td><span data-cell="18">第 18 格</span>、<span data-cell="28">第 28 格</span></td></tr>
+        <tr><td>“不调参也能做出一个强基线”</td><td><span data-cell="30">第 30 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">作者没有在文字里写比赛分数（AUC）或验证损失，运行输出也不在源码里，这里不列分数。</p>
+      <h3>读代码时发现的问题（原文未改，供讨论）</h3>
+      <ol class="tight">
+        <li><b>squash 写成了单纯的归一化</b>：第 12 格 <code>return x / scale</code> 把每个胶囊的长度都变成 1，第 1 格讲的“长度表示存在的概率”在代码里就不成立了。论文的 squash 是 ‖s‖²/(1+‖s‖²) · s/‖s‖。实验 A 可以对比。<span data-cell="12">第 12 格</span></li>
+        <li><b>路由更新是“替换”不是“累加”</b>：第 1 格的算法写 b ← b + û·v，第 14 格代码是 <code>b = K.batch_dot(outputs, u_hat_vecs, …)</code>，每轮只保留最新一次的“同意程度”。实验 B 可以切换。<span data-cell="14">第 14 格</span></li>
+        <li><b>K 折的最后一折写错了变量</b>：第 17 格 <code>if fold_id == fold_size - 1</code> 应该是 <code>fold_count - 1</code>，所以除不尽时剩下的几行永远不会进验证集；函数最后返回的 <code>models</code> 也一直是空列表。<span data-cell="17">第 17 格</span></li>
+        <li>内核里实际训练的模型（每段只看 10 个词、2 折）和最后提交用的预测（作者离线 10 折）不是同一套，提交文件读的是另一个数据集里的现成预测。<span data-cell="29">第 29 格</span></li>
+      </ol>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一段申请文本，输出通过概率，帮助平台优先人工审核“可能被拒”的申请。</li>
+        <li><b>同类问题：</b>评论有害内容检测（作者提到的 Toxic Comment 比赛）、情感分类、问题是否重复等文本分类。</li>
+        <li><b>胶囊网络最初的用途：</b>图像识别（Hinton 等 2017 年的论文用在 MNIST 手写数字上），想让网络知道“部件之间的相对位置”，比如嘴在眼睛下面才是脸。</li>
+        <li><b>和 CNN、RNN 的区别：</b>CNN 的最大池化只把一小块里最大的数往上传，位置信息丢了；胶囊传的是向量，并且上下层通过“路由协商”决定谁的信息送给谁。代价是计算慢，路由要迭代好几轮，所以后来用得不如 CNN 和 Transformer 多。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>NLTK 分词、建词典、对齐 fastText 词向量 <span data-cell="4">第 4 格</span> <span data-cell="6">第 6 格</span></li>
+        <li>胶囊参数：10 个胶囊 × 16 维，5 轮路由 <span data-cell="11">第 11 格</span></li>
+        <li>胶囊层（共享权重，用 1 维卷积算预测向量） <span data-cell="14">第 14 格</span></li>
+        <li>模型：冻结的词向量 → SpatialDropout → 双向 GRU(128) → 胶囊层 → 展平 → Dropout → sigmoid <span data-cell="15">第 15 格</span></li>
+        <li>按验证集 log loss 早停（耐心 5 轮） <span data-cell="16">第 16 格</span></li>
+        <li>多折预测的排名平均 <span data-cell="29">第 29 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>“一个数”和“一个向量”表示一个特征，有什么区别？举个生活中的例子：只说“有一只猫”和说“有一只猫，在左上角，头朝右”。</li>
+      <li>最大池化只保留最大值。对图片来说，丢掉的是哪些信息？对文本呢？</li>
+      <li>第 12 格的 squash 写错了，模型照样能训练、也能出预测。为什么这种错误不容易被发现？</li>
+      <li>动态路由要迭代 5 轮，每轮都要重新计算。和一次就算完的池化相比，你觉得值不值？</li>
+      <li>只看每份申请的前 10 个词就去预测能不能通过，合理吗？作者为什么要这样做？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Zafar（fizzbuzz），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Kaggle 比赛 DonorsChoose.org Application Screening；胶囊网络论文：Sabour, Frosst, Hinton, Dynamic Routing Between Capsules（2017）。
+</footer>
+</main>
+
+<script src="nb/capsnet-text-routing.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+  const vec = (svg, x, y, dx, dy, color, w) => K.arrow(svg, x, y, x + dx, y + dy, { color, sw: w || 2 });
+  const squashH = (n) => (n * n) / (1 + n * n);   // 论文：输出长度
+
+  const steps = [
+    {
+      at: 0, title: "胶囊网络是什么", kicker: "第 0 格 · 介绍",
+      html: `<p>作者先说明背景：胶囊网络（CapsNet）在 Toxic Comment 文本比赛里表现很好，这份 notebook 用 Keras 实现它，并拿到 DonorsChoose 申请审核比赛上试一试。</p><p>动画对比两种“神经元”：普通神经元只输出一个数（亮度）；胶囊输出一个箭头，<b>箭头长短</b>表示“这个东西在不在”，<b>箭头方向</b>表示“它的位置、大小、角度”等属性。</p>`,
+      cells: [0], highlight: ["Capsule Network (aka CapsNet) proved to be a huge success"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 14, "font-weight": 700 }, "普通神经元：一个数");
+        K.svg(svg, "text", { x: 380, y: 30, "font-size": 14, "font-weight": 700, fill: "var(--accent)" }, "胶囊：一个向量");
+        const vals = [0.9, 0.2, 0.6, 0.05];
+        const cs = vals.map((v, i) => K.svg(svg, "circle", { cx: 80 + i * 70, cy: 150, r: 24, fill: "var(--panel-2)", stroke: "var(--ink-3)" }));
+        vals.forEach((v, i) => K.svg(svg, "text", { x: 80 + i * 70, y: 200, "text-anchor": "middle", "font-size": 12 }, v.toFixed(2)));
+        const ar = [[0.9, -0.5], [0.25, 1.9], [0.6, 2.6], [0.08, 0.5]].map(([L, a], i) => {
+          const cx = 430 + i * 72, cy = 150;
+          K.svg(svg, "circle", { cx, cy, r: 28, fill: "var(--panel-2)", stroke: "var(--accent)" });
+          const g = vec(svg, cx, cy, Math.cos(a) * L * 28, -Math.sin(a) * L * 28, "var(--c2)", 2.5); g.style.opacity = 0; return g;
+        });
+        K.svg(svg, "text", { x: 380, y: 220, "font-size": 12, class: "muted" }, "长 = 很可能存在；方向 = 姿态、位置等属性");
+        K.svg(svg, "text", { x: 30, y: 250, "font-size": 12, class: "muted" }, "只知道“有多强”，不知道“长什么样”");
+        ctx.tween(1200, (t) => { cs.forEach((c, i) => K.set(c, { fill: `color-mix(in srgb, var(--c1) ${Math.round(vals[i] * 100 * t)}%, var(--panel-2))` })); ar.forEach((a) => (a.style.opacity = t)); });
+      },
+    },
+    {
+      title: "胶囊：长度是“有没有”，方向是“什么样”", kicker: "第 1 格 · 原理（上）",
+      html: `<p>作者从人看东西讲起：一棵树由树冠、树干、树根组成，树冠又由树枝和叶子组成，物体是<b>部件的层级</b>。每个胶囊负责一种部件（“实体”），输出向量的<b>长度</b>是这个部件存在的概率，向量里的每个数是它的属性（位置、大小、颜色……）。</p><p>长度可能超过 1（作者举的长方形例子算出 10.06），所以要用 <b>squash 函数</b>把长度压进 0 到 1，方向不变。它就是胶囊网络的激活函数，相当于 CNN 里的 ReLU。</p>`,
+      cells: [1], highlight: ["squashing", "instantiation parameters"],
+      draw(svg, ctx) {
+        const parts = [["叶子", 120, 60], ["树枝", 120, 130], ["树干", 120, 200], ["树根", 120, 270]];
+        const mid = [["树冠", 360, 95], ["树身", 360, 235]];
+        parts.forEach((p, i) => { K.node(svg, p[1] - 50, p[2] - 18, 100, 36, p[0], { fs: 12 }); });
+        mid.forEach((p) => K.node(svg, p[1] - 50, p[2] - 18, 100, 36, p[0], { fs: 12, fill: "var(--accent-soft)", stroke: "var(--accent)" }));
+        K.node(svg, 540, 147, 100, 46, "树", { bold: true, fill: "color-mix(in srgb, var(--good) 22%, var(--panel))", stroke: "var(--good)" });
+        const links = [[0, 0], [1, 0], [2, 1], [3, 1]].map(([a, b]) => K.arrow(svg, 172, parts[a][2], 308, mid[b][2]));
+        const top = mid.map((m) => K.arrow(svg, 412, m[2], 538, 170));
+        hide([...links, ...top]);
+        K.svg(svg, "text", { x: 30, y: 330, "font-size": 12, class: "muted" }, "低层胶囊（部件）→ 中层 → 高层（整体）");
+        ctx.tween(800, (t) => links.forEach((l) => (l.style.opacity = t))).then((ok) => ok && ctx.tween(800, (t) => top.forEach((l) => (l.style.opacity = t))));
+      },
+    },
+    {
+      title: "动态路由：下层投票，上层回应", kicker: "第 1 格 · 原理（下）",
+      html: `<p>下层胶囊 i 对每个上层胶囊 j 做一个“预测”：<code>û = W·u</code>。上层胶囊把这些预测按<b>耦合系数</b> c 加权求和，再 squash。然后算每条预测和结果的点积：方向一致（同意）的，下一轮 c 就变大。重复几轮，信息就只流向“意见一致”的上层胶囊。</p><p>作者的比喻：长方形和三角形胶囊都“押注”房子，它们的预测互相吻合，房子胶囊就越来越强，船和车胶囊得不到支持。和 CNN 的最大池化比，路由是由上下层<b>协商</b>决定的。</p>`,
+      cells: [1], highlight: ["Routing by agreement", "c_{ij} = \\frac{\\exp(b_{ij})}"],
+      draw(svg, ctx) {
+        const lows = ["长方形", "三角形", "圆形"], highs = ["房子", "船"];
+        lows.forEach((l, i) => K.node(svg, 40, 60 + i * 90, 110, 44, l, { fs: 12 }));
+        highs.forEach((h, j) => K.node(svg, 520, 90 + j * 140, 140, 50, h, { bold: true, fill: j ? "var(--panel-2)" : "var(--accent-soft)", stroke: j ? "var(--line)" : "var(--accent)" }));
+        const L = [];
+        lows.forEach((l, i) => highs.forEach((h, j) => L.push({ i, j, e: K.svg(svg, "line", { x1: 150, y1: 82 + i * 90, x2: 518, y2: 115 + j * 140, stroke: j ? "var(--c6)" : "var(--c1)", "stroke-width": 4 }) })));
+        const it = K.svg(svg, "text", { x: 260, y: 330, "font-size": 13, "font-weight": 700 }, "");
+        const target = [[0.95, 0.05], [0.9, 0.1], [0.5, 0.5]];
+        ctx.tween(2600, (t) => {
+          const r = Math.min(4, Math.floor(t * 5));
+          it.textContent = "路由第 " + (r + 1) + " 轮：同意的连线变粗（示意）";
+          L.forEach((d) => { const c = K.lerp(0.5, target[d.i][d.j], t); K.set(d.e, { "stroke-width": 0.5 + c * 9, opacity: 0.25 + c * 0.75 }); });
+        });
+      },
+    },
+    {
+      title: "文本预处理：分词、词典、词向量", kicker: "第 2–7 格 · 准备工作",
+      html: `<p>这几格是常规的文本流水线：</p><ul class="tight"><li>用 NLTK 把每段文本切成词，转成小写，给每个新词编号；</li><li>读 fastText 预训练词向量（每个词 300 个数），只保留数据里出现过的词；</li><li>把每段文本变成固定长度的编号序列，太长截断，太短用补位词补齐，查不到的词记为未知。</li></ul>`,
+      cells: [4, 6, 7], highlight: ["nltk.tokenize.word_tokenize(sentence)", "if len(current_words) >= sentences_length:"],
+      draw(svg, ctx) {
+        const words = ["we", "need", "books", "for", "our", "readers"];
+        K.node(svg, 20, 30, 680, 40, "“We need books for our young readers!”", { fs: 13 });
+        const tk = words.map((w, i) => { const g = K.node(svg, 20 + i * 100, 110, 90, 34, w, { fs: 12 }); g.style.opacity = 0; return g; });
+        const ids = words.map((w, i) => { const g = K.node(svg, 20 + i * 100, 180, 90, 34, String([12, 87, 5, 3, 41, 260][i]), { fs: 12, fill: "var(--panel)" }); g.style.opacity = 0; return g; });
+        const vecs = words.map((w, i) => { const g = K.svg(svg, "g"); for (let k = 0; k < 8; k++) K.svg(g, "rect", { x: 30 + i * 100 + (k % 4) * 18, y: 245 + Math.floor(k / 4) * 18, width: 16, height: 16, fill: K.heat(((i * 5 + k * 3) % 9) / 9 + 0.05) }); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 20, y: 100, "font-size": 11, class: "muted" }, "分词 + 小写");
+        K.svg(svg, "text", { x: 20, y: 170, "font-size": 11, class: "muted" }, "查词典编号（数字为示意）");
+        K.svg(svg, "text", { x: 20, y: 236, "font-size": 11, class: "muted" }, "查 fastText 词向量（300 维，这里画 8 个）");
+        (async () => { for (const grp of [tk, ids, vecs]) if (!(await ctx.tween(500, (t) => grp.forEach((g) => (g.style.opacity = t))))) return; })();
+      },
+    },
+    {
+      title: "整体结构：胶囊层代替池化层", kicker: "第 8–11 格 · 模型设计",
+      html: `<p>作者的结构和常见的文本模型很像，只是把 GRU 后面常用的“池化层”换成了<b>胶囊层</b>：词向量 → 双向 GRU（每个词位置输出一个向量）→ 胶囊层（把所有位置的信息路由到 10 个 16 维胶囊）→ 输出。</p><p>参数：GRU 隐藏单元 128，5 轮路由，10 个胶囊，每个 16 维，Dropout 0.3。作者认为胶囊层能在不丢细节的情况下获得“平移不变性”（关键词出现在句首还是句尾都能识别）。</p>`,
+      cells: [8, 11], highlight: ["Routings = 5", "Num_capsule = 10", "Dim_capsule = 16"],
+      draw(svg, ctx) {
+        const B = [["词向量", 300], ["双向 GRU", 256], ["胶囊层\n10 × 16", 0], ["sigmoid\n通过概率", 0]];
+        const xs = [30, 200, 390, 570];
+        const nodes = B.map((b, i) => K.node(svg, xs[i], 130, 130, 70, b[0], { bold: i === 2, fill: i === 2 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 2 ? "var(--accent)" : "var(--line)" }));
+        const ar = [0, 1, 2].map((i) => K.arrow(svg, xs[i] + 130, 165, xs[i + 1] - 2, 165));
+        K.svg(svg, "text", { x: 390, y: 240, "font-size": 12, fill: "var(--bad)" }, "常见做法：这里放 最大池化");
+        K.svg(svg, "text", { x: 390, y: 262, "font-size": 12, fill: "var(--good)" }, "作者：换成胶囊层 + 动态路由");
+        hide([...nodes, ...ar]);
+        (async () => { for (let i = 0; i < 4; i++) { if (i) if (!(await ctx.tween(250, (t) => (ar[i - 1].style.opacity = t)))) return; if (!(await ctx.tween(350, (t) => (nodes[i].style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      title: "squash 函数（代码里写成了归一化）", kicker: "第 12 格 · 激活函数",
+      html: `<p>第 1 格讲的 squash：长度 ‖s‖ 被压成 ‖s‖²/(1+‖s‖²)，短向量变得更短（接近 0），长向量接近 1，方向不变。这样长度才能当作“存在的概率”。</p><p>但第 12 格实际写的是 <code>x / sqrt(‖x‖² + ε)</code>，也就是把每个向量都缩放到长度 1。动画左边是论文的 squash，右边是作者代码：不管原来多长，最后都一样长。</p>`,
+      cells: [12], highlight: ["return x / scale"],
+      draw(svg, ctx) {
+        const L = [0.3, 0.8, 1.5, 3.0], cx1 = 180, cx2 = 530, cy = 190, R = 110;
+        K.svg(svg, "text", { x: cx1, y: 40, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--good)" }, "论文：squash");
+        K.svg(svg, "text", { x: cx2, y: 40, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--bad)" }, "第 12 格：x / ‖x‖");
+        [cx1, cx2].forEach((c) => K.svg(svg, "circle", { cx: c, cy, r: R, fill: "none", stroke: "var(--ink-3)", "stroke-dasharray": "4 4" }));
+        const angs = [0.3, 1.2, 2.3, 3.6];
+        const A = L.map((l, i) => [cx1, cx2].map((c) => K.svg(svg, "line", { x1: c, y1: cy, x2: c, y2: cy, stroke: K.colors[i], "stroke-width": 4 })));
+        K.svg(svg, "text", { x: 30, y: 330, "font-size": 12, class: "muted" }, "虚线圆 = 长度 1；四个向量原长 0.3、0.8、1.5、3.0（箭头先画原长的 1/3）");
+        ctx.tween(800, (t) => A.forEach((p, i) => p.forEach((e, k) => { const l = L[i] * R / 3 * t; K.set(e, { x2: [cx1, cx2][k] + Math.cos(angs[i]) * l, y2: cy - Math.sin(angs[i]) * l }); })))
+          .then((ok) => ok && ctx.wait(500))
+          .then((ok) => ok && ctx.tween(1400, (t) => A.forEach((p, i) => p.forEach((e, k) => { const to = k ? 1 : squashH(L[i]); const l = K.lerp(L[i] / 3, to, t) * R; K.set(e, { x2: [cx1, cx2][k] + Math.cos(angs[i]) * l, y2: cy - Math.sin(angs[i]) * l }); }))));
+      },
+    },
+    {
+      title: "胶囊层代码：路由 5 轮", kicker: "第 13–14 格 · Capsule 层",
+      html: `<p><code>Capsule</code> 层的关键步骤：</p><ol class="tight"><li>用一个共享的权重矩阵（1 维卷积实现）把每个位置的 GRU 输出变成对 10 个上层胶囊的预测向量 û，形状 [批, 10, 位置数, 16]；</li><li>b 初始全 0；每轮对 b 做 softmax 得到 c（每个下层胶囊投给 10 个上层胶囊的票加起来是 1）；</li><li>按 c 加权求和、squash 得到输出；</li><li>用输出和 û 的点积更新 b，进入下一轮。</li></ol><p class="note">论文是 b 累加点积，代码是直接把 b 换成新的点积，见实验 B 的开关。</p>`,
+      cells: [14], highlight: ["c = K.softmax(b)", "outputs = self.activation(K.batch_dot(c, u_hat_vecs, [2, 2]))", "b = K.batch_dot(outputs, u_hat_vecs, [2, 3])"],
+      draw(svg, ctx) {
+        const steps2 = ["û = W·u\n预测向量", "c = softmax(b)\n分票", "s = Σ c·û\nv = squash(s)", "b ← v·û\n看谁同意"];
+        const P = [[100, 90], [360, 90], [360, 250], [100, 250]];
+        const ns = steps2.map((s, i) => K.node(svg, P[i][0] - 10, P[i][1] - 35, 200, 70, s, { fs: 12, fill: i === 3 ? "color-mix(in srgb, var(--warn) 16%, var(--panel))" : "var(--panel-2)" }));
+        K.arrow(svg, 290, 90, 348, 90); K.arrow(svg, 450, 125, 450, 213); K.arrow(svg, 348, 250, 292, 250); K.arrow(svg, 200, 213, 400, 127, { dash: "5 4" });
+        const ring = K.svg(svg, "rect", { x: 0, y: 0, width: 204, height: 74, rx: 10, fill: "none", stroke: "var(--accent)", "stroke-width": 3 });
+        const it = K.svg(svg, "text", { x: 590, y: 170, "font-size": 15, "font-weight": 700, fill: "var(--accent)" }, "");
+        (async () => {
+          let k = 0;
+          for (let r = 0; r < 5; r++) for (let s = r ? 1 : 0; s < 4; s++) {
+            if (r === 4 && s === 3) break;
+            K.set(ring, { x: P[s][0] - 12, y: P[s][1] - 37 }); it.textContent = "第 " + (r + 1) + " / 5 轮";
+            if (!(await ctx.wait(420))) return;
+          }
+          it.textContent = "输出 10 个胶囊";
+        })();
+      },
+    },
+    {
+      title: "完整模型：GRU 的每个位置都是一个“下层胶囊”", kicker: "第 15 格 · get_model",
+      html: `<p>模型代码：输入编号序列 → 冻结的 fastText 词向量（不训练）→ SpatialDropout（随机丢掉整条词向量通道）→ 双向 GRU，<code>return_sequences=True</code> 让每个词位置都输出一个 256 维向量 → 胶囊层把这些位置当作下层胶囊，路由到 10 个 16 维胶囊 → 展平成 160 个数 → Dropout → 一个 sigmoid 神经元输出通过概率。</p><p>损失是二元交叉熵，优化器 Adam。</p>`,
+      cells: [15], highlight: ["return_sequences=True", "capsule = Capsule(num_capsule=Num_capsule, dim_capsule=Dim_capsule, routings=Routings,", "Dense(1, activation='sigmoid')"],
+      draw(svg, ctx) {
+        const T = 6, xs = Array.from({ length: T }, (_, i) => 60 + i * 60);
+        xs.forEach((x, i) => { K.node(svg, x - 24, 280, 48, 30, "词" + (i + 1), { fs: 11 }); K.svg(svg, "rect", { x: x - 20, y: 200, width: 40, height: 40, rx: 6, fill: "color-mix(in srgb, var(--c3) 25%, var(--panel))", stroke: "var(--c3)" }); K.arrow(svg, x, 278, x, 242); });
+        K.svg(svg, "text", { x: 30, y: 192, "font-size": 12, fill: "var(--c3)" }, "双向 GRU：每个位置一个向量");
+        const caps = Array.from({ length: 5 }, (_, j) => K.svg(svg, "circle", { cx: 520, cy: 60 + j * 50, r: 18, fill: "var(--accent-soft)", stroke: "var(--accent)" }));
+        K.svg(svg, "text", { x: 560, y: 64, "font-size": 12 }, "10 个胶囊（画 5 个）");
+        const lines = [];
+        xs.forEach((x) => caps.forEach((c, j) => lines.push(K.svg(svg, "line", { x1: x, y1: 200, x2: 502, y2: 60 + j * 50, stroke: "var(--accent)", "stroke-width": 1, opacity: 0 }))));
+        K.node(svg, 600, 270, 100, 44, "sigmoid\n通过概率", { fs: 11 });
+        K.arrow(svg, 540, 260, 598, 285);
+        const r = K.rng(4), w = lines.map(() => r());
+        ctx.wait(400).then((ok) => ok && ctx.tween(1800, (t) => lines.forEach((l, k) => K.set(l, { opacity: 0.1 + t * w[k] * 0.8, "stroke-width": 0.5 + t * w[k] * 3 }))));
+      },
+    },
+    {
+      title: "训练：早停 + 手写 K 折", kicker: "第 16–17 格 · 训练函数",
+      html: `<p><code>_train_model</code> 每次训练 1 轮，在验证折上算 log loss（越小越好），连续 5 轮没有变好就停下，并退回最好那一轮的权重，这叫<b>早停</b>。</p><p><code>train_folds</code> 把数据按顺序切成 K 份，每份轮流当验证集，各训练一个模型，把对训练集和测试集的预测存成文件。</p><p class="note">第 17 格判断最后一折时写成了 <code>fold_size - 1</code>（应为 <code>fold_count - 1</code>），除不尽时多出来的几行不会进入任何验证折。</p>`,
+      cells: [16, 17], highlight: ["if current_epoch - best_epoch == patience:", "if fold_id == fold_size - 1:"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 360, h: 240 }, [0, 14], [0.3, 0.7], { xlabel: "轮数", ylabel: "验证 log loss" });
+        const f = (e) => 0.62 - 0.22 * (1 - Math.exp(-e / 3)) + 0.012 * Math.max(0, e - 6);
+        const dots = []; for (let e = 0; e <= 13; e++) dots.push(K.svg(svg, "circle", { cx: ax.sx(e), cy: ax.sy(f(e)), r: 4, fill: e === 7 ? "var(--good)" : "var(--c1)", opacity: 0 }));
+        const lab = K.svg(svg, "text", { x: ax.sx(7), y: ax.sy(f(7)) + 24, "text-anchor": "middle", "font-size": 12, fill: "var(--good)" }, "最好一轮 → 退回这里");
+        lab.style.opacity = 0;
+        K.svg(svg, "text", { x: 70, y: 330, "font-size": 12, class: "muted" }, "曲线为示意");
+        // 折
+        for (let k = 0; k < 4; k++) for (let f2 = 0; f2 < 4; f2++) K.svg(svg, "rect", { x: 470 + f2 * 56, y: 60 + k * 50, width: 52, height: 34, rx: 4, fill: f2 === k ? "color-mix(in srgb, var(--c2) 40%, var(--panel))" : "var(--panel-2)", stroke: "var(--line)" });
+        K.svg(svg, "text", { x: 470, y: 46, "font-size": 12 }, "K 折：橙色 = 这一轮的验证折");
+        (async () => { for (let e = 0; e <= 13; e++) { if (!(await ctx.tween(120, (t) => (dots[e].style.opacity = t)))) return; if (e === 12) lab.style.opacity = 1; } })();
+      },
+    },
+    {
+      title: "在内核里跑一个“缩小版”", kicker: "第 18–27 格 · 训练",
+      html: `<p>因为 Kaggle 内核有时间限制，作者把规模全部调小：只读小样本文件、精简版词向量，每段文本只取前 <b>10</b> 个词（完整版 300），2 折（完整版 10），批大小 128（完整版 256）。然后读数据、分词、对齐词向量、转成编号矩阵，开始训练。</p><p>这一段相当于“演示流程能跑通”，不是最终成绩来源。</p>`,
+      cells: [19, 24, 27], highlight: ["sentences_length = 10 # 300", "fold_count = 2 # 10", "train_small.csv"],
+      draw(svg, ctx) {
+        const items = [["每段词数", 10, 300], ["折数", 2, 10], ["批大小", 128, 256]];
+        items.forEach((d, i) => {
+          const y = 70 + i * 90;
+          K.svg(svg, "text", { x: 130, y: y + 22, "text-anchor": "end", "font-size": 13 }, d[0]);
+          const full = K.svg(svg, "rect", { x: 140, y, width: 0, height: 18, rx: 3, fill: "color-mix(in srgb, var(--ink-3) 35%, var(--panel))" });
+          const small = K.svg(svg, "rect", { x: 140, y: y + 22, width: 0, height: 18, rx: 3, fill: "var(--c2)" });
+          K.svg(svg, "text", { x: 140 + 500 + 8, y: y + 14, "font-size": 11, class: "muted" }, "完整 " + d[2]);
+          K.svg(svg, "text", { x: 140 + 500 * d[1] / d[2] + 8, y: y + 36, "font-size": 11, fill: "var(--c2)" }, "内核里 " + d[1]);
+          ctx.tween(1200, (t) => { K.set(full, { width: 500 * t }); K.set(small, { width: 500 * d[1] / d[2] * t }); });
+        });
+        K.svg(svg, "text", { x: 30, y: 330, "font-size": 12, class: "muted" }, "数字来自第 19 格代码和注释");
+      },
+    },
+    {
+      title: "提交：10 折预测做排名平均", kicker: "第 28–31 格 · 提交与总结",
+      html: `<p>最终提交用的不是上面内核里训练的模型，而是作者离线跑好的 10 折预测（上传成了另一个数据集）。做法是<b>排名平均</b>：每一折的预测先换成名次（第几高），再把 10 个名次平均。比赛按 AUC 评分，只看排序不看具体概率，所以排名平均能消除各折模型“打分尺度”不同的影响。</p><p>作者结论：不调参，胶囊网络也能做出强基线。</p>`,
+      cells: [29], highlight: ["rankdata(predict)"],
+      draw(svg, ctx) {
+        const r = K.rng(8), N = 6, F = 3, P = [];
+        for (let f = 0; f < F; f++) { const sc = 0.3 + f * 0.3; P.push(Array.from({ length: N }, (_, i) => (i / N + r() * 0.25) * sc + f * 0.1)); }
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13 }, "3 折模型给 6 份申请的概率（尺度各不相同，示意）");
+        P.forEach((row, f) => row.forEach((v, i) => { K.svg(svg, "rect", { x: 60 + i * 60, y: 50 + f * 40, width: 54, height: 32, rx: 4, fill: K.heat(v) }); K.svg(svg, "text", { x: 87 + i * 60, y: 71 + f * 40, "text-anchor": "middle", "font-size": 11 }, v.toFixed(2)); }));
+        const ranks = P.map((row) => { const s = row.slice().sort((a, b) => a - b); return row.map((v) => s.indexOf(v) + 1); });
+        const avg = Array.from({ length: N }, (_, i) => ranks.reduce((s, rk) => s + rk[i], 0) / F);
+        const g = K.svg(svg, "g"); g.style.opacity = 0;
+        K.svg(g, "text", { x: 30, y: 200, "font-size": 13, "font-weight": 700 }, "换成名次再平均");
+        avg.forEach((v, i) => { K.svg(g, "rect", { x: 60 + i * 60, y: 215, width: 54, height: 32, rx: 4, fill: K.heat(v / N) }); K.svg(g, "text", { x: 87 + i * 60, y: 236, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, v.toFixed(1)); });
+        K.svg(g, "text", { x: 440, y: 236, "font-size": 12, class: "muted" }, "AUC 只看排序");
+        ctx.wait(900).then((ok) => ok && ctx.tween(600, (t) => (g.style.opacity = t)));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ===== 实验 B：动态路由 ===== */
+  function squashV(s, mode) { const n = Math.hypot(s[0], s[1]) || 1e-9; const k = mode === "paper" ? (n * n) / (1 + n * n) / n : 1 / n; return [s[0] * k, s[1] * k]; }
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "r", label: "路由轮数（作者用 5）", min: 1, max: 6, step: 1, value: 3 },
+      { id: "noise", label: "“房子”预测的分歧程度", min: 0, max: 1.5, step: 0.05, value: 0.25, fmt: (v) => v.toFixed(2) },
+      { id: "sq", label: "squash 写法", value: "paper", options: [["paper", "论文：‖s‖²/(1+‖s‖²)"], ["author", "第 12 格：x / ‖x‖"]] },
+      { id: "upd", label: "b 的更新", value: "add", options: [["add", "论文：b ← b + û·v"], ["replace", "第 14 格：b ← û·v（替换）"]] },
+    ],
+    note: "8 个下层胶囊各自对“房子”和“船”两个上层胶囊给出 2 维预测向量 û（箭头）。对房子的预测方向大体一致（分歧可调），对船的预测方向随机。每轮：c = softmax(b) → s = Σ c·û → v = squash(s) → 更新 b。箭头越实，说明这条预测分到的票 c 越多。",
+    render(svg, v) {
+      const r = K.rng(12), m = 8;
+      const base = 0.9;
+      const U = [[], []];
+      for (let i = 0; i < m; i++) {
+        const a = base + K.randn(r) * v.noise, L = 0.45 + r() * 0.2;
+        U[0].push([Math.cos(a) * L, Math.sin(a) * L]);
+        const a2 = r() * Math.PI * 2, L2 = 0.45 + r() * 0.2;
+        U[1].push([Math.cos(a2) * L2, Math.sin(a2) * L2]);
+      }
+      let b = Array.from({ length: m }, () => [0, 0]), c, V;
+      for (let it = 0; it < v.r; it++) {
+        c = b.map((row) => { const e = row.map(Math.exp), z = e[0] + e[1]; return [e[0] / z, e[1] / z]; });
+        V = [0, 1].map((j) => { const s = [0, 0]; for (let i = 0; i < m; i++) { s[0] += c[i][j] * U[j][i][0]; s[1] += c[i][j] * U[j][i][1]; } return squashV(s, v.sq); });
+        if (it < v.r - 1) b = b.map((row, i) => [0, 1].map((j) => (v.upd === "add" ? row[j] : 0) + U[j][i][0] * V[j][0] + U[j][i][1] * V[j][1]));
+      }
+      const names = ["房子", "船"], CX = [170, 470], CY = 190, S = 110;
+      [0, 1].forEach((j) => {
+        K.svg(svg, "circle", { cx: CX[j], cy: CY, r: S, fill: "var(--panel-2)", stroke: "var(--line)" });
+        K.svg(svg, "text", { x: CX[j], y: 50, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "上层胶囊：" + names[j]);
+        for (let i = 0; i < m; i++) { const g = K.arrow(svg, CX[j], CY, CX[j] + U[j][i][0] * S, CY - U[j][i][1] * S, { color: "var(--c1)", sw: 1.5 }); g.style.opacity = 0.15 + 0.85 * c[i][j]; }
+        const out = K.arrow(svg, CX[j], CY, CX[j] + V[j][0] * S, CY - V[j][1] * S, { color: "var(--c2)", sw: 4.5 });
+        K.svg(svg, "text", { x: CX[j], y: CY + S + 26, "text-anchor": "middle", "font-size": 13, fill: "var(--c2)", "font-weight": 700 }, "输出长度 ‖v‖ = " + Math.hypot(...V[j]).toFixed(2));
+      });
+      K.svg(svg, "text", { x: 30, y: 370, "font-size": 12, class: "muted" }, "蓝细箭头 = 8 条预测 û；橙粗箭头 = 输出 v；外圆半径 = 长度 1");
+      const toHouse = c.reduce((s2, ci) => s2 + ci[0], 0) / m;
+      return { readout: [
+        { k: "房子胶囊长度（存在概率）", v: Math.hypot(...V[0]).toFixed(2), color: "var(--c2)" },
+        { k: "船胶囊长度", v: Math.hypot(...V[1]).toFixed(2) },
+        { k: "平均投给房子的票 c", v: toHouse.toFixed(2), color: toHouse > 0.6 ? "var(--good)" : "var(--ink)" },
+      ] };
+    },
+  });
+
+  /* ===== 实验 A：squash 曲线 ===== */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "n", label: "输入向量 s 的长度 ‖s‖", min: 0, max: 5, step: 0.05, value: 0.6, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "横轴是输入长度，纵轴是输出长度。绿线是论文的 squash：短向量被压得更短、长向量逼近 1，长度可以当概率；红线是第 12 格的写法：除了 0 以外，输出长度永远是 1。",
+    render(svg, v) {
+      const ax = K.axes(svg, { x: 60, y: 20, w: 520, h: 240 }, [0, 5], [0, 1.1], { xlabel: "输入长度 ‖s‖", ylabel: "输出长度" });
+      let d1 = "", d2 = "";
+      for (let x = 0; x <= 5.001; x += 0.05) { d1 += (x ? "L" : "M") + ax.sx(x) + "," + ax.sy(squashH(x)); d2 += (x ? "L" : "M") + ax.sx(x) + "," + ax.sy(x < 1e-3 ? 0 : x / Math.sqrt(x * x + 1e-7)); }
+      K.svg(svg, "path", { d: d2, fill: "none", stroke: "var(--bad)", "stroke-width": 2.5, "stroke-dasharray": "6 4" });
+      K.svg(svg, "path", { d: d1, fill: "none", stroke: "var(--good)", "stroke-width": 2.5 });
+      const y1 = squashH(v.n), y2 = v.n < 1e-3 ? 0 : 1;
+      K.svg(svg, "line", { x1: ax.sx(v.n), x2: ax.sx(v.n), y1: ax.sy(0), y2: ax.sy(1.1), stroke: "var(--ink-3)", "stroke-dasharray": "3 3" });
+      K.svg(svg, "circle", { cx: ax.sx(v.n), cy: ax.sy(y1), r: 6, fill: "var(--good)" });
+      K.svg(svg, "circle", { cx: ax.sx(v.n), cy: ax.sy(y2), r: 6, fill: "var(--bad)" });
+      K.svg(svg, "text", { x: 380, y: 200, "font-size": 12, fill: "var(--good)" }, "论文 squash");
+      K.svg(svg, "text", { x: 380, y: 40, "font-size": 12, fill: "var(--bad)" }, "第 12 格：x / ‖x‖");
+      return { readout: [
+        { k: "论文 squash 输出长度", v: y1.toFixed(3), color: "var(--good)" },
+        { k: "第 12 格输出长度", v: y2.toFixed(3), color: "var(--bad)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

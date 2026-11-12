@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>橄榄球头盔跟踪</title>
+<meta name="description" content="Kaggle 案例拆解：把传感器记录的球员位置和画面里的头盔框对上号，再用 DeepSORT（卡尔曼滤波 + 匈牙利匹配 + 外观特征）把同一个头盔串成轨迹、投票统一标签。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">视频 · 多目标跟踪 · 身份匹配</div>
+  <h1>橄榄球场上认头盔：传感器位置映射 + DeepSORT 跟踪</h1>
+  <p class="en">Helper Code + Helmet Mapping + Deepsort</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span><span class="tag opt">优化</span>
+    <span class="tag method">排序对齐映射</span><span class="tag method">旋转搜索</span><span class="tag method">DeepSORT</span>
+    <span class="tag method">卡尔曼滤波</span><span class="tag method">匈牙利匹配</span><span class="tag method">ReID 外观特征</span><span class="tag method">轨迹众数投票</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Rob Mulla</b>（robikscube）</span>
+    <span>Kaggle 点赞 <b>375</b>（2026-11 抓取）</span>
+    <span>数据 <b>NFL Health &amp; Safety - Helmet Assignment 比赛</b></span>
+    <span><a href="https://www.kaggle.com/code/robikscube/helper-code-helmet-mapping-deepsort" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">比赛录像 + 球员身上的定位传感器</div><p>每场比赛有两个机位（端区 Endzone、边线 Sideline）的视频，比赛方给了每帧的头盔检测框（基线），还有传感器记录的每个球员在球场上的坐标。<span data-cell="6">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">画面里的每个头盔是哪位球员</div><p>给每个头盔框贴上球员标签。难点：画面是斜着拍的，传感器是俯视坐标，两者要对上号。</p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">先逐帧映射，再用 DeepSORT 串成轨迹</div><p>第一步把头盔左右顺序和传感器位置的左右顺序对齐；第二步用 DeepSORT 把同一个头盔跨帧连成一条轨迹，轨迹里出现最多的标签胜出。<span data-cell="11">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">基线约 0.3 分，再加 DeepSORT 后处理</div><p>作者写明基线映射的验证分“大约 0.3，和公开排行榜接近”。<span data-cell="9">出处</span> DeepSORT 后处理前后的分数打印在运行输出里，源码不带。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据来自 NFL（美国国家橄榄球联盟）在 Kaggle 办的比赛 <b>Helmet Assignment</b>。下面的文件名和列名来自作者代码；比赛的视频总数等规模信息 notebook 里没写，这里不列。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">公开测试集视频</div><div class="v">6 段</div></div>
+        <div class="stat-tile"><div class="k">机位</div><div class="v">端区 / 边线</div></div>
+        <div class="stat-tile"><div class="k">调试时抽的视频</div><div class="v">1 段</div></div>
+        <div class="stat-tile"><div class="k">头盔框置信度门槛</div><div class="v">0.3</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">测试目录里有 6 段视频时，作者判断这是“公开测试集”，就切到调试模式，改用训练集里随机抽的 1 段视频来验证 <span data-cell="6">第 6 格</span> <span data-cell="7">第 7 格</span>。两个机位来自第 8 格对 <code>view == 'Endzone'</code> 的判断。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">三张表</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>文件</th><th>里面有什么</th></tr>
+        <tr><td><code>*_baseline_helmets.csv</code></td><td>比赛方给的头盔检测框：<code>video_frame</code>（比赛_回合_机位_帧号）、<code>left top width height</code>、置信度 <code>conf</code></td></tr>
+        <tr><td><code>*_player_tracking.csv</code></td><td>传感器数据：<code>gameKey playID player x y</code>，加上估算的对应视频帧 <code>est_frame</code>（由 <code>add_track_features</code> 算出）</td></tr>
+        <tr><td><code>train_labels.csv</code></td><td>正确答案：每个头盔框对应的球员 <code>label</code>（<b>要预测的答案</b>），只用来打分</td></tr>
+      </table></div>
+      <p class="note">“头盔框”是图像坐标（像素，从画面左上角量）；“传感器位置”是球场坐标（码，俯视）。两种坐标的对应关系就是本题的核心。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="18">
+    <h3>动手试试 A · 卡尔曼预测 + 匈牙利匹配 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="20">
+    <h3>动手试试 B · 轨迹投票能纠正多少错标签 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>基线头盔映射的验证分“大约 0.3”，和公开排行榜相近</td><td><span data-cell="9">第 9 格</span></td></tr>
+        <tr><td>DeepSORT 把同一个头盔跨帧聚成一簇，再取簇里最常见的标签覆盖整簇</td><td><span data-cell="11">第 11 格</span></td></tr>
+        <tr><td>DeepSORT 的配置只是默认值，“还可以改进”</td><td><span data-cell="14">第 14 格</span></td></tr>
+        <tr><td>把 DeepSORT 结果并回原始头盔框的做法“很粗糙”，有很大改进空间</td><td><span data-cell="17">第 17 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">DeepSORT 前后的分数由第 20 格的 <code>score_vs_deepsort</code> 打印在运行输出里，Kaggle 下载的源码不带输出，作者文字里也没写具体数值，所以这里不列。另有一份点赞更多的派生版（jianghanhan/tuning-deepsort-helmet-mapping-high-score）基本照搬本 notebook，只调整了 DeepSORT 配置。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>自动给比赛录像里的每个球员打上号码，统计谁发生过头部碰撞，帮助研究运动员安全。</li>
+        <li><b>同类问题：</b>足球、篮球的球员跟踪；商场客流计数；交通路口的车辆跟踪；养殖场的动物个体识别。</li>
+        <li><b>可迁移的套路：</b>逐帧检测 → 跨帧关联成轨迹 → 在轨迹层面投票纠错。单帧判断不稳时，“看整段”往往更可靠。</li>
+      </ul>
+      <h3>方法清单（哪部分是深度学习，哪部分不是）</h3>
+      <ul class="tight">
+        <li>头盔检测框：比赛方给的基线检测，本 notebook 直接用 <span data-cell="6">第 6 格</span></li>
+        <li>排序对齐 + 旋转搜索：几何 + 穷举搜索（不是深度学习） <span data-cell="8">第 8 格</span></li>
+        <li>卡尔曼滤波：统计估计，预测下一帧位置 <span data-cell="18">第 18 格</span></li>
+        <li>匈牙利算法：组合优化，求总代价最小的一一配对 <span data-cell="18">第 18 格</span></li>
+        <li>ReID 外观特征：深度学习小 CNN（权重 <code>ckpt.t7</code>） <span data-cell="15">第 15 格</span></li>
+        <li>轨迹投票：统计众数 <span data-cell="18">第 18 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>基线方法只比较头盔在画面里的<b>左右顺序</b>，完全不用上下位置。什么情况下（比如几个球员排成一竖列）会出错？</li>
+      <li>DeepSORT 里卡尔曼滤波、匈牙利算法、外观 CNN 各管什么？如果去掉外观 CNN，两名球员交叉跑过时会怎样？</li>
+      <li>轨迹投票的前提是“一条轨迹自始至终是同一个人”。如果跟踪器中途把两个人串号了，投票反而会把对的标签改错吗？</li>
+      <li><code>deepsort_helmets</code> 函数里用的是外面循环的全局变量 <code>myvideo</code> 而不是参数。这样写有什么隐患？</li>
+      <li>MAX_AGE 设成 70 帧意味着什么？球员被挡住 2 秒再出现，你希望系统把他当成老朋友还是新面孔？</li>
+      <li>比赛录像里是真实的运动员。用 AI 自动识别、统计每个人的碰撞次数，可能带来哪些好处和隐私问题？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Rob Mulla（robikscube），基线映射部分来自 its7171 的公开 notebook，DeepSORT 代码来自 mikel-brostrom/Yolov5_DeepSort_Pytorch。版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：NFL Health &amp; Safety - Helmet Assignment 比赛。
+</footer>
+</main>
+
+<script src="nb/nfl-helmet-deepsort.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* 匈牙利算法（最小化），cost 为 n×m 矩阵，返回 assign[i] = 列号或 -1 */
+  function hungarian(cost) {
+    const n = cost.length, m = n ? cost[0].length : 0, N = Math.max(n, m), BIG = 1e9;
+    const a = [];
+    for (let i = 0; i < N; i++) { a.push([]); for (let j = 0; j < N; j++) a[i].push(i < n && j < m ? cost[i][j] : BIG / 1000); }
+    const u = new Array(N + 1).fill(0), v = new Array(N + 1).fill(0), p = new Array(N + 1).fill(0), way = new Array(N + 1).fill(0);
+    for (let i = 1; i <= N; i++) {
+      p[0] = i; let j0 = 0; const minv = new Array(N + 1).fill(Infinity), used = new Array(N + 1).fill(false);
+      do {
+        used[j0] = true; const i0 = p[j0]; let delta = Infinity, j1 = 0;
+        for (let j = 1; j <= N; j++) if (!used[j]) {
+          const cur = a[i0 - 1][j - 1] - u[i0] - v[j];
+          if (cur < minv[j]) { minv[j] = cur; way[j] = j0; }
+          if (minv[j] < delta) { delta = minv[j]; j1 = j; }
+        }
+        for (let j = 0; j <= N; j++) { if (used[j]) { u[p[j]] += delta; v[j] -= delta; } else minv[j] -= delta; }
+        j0 = j1;
+      } while (p[j0] !== 0);
+      do { const j1 = way[j0]; p[j0] = p[j1]; j0 = j1; } while (j0);
+    }
+    const res = new Array(n).fill(-1);
+    for (let j = 1; j <= N; j++) if (p[j] && p[j] - 1 < n && j - 1 < m) res[p[j] - 1] = j - 1;
+    return res;
+  }
+
+  /* 画一个小球场（俯视） */
+  function field(svg, x, y, w, h) {
+    K.svg(svg, "rect", { x, y, width: w, height: h, rx: 4, fill: "color-mix(in srgb, var(--c3) 22%, var(--panel))", stroke: "var(--c3)" });
+    for (let i = 1; i < 10; i++) K.svg(svg, "line", { x1: x + (w * i) / 10, x2: x + (w * i) / 10, y1: y, y2: y + h, stroke: "var(--panel)", "stroke-width": 1, opacity: 0.7 });
+  }
+
+  const PL = [[0.18, 0.3], [0.3, 0.62], [0.42, 0.42], [0.5, 0.78], [0.6, 0.25], [0.72, 0.55], [0.84, 0.4]];
+
+  const steps = [
+    {
+      title: "两步走：先对号，再串轨迹", kicker: "第 0–2 格 · 整体思路",
+      html: `<p>作者在开头说清了两件事：一是介绍自己写的辅助包 <code>helmet_assignment</code>（打分器 <code>NFLAssignmentScorer</code>、提交检查 <code>check_submission</code> 等）；二是演示怎样用 <b>DeepSORT</b> 对已有的预测做“后处理”。<span data-cell="0">出处</span></p><p>动画是全流程：头盔框 + 传感器位置 → 逐帧对号（基线）→ DeepSORT 把同一个头盔连成轨迹 → 轨迹内投票统一标签。</p>`,
+      cells: [0, 2],
+      draw(svg, ctx) {
+        const box = [["头盔框\n（每帧检测）", "var(--c1)"], ["传感器位置\n（俯视坐标）", "var(--c2)"]];
+        box.forEach((b, i) => K.node(svg, 20, 60 + i * 140, 130, 70, b[0], { fill: `color-mix(in srgb, ${b[1]} 16%, var(--panel))`, stroke: b[1] }));
+        const seq = [["① 逐帧映射\n左右顺序对齐", 200], ["② DeepSORT\n跨帧连成轨迹", 380], ["③ 轨迹投票\n统一标签", 560]];
+        const els = seq.map(([t, x], i) => { const g = K.node(svg, x, 125, 140, 80, t, { fill: i === 1 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 1 ? "var(--accent)" : "var(--line)", bold: true }); return g; });
+        const ar = [K.arrow(svg, 152, 95, 198, 150), K.arrow(svg, 152, 235, 198, 185), K.arrow(svg, 342, 165, 378, 165), K.arrow(svg, 522, 165, 558, 165)];
+        [...els, ...ar].forEach((e) => (e.style.opacity = 0.15));
+        K.svg(svg, "text", { x: 200, y: 300, "font-size": 12, class: "muted" }, "第 ① 步来自 its7171 的基线 notebook；第 ②③ 步是本 notebook 的重点");
+        (async () => {
+          for (const e of [ar[0], ar[1], els[0], ar[2], els[1], ar[3], els[2]]) if (!(await ctx.tween(350, (t) => (e.style.opacity = 0.15 + 0.85 * t)))) return;
+        })();
+      },
+    },
+    {
+      title: "读入三张表，切到调试模式", kicker: "第 3–7 格 · 数据与设置",
+      html: `<p>参数都提到最上面方便试验：置信度门槛 <code>CONF_THRE = 0.3</code>、最多尝试 <code>max_iter = 1000</code> 种删人组合、旋转步长 <code>DIG_STEP = 3</code> 度、最大旋转 <code>DIG_MAX = 30</code> 度。<span data-cell="6">出处</span></p><p>一个小技巧：测试目录里如果正好 6 段视频，说明是在编辑模式下跑公开测试集，作者就自动改用训练集里随机抽的 1 段视频（有答案，能打分）。<span data-cell="7">出处</span></p>`,
+      cells: [6, 7], highlight: ["CONF_THRE", "DIG_STEP", "n_test_videos == 6"],
+      draw(svg, ctx) {
+        const t = [["baseline_helmets", "video_frame · left · top · width · height · conf", "var(--c1)"], ["player_tracking", "gameKey · playID · player · x · y · est_frame", "var(--c2)"], ["train_labels", "video_frame · 框 · label（答案）", "var(--c4)"]];
+        t.forEach((r, i) => {
+          const g = K.svg(svg, "g");
+          K.svg(g, "rect", { x: 30, y: 30 + i * 80, width: 420, height: 60, rx: 6, fill: `color-mix(in srgb, ${r[2]} 12%, var(--panel))`, stroke: r[2] });
+          K.svg(g, "text", { x: 44, y: 54 + i * 80, "font-size": 14, "font-weight": 700 }, r[0] + ".csv");
+          K.svg(g, "text", { x: 44, y: 76 + i * 80, "font-size": 12, "font-family": "var(--mono)" }, r[1]);
+          g.style.opacity = 0.2;
+          ctx.wait(i * 400).then((ok) => ok && ctx.tween(400, (k) => (g.style.opacity = 0.2 + 0.8 * k)));
+        });
+        K.node(svg, 490, 70, 200, 70, "测试目录有 6 段视频？", { fill: "var(--panel-2)" });
+        K.arrow(svg, 590, 142, 590, 180);
+        K.node(svg, 490, 182, 200, 70, "是 → debug\n训练集抽 1 段来打分", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+      },
+    },
+    {
+      title: "俯视坐标对画面：只比左右顺序", kicker: "第 8 格 · 基线映射的想法",
+      html: `<p>传感器给的是俯视球场上的坐标，画面是从场边斜着拍的。基线方法用了一个很聪明的简化：<b>不管上下，只看左右</b>。<span data-cell="8">出处</span></p><ul class="tight"><li>头盔框：取中心横坐标 <code>left + width/2</code>，从左到右排好</li><li>传感器：把球员按 <code>x</code> 从左到右排好（端区机位先把 x、y 对调）</li><li>两串数字都缩放到 0–1，排在第 k 个的头盔就认作排在第 k 个的球员</li></ul><p>画面可能是镜像的（从对面拍），所以作者同时试了“从左到右”和“从右到左”两种排法（<code>center_h_p</code> 与 <code>center_h_m</code>），取距离小的那个。</p>`,
+      cells: [8], highlight: ["center_h_p", "center_h_m", "norm_arr", "view == 'Endzone'"],
+      draw(svg, ctx) {
+        field(svg, 30, 40, 300, 170);
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 12, class: "muted" }, "传感器：俯视球场（示意）");
+        const dots = PL.map((p, i) => K.svg(svg, "circle", { cx: 30 + p[0] * 300, cy: 40 + p[1] * 170, r: 7, fill: K.colors[i % 6] }));
+        K.svg(svg, "text", { x: 400, y: 30, "font-size": 12, class: "muted" }, "画面：头盔框（斜着拍，示意）");
+        const hel = PL.map((p, i) => { const x = 400 + p[0] * 280 + (p[1] - 0.5) * 30, y = 120 - p[1] * 50 + 40; K.svg(svg, "rect", { x: x - 9, y: y - 9, width: 18, height: 18, fill: "none", stroke: "var(--ink)", "stroke-width": 2 }); return x; });
+        K.svg(svg, "line", { x1: 30, x2: 690, y1: 270, y2: 270, stroke: "var(--line)" });
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12 }, "都投到一条横线上，只看左右顺序 → 第 k 个对第 k 个");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1400, (t) => {
+          dots.forEach((d, i) => { d.setAttribute("cy", K.lerp(40 + PL[i][1] * 170, 255, t)); });
+        })).then((ok) => {
+          if (!ok) return;
+          PL.forEach((p, i) => {
+            K.svg(svg, "circle", { cx: hel[i], cy: 285, r: 5, fill: "var(--ink)" });
+            K.svg(svg, "line", { x1: 30 + p[0] * 300, y1: 262, x2: hel[i], y2: 280, stroke: K.colors[i % 6], "stroke-dasharray": "3 3" });
+          });
+        });
+      },
+    },
+    {
+      title: "转一转、删几个人，找最像的排列", kicker: "第 8 格 · 旋转搜索与删人组合",
+      html: `<p>镜头不一定正对球场，所以作者把传感器坐标从 −30° 到 +30°、每隔 3° 旋转一次（<code>rotate_arr</code>），每次都重新按横坐标排序，看和头盔序列的距离有多近。<span data-cell="8">出处</span></p><p>传感器记录了场上全部球员，画面里却只拍到一部分。于是 <code>dist_for_different_len</code> 尝试“删掉几名球员”的各种组合，组合太多时随机抽 1000 种，留下距离最小的那组。这是<b>穷举搜索</b>，不是神经网络。</p>`,
+      cells: [8], highlight: ["rotate_arr", "itertools.combinations", "random.sample(del_list, max_iter)"],
+      draw(svg, ctx) {
+        const cx = 180, cy = 170;
+        field(svg, 40, 70, 280, 200);
+        const pts = PL.concat([[0.25, 0.85], [0.66, 0.9]]);
+        const els = pts.map((p, i) => K.svg(svg, "circle", { cx: 40 + p[0] * 280, cy: 70 + p[1] * 200, r: 6, fill: i >= 7 ? "var(--ink-3)" : K.colors[i % 6] }));
+        const lab = K.svg(svg, "text", { x: 40, y: 50, "font-size": 13, "font-family": "var(--mono)" }, "旋转 0°");
+        K.svg(svg, "text", { x: 380, y: 60, "font-size": 13, "font-weight": 700 }, "每个角度算一次距离（示意）");
+        const ax = K.axes(svg, { x: 400, y: 80, w: 290, h: 170 }, [-30, 30], [0, 1], { yticks: 0, xlabel: "旋转角度（度）" });
+        const f = (d) => 0.25 + 0.6 * Math.pow((d - 9) / 40, 2) + 0.05 * Math.sin(d);
+        const bars = [];
+        for (let d = -30; d <= 30; d += 3) bars.push(K.svg(svg, "rect", { x: ax.sx(d) - 5, y: ax.sy(f(d)), width: 10, height: ax.sy(0) - ax.sy(f(d)), fill: "var(--c1)", opacity: 0 }));
+        K.svg(svg, "text", { x: 40, y: 300, "font-size": 12, class: "muted" }, "灰点 = 画面外的球员，会被“删掉”后再比较");
+        ctx.tween(3000, (t) => {
+          const d = -30 + Math.floor(t * 20.99) * 3, a = (d * Math.PI) / 180;
+          lab.textContent = "旋转 " + d + "°";
+          els.forEach((e, i) => { const x = pts[i][0] * 280 - 140, y = pts[i][1] * 200 - 100; e.setAttribute("cx", cx + x * Math.cos(a) - y * Math.sin(a)); e.setAttribute("cy", cy + x * Math.sin(a) + y * Math.cos(a)); });
+          bars.forEach((b, k) => { b.style.opacity = -30 + k * 3 <= d ? 0.8 : 0; b.style.fill = Math.abs(-30 + k * 3 - 9) < 2 ? "var(--good)" : "var(--c1)"; });
+        });
+      },
+    },
+    {
+      title: "基线成绩：大约 0.3", kicker: "第 9–10 格 · 先打个分",
+      html: `<p>用比赛的打分器给基线预测打分。作者写道：分数<b>大约 0.3</b>，和公开排行榜上的分数差不多。<span data-cell="9">出处</span></p><p>也就是说，只靠“左右顺序”一招，大多数头盔还是认错了。原因很直观：每一帧都是独立判断，这一帧认对、下一帧又认错，同一个头盔的标签会来回跳。</p>`,
+      cells: [9, 10], highlight: ["~0.3"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "同一个头盔在连续 12 帧里的基线标签（示意）");
+        const labs = ["H23", "H23", "V12", "H23", "H18", "H23", "V12", "H23", "H23", "H18", "H23", "H23"];
+        labs.forEach((l, i) => {
+          const ok = l === "H23";
+          const g = K.node(svg, 30 + i * 55, 60, 48, 48, l, { fill: ok ? "color-mix(in srgb, var(--good) 18%, var(--panel))" : "color-mix(in srgb, var(--bad) 18%, var(--panel))", stroke: ok ? "var(--good)" : "var(--bad)", fs: 12 });
+          g.style.opacity = 0; ctx.wait(i * 120).then((k) => k && ctx.tween(200, (t) => (g.style.opacity = t)));
+        });
+        K.svg(svg, "text", { x: 30, y: 140, "font-size": 12, class: "muted" }, "（H23 等标签写法仅为示意）");
+        K.svg(svg, "text", { x: 30, y: 200, "font-size": 15 }, "作者写的基线验证分：");
+        K.svg(svg, "text", { x: 200, y: 202, "font-size": 30, "font-weight": 700, fill: "var(--warn)" }, "≈ 0.3");
+        K.svg(svg, "text", { x: 30, y: 250, "font-size": 13 }, "逐帧独立判断 → 标签来回跳。如果能知道“这几帧是同一个头盔”，就能多数表决。");
+        K.svg(svg, "text", { x: 30, y: 276, "font-size": 13, fill: "var(--accent)", "font-weight": 700 }, "→ 这正是跟踪（tracking）要做的事");
+      },
+    },
+    {
+      title: "DeepSORT：哪部分是深度学习", kicker: "第 11–13 格 · 跟踪器的三个零件",
+      html: `<p>DeepSORT 是很流行的多目标跟踪框架。作者的用法：逐帧把头盔框喂给它，它把同一个头盔在不同帧里的框“聚成一簇”（给同一个编号）；然后每簇取最常见的标签，覆盖整簇。<span data-cell="11">出处</span></p><p>DeepSORT 由三块拼成，只有一块是深度学习：</p><ul class="tight"><li><b>卡尔曼滤波</b>（统计估计）：根据过去的位置和速度，预测这个头盔下一帧会在哪</li><li><b>匈牙利算法</b>（组合优化）：把“预测位置”和“新检测框”做一一配对，让总差距最小</li><li><b>ReID 外观特征</b>（深度学习）：一个小卷积网络把每个框的图像变成一串数字，长得像的框数字也接近</li></ul><p>比赛不许联网，所以代码和权重都从附加的数据集里导入。<span data-cell="13">出处</span></p>`,
+      cells: [11, 13], highlight: ["from deep_sort.deep_sort import DeepSort"],
+      draw(svg, ctx) {
+        const parts = [["卡尔曼滤波", "统计估计：预测下一帧位置", "var(--c1)"], ["匈牙利算法", "组合优化：一一配对总代价最小", "var(--c4)"], ["ReID 外观 CNN", "深度学习：把外观变成特征向量", "var(--c6)"]];
+        K.node(svg, 260, 130, 200, 80, "DeepSORT", { fill: "var(--accent-soft)", stroke: "var(--accent)", bold: true, fs: 16 });
+        const pos = [[20, 30], [480, 30], [250, 250]];
+        parts.forEach((p, i) => {
+          const g = K.svg(svg, "g");
+          K.node(g, pos[i][0], pos[i][1], 220, 62, p[0] + "\n" + p[1], { fill: `color-mix(in srgb, ${p[2]} 15%, var(--panel))`, stroke: p[2], fs: 12 });
+          const [x, y] = pos[i];
+          K.arrow(g, x + 110, y + (i === 2 ? 0 : 62), i === 0 ? 300 : i === 1 ? 420 : 360, i === 2 ? 212 : 128, { color: p[2] });
+          g.style.opacity = 0; ctx.wait(300 + i * 500).then((ok) => ok && ctx.tween(400, (t) => (g.style.opacity = t)));
+        });
+        K.svg(svg, "text", { x: 500, y: 320, "font-size": 12, fill: "var(--c6)" }, "只有这一块是神经网络");
+      },
+    },
+    {
+      title: "配置：一条轨迹的生老病死", kicker: "第 14–17 格 · deepsort.yaml",
+      html: `<p>作者用的是默认配置，并说“还可以改进”。<span data-cell="14">出处</span> 几个关键参数：</p><ul class="tight"><li><code>N_INIT: 3</code>：一个新目标要连续匹配上 3 帧，才“转正”成正式轨迹（防止偶然的误检）</li><li><code>MAX_AGE: 70</code>：一条轨迹连续 70 帧没匹配上才删除（被挡住一会儿还能接上）</li><li><code>MAX_DIST: 0.2</code>：外观特征距离超过它就不配对</li><li><code>MAX_IOU_DISTANCE: 0.7</code>：靠框重叠度配对时的门槛</li><li><code>REID_CKPT</code>：外观网络的权重文件</li></ul><p>第 16 格是从 YOLOv5 借来的画框小工具，按编号给每条轨迹一个固定颜色。<span data-cell="16">出处</span></p>`,
+      cells: [15, 16], highlight: ["MAX_AGE", "N_INIT", "MAX_DIST", "REID_CKPT"],
+      draw(svg, ctx) {
+        const st = [["新出现\n（试用期）", 40, "var(--warn)"], ["正式轨迹", 290, "var(--good)"], ["删除", 560, "var(--bad)"]];
+        st.forEach(([t, x, c]) => K.node(svg, x, 60, 130, 64, t, { fill: `color-mix(in srgb, ${c} 16%, var(--panel))`, stroke: c, bold: true }));
+        K.arrow(svg, 172, 92, 288, 92); K.svg(svg, "text", { x: 230, y: 82, "text-anchor": "middle", "font-size": 12 }, "连中 N_INIT=3 帧");
+        K.arrow(svg, 422, 92, 558, 92); K.svg(svg, "text", { x: 490, y: 82, "text-anchor": "middle", "font-size": 12 }, "连丢 MAX_AGE=70 帧");
+        // 时间线：一条轨迹的命中/丢失
+        K.svg(svg, "text", { x: 40, y: 175, "font-size": 12, class: "muted" }, "一条轨迹逐帧的匹配情况（示意，● 匹配上 ○ 没匹配上）");
+        const seq = "111111110000011111111111000000000";
+        const dots = [];
+        for (let i = 0; i < seq.length; i++) dots.push(K.svg(svg, "circle", { cx: 50 + i * 19, cy: 200, r: 6, fill: seq[i] === "1" ? "var(--c1)" : "none", stroke: "var(--c1)", opacity: 0.15 }));
+        const stat = K.svg(svg, "text", { x: 40, y: 250, "font-size": 14, "font-weight": 700 }, "");
+        const miss = K.svg(svg, "text", { x: 40, y: 276, "font-size": 12, class: "muted" }, "");
+        let hits = 0, lost = 0;
+        ctx.tween(3600, (t) => {
+          const n = Math.floor(t * seq.length);
+          hits = 0; lost = 0; let s = "试用期";
+          for (let i = 0; i < n; i++) { if (seq[i] === "1") { hits++; lost = 0; if (hits >= 3) s = "正式轨迹"; } else lost++; }
+          dots.forEach((d, i) => (d.style.opacity = i < n ? 1 : 0.15));
+          stat.textContent = "当前状态：" + s;
+          miss.textContent = `已连续丢失 ${lost} 帧（到 70 才删除，被挡住时轨迹先“挂起”）`;
+        });
+      },
+    },
+    {
+      title: "逐帧运行：预测、配对、更新", kicker: "第 18 格 · deepsort_helmets",
+      html: `<p><code>deepsort_helmets</code> 一帧一帧地处理：把头盔框换成“中心点 + 宽高”，从视频里读出这一帧的画面（外观网络要看图），交给 <code>deepsort.update</code>，拿回每个框的轨迹编号 <code>deepsort_cluster</code>。<span data-cell="18">出处</span></p><p>动画演示 <code>update</code> 内部的一步：卡尔曼滤波先把每条轨迹“往前推”一帧（虚线圈），再用匈牙利算法把预测和新检测一一配对。最后作者用 <code>merge_asof</code> 只按 <code>left</code> 坐标就近把编号并回原框，他自己也注明这一步“很粗糙”。<span data-cell="17">出处</span></p>`,
+      cells: [18], highlight: ["deepsort.update", "merge_asof", "cap.set(cv2.CAP_PROP_POS_FRAMES"],
+      draw(svg, ctx) {
+        const tr = [[120, 120, 40, 10], [200, 240, 35, -15], [380, 90, -10, 30], [450, 220, -40, 0]];
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 12, class: "muted" }, "实心 = 上一帧位置；虚线圈 = 卡尔曼预测；方框 = 本帧新检测（顺序被打乱）");
+        const prev = tr.map((p, i) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 9, fill: K.colors[i] }));
+        const pred = tr.map((p, i) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 16, fill: "none", stroke: K.colors[i], "stroke-dasharray": "4 3", "stroke-width": 2 }));
+        const dets = [[452, 205], [418, 222], [158, 132], [236, 228]].map(([x, y]) => K.svg(svg, "rect", { x: x - 10, y: y - 10, width: 20, height: 20, fill: "none", stroke: "var(--ink)", "stroke-width": 2, opacity: 0 }));
+        const match = [2, 3, 0, 1]; // 第 i 条轨迹 → 第 match[i] 个检测
+        const detPos = [[452, 205], [418, 222], [158, 132], [236, 228]];
+        const lines = [];
+        ctx.wait(400)
+          .then((ok) => ok && ctx.tween(1000, (t) => pred.forEach((c, i) => { c.setAttribute("cx", tr[i][0] + tr[i][2] * t); c.setAttribute("cy", tr[i][1] + tr[i][3] * t); })))
+          .then((ok) => ok && ctx.tween(500, (t) => dets.forEach((d) => (d.style.opacity = t))))
+          .then(async (ok) => {
+            if (!ok) return;
+            for (let i = 0; i < 4; i++) {
+              const p = [tr[i][0] + tr[i][2], tr[i][1] + tr[i][3]], d = detPos[match[i]];
+              const ln = K.svg(svg, "line", { x1: p[0], y1: p[1], x2: p[0], y2: p[1], stroke: K.colors[i], "stroke-width": 3 });
+              if (!(await ctx.tween(350, (t) => { ln.setAttribute("x2", K.lerp(p[0], d[0], t)); ln.setAttribute("y2", K.lerp(p[1], d[1], t)); }))) return;
+              lines.push(ln);
+            }
+            K.svg(svg, "text", { x: 540, y: 120, "font-size": 13, "font-weight": 700 }, "匈牙利算法：");
+            K.svg(svg, "text", { x: 540, y: 142, "font-size": 12 }, "在所有一一配对里");
+            K.svg(svg, "text", { x: 540, y: 160, "font-size": 12 }, "选总距离最小的那种");
+          });
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 12, class: "muted" }, "（真实的 DeepSORT 还会把外观特征距离算进代价里）");
+      },
+    },
+    {
+      title: "按轨迹投票，统一标签", kicker: "第 19–20 格 · add_deepsort_label_col",
+      html: `<p>每段视频跑完 DeepSORT 后，<code>add_deepsort_label_col</code> 对每个轨迹编号统计：这条轨迹里基线给出最多的是哪个球员标签，就把整条轨迹都改成它（众数投票）。<span data-cell="18">出处</span> 调试模式下还会画出第 10、150、250 帧的轨迹编号，并打印“前 → 后”两个分数。<span data-cell="20">出处</span></p><p>前提是轨迹本身要可靠：一条轨迹如果中途“串号”（从 A 球员跳到 B 球员），投票就会把一半的帧改错。下面的实验 B 可以试试这个风险。</p>`,
+      cells: [20], highlight: ["add_deepsort_label_col", "score_vs_deepsort", "plot_frames=[10, 150, 250]"],
+      draw(svg, ctx) {
+        const labs = ["H23", "H23", "V12", "H23", "H18", "H23", "V12", "H23", "H23", "H18", "H23", "H23"];
+        const cells = labs.map((l, i) => K.node(svg, 30 + i * 55, 50, 48, 48, l, { fill: "var(--panel-2)", fs: 12 }));
+        K.svg(svg, "text", { x: 30, y: 36, "font-size": 12, class: "muted" }, "DeepSORT 轨迹 #7 的 12 帧（示意），每帧的基线标签");
+        const cnt = {}; labs.forEach((l) => (cnt[l] = (cnt[l] || 0) + 1));
+        const keys = Object.keys(cnt);
+        const bars = keys.map((k, i) => {
+          K.svg(svg, "text", { x: 90, y: 160 + i * 36, "text-anchor": "end", "font-size": 13 }, k);
+          return [K.svg(svg, "rect", { x: 100, y: 145 + i * 36, width: 0, height: 22, rx: 3, fill: k === "H23" ? "var(--good)" : "var(--ink-3)" }), cnt[k], K.svg(svg, "text", { x: 0, y: 161 + i * 36, "font-size": 12 }, "")];
+        });
+        const out = K.svg(svg, "text", { x: 400, y: 200, "font-size": 16, "font-weight": 700, fill: "var(--good)" }, "");
+        ctx.tween(1200, (t) => bars.forEach(([r, c, tx]) => { r.setAttribute("width", c * 30 * t); tx.setAttribute("x", 106 + c * 30 * t); tx.textContent = Math.round(c * t); }))
+          .then((ok) => { if (!ok) return; out.textContent = "众数 H23 → 整条轨迹都改成 H23"; return ctx.wait(300); })
+          .then((ok) => ok && ctx.tween(600, () => cells.forEach((g) => { g.querySelector("text").textContent = "H23"; g.querySelector("rect").style.stroke = "var(--good)"; })));
+      },
+    },
+    {
+      title: "去重、检查、写出提交文件", kicker: "第 21–22 格 · 提交",
+      html: `<p>比赛规定：同一帧里一个球员标签只能出现一次。投票之后，两条轨迹可能被改成同一个标签，所以作者：①没投出结果的框保留原标签（<code>fillna</code>）；②用投票标签替换原标签；③同一帧里重复的标签只留第一个；④用 <code>check_submission</code> 检查格式后保存。<span data-cell="22">出处</span></p><p>注意第 ③ 步是直接丢掉重复的框，而不是给它换一个次优的标签，这里也有改进空间。</p>`,
+      cells: [22], highlight: ["fillna", "duplicated()", "check_submission"],
+      draw(svg, ctx) {
+        const rows = [["帧 57", "框 a", "H23"], ["帧 57", "框 b", "V12"], ["帧 57", "框 c", "H23"], ["帧 57", "框 d", "H18"]];
+        K.svg(svg, "text", { x: 40, y: 34, "font-size": 13, class: "muted" }, "同一帧里出现两个 H23 → 只保留第一个");
+        const els = rows.map((r, i) => {
+          const g = K.svg(svg, "g");
+          K.svg(g, "rect", { x: 40, y: 50 + i * 50, width: 360, height: 40, rx: 5, fill: "var(--panel-2)", stroke: "var(--line)" });
+          r.forEach((c, j) => K.svg(g, "text", { x: 60 + j * 120, y: 75 + i * 50, "font-size": 14, "font-family": "var(--mono)" }, c));
+          return g;
+        });
+        const x = K.svg(svg, "text", { x: 420, y: 178, "font-size": 14, fill: "var(--bad)", "font-weight": 700, opacity: 0 }, "✗ 重复，删除");
+        K.node(svg, 480, 240, 200, 60, "check_submission ✓\nsubmission.csv", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        ctx.wait(800).then((ok) => ok && ctx.tween(800, (t) => { els[2].style.opacity = 1 - 0.8 * t; x.style.opacity = t; }));
+      },
+    },
+    {
+      title: "生成带标签的回放视频", kicker: "第 23–24 格 · 人工核对",
+      html: `<p>最后用辅助包里的 <code>video_with_predictions</code> 把预测画回视频：每个头盔上标出球员标签，并区分预测对错，嵌进 notebook 里直接播放（按 0.6 倍缩小显示）。<span data-cell="24">出处</span></p><p>分数只是一个数，回放视频能让人一眼看到“哪里错、为什么错”，比如两名球员交叉时标签互换。</p>`,
+      cells: [24], highlight: ["video_with_predictions"],
+      draw(svg, ctx) {
+        K.svg(svg, "rect", { x: 40, y: 30, width: 640, height: 260, rx: 6, fill: "color-mix(in srgb, var(--c3) 20%, var(--panel))", stroke: "var(--line)" });
+        const P = [[120, 150, 1, "H23", true], [220, 110, 1, "V12", true], [300, 200, -1, "H18", false], [430, 140, -1, "V55", true], [560, 190, 1, "H07", true]];
+        const g = P.map((p) => {
+          const r = K.svg(svg, "rect", { x: p[0] - 14, y: p[1] - 14, width: 28, height: 28, fill: "none", stroke: p[4] ? "var(--good)" : "var(--bad)", "stroke-width": 3 });
+          const t = K.svg(svg, "text", { x: p[0] - 14, y: p[1] - 20, "font-size": 12, "font-weight": 700, fill: p[4] ? "var(--good)" : "var(--bad)" }, p[3]);
+          return [r, t, p];
+        });
+        K.svg(svg, "text", { x: 40, y: 318, "font-size": 12, class: "muted" }, "示意：绿框 = 标签正确，红框 = 标签错误（颜色约定以辅助包为准）");
+        ctx.tween(3000, (t) => g.forEach(([r, tx, p]) => { const x = p[0] + p[2] * 60 * t; r.setAttribute("x", x - 14); tx.setAttribute("x", x - 14); }));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：卡尔曼 + 匈牙利 ---------- */
+  function simTracking(v) {
+    const r = K.rng(11 + v.seed * 31), n = 5, T = 60;
+    // 5 个球员：沿不同方向跑，路线会交叉
+    const objs = [];
+    for (let i = 0; i < n; i++) {
+      const y0 = 40 + i * 50, dir = i % 2 ? -1 : 1;
+      objs.push({ x: dir > 0 ? 40 : 560, y: y0, vx: dir * (3 + r() * 2) * v.speed, vy: (i < 2 ? 1 : i > 2 ? -1 : 0) * (1.2 + r()) * v.speed });
+    }
+    const truth = [], dets = [];
+    for (let t = 0; t < T; t++) {
+      truth.push(objs.map((o) => [o.x + o.vx * t, o.y + o.vy * t]));
+      const d = [];
+      truth[t].forEach((p, i) => { if (r() > v.miss) d.push({ x: p[0] + K.randn(r) * v.noise, y: p[1] + K.randn(r) * v.noise, obj: i }); });
+      for (let k = d.length - 1; k > 0; k--) { const j = Math.floor(r() * (k + 1)); [d[k], d[j]] = [d[j], d[k]]; }
+      dets.push(d);
+    }
+    // 跟踪器
+    const tracks = []; let nextId = 1; const out = [];
+    const q = 1, R = v.noise * v.noise + 1;
+    for (let t = 0; t < T; t++) {
+      tracks.forEach((tk) => {
+        if (v.mode === "kf") {
+          ["x", "y"].forEach((ax) => {
+            const s = tk[ax]; // s = {p, v, P:[a,b,c]}
+            s.p += s.v; const [a, b, c] = s.P;
+            s.P = [a + 2 * b + c + q, b + c + q, c + q];
+          });
+        }
+        tk.pred = [tk.x.p, tk.y.p];
+      });
+      const D = dets[t];
+      const cost = tracks.map((tk) => D.map((d) => Math.hypot(tk.pred[0] - d.x, tk.pred[1] - d.y)));
+      const asg = tracks.length && D.length ? hungarian(cost) : [];
+      const usedDet = new Set();
+      tracks.forEach((tk, i) => {
+        const j = asg[i];
+        if (j != null && j >= 0 && cost[i][j] < v.gate) {
+          usedDet.add(j); const d = D[j];
+          ["x", "y"].forEach((ax) => {
+            const s = tk[ax], z = d[ax];
+            if (v.mode === "kf") {
+              const [a, b, c] = s.P, S = a + R, k1 = a / S, k2 = b / S, y = z - s.p;
+              s.p += k1 * y; s.v += k2 * y; s.P = [(1 - k1) * a, (1 - k1) * b, c - k2 * b];
+            } else s.p = z;
+          });
+          tk.miss = 0; tk.hits++;
+          out.push({ t, id: tk.id, obj: d.obj, x: d.x, y: d.y });
+        } else tk.miss++;
+      });
+      for (let k = tracks.length - 1; k >= 0; k--) if (tracks[k].miss > v.maxAge) tracks.splice(k, 1);
+      D.forEach((d, j) => {
+        if (usedDet.has(j)) return;
+        const tk = { id: nextId++, x: { p: d.x, v: 0, P: [R, 0, 25] }, y: { p: d.y, v: 0, P: [R, 0, 25] }, miss: 0, hits: 1 };
+        tracks.push(tk); out.push({ t, id: tk.id, obj: d.obj, x: d.x, y: d.y });
+      });
+    }
+    // ID 切换：同一个真实球员前后两次被分到的轨迹编号不同
+    const last = {}; let sw = 0;
+    out.forEach((o) => { if (last[o.obj] != null && last[o.obj] !== o.id) sw++; last[o.obj] = o.id; });
+    return { truth, out, sw, ids: nextId - 1 };
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "mode", label: "配对时用哪个位置", value: "kf", options: [["kf", "卡尔曼预测的下一帧位置"], ["last", "上一帧的位置（不预测）"]] },
+      { id: "speed", label: "球员跑动速度", min: 0.5, max: 3, step: 0.1, value: 1.6, fmt: (x) => x.toFixed(1) + "×" },
+      { id: "noise", label: "检测框位置误差（像素）", min: 0, max: 15, step: 0.5, value: 4 },
+      { id: "miss", label: "每帧漏检概率", min: 0, max: 0.4, step: 0.02, value: 0.1, fmt: (x) => Math.round(x * 100) + "%" },
+      { id: "gate", label: "最大配对距离（超过就不配）", min: 10, max: 80, step: 1, value: 35 },
+      { id: "maxAge", label: "MAX_AGE（连丢几帧删轨迹）", min: 0, max: 10, step: 1, value: 3 },
+      { id: "seed", label: "换一组随机数据", button: true },
+    ],
+    note: "5 名球员跑 60 帧，检测框带随机误差、偶尔漏检，顺序每帧打乱。跟踪器每帧用匈牙利算法（真算）做一一配对。颜色 = 跟踪器分配的编号；同一条直线上颜色变了，就是一次“ID 切换”。",
+    render(svg, v) {
+      const res = simTracking(v);
+      K.svg(svg, "rect", { x: 20, y: 10, width: 600, height: 300, rx: 4, fill: "color-mix(in srgb, var(--c3) 12%, var(--panel))", stroke: "var(--line)" });
+      const tx = (x) => 20 + K.clamp(x, 0, 600), ty = (y) => 10 + K.clamp(y, 0, 300);
+      for (let i = 0; i < 5; i++) {
+        const a = res.truth[0][i], b = res.truth[59][i];
+        K.svg(svg, "line", { x1: tx(a[0]), y1: ty(a[1]), x2: tx(b[0]), y2: ty(b[1]), stroke: "var(--ink-3)", "stroke-width": 1, "stroke-dasharray": "3 3", opacity: 0.6 });
+      }
+      const pal = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c5)", "var(--c6)", "var(--ink)", "var(--warn)"];
+      res.out.forEach((o) => K.svg(svg, "circle", { cx: tx(o.x), cy: ty(o.y), r: 3, fill: pal[(o.id - 1) % pal.length], opacity: 0.85 }));
+      K.svg(svg, "text", { x: 24, y: 330, "font-size": 12, class: "muted" }, "虚线 = 真实跑动路线；彩色点 = 每帧检测，按跟踪编号上色");
+      return { readout: [
+        { k: "ID 切换次数", v: String(res.sw), color: res.sw <= 2 ? "var(--good)" : "var(--bad)" },
+        { k: "一共开过几条轨迹", v: res.ids + "（真实 5 人）", color: res.ids <= 6 ? "var(--good)" : "var(--warn)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：轨迹投票 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "p", label: "基线每帧标签正确的概率", min: 0.1, max: 0.9, step: 0.05, value: 0.3, fmt: (x) => Math.round(x * 100) + "%" },
+      { id: "len", label: "每条轨迹长度（帧）", min: 1, max: 60, step: 1, value: 20 },
+      { id: "sw", label: "轨迹中途串号的概率", min: 0, max: 0.6, step: 0.05, value: 0, fmt: (x) => Math.round(x * 100) + "%" },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "模拟 400 条轨迹，场上 22 名球员。基线每帧以设定的概率给出正确标签，否则从其余 21 人里随机挑一个。串号的轨迹后半段换成另一名球员。投票 = 取轨迹内出现最多的标签。",
+    render(svg, v) {
+      const r = K.rng(5 + v.seed * 13), NP = 22, NT = 400;
+      let before = 0, after = 0, tot = 0;
+      const hist = new Array(11).fill(0);
+      for (let k = 0; k < NT; k++) {
+        const A = Math.floor(r() * NP); let B = Math.floor(r() * (NP - 1)); if (B >= A) B++;
+        const cut = r() < v.sw ? Math.floor(v.len * (0.3 + 0.4 * r())) : v.len;
+        const truth = [], pred = [];
+        for (let f = 0; f < v.len; f++) {
+          const t = f < cut ? A : B; truth.push(t);
+          if (r() < v.p) pred.push(t); else { let o = Math.floor(r() * (NP - 1)); if (o >= t) o++; pred.push(o); }
+        }
+        const c = {}; pred.forEach((x) => (c[x] = (c[x] || 0) + 1));
+        let best = pred[0]; for (const x in c) if (c[x] > c[best]) best = +x;
+        let bOK = 0, aOK = 0;
+        for (let f = 0; f < v.len; f++) { if (pred[f] === truth[f]) bOK++; if (best === truth[f]) aOK++; }
+        before += bOK; after += aOK; tot += v.len;
+        hist[Math.min(10, Math.floor((aOK / v.len) * 10))]++;
+      }
+      const ax = K.axes(svg, { x: 50, y: 30, w: 560, h: 200 }, [0, 1.1], [0, NT], { xlabel: "投票后一条轨迹里正确帧的比例（每根柱子 = 一个 10% 区间，最右一根 = 100%）", xticks: 11, xfmt: (x) => (x > 1.05 ? "" : Math.round(x * 100) + "%"), yticks: 4 });
+      hist.forEach((h, i) => K.svg(svg, "rect", { x: ax.sx(i / 10) + 2, y: ax.sy(h), width: ax.sx(0.1) - ax.sx(0) - 4, height: ax.sy(0) - ax.sy(h), fill: i >= 9 ? "var(--good)" : i <= 1 ? "var(--bad)" : "var(--c1)" }));
+      K.svg(svg, "text", { x: 56, y: 26, "font-size": 12, class: "muted" }, "400 条轨迹的分布：绿 = 几乎全对，红 = 几乎全错");
+      K.svg(svg, "text", { x: 50, y: 285, "font-size": 12, class: "muted" }, "试试：正确率 30%、长度 20 → 投票后大多全对；再把“串号概率”拉高，看错误怎样被放大。");
+      return { readout: [
+        { k: "投票前逐帧正确率", v: ((before / tot) * 100).toFixed(1) + "%" },
+        { k: "投票后逐帧正确率", v: ((after / tot) * 100).toFixed(1) + "%", color: after >= before ? "var(--good)" : "var(--bad)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

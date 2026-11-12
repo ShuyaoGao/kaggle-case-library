@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>黑白照片上色</title>
+<meta name="description" content="Kaggle 案例拆解：用条件 WGAN 思路给黑白照片上色。在 Lab 色彩空间里，ResU-Net 根据亮度 L 预测颜色 a、b；顺带发现生成器其实只用了 L1 损失、测试集就是训练集等问题。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">图像 · 图像到图像翻译 · 条件生成</div>
+  <h1>给黑白照片上色：只知道亮度，猜出颜色</h1>
+  <p class="en">Pix2Pix Image Colorization with Conditional WGAN</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">pix2pix 思路</span><span class="tag method">Lab 色彩空间</span><span class="tag method">ResU-Net 生成器</span>
+    <span class="tag method">WGAN 评论家</span><span class="tag method">梯度惩罚 + R1</span><span class="tag method">L1 重建损失</span><span class="tag method">PyTorch Lightning</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Salim Hammadi</b>（salimhammadi07）</span>
+    <span>Kaggle 点赞 <b>329</b>（2026-11 抓取）</span>
+    <span>数据集 <b>shravankumar9892/image-colorization</b></span>
+    <span><a href="https://www.kaggle.com/code/salimhammadi07/pix2pix-image-colorization-with-conditional-wgan" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">224×224 的彩色照片，拆成两份</div><p>数据集已经把每张照片转到 Lab 色彩空间：L（亮度，也就是黑白照片）和 ab（颜色）分别存成数组。作者只取前 3000 张。<span data-cell="14">出处</span> <span data-cell="15">出处</span></p></div>
+    <div class="card panel"><h3>要做什么</h3><div class="big">输入黑白，输出颜色</div><p>只给亮度 L，让网络预测每个像素的 a、b 两个颜色值，再和 L 拼起来就是一张彩色照片。<span data-cell="6">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">ResU-Net + WGAN 评论家</div><p>作者的设计：生成器是带残差块的 U-Net，判别器换成 WGAN 的“评论家”，加梯度惩罚。<span data-cell="4">出处</span> <span data-cell="53">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">能上色，但“对抗”其实没接上</div><p>作者的结论讲的是 WGAN + ResU-Net 的好处；但代码里生成器<b>只用了 L1 重建损失</b>，评论家训练了却没反馈给生成器。IS、FID 的实现也有错。<span data-cell="53">出处</span> <span data-cell="68">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>image-colorization</b>（Kaggle 用户 shravankumar9892 上传）把彩色照片转换到 Lab 色彩空间后存成 NumPy 数组：<code>l/gray_scale.npy</code> 是亮度，<code>ab/ab/ab1.npy</code> 是颜色 <span data-cell="14">第 14 格</span>。作者只读取前 3000 张 <span data-cell="15">第 15 格</span>。数据集总张数 notebook 没有写，这里不写。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">使用的照片</div><div class="v">前 3,000 张</div></div>
+        <div class="stat-tile"><div class="k">尺寸</div><div class="v">224×224</div></div>
+        <div class="stat-tile"><div class="k">每批</div><div class="v" style="color:var(--c1)">1 张</div></div>
+        <div class="stat-tile"><div class="k">训练轮数</div><div class="v" style="color:var(--c3)">150 轮</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">尺寸见 <span data-cell="22">第 22 格</span>，batch 1 见 <span data-cell="23">第 23 格</span>，150 轮见 <span data-cell="55">第 55 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每个“字段”是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>数组</th><th>含义</th><th>形状</th></tr>
+        <tr><td><code>L</code>（gray_scale.npy）</td><td>亮度：0 黑 → 100 白（存储时缩放过）。这就是“黑白照片”，作为<b>输入</b></td><td>224×224×1</td></tr>
+        <tr><td><code>ab</code>（ab1.npy）</td><td>颜色：a 从绿到红，b 从蓝到黄。<b>要预测的答案</b></td><td>224×224×2</td></tr>
+      </table></div>
+      <p class="note">作者解释了为什么用 Lab：它把亮度和颜色分开，L 是现成的输入，网络只需预测两个颜色通道 <span data-cell="17">第 17 格</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="19">
+    <h3>动手试试 A · Lab 色彩空间：亮度和颜色分开 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="53">
+    <h3>动手试试 B · 只用重建损失上色：要么发灰，要么只剩一种颜色 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>pix2pix 用于上色可以改进：用 WGAN 代替普通 GAN 让训练更稳定，用残差块的 U-Net 学习细节</td><td><span data-cell="4">第 4 格</span> <span data-cell="68">第 68 格</span></td></tr>
+        <tr><td>Lab 色彩空间把亮度和颜色分开，更适合上色</td><td><span data-cell="17">第 17 格</span></td></tr>
+        <tr><td>评估 GAN 可以用人工打分、Inception Score、FID</td><td><span data-cell="59">第 59 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">IS 和 FID 的具体数值打印在运行输出里，Kaggle 下载的源码不带输出；而且下面会说到这两个指标的实现有问题，所以这里不列任何分数。</p>
+      <p class="callout">读代码发现的问题（这份 notebook 的“坑”特别有教学价值）：<br>① <b>生成器只用了 L1 重建损失</b>，注释写着“WGAN has only a reconstruction loss” <span data-cell="53">第 53 格</span>。评论家照常训练，却从没把意见传回生成器，<code>lambda_recon</code> 也没用到。所以实际效果等于一个普通的有监督 ResU-Net，并不是条件 GAN。<br>② 评论家的损失写成 <code>real − fake</code>，和 WGAN 的方向相反（应让真图得分高、假图得分低），同时叠加了梯度惩罚和 R1 两种正则 <span data-cell="53">第 53 格</span>。<br>③ <b>测试集就是训练集</b>：两个 Dataset 都用 <code>(L_df, ab_df)</code> <span data-cell="23">第 23 格</span>；<code>__getitem__</code> 还读的是全局变量 <code>dataset</code> 而不是 <code>self.dataset</code> <span data-cell="22">第 22 格</span>。<br>④ IS、FID 把 <b>Lab 数值</b>当成 RGB 图片喂给 Inception <span data-cell="61">第 61 格</span>；IS 是和均匀分布比而不是和边缘分布比 <span data-cell="62">第 62 格</span>；FID 用的是标准差而不是协方差矩阵，均值差还算了两遍，和作者自己在第 59 格写的公式不一致 <span data-cell="65">第 65 格</span>。<br>⑤ 评论家的说明文字写“5 层卷积、输出真假概率” <span data-cell="42">第 42 格</span>，代码是 4 层卷积 + 全局平均池化 + 线性层，输出的是不受 0–1 限制的分数 <span data-cell="45">第 45 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>老照片、老电影上色；医学影像、红外图像的伪彩色；漫画线稿上色。</li>
+        <li><b>同类问题（图像到图像翻译）：</b>草图变照片、白天变夜晚、卫星图变地图、去雨去雾、超分辨率。pix2pix 论文就展示了这些例子（作者在第 5 格转述）。</li>
+        <li><b>可迁移的套路：</b>选合适的颜色/表示空间（Lab）→ 已知部分当输入、未知部分当输出 → U-Net（跳连保留细节）→ L1 管“大体对”+ 对抗损失管“看起来真”→ 评估时测试集必须独立。</li>
+        <li><b>为什么要对抗损失：</b>只用 L2，网络遇到“这个苹果可能红也可能绿”时会选一个折中的灰褐色；只用 L1，会选多数派的颜色，少数派全被涂错，红绿各半时也会落到中间（实验 B）。判别器会惩罚这种“不像真照片”的结果。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>数据：L、ab 数组，前 3000 张，batch 1 <span data-cell="15">第 15 格</span> <span data-cell="23">第 23 格</span></li>
+        <li>生成器：ResBlock U-Net（64 → 128 → 256 → 512 → 256 → 128 → 64 → 2），Dropout 0.2 <span data-cell="35">第 35 格</span></li>
+        <li>评论家：4 层卷积（InstanceNorm + LeakyReLU）→ 平均池化 → 线性 <span data-cell="45">第 45 格</span></li>
+        <li>训练：Adam 2e-4（β = 0.5, 0.9），梯度惩罚 λ = 10，R1 λ = 10，L1 重建，150 轮 <span data-cell="53">第 53 格</span> <span data-cell="55">第 55 格</span></li>
+        <li>评估：Inception Score、FID（实现有误）<span data-cell="62">第 62 格</span> <span data-cell="65">第 65 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>同一个灰度值，可能是红苹果也可能是绿苹果。网络只看亮度，怎么决定颜色？你会给它什么“提示”？</li>
+      <li>代码里评论家训练了 150 轮，但生成器从没用到它的意见。怎么从代码里发现这种“接线没接上”的问题？</li>
+      <li>测试集和训练集是同一批图。这样算出来的指标能说明什么？不能说明什么？</li>
+      <li>老照片上色后放进纪录片，观众可能以为那就是真实的颜色。上色结果应该怎样标注？</li>
+      <li>“看起来真”和“颜色正确”是一回事吗？一件历史服装真正的颜色，AI 能知道吗？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Salim Hammadi（Kaggle：salimhammadi07），方法参考 pix2pix（Isola 等 2017）与 WGAN-GP。版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的图像都是程序生成的示意图，不是数据集照片。数据集：shravankumar9892/image-colorization。
+</footer>
+</main>
+
+<script src="nb/pix2pix-colorization-wgan.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- Lab ↔ RGB（D65） ---------- */
+  function lab2rgb(L, a, b) {
+    let y = (L + 16) / 116, x = a / 500 + y, z = y - b / 200;
+    const f = (t) => (t ** 3 > 0.008856 ? t ** 3 : (t - 16 / 116) / 7.787);
+    x = 0.95047 * f(x); y = 1.0 * f(y); z = 1.08883 * f(z);
+    let r = x * 3.2406 + y * -1.5372 + z * -0.4986, g = x * -0.9689 + y * 1.8758 + z * 0.0415, bb = x * 0.0557 + y * -0.204 + z * 1.057;
+    const gm = (c) => (c > 0.0031308 ? 1.055 * Math.pow(c, 1 / 2.4) - 0.055 : 12.92 * c);
+    return [gm(r), gm(g), gm(bb)].map((c) => Math.round(K.clamp(c, 0, 1) * 255));
+  }
+  const css = (rgb) => `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+  /* 程序画的一张“风景”：每个像素给出 [L, a, b] */
+  const S = 24;
+  const SCENE = (() => {
+    const px = [];
+    for (let i = 0; i < S; i++) for (let j = 0; j < S; j++) {
+      const x = (j + 0.5) / S, y = (i + 0.5) / S;
+      let p;
+      if (Math.hypot(x - 0.75, y - 0.22) < 0.1) p = [92, -2, 70];                 // 太阳
+      else if (y < 0.55) p = [62 + 25 * y, -8, -38 + 30 * y];                       // 天空
+      else if (Math.abs(x - 0.3) < 0.04 && y < 0.8) p = [35, 12, 25];               // 树干
+      else if (Math.hypot(x - 0.3, y - 0.52) < 0.14) p = [48, -38, 32];            // 树冠
+      else if (Math.hypot(x - 0.62, y - 0.78) < 0.05) p = [50, 62, 40];            // 红花
+      else p = [55 - 10 * (y - 0.55), -42, 40];                                     // 草地
+      px.push(p);
+    }
+    return px;
+  })();
+  function drawLab(svg, x, y, size, px, mode, k) {
+    const s = size / S, g = K.svg(svg, "g");
+    for (let i = 0; i < S; i++) for (let j = 0; j < S; j++) {
+      const p = px[i * S + j];
+      const L = mode === "ab" ? 60 : p[0], A = mode === "L" ? 0 : p[1] * (k == null ? 1 : k), B = mode === "L" ? 0 : p[2] * (k == null ? 1 : k);
+      K.svg(g, "rect", { x: x + j * s, y: y + i * s, width: s + 0.3, height: s + 0.3, fill: css(lab2rgb(L, A, B)) });
+    }
+    return g;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "开场：导入工具", kicker: "第 0–3 格 · 安装与导入",
+      html: `<p>先装 <code>torchsummary</code>（打印网络结构用）<span data-cell="0">第 0 格</span>，再导入一大批工具 <span data-cell="1">第 1 格</span>。其中两个值得注意：</p><ul class="tight"><li><code>skimage.color</code> 里的 <code>rgb2lab</code>、<code>lab2rgb</code>：在 RGB 和 Lab 两种颜色表示之间转换；</li><li><code>pytorch_lightning</code>：把训练循环包装好的框架，后面用它的 <code>Trainer</code> 来训练。</li></ul>`,
+      cells: [0, 1], highlight: ["rgb2lab, lab2rgb", "pytorch_lightning"],
+      draw(svg, ctx) {
+        const g1 = drawLab(svg, 60, 60, 200, SCENE, "L"), g2 = drawLab(svg, 460, 60, 200, SCENE, "full");
+        K.svg(svg, "text", { x: 160, y: 290, "text-anchor": "middle", "font-size": 13 }, "输入：只有亮度（黑白）");
+        K.svg(svg, "text", { x: 560, y: 290, "text-anchor": "middle", "font-size": 13 }, "目标：彩色");
+        const a = K.arrow(svg, 270, 160, 450, 160); a.style.opacity = 0;
+        K.svg(svg, "text", { x: 360, y: 145, "text-anchor": "middle", "font-size": 13 }, "猜出颜色");
+        g2.style.opacity = 0;
+        K.svg(svg, "text", { x: 360, y: 325, "text-anchor": "middle", "font-size": 11, class: "muted" }, "程序画的示意风景");
+        ctx.tween(600, (t) => (a.style.opacity = t)).then((ok) => ok && ctx.tween(900, (t) => (g2.style.opacity = t)));
+      },
+    },
+    {
+      title: "黑白照片上色与 pix2pix", kicker: "第 4–8 格 · 项目介绍",
+      html: `<p>作者先介绍论文 <b>pix2pix</b>（《用条件对抗网络做图像到图像翻译》）的要点 <span data-cell="5">第 5 格</span>：</p><ul class="tight"><li>生成器把一种图（如草图）转成另一种图（如照片）；</li><li>生成器的损失 = <b>对抗损失 + L1 损失</b>；</li><li>判别器用“PatchGAN”：不是给整张图打一个分，而是给每个 70×70 的小块打分。</li></ul><p>然后解释了什么是上色 <span data-cell="6">第 6 格</span>，并提出两个改进：判别器换成 WGAN，生成器换成带残差块的 U-Net <span data-cell="4">第 4 格</span>。</p>`,
+      cells: [4, 5, 6],
+      draw(svg, ctx) {
+        const pairs = [["草图", "照片"], ["白天", "夜晚"], ["标注图", "街景"], ["黑白", "彩色"]];
+        const els = pairs.map((p, i) => {
+          const g = K.svg(svg, "g"); g.style.opacity = 0;
+          K.node(g, 60, 30 + i * 72, 140, 52, p[0], {});
+          K.arrow(g, 204, 56 + i * 72, 300, 56 + i * 72);
+          K.node(g, 304, 30 + i * 72, 140, 52, p[1], { fill: i === 3 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 3 ? "var(--accent)" : "var(--ink-3)" });
+          return g;
+        });
+        K.svg(svg, "text", { x: 480, y: 120, "font-size": 13 }, "同一套方法：");
+        K.svg(svg, "text", { x: 480, y: 146, "font-size": 13 }, "已知一张图 → 生成另一张图");
+        K.svg(svg, "text", { x: 480, y: 186, "font-size": 12, class: "muted" }, "（pix2pix 论文中的例子，");
+        K.svg(svg, "text", { x: 480, y: 206, "font-size": 12, class: "muted" }, "作者在第 5 格转述）");
+        (async () => { for (const e of els) if (!(await ctx.tween(350, (t) => (e.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "GAN → 条件 GAN：为什么上色要用条件 GAN", kicker: "第 9–13 格 · 理论",
+      html: `<p>作者依次介绍 GAN（生成器从随机数生成数据、判别器分真假）<span data-cell="9">第 9 格</span> 和条件 GAN（两者都额外看到“条件”）<span data-cell="11">第 11 格</span>，并列出选条件 GAN 的理由 <span data-cell="12">第 12 格</span>：能控制输出、训练更稳、适合补全缺失的数据……</p><p>放到上色任务里：<b>条件就是那张黑白照片</b>。生成器看着黑白照片生成颜色，判别器看着“黑白照片 + 颜色”判断这组颜色像不像真照片。</p>`,
+      cells: [9, 11, 12],
+      draw(svg, ctx) {
+        const L = K.svg(svg, "g"); drawLab(L, 40, 110, 110, SCENE, "L");
+        const G = K.node(svg, 200, 130, 120, 70, "生成器", { bold: true, fill: "color-mix(in srgb, var(--c2) 18%, var(--panel))", stroke: "var(--c2)" });
+        const D = K.node(svg, 500, 130, 120, 70, "判别器", { bold: true, fill: "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: "var(--c1)" });
+        K.arrow(svg, 152, 165, 198, 165); K.arrow(svg, 322, 165, 360, 165);
+        const ab = K.svg(svg, "g"); drawLab(ab, 362, 125, 80, SCENE, "ab"); K.arrow(svg, 444, 165, 498, 165);
+        const cond = K.svg(svg, "path", { d: "M95,108 C95,40 560,40 560,128", fill: "none", stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        K.svg(svg, "text", { x: 330, y: 52, "text-anchor": "middle", "font-size": 12, fill: "var(--warn)" }, "条件：黑白照片也交给判别器");
+        K.svg(svg, "text", { x: 640, y: 160, "font-size": 13 }, "真？");
+        K.svg(svg, "text", { x: 95, y: 245, "text-anchor": "middle", "font-size": 12 }, "黑白（条件）");
+        K.svg(svg, "text", { x: 402, y: 225, "text-anchor": "middle", "font-size": 12 }, "生成的颜色");
+        ctx.tween(1500, (t) => K.set(cond, { "stroke-dashoffset": -60 * t }));
+      },
+    },
+    {
+      title: "数据：L 和 ab 两个数组，只取 3000 张", kicker: "第 14–16 格 · 读数据",
+      html: `<p>数据集已经把照片转成 Lab 并分开存放：<code>gray_scale.npy</code> 存所有照片的 L，<code>ab1.npy</code> 存对应的 ab <span data-cell="14">第 14 格</span>。作者用 <code>[0:3000]</code> 只取前 3000 张，组成 <code>dataset = (L_df, ab_df)</code> <span data-cell="15">第 15 格</span>。</p><p>只用 3000 张，加上 batch 1、150 轮，是为了在 Kaggle 的显存和时间限制内跑得完。</p>`,
+      cells: [14, 15], highlight: ["[0:3000]"],
+      draw(svg, ctx) {
+        const bars = [];
+        for (let k = 0; k < 20; k++) bars.push(K.svg(svg, "rect", { x: 40 + k * 32, y: 100, width: 26, height: 120, rx: 3, fill: "var(--c1)", opacity: 0.25 }));
+        K.svg(svg, "text", { x: 40, y: 80, "font-size": 13 }, "数据集里的全部照片（示意）");
+        const lab = K.svg(svg, "text", { x: 40, y: 260, "font-size": 15, "font-weight": 700, fill: "var(--c1)" }, "");
+        ctx.tween(1200, (t) => { bars.forEach((b, k) => (b.style.opacity = k < 4 ? 0.25 + 0.75 * t : 0.25 - 0.15 * t)); lab.textContent = t > 0.5 ? "np.load(...)[0:3000]：只取最前面的 3000 张" : ""; });
+      },
+    },
+    {
+      title: "Lab 色彩空间：亮度和颜色分开", kicker: "第 17–21 格 · 数据探索",
+      html: `<p>作者用“经纬度 + 海拔”打比方介绍 Lab <span data-cell="17">第 17 格</span>：</p><ul class="tight"><li><b>L</b>：亮度，0 是黑，100 是白；</li><li><b>a</b>：绿（负）↔ 红（正）；</li><li><b>b</b>：蓝（负）↔ 黄（正）。</li></ul><p>上色任务因此变得很干净：L 就是黑白照片，原封不动；网络只要猜 a、b。<code>lab_to_rgb</code> 把 L、ab 从 0–1 换回原尺度再转 RGB <span data-cell="18">第 18 格</span>，第 19 格画了 8 对“黑白 / 彩色”样例。小问题：第 19 格画黑白图时把 0–255 的 L 直接当 0–100 用，画彩色图又换成了 OpenCV 的 8 位 Lab 规则，两种换算不统一。</p>`,
+      cells: [17, 18, 19], highlight: ["L = L  * 100", "ab = (ab - 0.5) * 128 * 2", "cv2.COLOR_LAB2RGB"],
+      draw(svg, ctx) {
+        const gL = drawLab(svg, 30, 50, 180, SCENE, "L"), gA = drawLab(svg, 270, 50, 180, SCENE, "ab"), gF = drawLab(svg, 510, 50, 180, SCENE, "full");
+        K.svg(svg, "text", { x: 120, y: 260, "text-anchor": "middle", "font-size": 13 }, "L：亮度");
+        K.svg(svg, "text", { x: 240, y: 145, "text-anchor": "middle", "font-size": 22 }, "+");
+        K.svg(svg, "text", { x: 360, y: 260, "text-anchor": "middle", "font-size": 13 }, "ab：颜色（亮度固定为 60 显示）");
+        K.svg(svg, "text", { x: 480, y: 145, "text-anchor": "middle", "font-size": 22 }, "=");
+        K.svg(svg, "text", { x: 600, y: 260, "text-anchor": "middle", "font-size": 13 }, "彩色照片");
+        [gL, gA, gF].forEach((g) => (g.style.opacity = 0));
+        (async () => { for (const g of [gL, gA, gF]) if (!(await ctx.tween(500, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "Dataset：测试集就是训练集", kicker: "第 22–31 格 · 数据加载",
+      html: `<p><code>ImageColorizationDataset</code> 每次取出一张的 L（224×224×1）和 ab（224×224×2），转成张量后返回 <code>(ab, L)</code>：ab 是答案，L 是条件 <span data-cell="22">第 22 格</span>。</p><p>然后建训练集、测试集，batch 1 <span data-cell="23">第 23 格</span>。问题在于：<b>两个都用 <code>(L_df, ab_df)</code></b>，测试集和训练集是同一批 3000 张图。后面“推理”和“评估”看到的，其实都是模型训练时见过的照片。另外 <code>__getitem__</code> 读的是全局变量 <code>dataset</code>，不是 <code>self.dataset</code>，换一份数据也不会生效。</p>`,
+      cells: [22, 23], highlight: ["L = np.array(dataset[0][idx])", "test_dataset = ImageColorizationDataset(dataset = (L_df, ab_df))"],
+      draw(svg, ctx) {
+        const tr = K.node(svg, 60, 80, 220, 120, "训练集\n(L_df, ab_df)\n3000 张", { fill: "color-mix(in srgb, var(--c1) 16%, var(--panel))", stroke: "var(--c1)" });
+        const te = K.node(svg, 440, 80, 220, 120, "测试集\n(L_df, ab_df)\n同样的 3000 张", { fill: "color-mix(in srgb, var(--c6) 16%, var(--panel))", stroke: "var(--c6)" });
+        const eq = K.svg(svg, "text", { x: 360, y: 150, "text-anchor": "middle", "font-size": 30, "font-weight": 700, fill: "var(--bad)" }, "=");
+        eq.style.opacity = 0;
+        K.svg(svg, "text", { x: 360, y: 260, "text-anchor": "middle", "font-size": 13, fill: "var(--bad)" }, "考试卷 = 练习册：分数再高也说明不了“学会了”");
+        ctx.wait(500).then((ok) => ok && ctx.tween(700, (t) => (eq.style.opacity = t)));
+      },
+    },
+    {
+      title: "生成器：带残差块的 U-Net", kicker: "第 32–38 格 · ResU-Net",
+      html: `<p>作者讲解了 U-Net（编码器下采样、解码器上采样、同层跳连）<span data-cell="27">第 27 格</span>，以及把每层卷积换成 <b>残差块</b>（ResBlock）的 ResU-Net <span data-cell="28">第 28 格</span>。</p><ul class="tight"><li><code>ResBlock</code>：两层 3×3 卷积 + BN + ReLU，再加一条 1×1 卷积的“捷径”，两路相加 <span data-cell="32">第 32 格</span>；</li><li>下采样：最大池化 + ResBlock；上采样：双线性放大 + 拼接跳连 + ResBlock <span data-cell="33">第 33 格</span> <span data-cell="34">第 34 格</span>；</li><li>整体：1 → 64 → 128 → 256 → 桥 512 → 256 → 128 → 64 → <b>2</b>（a、b 两个通道），每层后 Dropout 0.2 <span data-cell="35">第 35 格</span>。</li></ul>`,
+      cells: [32, 33, 34, 35, 36], highlight: ["self.identity_map", "torch.cat([x, skip], dim=1)", "self.output = nn.Conv2d(64, output_channel, kernel_size=1)"],
+      draw(svg, ctx) {
+        const lv = [[64, 224], [128, 112], [256, 56]];
+        const xs = [40, 130, 220], els = [];
+        lv.forEach((l, i) => { els.push(K.node(svg, xs[i], 40 + i * 70, 80, 60, `${l[0]}\n${l[1]}²`, { fill: "color-mix(in srgb, var(--c1) 16%, var(--panel))", stroke: "var(--c1)" })); });
+        els.push(K.node(svg, 310, 250, 100, 60, "桥 512\n28²", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" }));
+        lv.slice().reverse().forEach((l, i) => { els.push(K.node(svg, 420 + i * 90, 180 - i * 70, 80, 60, `${l[0]}\n${l[1]}²`, { fill: "color-mix(in srgb, var(--c3) 16%, var(--panel))", stroke: "var(--c3)" })); });
+        els.push(K.node(svg, 620, 20, 80, 40, "输出 2\n(a, b)", { bold: true }));
+        lv.forEach((l, i) => { const y = 70 + i * 70; const s = K.svg(svg, "line", { x1: xs[i] + 80, x2: 600 - xs[i] - 0, y1: y, y2: y, stroke: "var(--warn)", "stroke-dasharray": "5 4" }); });
+        K.svg(svg, "text", { x: 360, y: 330, "text-anchor": "middle", "font-size": 12, class: "muted" }, "蓝：下采样（MaxPool + ResBlock）  绿：上采样（放大 + 拼接 + ResBlock）  黄虚线：跳连");
+        els.forEach((e) => (e.style.opacity = 0));
+        (async () => { for (const e of els) if (!(await ctx.tween(220, (t) => (e.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "评论家：给“黑白 + 颜色”打分", kicker: "第 39–49 格 · Critic",
+      html: `<p>WGAN 里的判别器叫 <b>评论家</b>（Critic）：它不回答“真 / 假”，而是给一个分数，真图分数应该高、假图分数应该低，分差近似两个分布之间的“推土机距离” <span data-cell="39">第 39 格</span>。</p><p>代码 <span data-cell="45">第 45 格</span>：把 ab（2 通道）和 L（1 通道）拼成 3 通道输入，经过 4 层步长 2 的卷积（InstanceNorm + LeakyReLU），全局平均池化，最后一个线性层输出一个数。文字说明里写的是“5 层、输出概率” <span data-cell="42">第 42 格</span>，和代码不一致。</p>`,
+      cells: [39, 45, 47], highlight: ["torch.cat((ab, l), 1)", "nn.AdaptiveAvgPool2d(1)", "nn.Linear(512, 1)"],
+      draw(svg, ctx) {
+        const sz = [224, 112, 56, 28, 14], xs = [30, 150, 250, 330, 395];
+        const els = sz.map((s, i) => { const w = 20 + s * 0.5; const e = K.node(svg, xs[i], 170 - w / 2, w * 0.7, w, i ? String(s) : "ab+L\n224", { fill: "color-mix(in srgb, var(--c1) 16%, var(--panel))", stroke: "var(--c1)" }); e.style.opacity = 0; return e; });
+        const out = K.svg(svg, "text", { x: 470, y: 175, "font-size": 15, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 470, y: 210, "font-size": 12, class: "muted" }, "一个不限范围的分数");
+        K.svg(svg, "text", { x: 470, y: 230, "font-size": 12, class: "muted" }, "（不是 0–1 的概率）");
+        (async () => {
+          for (const e of els) if (!(await ctx.tween(250, (t) => (e.style.opacity = t)))) return;
+          for (const v of [3.2, -1.7, 0.4]) { out.textContent = "分数 = " + v; if (!(await ctx.wait(600))) return; }
+        })();
+      },
+    },
+    {
+      title: "WGAN：用“搬土距离”比较分布", kicker: "第 50–52 格 · 理论与工具函数",
+      html: `<p>作者解释 WGAN <span data-cell="50">第 50 格</span>：普通 GAN 优化的是 JS 散度，两个分布离得远时几乎没有梯度，训练容易不稳；WGAN 改用 <b>Wasserstein 距离</b>（推土机距离：把一堆土搬成另一堆形状，最少要做多少功），梯度始终有意义。代价是评论家必须“平滑”（1-Lipschitz），通常靠<b>梯度惩罚</b>来保证。</p><p>然后是权重初始化 <span data-cell="51">第 51 格</span> 和展示进度的 <code>display_progress</code>（输入 / 真实 / 生成三图并排）<span data-cell="52">第 52 格</span>。</p>`,
+      cells: [50, 51, 52], highlight: ["torch.nn.init.normal_(m.weight, 0.0, 0.02)", "titles = ['input','real','generated']"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 30, w: 620, h: 220 }, [0, 10], [0, 1], { xticks: 5, yticks: 0 });
+        const pile = (c, w) => { let d = ""; for (let x = 0; x <= 10.001; x += 0.1) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(Math.exp(-((x - c) ** 2) / (2 * w * w)) * 0.9); return d + "L" + ax.sx(10) + "," + ax.sy(0) + "L" + ax.sx(0) + "," + ax.sy(0) + "Z"; };
+        K.svg(svg, "path", { d: pile(7, 0.8), fill: "var(--c1)", "fill-opacity": 0.35, stroke: "var(--c1)" });
+        const moving = K.svg(svg, "path", { d: pile(2, 0.8), fill: "var(--c2)", "fill-opacity": 0.45, stroke: "var(--c2)" });
+        K.svg(svg, "text", { x: ax.sx(7), y: 50, "text-anchor": "middle", "font-size": 12, fill: "var(--c1)" }, "真实分布");
+        const lab = K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "");
+        ctx.tween(2400, (t) => { const c = K.lerp(2, 7, t); moving.setAttribute("d", pile(c, 0.8)); lab.textContent = `搬土距离 ≈ ${(7 - c).toFixed(2)}：两堆土差多远，就要搬多远`; });
+      },
+    },
+    {
+      title: "训练步骤：生成器只看了 L1", kicker: "第 53 格 · CWGAN（关键问题）",
+      html: `<p><code>CWGAN</code> 用 PyTorch Lightning 组织训练 <span data-cell="53">第 53 格</span>，每个 batch 交替做两步：</p><ul class="tight"><li><b>评论家一步</b>：<code>loss_C = real.mean() − fake.mean()</code>，加梯度惩罚（λ = 10）和 R1 正则（λ = 10）；</li><li><b>生成器一步</b>：只算 <code>L1(生成的 ab, 真实的 ab)</code>。</li></ul><p>问题来了：生成器这一步<b>根本没调用评论家</b>。注释写着“WGAN has only a reconstruction loss”，<code>lambda_recon</code> 也没用上。评论家练了 150 轮，却一句意见都没传给生成器，模型实际上就是一个用 L1 训练的 ResU-Net。另外 WGAN 评论家的损失本应是 <code>fake − real</code>（让真图分数高），这里正好写反了。实验 B 说明只用重建损失（L1 / L2）上色会出什么问题。</p>`,
+      cells: [53], highlight: ["# WGAN has only a reconstruction loss", "recon_loss = self.recon_criterion(fake_images, real_images)", "loss_C = real_logits.mean() - fake_logits.mean()"],
+      draw(svg, ctx) {
+        const G = K.node(svg, 60, 130, 140, 70, "生成器", { bold: true, fill: "color-mix(in srgb, var(--c2) 18%, var(--panel))", stroke: "var(--c2)" });
+        const C = K.node(svg, 500, 60, 150, 70, "评论家\n（训练了 150 轮）", { bold: true, fill: "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: "var(--c1)" });
+        const L1 = K.node(svg, 500, 200, 150, 60, "L1 重建损失", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        K.arrow(svg, 202, 165, 498, 95, { color: "var(--c1)" });
+        K.arrow(svg, 202, 165, 498, 230, { color: "var(--accent)" });
+        const back1 = K.svg(svg, "path", { d: "M500,240 C350,300 250,260 140,205", fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        const back2 = K.svg(svg, "path", { d: "M500,80 C350,20 250,60 140,128", fill: "none", stroke: "var(--bad)", "stroke-width": 2.5, "stroke-dasharray": "6 6" });
+        const x = K.svg(svg, "text", { x: 320, y: 50, "text-anchor": "middle", "font-size": 30, fill: "var(--bad)", "font-weight": 700 }, "✗");
+        K.svg(svg, "text", { x: 320, y: 300, "text-anchor": "middle", "font-size": 12, fill: "var(--accent)" }, "实际传回生成器的只有 L1");
+        K.svg(svg, "text", { x: 320, y: 80, "text-anchor": "middle", "font-size": 12, fill: "var(--bad)" }, "评论家的意见没接回来");
+        x.style.opacity = 0;
+        ctx.tween(1500, (t) => { K.set(back1, { "stroke-dashoffset": 0 }); x.style.opacity = t > 0.6 ? 1 : 0; });
+      },
+    },
+    {
+      title: "训练 150 轮", kicker: "第 54–56 格 · 开始训练",
+      html: `<p>创建模型：输入 1 通道（L），输出 2 通道（ab），学习率 2e-4 <span data-cell="54">第 54 格</span>；用 Lightning 的 <code>Trainer</code> 在 GPU 上训练 150 轮 <span data-cell="55">第 55 格</span>。</p><p>每 10 轮（<code>display_step = 10</code>）的第一个 batch，会保存一次生成器和评论家的参数，打印两者最近 10 步的平均损失，并显示“输入 / 真实 / 生成”三张图。3000 张 × batch 1，每轮就是 3000 次更新。</p>`,
+      cells: [54, 55], highlight: ["max_epochs=150"],
+      draw(svg, ctx) {
+        const g = K.svg(svg, "g");
+        const ep = K.svg(svg, "text", { x: 560, y: 120, "font-size": 18, "font-family": "var(--mono)", "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 560, y: 150, "font-size": 12, class: "muted" }, "每 10 轮看一次（示意）");
+        ctx.tween(3000, (t) => {
+          const e = Math.min(150, Math.round(t * 150)), k = Math.min(1, e / 100);
+          ep.textContent = `epoch ${e}`;
+          if (e % 10 === 0) { while (g.firstChild) g.firstChild.remove(); drawLab(g, 40, 60, 140, SCENE, "L"); drawLab(g, 200, 60, 140, SCENE, "full"); drawLab(g, 360, 60, 140, SCENE, "full", 0.25 + 0.5 * k); K.svg(g, "text", { x: 110, y: 225, "text-anchor": "middle", "font-size": 12 }, "input"); K.svg(g, "text", { x: 270, y: 225, "text-anchor": "middle", "font-size": 12 }, "real"); K.svg(g, "text", { x: 430, y: 225, "text-anchor": "middle", "font-size": 12 }, "generated"); }
+        });
+      },
+    },
+    {
+      title: "推理：在“测试集”上看效果", kicker: "第 57–58 格 · 推理展示",
+      html: `<p>从 <code>test_loader</code> 取 6 张，每张画“输入 / 真实 / 生成”三图 <span data-cell="57">第 57 格</span>。生成时 ab 通道和输入的 L 拼起来，用 <code>lab_to_rgb</code> 转回 RGB。</p><p>但别忘了第 6 章：测试集就是训练集，这 6 张模型在训练时都见过。所以这里看到的效果偏乐观。要检验真正的上色能力，得用一批完全没参与训练的照片。</p>`,
+      cells: [57], highlight: ["for batch_idx, batch in enumerate(test_loader)"],
+      draw(svg, ctx) {
+        const rows = [1, 0.6, 0.35];
+        const gs = [];
+        rows.forEach((k, i) => { const g = K.svg(svg, "g"); drawLab(g, 40 + i * 230, 60, 180, SCENE, "full", k); K.svg(g, "text", { x: 130 + i * 230, y: 265, "text-anchor": "middle", "font-size": 12 }, ["真实颜色", "颜色偏淡", "接近灰褐"][i]); g.style.opacity = 0; gs.push(g); });
+        K.svg(svg, "text", { x: 360, y: 310, "text-anchor": "middle", "font-size": 12, class: "muted" }, "示意：只用重建损失训练的上色模型，常见的问题是颜色偏淡、偏灰（见实验 B）");
+        (async () => { for (const g of gs) if (!(await ctx.tween(400, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "Inception Score：实现有问题", kicker: "第 59–64 格 · 评估 A",
+      html: `<p>作者介绍了三种评估 GAN 的方法：人工打分、Inception Score（IS）、FID <span data-cell="59">第 59 格</span>。然后取 501 张（测试集，也就是训练集）的预测和真值 <span data-cell="61">第 61 格</span>，实现 IS <span data-cell="62">第 62 格</span>。</p><p>这里有两个问题：① 喂给 Inception 的是 <b>Lab 数值</b>（L 加 ab 三个通道），而 Inception 是在 RGB 图片上训练的；② 标准的 IS 是拿每张图的类别分布和<b>所有图的平均分布</b>比 KL 散度，这里是和均匀分布比（第 1 格导入了 <code>scipy.stats.entropy</code> 却没有用上）。说明文字里“熵越高越多样、越好”的解释也不准确：IS 要求单张图的预测<b>越确定</b>越好、所有图合起来<b>越分散</b>越好。</p>`,
+      cells: [59, 61, 62, 63], highlight: ["Lab = torch.cat([condition, pred], dim=1).numpy()", "torch.log(torch.tensor(1.0/generated_features.size(1))"],
+      draw(svg, ctx) {
+        K.node(svg, 40, 120, 150, 70, "Lab 数值\n(L, a, b)", { fill: "var(--panel-2)", stroke: "var(--ink-3)" });
+        const net = K.node(svg, 290, 120, 150, 70, "Inception\n（学的是 RGB）", { bold: true, fill: "color-mix(in srgb, var(--c1) 16%, var(--panel))", stroke: "var(--c1)" });
+        K.arrow(svg, 192, 155, 288, 155, { color: "var(--bad)" });
+        K.svg(svg, "text", { x: 240, y: 140, "text-anchor": "middle", "font-size": 20, fill: "var(--bad)" }, "✗");
+        K.svg(svg, "text", { x: 480, y: 130, "font-size": 13 }, "像给只认中文的人");
+        K.svg(svg, "text", { x: 480, y: 152, "font-size": 13 }, "看一页拼音乱码");
+        K.svg(svg, "text", { x: 480, y: 190, "font-size": 12, class: "muted" }, "算出来的分数没有意义");
+      },
+    },
+    {
+      title: "FID 也写错了，以及作者的结论", kicker: "第 65–68 格 · 评估 B 与结论",
+      html: `<p>作者在说明里写出了正确的 FID 公式：均值差的平方 + 协方差矩阵的迹项 <span data-cell="59">第 59 格</span>。但代码 <span data-cell="65">第 65 格</span> 里：</p><ul class="tight"><li>用每个特征的<b>标准差</b>代替了协方差矩阵，没有迹和矩阵平方根；</li><li>均值差被算了两遍（<code>mu_diff</code> 和 <code>self.mu − generated_mu</code> 是同一个东西）；</li><li>同样把 Lab 数值当 RGB 喂给 Inception。</li></ul><p>结论 <span data-cell="68">第 68 格</span> 重复了开头的观点：WGAN 让训练更稳、ResU-Net 学到更多细节。可是结合第 10 章，生成器其实没有用到 WGAN；这个结论缺少对照实验（比如“只用 L1 的 ResU-Net”）来支撑。</p>`,
+      cells: [65, 66, 68], highlight: ["fid = mu_diff.pow(2).sum() + (self.sigma - generated_sigma).pow(2).sum() + (self.mu - generated_mu).pow(2).sum()"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 40, y: 60, "font-size": 14, "font-weight": 700, fill: "var(--good)" }, "说明里的公式（正确）");
+        K.svg(svg, "text", { x: 40, y: 92, "font-size": 15, "font-family": "var(--mono)" }, "‖μx − μg‖² + Tr(Σx + Σg − 2(ΣxΣg)^½)");
+        K.svg(svg, "text", { x: 40, y: 160, "font-size": 14, "font-weight": 700, fill: "var(--bad)" }, "代码里实际算的");
+        const t1 = K.svg(svg, "text", { x: 40, y: 192, "font-size": 15, "font-family": "var(--mono)" }, "‖μx − μg‖² + ‖σx − σg‖² + ‖μx − μg‖²");
+        K.svg(svg, "text", { x: 40, y: 240, "font-size": 12, class: "muted" }, "σ 是每个特征的标准差（不是协方差矩阵），均值差算了两遍");
+        const hl = K.svg(svg, "rect", { x: 36, y: 172, width: 0, height: 28, fill: "var(--bad)", opacity: 0.15 });
+        ctx.tween(1500, (t) => K.set(hl, { width: 420 * t }));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：Lab ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 660, height: 320,
+    controls: [
+      { id: "L", label: "亮度 L", min: 0, max: 100, step: 1, value: 60 },
+      { id: "a", label: "a（负 = 绿，正 = 红）", min: -80, max: 80, step: 1, value: 40 },
+      { id: "b", label: "b（负 = 蓝，正 = 黄）", min: -80, max: 80, step: 1, value: 30 },
+      { id: "k", label: "风景图的颜色强度（ab 乘以几倍）", min: 0, max: 1.5, step: 0.05, value: 1, fmt: (v) => v.toFixed(2) + "×" },
+    ],
+    note: "左：用你选的 L、a、b 在浏览器里按 CIE Lab → sRGB 公式算出的颜色。中间色条：亮度固定为你选的 L，只改变 a（上排）或 b（下排）。右：示意风景图，L 不变，只把 ab 乘以一个系数：0× 就是黑白照片，1× 是原色。上色模型要做的，就是从黑白照片恢复右图的 ab。",
+    render(svg, v) {
+      const rgb = lab2rgb(v.L, v.a, v.b);
+      K.svg(svg, "rect", { x: 20, y: 20, width: 150, height: 150, rx: 8, fill: css(rgb), stroke: "var(--line)" });
+      K.svg(svg, "text", { x: 95, y: 192, "text-anchor": "middle", "font-size": 12 }, `RGB(${rgb.join(", ")})`);
+      for (let k = 0; k < 17; k++) { const a = -80 + k * 10; K.svg(svg, "rect", { x: 190 + k * 11, y: 30, width: 11, height: 50, fill: css(lab2rgb(v.L, a, v.b)) }); }
+      for (let k = 0; k < 17; k++) { const b = -80 + k * 10; K.svg(svg, "rect", { x: 190 + k * 11, y: 110, width: 11, height: 50, fill: css(lab2rgb(v.L, v.a, b)) }); }
+      K.svg(svg, "text", { x: 190, y: 98, "font-size": 11, class: "muted" }, "a：−80（绿）→ +80（红）");
+      K.svg(svg, "text", { x: 190, y: 178, "font-size": 11, class: "muted" }, "b：−80（蓝）→ +80（黄）");
+      K.svg(svg, "line", { x1: 190 + ((v.a + 80) / 10) * 11 + 5, x2: 190 + ((v.a + 80) / 10) * 11 + 5, y1: 26, y2: 84, stroke: "var(--ink)", "stroke-width": 2 });
+      K.svg(svg, "line", { x1: 190 + ((v.b + 80) / 10) * 11 + 5, x2: 190 + ((v.b + 80) / 10) * 11 + 5, y1: 106, y2: 164, stroke: "var(--ink)", "stroke-width": 2 });
+      drawLab(svg, 420, 20, 220, SCENE, "full", v.k);
+      K.svg(svg, "text", { x: 530, y: 262, "text-anchor": "middle", "font-size": 12 }, v.k === 0 ? "ab × 0 = 黑白照片" : `ab × ${v.k.toFixed(2)}`);
+      const chroma = Math.hypot(v.a, v.b);
+      return { readout: [
+        { k: "颜色鲜艳度 √(a²+b²)", v: chroma.toFixed(1) },
+        { k: "同样亮度的灰色", v: `RGB(${lab2rgb(v.L, 0, 0).join(", ")})`, color: "var(--ink-3)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：L1 / L2 / 按分布抽样 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 660, height: 340,
+    controls: [
+      { id: "red", label: "训练数据里红苹果的比例（其余是绿苹果）", min: 0, max: 100, step: 1, value: 55, fmt: (v) => v + "%" },
+      { id: "seed", label: "重新生成训练数据", button: true },
+    ],
+    note: "300 个“苹果”，亮度都约为 55（黑白照片上看不出区别），颜色有红（a≈+55, b≈+35）有绿（a≈−40, b≈+45）。只给亮度、要猜 ab：用梯度下降分别按 L1（绝对误差，和作者的生成器一样）、L2（平方误差）训练一个“猜一个固定颜色”的模型，并和“按训练数据的颜色分布随机抽一个”（条件 GAN 追求的效果）比较。L2 永远落在两团中间（灰褐色）；L1 选多数派，把 50% 附近拖来拖去，看它什么时候“跳边”、什么时候也落到中间。",
+    render(svg, v) {
+      const r = K.rng(77 + v.seed * 5), data = [];
+      for (let i = 0; i < 300; i++) { const red = r() * 100 < v.red; data.push(red ? [55 + K.randn(r) * 6, 35 + K.randn(r) * 6] : [-40 + K.randn(r) * 6, 45 + K.randn(r) * 6]); }
+      const fit = (kind) => { let a = 0, b = 0; for (let it = 0; it < 400; it++) { let ga = 0, gb = 0; data.forEach((d) => { if (kind === "l1") { ga += Math.sign(a - d[0]); gb += Math.sign(b - d[1]); } else { ga += 2 * (a - d[0]); gb += 2 * (b - d[1]); } }); const lr = kind === "l1" ? 0.6 * (1 - it / 400) + 0.02 : 0.004; a -= (lr * ga) / data.length * (kind === "l1" ? 10 : 100); b -= (lr * gb) / data.length * (kind === "l1" ? 10 : 100); } return [a, b]; };
+      const p1 = fit("l1"), p2 = fit("l2");
+      const draws = []; for (let k = 0; k < 6; k++) draws.push(data[Math.floor(r() * data.length)]);
+      const apple = (x, y, ab, lab) => { K.svg(svg, "circle", { cx: x, cy: y, r: 26, fill: css(lab2rgb(55, ab[0], ab[1])), stroke: "var(--line)" }); K.svg(svg, "path", { d: `M${x},${y - 26} q4,-12 12,-14`, fill: "none", stroke: "var(--ink-3)", "stroke-width": 2 }); if (lab) K.svg(svg, "text", { x, y: y + 44, "text-anchor": "middle", "font-size": 11 }, lab); };
+      K.svg(svg, "text", { x: 20, y: 24, "font-size": 13, "font-weight": 700 }, "输入（黑白）");
+      for (let k = 0; k < 3; k++) apple(60 + k * 66, 70, [0, 0]);
+      K.svg(svg, "text", { x: 260, y: 24, "font-size": 13, "font-weight": 700 }, "L1 训练的结果");
+      apple(300, 70, p1, `a=${p1[0].toFixed(0)}, b=${p1[1].toFixed(0)}`);
+      K.svg(svg, "text", { x: 400, y: 24, "font-size": 13, "font-weight": 700 }, "L2 训练的结果");
+      apple(440, 70, p2, `a=${p2[0].toFixed(0)}, b=${p2[1].toFixed(0)}`);
+      K.svg(svg, "text", { x: 20, y: 160, "font-size": 13, "font-weight": 700 }, "按真实颜色分布抽样（条件 GAN 想达到的效果）");
+      draws.forEach((d, k) => apple(60 + k * 70, 205, d));
+      // ab 平面散点
+      const ax = K.axes(svg, { x: 470, y: 150, w: 170, h: 170 }, [-80, 80], [-20, 80], { xticks: 2, yticks: 2, xlabel: "a" });
+      data.forEach((d) => K.svg(svg, "circle", { cx: ax.sx(d[0]), cy: ax.sy(d[1]), r: 1.8, fill: css(lab2rgb(55, d[0], d[1])), opacity: 0.8 }));
+      K.svg(svg, "circle", { cx: ax.sx(p1[0]), cy: ax.sy(p1[1]), r: 6, fill: "none", stroke: "var(--ink)", "stroke-width": 2 });
+      K.svg(svg, "rect", { x: ax.sx(p2[0]) - 5, y: ax.sy(p2[1]) - 5, width: 10, height: 10, fill: "none", stroke: "var(--ink)", "stroke-width": 2 });
+      K.svg(svg, "text", { x: 470, y: 146, "font-size": 11, class: "muted" }, "ab 平面：○ L1  □ L2");
+      const sat = (p) => Math.hypot(p[0], p[1]);
+      const avgSat = data.reduce((s, d) => s + sat(d), 0) / data.length;
+      return { readout: [
+        { k: "真实颜色的平均鲜艳度", v: avgSat.toFixed(0) },
+        { k: "L1 结果鲜艳度", v: sat(p1).toFixed(0), color: sat(p1) < avgSat * 0.7 ? "var(--bad)" : "var(--good)" },
+        { k: "L2 结果鲜艳度", v: sat(p2).toFixed(0), color: sat(p2) < avgSat * 0.7 ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

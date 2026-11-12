@@ -1,0 +1,667 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>脑肿瘤 MRI 识别</title>
+<meta name="description" content="Kaggle 案例拆解：只有两百多张脑部 MRI，先用 OpenCV 自动裁掉黑边，再借用 ImageNet 上训练好的 VGG16 做迁移学习，判断有没有肿瘤。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">医学影像 · 二分类 · 迁移学习</div>
+  <h1>脑肿瘤 MRI 识别：小数据靠裁剪和 VGG16 迁移学习</h1>
+  <p class="en">Brain Tumor Detection v1.0 || CNN, VGG-16</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">迁移学习</span><span class="tag method">VGG16（冻结主干）</span><span class="tag method">OpenCV 轮廓裁剪</span>
+    <span class="tag method">阈值 / 腐蚀 / 膨胀</span><span class="tag method">数据增强</span><span class="tag method">EarlyStopping</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Ruslan Klymentiev</b></span>
+    <span>Kaggle 点赞 <b>4,395</b>（2026-11 抓取）</span>
+    <span>数据集 <b>navoneel/brain-mri-images-for-brain-tumor-detection</b></span>
+    <span><a href="https://www.kaggle.com/code/ruslankl/brain-tumor-detection-v1-0-cnn-vgg-16" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">两百多张脑部 MRI 切片</div><p>分在 <code>yes</code>（有肿瘤）和 <code>no</code>（无肿瘤）两个文件夹。数据页统计共 253 张（yes 155、no 98）。作者提醒：数据说明里没有交代这些片子的来源。<span data-cell="1">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这张 MRI 里有没有肿瘤</div><p>二分类，NO 编码为 0，YES 编码为 1。作者用准确率（判对的图片数 / 总图片数）作为评价指标。<span data-cell="1">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">先自动裁黑边，再“借”VGG16</div><p>用 OpenCV 找出脑部最大轮廓、按四个极值点裁掉黑边；缩放到 224×224；数据增强；把在 ImageNet 上训练好的 VGG16 卷积部分冻结，只训练一个新加的输出层。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">验证集约 88%，测试集约 80%</div><p>作者在开头的结果表里写明。测试集只有 10 张图，每错 1 张就差 10 个百分点，这个数字的波动很大。<span data-cell="1">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>Brain MRI Images for Brain Tumor Detection</b>（作者 Navoneel Chakrabarty，发布在 Kaggle）。每张图是一张脑部 MRI 切片，按文件夹分成有肿瘤、无肿瘤两类。下面的数字来自数据集页面的文件统计和 notebook 代码。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">图片总数</div><div class="v">253</div></div>
+        <div class="stat-tile"><div class="k">类别数</div><div class="v">2</div></div>
+        <div class="stat-tile"><div class="k">有肿瘤 yes</div><div class="v" style="color:var(--c6)">155</div></div>
+        <div class="stat-tile"><div class="k">无肿瘤 no</div><div class="v" style="color:var(--c3)">98</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">张数来自数据集页面的文件夹统计。两个类别及编码见作者第 1 格 <span data-cell="1">出处</span>；图片宽高、黑边大小不一见第 15 格 <span data-cell="15">出处</span>；“数据说明没有交代来源”是作者原话 <span data-cell="1">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一项是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>项目</th><th>含义</th><th>类型</th></tr>
+        <tr><td>图片文件</td><td>一张脑部 MRI 切片（彩色读入，实际接近灰度），宽高不统一 <span data-cell="15">第 15 格</span></td><td>图像</td></tr>
+        <tr><td><code>yes</code> / <code>no</code> 文件夹</td><td><b>要预测的答案</b>：yes = 有肿瘤（编码 1），no = 无肿瘤（编码 0） <span data-cell="1">第 1 格</span></td><td>类别</td></tr>
+        <tr><td>TRAIN / VAL / TEST</td><td>作者自己切的：每类前 5 张做测试，其余按 80% 分界切训练、验证 <span data-cell="7">第 7 格</span>（推算约 193 / 50 / 10 张）</td><td>划分</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="22">
+    <h3>动手试试 A · 自动裁掉黑边：阈值和腐蚀次数怎么选 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="39">
+    <h3>动手试试 B · 冻结主干：到底要训练多少个参数 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>验证集准确率约 88%，测试集准确率约 80%（验证集用于调超参数，测试集全程不碰，只做最终评估）</td><td><span data-cell="1">第 1 格</span></td></tr>
+        <tr><td>图片宽高和黑边大小各不相同，直接缩放到 224×224 会变形，所以先把脑部裁出来</td><td><span data-cell="15">第 15 格</span> <span data-cell="17">第 17 格</span></td></tr>
+        <tr><td>数据集小，所以用数据增强“扩大”训练集</td><td><span data-cell="30">第 30 格</span></td></tr>
+        <tr><td>一张被误判的测试图中间有一块亮斑，作者认为能理解模型为什么判成“有肿瘤”</td><td><span data-cell="47">第 47 格</span></td></tr>
+        <tr><td>最终准确率远高于 50% 的随机猜测基线，增加训练图片或调超参数还能再提高</td><td><span data-cell="48">第 48 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">除了作者在第 1 格写的“约 88% / 约 80%”，训练曲线、混淆矩阵等具体数值都在运行输出里，Kaggle 下载的源码不带输出，这里不再列别的分数。</p>
+      <p class="callout">样本量：数据页统计 yes 155 张、no 98 张。按第 7 格的切分规则（每类前 5 张进测试集，其余按 80% 分界切训练/验证）推算：训练约 193 张、验证约 50 张、测试 10 张。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一张脑部 MRI 切片，输出“有肿瘤”的概率，超过 0.5 判为有。适合做阅片前的初筛或教学演示，不能替代医生诊断。</li>
+        <li><b>同类问题：</b>任何“样本只有几百张”的图像分类，如罕见病影像、工业缺陷样本、文物/标本照片分类。</li>
+        <li><b>可迁移的套路：</b>先用传统图像处理把目标区域裁干净（去掉无关背景）→ 统一尺寸并按预训练模型的方式预处理 → 冻结大模型的卷积部分，只训练一个小分类头 → 强增强 + 早停防止过拟合。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>切分数据：每类前 5 张为测试集，其余 80/20 切训练/验证 <span data-cell="7">第 7 格</span></li>
+        <li>裁剪：灰度、高斯模糊、阈值 45、腐蚀/膨胀各 2 次、最大轮廓与四个极值点 <span data-cell="18">第 18 格</span></li>
+        <li>预处理：缩放到 224×224，<code>vgg16.preprocess_input</code> <span data-cell="27">第 27 格</span></li>
+        <li>增强：旋转、平移、剪切、亮度、上下左右翻转 <span data-cell="36">第 36 格</span></li>
+        <li>模型：VGG16（ImageNet 权重、去掉顶层、冻结）+ Flatten + Dropout(0.5) + Dense(1, sigmoid) <span data-cell="39">第 39 格</span></li>
+        <li>训练：RMSprop(lr=1e-4)，EarlyStopping(patience=6)，最多 30 轮 <span data-cell="40">第 40 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>测试集只有 10 张图。“测试准确率约 80%”大概意味着错了几张？如果换一批 10 张，这个数可能落在什么范围？你会怎么设计更可靠的评估（例如交叉验证）？</li>
+      <li>第 46 格展示测试集错例时，标题里写的是 <code>y_val[i]</code> 而不是 <code>y_test[i]</code>。这会造成什么问题？读别人的代码时怎样发现这类错误？</li>
+      <li>增强里打开了 <code>vertical_flip=True</code>（上下翻转）。对脑部 MRI 来说，上下颠倒的图在真实世界会出现吗？哪些增强对医学影像是“安全”的？</li>
+      <li>VGG16 是在 ImageNet（猫、狗、汽车……）上训练的，为什么它学到的特征对 MRI 也有用？如果主干完全冻结效果不好，下一步可以解冻哪几层？</li>
+      <li>阈值 45 是作者手工定的。如果换一台扫描仪，图片整体变暗或变亮，这个裁剪流程会出什么问题？（可以用实验 A 试试）</li>
+      <li>作者自己写了“数据说明里没有任何关于来源的信息”。来源不明的医学数据，训练出来的模型可以用在临床吗？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Ruslan Klymentiev，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：Navoneel Chakrabarty, Brain MRI Images for Brain Tumor Detection。裁剪方法参考了 PyImageSearch 关于轮廓极值点的教程（作者在第 17 格注明）。
+</footer>
+</main>
+
+<script src="nb/brain-tumor-vgg16.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* ===== 页面专用：像素图工具（用代码生成小图并在浏览器里真算卷积、池化、仿射变换） ===== */
+  const PX = (function () {
+    function rgbOf(name, fb) {
+      let s = (K.css(name) || fb || "#888888").trim();
+      if (s[0] !== "#") return [128, 128, 128];
+      if (s.length === 4) s = "#" + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+      return [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
+    }
+    function grid(W, H, f) { const a = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) a[y * W + x] = f(x, y); return { W, H, a }; }
+    function at(m, x, y) { return m.a[y * m.W + x]; }
+    function atClamp(m, x, y) { x = x < 0 ? 0 : x >= m.W ? m.W - 1 : x; y = y < 0 ? 0 : y >= m.H ? m.H - 1 : y; return m.a[y * m.W + x]; }
+    function atZero(m, x, y) { return x < 0 || y < 0 || x >= m.W || y >= m.H ? 0 : m.a[y * m.W + x]; }
+    /* Keras padding='same'：边界外按 0 补 */
+    function conv(m, k) { const n = k.length, r = (n - 1) / 2; return grid(m.W, m.H, (x, y) => { let s = 0; for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) s += k[j][i] * atZero(m, x + i - r, y + j - r); return s; }); }
+    function map(m, f) { const o = { W: m.W, H: m.H, a: new Float32Array(m.a.length) }; for (let i = 0; i < m.a.length; i++) o.a[i] = f(m.a[i], i); return o; }
+    const relu = (m) => map(m, (v) => (v > 0 ? v : 0));
+    function pool(m, s) { s = s || 2; const W = Math.ceil(m.W / s), H = Math.ceil(m.H / s); return grid(W, H, (x, y) => { let b = -Infinity; for (let j = 0; j < s; j++) for (let i = 0; i < s; i++) { const xx = x * s + i, yy = y * s + j; if (xx < m.W && yy < m.H) b = Math.max(b, at(m, xx, yy)); } return b; }); }
+    function range(m) { let lo = Infinity, hi = -Infinity; for (const v of m.a) { if (v < lo) lo = v; if (v > hi) hi = v; } return [lo, hi]; }
+    function bilinear(m, x, y) {
+      const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+      return (atClamp(m, x0, y0) * (1 - fx) + atClamp(m, x0 + 1, y0) * fx) * (1 - fy) + (atClamp(m, x0, y0 + 1) * (1 - fx) + atClamp(m, x0 + 1, y0 + 1) * fx) * fy;
+    }
+    /* 类似 Keras ImageDataGenerator：绕中心旋转/剪切/缩放/平移/翻转，边界外用最近像素填充（fill_mode='nearest'） */
+    function affine(m, p) {
+      const th = ((p.rot || 0) * Math.PI) / 180, c = Math.cos(th), s = Math.sin(th), sh = p.shear || 0, z = p.zoom || 1;
+      const cx = (m.W - 1) / 2, cy = (m.H - 1) / 2, tx = (p.tx || 0) * m.W, ty = (p.ty || 0) * m.H;
+      return grid(m.W, m.H, (x, y) => {
+        let u = x - cx - tx, v = y - cy - ty;
+        if (p.flip) u = -u;
+        if (p.vflip) v = -v;
+        let a = c * u + s * v, b = -s * u + c * v;
+        a = a - sh * b;
+        return bilinear(m, a / z + cx, b / z + cy) * (p.bright == null ? 1 : p.bright);
+      });
+    }
+    function toURL(m, mode, lo, hi) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      const P = rgbOf("--panel", "#ffffff"), A = rgbOf("--c1"), B = rgbOf("--c2");
+      if (lo == null || hi == null) { const r = range(m); if (lo == null) lo = r[0]; if (hi == null) hi = r[1]; }
+      const span = hi - lo || 1, amax = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+      for (let i = 0; i < m.a.length; i++) {
+        const v = m.a[i]; let r, gg, b;
+        if (mode === "div") { const t = Math.max(-1, Math.min(1, v / amax)), C = t >= 0 ? B : A, k = Math.abs(t); r = P[0] + (C[0] - P[0]) * k; gg = P[1] + (C[1] - P[1]) * k; b = P[2] + (C[2] - P[2]) * k; }
+        else if (mode === "heat") { const k = Math.max(0, Math.min(1, (v - lo) / span)); r = P[0] + (A[0] - P[0]) * k; gg = P[1] + (A[1] - P[1]) * k; b = P[2] + (A[2] - P[2]) * k; }
+        else { const k = Math.max(0, Math.min(1, (v - lo) / span)) * 255; r = gg = b = k; }
+        d[i * 4] = r; d[i * 4 + 1] = gg; d[i * 4 + 2] = b; d[i * 4 + 3] = 255;
+      }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    /* 彩色图：m 为 {W,H,rgb:[Float32Array*3]}，取值 0–1 */
+    function rgbURL(m) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      for (let i = 0; i < m.W * m.H; i++) { for (let c = 0; c < 3; c++) d[i * 4 + c] = Math.max(0, Math.min(1, m.rgb[c][i])) * 255; d[i * 4 + 3] = 255; }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    function draw(svg, x, y, w, h, m, mode, lo, hi) {
+      const e = K.svg(svg, "image", { x, y, width: w, height: h, preserveAspectRatio: "none" });
+      e.style.imageRendering = "pixelated";
+      e.setAttribute("href", m.rgb ? rgbURL(m) : toURL(m, mode, lo, hi));
+      K.svg(svg, "rect", { x, y, width: w, height: h, fill: "none", stroke: "var(--line)" });
+      return e;
+    }
+    function update(e, m, mode, lo, hi) { e.setAttribute("href", m.rgb ? rgbURL(m) : toURL(m, mode, lo, hi)); }
+    function lines(svg, x, y, w, h, W, H, op) {
+      const g = K.svg(svg, "g");
+      for (let i = 0; i <= W; i++) K.svg(g, "line", { x1: x + (w * i) / W, x2: x + (w * i) / W, y1: y, y2: y + h, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      for (let j = 0; j <= H; j++) K.svg(g, "line", { y1: y + (h * j) / H, y2: y + (h * j) / H, x1: x, x2: x + w, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      return g;
+    }
+    const smooth = (e0, e1, x) => { const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+    const blob = (x, y, cx, cy, sx, sy) => Math.exp(-(((x - cx) * (x - cx)) / (2 * sx * sx) + ((y - cy) * (y - cy)) / (2 * sy * sy)));
+    return { grid, at, atClamp, conv, map, relu, pool, range, bilinear, affine, toURL, rgbURL, draw, update, lines, smooth, blob, rgbOf };
+  })();
+
+  /* ---------- 代码生成的“MRI 切片”：黑背景 + 椭圆脑组织（颅骨亮环、脑回纹理、脑室）+ 可选肿瘤亮斑 + 可选角落噪点/文字标记 ---------- */
+  function mri(W, H, o) {
+    o = o || {};
+    const r = K.rng(o.seed || 1);
+    const cx = 0.5 + (o.ox || 0), cy = 0.5 + (o.oy || 0), rx = o.rx || 0.36, ry = o.ry || 0.4;
+    const tx = cx + (o.tdx == null ? 0.12 : o.tdx) * rx * 2, ty = cy + (o.tdy == null ? -0.1 : o.tdy) * ry * 2;
+    const specks = [];
+    for (let i = 0; i < (o.specks || 0); i++) { const cxr = r() < 0.5 ? r() * 0.12 + 0.02 : 0.86 + r() * 0.12, cyr = r() * 0.96 + 0.02; specks.push([cxr, cyr]); }
+    const noise = Array.from({ length: W * H }, () => (r() - 0.5) * 0.06);
+    return PX.grid(W, H, (px, py) => {
+      const x = (px + 0.5) / W, y = (py + 0.5) / H, nz = noise[py * W + px];
+      const dx = (x - cx) / rx, dy = (y - cy) / ry, d = Math.sqrt(dx * dx + dy * dy);
+      let v = 0.02;
+      if (d < 1.02) {
+        const inner = 1 - PX.smooth(0.84, 0.9, d);
+        v = 0.38 + 0.1 * Math.sin(dx * 11 + 1.6 * Math.sin(dy * 9)) * Math.cos(dy * 10 + dx * 2);
+        v -= 0.28 * (PX.blob(x, y, cx - 0.05, cy, 0.03, 0.08) + PX.blob(x, y, cx + 0.05, cy, 0.03, 0.08));
+        v = v * inner + (1 - inner) * 0.08;
+        v += 0.62 * Math.exp(-((d - 0.95) ** 2) / (2 * 0.03 ** 2));
+        v *= 1 - PX.smooth(0.98, 1.02, d);
+        if (o.tumor) v += 0.55 * PX.blob(x, y, tx, ty, 0.055, 0.05);
+        if (o.spot) v += 0.4 * PX.blob(x, y, cx + 0.02, cy + 0.02, 0.03, 0.03);
+      }
+      for (const s of specks) if (Math.abs(x - s[0]) < 0.6 / W + 0.004 && Math.abs(y - s[1]) < 0.6 / H + 0.004) v = 0.75;
+      if (o.label && x > 0.03 && x < 0.24 && y > 0.04 && y < 0.1 && (Math.floor(x * W) % 3) !== 2) v = 0.8;
+      return K.clamp(v + nz, 0, 1);
+    });
+  }
+
+  /* ---------- 作者第 18 格的裁剪流程，在浏览器里逐步实现 ---------- */
+  const G5 = (() => { const b = [1, 4, 6, 4, 1]; return b.map((u) => b.map((w) => (u * w) / 256)); })();
+  const blur = (m) => PX.conv(m, G5);
+  const thresh = (m, t) => PX.map(m, (v) => (v * 255 > t ? 1 : 0));
+  /* cv2.erode / dilate，核为 3×3 方块；图外的像素不参与 */
+  function morph(m, it, isErode) {
+    let cur = m;
+    for (let k = 0; k < it; k++) {
+      const src = cur;
+      cur = PX.grid(src.W, src.H, (x, y) => {
+        let b = isErode ? 1 : 0;
+        for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) {
+          const xx = x + i, yy = y + j;
+          if (xx < 0 || yy < 0 || xx >= src.W || yy >= src.H) continue;
+          const v = PX.at(src, xx, yy);
+          b = isErode ? Math.min(b, v) : Math.max(b, v);
+        }
+        return b;
+      });
+    }
+    return cur;
+  }
+  /* 8 连通区域标记，返回最大区域的掩码、区域个数 */
+  function largest(m) {
+    const W = m.W, H = m.H, lab = new Int32Array(W * H), sizes = [0];
+    let n = 0;
+    for (let s = 0; s < W * H; s++) {
+      if (!m.a[s] || lab[s]) continue;
+      n++; let cnt = 0; const st = [s]; lab[s] = n;
+      while (st.length) {
+        const p = st.pop(); cnt++;
+        const x = p % W, y = (p - x) / W;
+        for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) {
+          const xx = x + i, yy = y + j;
+          if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+          const q = yy * W + xx;
+          if (m.a[q] && !lab[q]) { lab[q] = n; st.push(q); }
+        }
+      }
+      sizes.push(cnt);
+    }
+    let bi = 0; for (let k = 1; k <= n; k++) if (sizes[k] > sizes[bi]) bi = k;
+    const mask = PX.grid(W, H, (x, y) => (bi && lab[y * W + x] === bi ? 1 : 0));
+    return { mask, count: n, area: sizes[bi] || 0 };
+  }
+  /* 四个极值点：最左、最右、最上、最下（和 argmin/argmax 一样取第一个） */
+  function extremes(mask) {
+    let L = null, R = null, T = null, B = null;
+    for (let y = 0; y < mask.H; y++) for (let x = 0; x < mask.W; x++) {
+      if (!PX.at(mask, x, y)) continue;
+      if (!L || x < L[0]) L = [x, y];
+      if (!R || x > R[0]) R = [x, y];
+      if (!T) T = [x, y];
+      B = [x, y];
+    }
+    return L ? { L, R, T, B } : null;
+  }
+  /* 只画外轮廓（和 RETR_EXTERNAL 一样）：先从图边缘把“外部背景”填出来，内部的洞不算 */
+  function boundary(mask) {
+    const W = mask.W, H = mask.H, ext = new Uint8Array(W * H), st = [];
+    for (let x = 0; x < W; x++) for (const y of [0, H - 1]) if (!PX.at(mask, x, y)) st.push(y * W + x);
+    for (let y = 0; y < H; y++) for (const x of [0, W - 1]) if (!PX.at(mask, x, y)) st.push(y * W + x);
+    st.forEach((p) => (ext[p] = 1));
+    while (st.length) { const p = st.pop(), x = p % W, y = (p - x) / W; for (const [i, j] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const xx = x + i, yy = y + j; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue; const q = yy * W + xx; if (!ext[q] && !mask.a[q]) { ext[q] = 1; st.push(q); } } }
+    return PX.grid(W, H, (x, y) => { if (!PX.at(mask, x, y)) return 0; for (const [i, j] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const xx = x + i, yy = y + j; if (xx < 0 || yy < 0 || xx >= W || yy >= H || ext[yy * W + xx]) return 1; } return 0; });
+  }
+  function crop(m, e) { const x0 = e.L[0], x1 = e.R[0], y0 = e.T[1], y1 = e.B[1]; const W = Math.max(1, x1 - x0), H = Math.max(1, y1 - y0); return PX.grid(W, H, (x, y) => PX.at(m, x0 + x, y0 + y)); }
+  function runCrop(img, t, it) {
+    const b = blur(img), th = thresh(b, t), er = morph(th, it, true), di = morph(er, it, false), lg = largest(di), ex = extremes(lg.mask);
+    return { b, th, er, di, lg, ex, out: ex ? crop(img, ex) : null };
+  }
+  /* 把灰度图和轮廓叠成彩色图 */
+  function overlay(img, edge) {
+    const W = img.W, H = img.H, c = PX.rgbOf("--warn"), rgb = [0, 1, 2].map(() => new Float32Array(W * H));
+    for (let i = 0; i < W * H; i++) for (let k = 0; k < 3; k++) rgb[k][i] = edge && edge.a[i] ? c[k] / 255 : img.a[i];
+    return { W, H, rgb };
+  }
+  /* 在 (x,y,w,h) 框里按原比例画一张图 */
+  function fit(svg, x, y, w, h, m, mode) {
+    const s = Math.min(w / m.W, h / m.H), ww = m.W * s, hh = m.H * s;
+    return { el: PX.draw(svg, x + (w - ww) / 2, y + (h - hh) / 2, ww, hh, m, mode || "gray", 0, 1), x: x + (w - ww) / 2, y: y + (h - hh) / 2, s };
+  }
+  const EXC = ["var(--c1)", "var(--c3)", "var(--c6)", "var(--c5)"];
+
+  const IMG_NO = mri(64, 64, { seed: 2 }), IMG_YES = mri(64, 64, { seed: 3, tumor: true });
+
+  const steps = [
+    {
+      title: "目标：MRI 里有没有肿瘤", kicker: "第 0–4 格 · 背景与环境", at: 0, notes: { 3: "安装 imutils 小工具包，后面找轮廓时要用。", 4: "导入要用的库：OpenCV（cv2）处理图片，Keras 搭模型。" },
+      html: `<p>作者的目标是搭一个 CNN，根据脑部 MRI 判断<b>有没有肿瘤</b>。数据分两类：<code>NO</code>（无肿瘤，编码 0）和 <code>YES</code>（有肿瘤，编码 1）。</p><p>评价指标是准确率。作者在开头就把结果写在表里：验证集约 88%，测试集约 80%。他也坦白，数据说明里没有交代这些片子来自哪里。</p>`,
+      cells: [1],
+      draw(svg, ctx) {
+        const a = PX.draw(svg, 90, 30, 230, 230, IMG_NO, "gray", 0, 1), b = PX.draw(svg, 400, 30, 230, 230, IMG_YES, "gray", 0, 1);
+        K.svg(svg, "text", { x: 205, y: 290, "text-anchor": "middle", "font-size": 15, "font-weight": 700 }, "NO 无肿瘤 → 0");
+        K.svg(svg, "text", { x: 515, y: 290, "text-anchor": "middle", "font-size": 15, "font-weight": 700, fill: "var(--c6)" }, "YES 有肿瘤 → 1");
+        K.svg(svg, "text", { x: 360, y: 322, "text-anchor": "middle", "font-size": 12, class: "muted" }, "示意图：代码生成，不是真实病例。右图多了一块亮的占位");
+        const ring = K.svg(svg, "circle", { cx: 400 + (0.5 + 0.12 * 0.72) * 230, cy: 30 + (0.5 - 0.1 * 0.8) * 230, r: 0, fill: "none", stroke: "var(--c6)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+        a.style.opacity = b.style.opacity = 0;
+        ctx.tween(600, (t) => (a.style.opacity = t)).then((ok) => ok && ctx.tween(600, (t) => (b.style.opacity = t))).then((ok) => ok && ctx.tween(700, (t) => ring.setAttribute("r", 26 * t)));
+      },
+    },
+    {
+      title: "按文件夹切出训练 / 验证 / 测试", kicker: "第 5–10 格 · 切分与读入数据", at: 5, notes: { 6: "用命令行建好 TRAIN / TEST / VAL 三组文件夹。", 9: "load_data 把文件夹里的图读成数组；后面还定义了画混淆矩阵的函数。" },
+      html: `<p>原始数据只有 <code>yes</code>、<code>no</code> 两个文件夹。作者遍历每一类：<b>前 5 张</b>复制到 TEST，序号小于该类总数 80% 的放 TRAIN，其余放 VAL。</p><p>按数据页的 155 / 98 张推算，大约是训练 193、验证 50、测试 10 张。测试集非常小，后面“测试准确率”每差一张就是 10 个百分点。</p>`,
+      cells: [7], highlight: ["n < 5", "0.8*IMG_NUM"],
+      draw(svg, ctx) {
+        const yes = 155, no = 98, dots = [];
+        const home = (k, isYes) => [40 + (k % 16) * 11, (isYes ? 40 : 200) + Math.floor(k / 16) * 11];
+        const bins = { TEST: [300, 40, 120], TRAIN: [300, 120, 400], VAL: [300, 250, 400] };
+        const counters = {}, cnt = { TEST: [0, 0], TRAIN: [0, 0], VAL: [0, 0] };
+        Object.entries(bins).forEach(([k, b]) => { K.svg(svg, "rect", { x: b[0], y: b[1], width: b[2], height: k === "TEST" ? 56 : 90, rx: 8, fill: "var(--panel-2)", stroke: "var(--line)" }); counters[k] = K.svg(svg, "text", { x: b[0] + 8, y: b[1] + 18, "font-size": 13, "font-weight": 700 }, k); });
+        K.svg(svg, "text", { x: 40, y: 30, "font-size": 13, "font-weight": 700, fill: "var(--c6)" }, "yes 155 张");
+        K.svg(svg, "text", { x: 40, y: 190, "font-size": 13, "font-weight": 700, fill: "var(--c3)" }, "no 98 张");
+        [[yes, true], [no, false]].forEach(([N, isYes]) => {
+          for (let n = 0; n < N; n++) {
+            const dest = n < 5 ? "TEST" : n < 0.8 * N ? "TRAIN" : "VAL";
+            const h = home(n, isYes);
+            dots.push({ dest, isYes, h, e: K.svg(svg, "circle", { cx: h[0], cy: h[1], r: 3.6, fill: isYes ? "var(--c6)" : "var(--c3)" }) });
+          }
+        });
+        dots.forEach((d) => { const c = cnt[d.dest]; const k = c[0] + c[1]; c[d.isYes ? 0 : 1]++; const b = bins[d.dest]; d.t = [b[0] + 12 + (k % (d.dest === "TEST" ? 10 : 36)) * 10.5, b[1] + 32 + Math.floor(k / (d.dest === "TEST" ? 10 : 36)) * 10]; });
+        K.svg(svg, "text", { x: 40, y: 330, "font-size": 12, class: "muted" }, "每个点 = 1 张图；总数来自数据页统计，切分份数按第 7 格规则推算");
+        ctx.wait(500).then((ok) => ok && ctx.tween(2200, (t) => dots.forEach((d, i) => { const u = K.clamp(t * 1.6 - (i / dots.length) * 0.6, 0, 1); K.set(d.e, { cx: K.lerp(d.h[0], d.t[0], u), cy: K.lerp(d.h[1], d.t[1], u) }); })))
+          .then((ok) => { if (ok) Object.keys(bins).forEach((k) => (counters[k].textContent = `${k}：yes ${cnt[k][0]} + no ${cnt[k][1]} = ${cnt[k][0] + cnt[k][1]}`)); });
+      },
+    },
+    {
+      title: "图片宽高不一，黑边有大有小", kicker: "第 11–16 格 · 探索", at: 11,
+      html: `<p>作者把样本画出来后发现：图片的<b>宽度、高度都不一样</b>，四周“黑角”的大小也不一样。VGG16 的输入要求 224×224，宽图直接缩放会被压扁。</p><p>他还画了宽高比（宽/高）的直方图来确认这个问题。结论是：缩放之前，先把真正的脑部区域裁出来。</p>`,
+      cells: [15, 16], highlight: ["RATIO_LIST.append(img.shape[1]/img.shape[0])"],
+      draw(svg, ctx) {
+        const imgs = [mri(80, 56, { seed: 4, rx: 0.3, ry: 0.36 }), mri(52, 72, { seed: 5, rx: 0.38, ry: 0.3, oy: 0.05 }), mri(64, 64, { seed: 6, rx: 0.26, ry: 0.3, tumor: true })];
+        const els = imgs.map((m, i) => { const w = m.W * 2.3, h = m.H * 2.3; return { m, w, h, x0: 30 + i * 200, el: PX.draw(svg, 30 + i * 200, 40, w, h, m, "gray", 0, 1) }; });
+        const frames = Array.from(svg.querySelectorAll("rect"));
+        els.forEach((e, i) => K.svg(svg, "text", { x: e.x0, y: 30, "font-size": 12, class: "muted" }, `宽/高 = ${(e.m.W / e.m.H).toFixed(2)}`));
+        const lab = K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 13, fill: "var(--warn)", "font-weight": 700 }, "");
+        ctx.wait(1000).then((ok) => { if (ok) lab.textContent = "直接缩放成正方形：宽图被压扁，脑子在画面里的比例也不同"; return ok && ctx.tween(1400, (t) => els.forEach((e, i) => { const w = K.lerp(e.w, 160, t), h = K.lerp(e.h, 160, t); K.set(e.el, { width: w, height: h }); K.set(frames[i], { width: w, height: h }); })); });
+      },
+    },
+    {
+      title: "灰度 → 高斯模糊 → 阈值 45", kicker: "第 17–18 格 · 裁剪①", at: 17,
+      html: `<p>裁剪的第一步是把“脑”和“背景”分开：转成灰度，用 5×5 的<b>高斯模糊</b>抹掉细小噪点，再做<b>二值化</b>：亮度大于 45（满分 255）的像素记为白（255），其余记为黑（0）。</p><p>背景几乎是纯黑，所以这个低阈值就能把整个脑部区域圈出来。</p>`,
+      cells: [18], highlight: ["cv2.GaussianBlur(gray, (5, 5), 0)", "cv2.threshold(gray, 45, 255, cv2.THRESH_BINARY)"],
+      draw(svg, ctx) {
+        const img = mri(64, 64, { seed: 7, specks: 10, ox: 0.04 }), R = runCrop(img, 45, 2);
+        const a = PX.draw(svg, 30, 50, 200, 200, img, "gray", 0, 1), b = PX.draw(svg, 260, 50, 200, 200, R.b, "gray", 0, 1), c = PX.draw(svg, 490, 50, 200, 200, R.th, "gray", 0, 1);
+        [["原图（灰度）", 130], ["高斯模糊 5×5", 360], ["阈值 45 → 黑白", 590]].forEach((d) => K.svg(svg, "text", { x: d[1], y: 38, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, d[0]));
+        K.svg(svg, "text", { x: 360, y: 290, "text-anchor": "middle", "font-size": 12, class: "muted" }, "注意右图角落里残留的小白点：这是噪点，下一步要去掉");
+        b.style.opacity = c.style.opacity = 0;
+        ctx.wait(500).then((ok) => ok && ctx.tween(700, (t) => (b.style.opacity = t))).then((ok) => ok && ctx.tween(700, (t) => (c.style.opacity = t)));
+      },
+    },
+    {
+      title: "腐蚀 2 次、膨胀 2 次：去掉小噪点", kicker: "第 19–20 格 · 裁剪②",
+      html: `<p><b>腐蚀</b>（erode）：一个白像素只要 3×3 邻域里有黑的，就变黑。小白点、细线会整个消失，大块区域只是边缘缩一圈。</p><p><b>膨胀</b>（dilate）：反过来，邻域里有白的就变白，把大块区域的边缘长回来。先腐蚀再膨胀（形态学“开运算”）的效果是：<b>小噪点没了，脑部形状基本不变</b>。</p>`,
+      cells: [20], highlight: ["cv2.erode(thresh, None, iterations=2)", "cv2.dilate(thresh, None, iterations=2)"],
+      draw(svg, ctx) {
+        const img = mri(64, 64, { seed: 7, specks: 10, ox: 0.04 }), th = thresh(blur(img), 45);
+        const frames = [["阈值结果", th], ["腐蚀 1 次", morph(th, 1, true)], ["腐蚀 2 次", morph(th, 2, true)], ["再膨胀 1 次", morph(morph(th, 2, true), 1, false)], ["膨胀 2 次（完成）", morph(morph(th, 2, true), 2, false)]];
+        const el = PX.draw(svg, 220, 40, 250, 250, th, "gray", 0, 1);
+        const lab = K.svg(svg, "text", { x: 345, y: 318, "text-anchor": "middle", "font-size": 15, "font-weight": 700, fill: "var(--accent)" }, "阈值结果");
+        const cnt = K.svg(svg, "text", { x: 500, y: 160, "font-size": 13 }, "");
+        K.svg(svg, "text", { x: 30, y: 120, "font-size": 13, "font-weight": 700 }, "3×3 结构元素");
+        for (let j = 0; j < 3; j++) for (let i = 0; i < 3; i++) K.svg(svg, "rect", { x: 40 + i * 26, y: 132 + j * 26, width: 24, height: 24, rx: 3, fill: "color-mix(in srgb, var(--accent) 35%, var(--panel))", stroke: "var(--accent)" });
+        K.svg(svg, "text", { x: 30, y: 230, "font-size": 12, class: "muted" }, "腐蚀：取 9 格最小值");
+        K.svg(svg, "text", { x: 30, y: 250, "font-size": 12, class: "muted" }, "膨胀：取 9 格最大值");
+        (async () => {
+          for (const [name, m] of frames) {
+            PX.update(el, m, "gray", 0, 1); lab.textContent = name;
+            cnt.textContent = `白色连通块：${largest(m).count} 个`;
+            if (!(await ctx.wait(1100))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "最大轮廓 + 四个极值点 → 裁剪", kicker: "第 21–25 格 · 裁剪③", notes: { 24: "把裁好的图存回硬盘，后面用生成器按文件夹读取。" },
+      html: `<p><code>cv2.findContours</code> 找出所有白色区域的外轮廓，取<b>面积最大</b>的那个（就是脑部）。再找轮廓上最左、最右、最上、最下四个<b>极值点</b>，用它们围成的矩形把原图裁出来。</p><p>裁剪函数 <code>crop_imgs</code> 定义在<span data-cell="18">第 18 格</span>。作者在第 21 格把这四步画成了一排图：原图 → 最大轮廓 → 极值点 → 裁剪结果。之后对训练、验证、测试集统一执行。</p>`,
+      cells: [21, 22], highlight: ["max(cnts, key=cv2.contourArea)", "extLeft", "extRight", "extTop", "extBot"],
+      draw(svg, ctx) {
+        const img = mri(64, 64, { seed: 8, ox: 0.06, oy: 0.04, rx: 0.3, ry: 0.36, tumor: true }), R = runCrop(img, 45, 2);
+        const S = 240 / 64, x0 = 30, y0 = 40;
+        const base = PX.draw(svg, x0, y0, 240, 240, img, "gray", 0, 1);
+        const edge = boundary(R.lg.mask);
+        K.svg(svg, "text", { x: x0 + 120, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "原图上找轮廓与极值点");
+        const names = [["L", "最左"], ["R", "最右"], ["T", "最上"], ["B", "最下"]];
+        const pts = names.map(([k], i) => K.svg(svg, "circle", { cx: x0 + (R.ex[k][0] + 0.5) * S, cy: y0 + (R.ex[k][1] + 0.5) * S, r: 0, fill: EXC[i], stroke: "var(--panel)", "stroke-width": 1.5 }));
+        const box = K.svg(svg, "rect", { x: x0 + R.ex.L[0] * S, y: y0 + R.ex.T[1] * S, width: (R.ex.R[0] - R.ex.L[0]) * S, height: (R.ex.B[1] - R.ex.T[1]) * S, fill: "none", stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        box.style.opacity = 0;
+        const out = fit(svg, 420, 50, 240, 230, R.out, "gray"); out.el.style.opacity = 0;
+        const lab = K.svg(svg, "text", { x: 540, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "");
+        const lg = K.svg(svg, "text", { x: 30, y: 316, "font-size": 12, class: "muted" }, "");
+        const ar = K.arrow(svg, 285, 160, 405, 160); ar.style.opacity = 0;
+        (async () => {
+          if (!(await ctx.wait(500))) return;
+          PX.update(base, overlay(img, edge)); lg.textContent = "黄线 = 面积最大的轮廓";
+          if (!(await ctx.wait(600))) return;
+          for (let i = 0; i < 4; i++) { if (!(await ctx.tween(300, (t) => pts[i].setAttribute("r", 6 * t)))) return; }
+          lg.textContent = "蓝/绿/红/黄点 = 最左 / 最右 / 最上 / 最下";
+          if (!(await ctx.tween(500, (t) => (box.style.opacity = t)))) return;
+          if (!(await ctx.tween(400, (t) => (ar.style.opacity = t)))) return;
+          lab.textContent = `裁剪结果 ${R.out.W}×${R.out.H}（原图 64×64）`;
+          await ctx.tween(600, (t) => (out.el.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "缩放到 224×224，按 VGG16 的方式预处理", kicker: "第 26–29 格 · 预处理", at: 26,
+      html: `<p>裁好的图用三次插值（<code>INTER_CUBIC</code>）缩放到 VGG16 要求的 <b>224×224</b>，再调用 <code>vgg16.preprocess_input</code>。</p><p>这个函数做的是 VGG16 训练时用过的同一套处理：把 RGB 通道顺序换成 BGR，再<b>减去 ImageNet 数据集的每通道均值</b>（B 103.939、G 116.779、R 123.68），不除以 255。用预训练模型，就要把输入弄得和它当年“见过”的一样。</p>`,
+      cells: [27], highlight: ["preprocess_input(img)", "cv2.INTER_CUBIC"],
+      draw(svg, ctx) {
+        const R = runCrop(mri(64, 64, { seed: 8, ox: 0.06, oy: 0.04, rx: 0.3, ry: 0.36, tumor: true }), 45, 2);
+        const f = fit(svg, 30, 70, 150, 150, R.out, "gray");
+        const fr = svg.querySelectorAll("rect")[0];
+        K.svg(svg, "text", { x: 105, y: 50, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "裁剪后（比例不一）");
+        const sq = K.svg(svg, "text", { x: 105, y: 260, "text-anchor": "middle", "font-size": 13, fill: "var(--accent)", "font-weight": 700 }, "");
+        const px = [90, 132, 140], mean = [103.939, 116.779, 123.68];
+        const ax = K.axes(svg, { x: 300, y: 60, w: 380, h: 200 }, [0, 3], [-60, 180], { xticks: 0, yticks: 4, yfmt: (v) => Math.round(v) });
+        K.svg(svg, "text", { x: 490, y: 40, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "某个像素的三个通道值（示意）");
+        const names = ["B", "G", "R"], cols = ["var(--c1)", "var(--c3)", "var(--c6)"];
+        const bars = names.map((n, i) => { K.svg(svg, "text", { x: ax.sx(i + 0.5), y: 300, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: cols[i] }, n); return { r: K.svg(svg, "rect", { x: ax.sx(i + 0.25), y: ax.sy(0), width: ax.sx(0.5) - ax.sx(0), height: 0, fill: cols[i], rx: 3 }), t: K.svg(svg, "text", { x: ax.sx(i + 0.5), y: ax.sy(0), "text-anchor": "middle", "font-size": 12, "font-family": "var(--mono)" }, "") }; });
+        const setv = (vals) => bars.forEach((b, i) => { const v = vals[i], y0 = ax.sy(0), y1 = ax.sy(v); K.set(b.r, { y: Math.min(y0, y1), height: Math.abs(y1 - y0) }); K.set(b.t, { y: v >= 0 ? y1 - 5 : y1 + 15 }); b.t.textContent = v.toFixed(1); });
+        const cap = K.svg(svg, "text", { x: 490, y: 325, "text-anchor": "middle", "font-size": 12, class: "muted" }, "原始像素（BGR 顺序）");
+        setv(px);
+        ctx.tween(900, (t) => { const w = K.lerp(f.el.getAttribute("width") * 1, 150, t), h = K.lerp(f.el.getAttribute("height") * 1, 150, t); K.set(f.el, { x: K.lerp(f.x, 30, t), y: K.lerp(f.y, 70, t), width: w, height: h }); K.set(fr, { x: K.lerp(f.x, 30, t), y: K.lerp(f.y, 70, t), width: w, height: h }); })
+          .then((ok) => { if (ok) sq.textContent = "→ 224×224"; return ok && ctx.wait(700); })
+          .then((ok) => ok && ctx.tween(1500, (t) => { setv(px.map((v, i) => v - mean[i] * t)); cap.textContent = t < 1 ? "减去 ImageNet 均值……" : "减去均值后：有正有负，以 0 为中心"; }));
+      },
+    },
+    {
+      title: "数据增强：旋转、平移、剪切、亮度、翻转", kicker: "第 30–36 格 · 数据增强", at: 30,
+      html: `<p>数据太少，作者用 <code>ImageDataGenerator</code> 在训练时随机变换：旋转 ±15°、水平/竖直平移 10%、剪切 0.1、<b>亮度 0.5–1.5 倍</b>、左右翻转、<b>上下翻转</b>。验证集只做 <code>preprocess_input</code>，不增强。</p><p>作者先在第 31–33 格用一张图生成 20 个增强样本做演示（演示时亮度范围是 0.1–1.5），再在第 36 格正式用于训练。动画里的变换是浏览器现场算的。</p>`,
+      cells: [31, 36], highlight: ["rotation_range=15", "shear_range=0.1", "brightness_range=[0.5, 1.5]", "vertical_flip=True", "horizontal_flip=True"],
+      draw(svg, ctx) {
+        const base = mri(56, 56, { seed: 9, tumor: true });
+        PX.draw(svg, 40, 50, 220, 220, base, "gray", 0, 1);
+        K.svg(svg, "text", { x: 150, y: 290, "text-anchor": "middle", "font-size": 13 }, "原图");
+        const out = PX.draw(svg, 440, 50, 220, 220, base, "gray", 0, 1);
+        const lab = K.svg(svg, "text", { x: 550, y: 290, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--accent)" }, "");
+        K.arrow(svg, 280, 160, 420, 160);
+        K.svg(svg, "text", { x: 350, y: 150, "text-anchor": "middle", "font-size": 12, class: "muted" }, "每个批次随机抽");
+        const seq = [["旋转 +15°", { rot: 15 }], ["水平平移 10%", { tx: 0.1 }], ["剪切 0.1", { shear: 0.1 }], ["亮度 × 0.5", { bright: 0.5 }], ["亮度 × 1.5", { bright: 1.5 }], ["左右翻转", { flip: true }], ["上下翻转", { vflip: true }], ["随机组合", { rot: -9, tx: 0.05, ty: -0.06, shear: 0.06, bright: 1.25, flip: true }]];
+        (async () => {
+          for (const [name, p] of seq) {
+            lab.textContent = name;
+            if (!(await ctx.tween(650, (t) => { const q = {}; for (const k in p) q[k] = k === "flip" || k === "vflip" ? t > 0.5 : k === "bright" ? K.lerp(1, p[k], t) : p[k] * t; PX.update(out, PX.affine(base, q), "gray", 0, 1); }))) return;
+            if (!(await ctx.wait(450))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "迁移学习：冻结 VGG16，只训练新分类头", kicker: "第 37–39 格 · 模型", at: 37,
+      html: `<p>作者加载在 ImageNet 上训练好的 <b>VGG16</b>，<code>include_top=False</code> 去掉原来的 1000 类输出部分，只留 13 个卷积层。后面接 <code>Flatten</code> → <code>Dropout(0.5)</code> → <code>Dense(1, sigmoid)</code>。</p><p>关键一句是 <code>model.layers[0].trainable = False</code>：VGG16 的 1,471 万个参数<b>全部冻结</b>，反向传播只更新新加的 25,089 个参数（7×7×512 = 25,088 个权重 + 1 个偏置）。两百张图不够训练一个大网络，但足够训练一个小分类头。</p>`,
+      cells: [38, 39], highlight: ["include_top=False", "model.layers[0].trainable = False", "layers.Dropout(0.5)", "activation='sigmoid'"],
+      draw(svg, ctx) {
+        const blocks = [["块1", 64, 2], ["块2", 128, 2], ["块3", 256, 3], ["块4", 512, 3], ["块5", 512, 3]];
+        K.svg(svg, "rect", { x: 20, y: 60, width: 440, height: 170, rx: 12, fill: "color-mix(in srgb, var(--ink-3) 10%, var(--panel))", stroke: "var(--ink-3)", "stroke-dasharray": "6 4" });
+        K.svg(svg, "text", { x: 30, y: 52, "font-size": 13, "font-weight": 700 }, "VGG16 卷积主干（ImageNet 权重）🔒 冻结");
+        blocks.forEach((b, i) => { K.node(svg, 32 + i * 86, 90, 76, 110, `${b[0]}\n${b[2]}×Conv\n${b[1]} 通道\n+池化`, { fs: 12 }); K.svg(svg, "text", { x: 70 + i * 86, y: 222, "text-anchor": "middle", "font-size": 14 }, "🔒"); });
+        const head = [["Flatten\n7×7×512", 476, 78], ["Dropout\n0.5", 562, 70], ["Dense 1\nsigmoid", 640, 74]];
+        head.forEach((h) => K.node(svg, h[1], 110, h[2], 70, h[0], { fs: 12, fill: "var(--accent-soft)", stroke: "var(--accent)" }));
+        K.svg(svg, "text", { x: 600, y: 96, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--accent)" }, "新加的分类头（可训练）");
+        K.svg(svg, "text", { x: 240, y: 262, "text-anchor": "middle", "font-size": 13 }, "14,714,688 个参数：不更新");
+        K.svg(svg, "text", { x: 600, y: 210, "text-anchor": "middle", "font-size": 13, fill: "var(--accent)" }, "25,089 个参数：训练");
+        const fw = K.svg(svg, "circle", { cx: 20, cy: 145, r: 7, fill: "var(--c3)" });
+        const bw = K.svg(svg, "circle", { cx: 714, cy: 165, r: 7, fill: "var(--c6)" });
+        const stop = K.svg(svg, "text", { x: 470, y: 300, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--c6)" }, "梯度传到这里就停下 ✋");
+        const lg = K.svg(svg, "text", { x: 20, y: 325, "font-size": 12, class: "muted" }, "绿点：前向传播（图片穿过整个网络）　红点：反向传播（误差只修改分类头）");
+        bw.style.opacity = stop.style.opacity = 0;
+        (async () => {
+          for (let r = 0; r < 3; r++) {
+            fw.style.opacity = 1; bw.style.opacity = 0; stop.style.opacity = 0;
+            if (!(await ctx.tween(1500, (t) => K.set(fw, { cx: K.lerp(20, 714, t) })))) return;
+            fw.style.opacity = 0; bw.style.opacity = 1;
+            if (!(await ctx.tween(900, (t) => K.set(bw, { cx: K.lerp(714, 470, t) })))) return;
+            stop.style.opacity = 1;
+            if (!(await ctx.wait(900))) return;
+          }
+        })();
+        void lg;
+      },
+    },
+    {
+      title: "训练：小学习率 + 早停", kicker: "第 40–42 格 · 训练", at: 40,
+      html: `<p>优化器是 <code>RMSprop(lr=1e-4)</code>：学习率很小，避免一下子把好的初始状态冲乱。最多训练 30 轮，每轮 50 个批次。</p><p><code>EarlyStopping(monitor='val_acc', mode='max', patience=6)</code>：验证准确率<b>连续 6 轮没有创新高</b>就提前停止，防止越训越过拟合。动画里的曲线是示意，不是作者的真实训练曲线。</p>`,
+      cells: [40], highlight: ["RMSprop(lr=1e-4)", "patience=6", "EPOCHS = 30", "steps_per_epoch=50"],
+      draw(svg, ctx) {
+        const r = K.rng(12), acc = [], tr = [];
+        let s = 0;
+        for (let e = 0; e < 30; e++) { s += (1 - s) * 0.22; acc.push(K.clamp(0.55 + 0.32 * s + K.randn(r) * 0.025 - (e > 12 ? (e - 12) * 0.004 : 0), 0, 1)); tr.push(K.clamp(0.55 + 0.42 * (1 - Math.exp(-e / 5)) + K.randn(r) * 0.01, 0, 1)); }
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 230 }, [1, 30], [0.5, 1], { xticks: 6, yticks: 5, xfmt: (v) => Math.round(v), yfmt: (v) => v.toFixed(1), xlabel: "轮次 epoch（最多 30）" });
+        K.svg(svg, "text", { x: 470, y: 50, "font-size": 12, fill: "var(--c1)" }, "— 训练准确率（示意）");
+        K.svg(svg, "text", { x: 470, y: 68, "font-size": 12, fill: "var(--c6)" }, "— 验证准确率（示意）");
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2 }), p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        const note = K.svg(svg, "text", { x: 70, y: 320, "font-size": 13, "font-weight": 700, fill: "var(--warn)" }, "");
+        (async () => {
+          let best = -1, wait = 0, d1 = "", d2 = "";
+          for (let e = 0; e < 30; e++) {
+            d1 += (d1 ? "L" : "M") + ax.sx(e + 1) + "," + ax.sy(tr[e]); d2 += (d2 ? "L" : "M") + ax.sx(e + 1) + "," + ax.sy(acc[e]);
+            p1.setAttribute("d", d1); p2.setAttribute("d", d2);
+            const nb = acc[e] > best;
+            K.svg(svg, "circle", { cx: ax.sx(e + 1), cy: ax.sy(acc[e]), r: 3.5, fill: nb ? "var(--c6)" : "var(--panel)", stroke: "var(--c6)" });
+            if (nb) { best = acc[e]; wait = 0; } else wait++;
+            note.textContent = `第 ${e + 1} 轮：已连续 ${wait} 轮没创新高（patience = 6）`;
+            if (wait >= 6) { note.textContent = `第 ${e + 1} 轮：连续 6 轮没进步 → 提前停止`; K.svg(svg, "line", { x1: ax.sx(e + 1), x2: ax.sx(e + 1), y1: 30, y2: 260, stroke: "var(--warn)", "stroke-dasharray": "4 3", "stroke-width": 2 }); return; }
+            if (!(await ctx.wait(260))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "评估与错例：小测试集要小心读", kicker: "第 43–49 格 · 评估与结论", at: 43, notes: { 48: "作者的结论：远高于 50% 的随机猜测，更多训练图或调参还能再提高。", 49: "删掉临时文件夹，保存模型。" },
+      html: `<p>作者把模型输出按 0.5 切成 0/1，分别在验证集和测试集上算准确率、画混淆矩阵。开头结果表里写的是验证约 88%、测试约 80%。测试集只有 10 张，80% 大约就是<b>错了 2 张</b>（按比例推算）。</p><p>他还把测试集里判错的图片画出来：其中一张中间有一块亮斑，作者说“能理解模型为什么把它判成肿瘤”。下面的图是示意。</p>`,
+      cells: [44, 47], highlight: ["accuracy_score(y_test, predictions)", "[1 if x>0.5 else 0 for x in predictions]"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 110, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "测试集 10 张（示意）");
+        const items = [];
+        for (let i = 0; i < 10; i++) { const isYes = i >= 5, wrong = i === 2 || i === 8; items.push({ isYes, wrong, m: mri(36, 36, { seed: 40 + i, tumor: isYes && i !== 8, spot: i === 2 }) }); }
+        items.forEach((it, i) => {
+          const x = 20 + (i % 5) * 72, y = 44 + Math.floor(i / 5) * 118;
+          const e = PX.draw(svg, x, y, 64, 64, it.m, "gray", 0, 1); e.style.opacity = 0;
+          const t = K.svg(svg, "text", { x: x + 32, y: y + 82, "text-anchor": "middle", "font-size": 11, "font-family": "var(--mono)" }, `真${it.isYes ? 1 : 0}/判${it.wrong ? (it.isYes ? 0 : 1) : it.isYes ? 1 : 0}`);
+          const m = K.svg(svg, "text", { x: x + 32, y: y + 104, "text-anchor": "middle", "font-size": 18, "font-weight": 700, fill: it.wrong ? "var(--bad)" : "var(--good)" }, it.wrong ? "✗" : "✓");
+          t.style.opacity = m.style.opacity = 0;
+          ctx.wait(150 + i * 160).then((ok) => ok && ctx.tween(250, (u) => (e.style.opacity = t.style.opacity = m.style.opacity = u)));
+        });
+        K.svg(svg, "text", { x: 400, y: 70, "font-size": 15, "font-weight": 700 }, "作者结果（第 1 格）");
+        K.svg(svg, "text", { x: 400, y: 98, "font-size": 14 }, "验证集准确率 ≈ 88%");
+        K.svg(svg, "text", { x: 400, y: 122, "font-size": 14 }, "测试集准确率 ≈ 80%");
+        K.svg(svg, "text", { x: 400, y: 160, "font-size": 13, fill: "var(--warn)" }, "10 张测试图：每错 1 张 = 10 个百分点");
+        K.svg(svg, "text", { x: 400, y: 184, "font-size": 13, fill: "var(--warn)" }, "80% ≈ 错 2 张（推算）");
+        K.svg(svg, "text", { x: 400, y: 230, "font-size": 13 }, "第 3 张：无肿瘤，但中间有亮斑 → 被判成有");
+        K.svg(svg, "text", { x: 400, y: 252, "font-size": 13 }, "（对应作者第 47 格的观察）");
+        K.svg(svg, "text", { x: 20, y: 330, "font-size": 12, class: "muted" }, "示意：哪几张错是虚构的，只用来说明“看错例”这个做法");
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：裁剪流程 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 660, height: 300,
+    controls: [
+      { id: "t", label: "二值化阈值（作者用 45）", min: 5, max: 200, step: 1, value: 45 },
+      { id: "it", label: "腐蚀 / 膨胀次数（作者用 2）", min: 0, max: 5, step: 1, value: 2 },
+      { id: "nz", label: "背景干扰", value: "speck", options: [["none", "干净黑背景"], ["speck", "角落有零星噪点"], ["label", "角落有噪点 + 文字标注"]] },
+      { id: "tm", label: "图片", value: "yes", options: [["yes", "有肿瘤（示意）"], ["no", "无肿瘤（示意）"]] },
+      { id: "seed", label: "换一张（位置、大小随机）", button: true },
+    ],
+    note: "这四张图对应作者第 21 格的四步：原图 → 阈值+腐蚀+膨胀后的掩码 → 最大轮廓与四个极值点 → 裁剪结果。试试把腐蚀次数设为 0、背景选“文字标注”，或者把阈值调到 150 以上，看看裁剪框会出什么问题。",
+    render(svg, v) {
+      const r = K.rng(500 + v.seed * 11);
+      const img = mri(72, 60, { seed: 600 + v.seed, ox: (r() - 0.5) * 0.14, oy: (r() - 0.5) * 0.12, rx: 0.24 + r() * 0.1, ry: 0.32 + r() * 0.08, tumor: v.tm === "yes", tdx: (r() - 0.5) * 0.4, tdy: (r() - 0.5) * 0.4, specks: v.nz === "none" ? 0 : 14, label: v.nz === "label" });
+      const R = runCrop(img, v.t, v.it);
+      const P = 150, gap = 12, y = 34;
+      const titles = ["① 原图 72×60", "② 阈值+腐蚀+膨胀", "③ 最大轮廓+极值点", "④ 裁剪结果"];
+      titles.forEach((t, i) => K.svg(svg, "text", { x: 6 + i * (P + gap) + P / 2, y: 22, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, t));
+      const a = fit(svg, 6, y, P, P, img);
+      fit(svg, 6 + (P + gap), y, P, P, R.di);
+      const c = fit(svg, 6 + 2 * (P + gap), y, P, P, img);
+      PX.update(c.el, overlay(img, R.ex ? boundary(R.lg.mask) : null));
+      if (R.ex) {
+        ["L", "R", "T", "B"].forEach((k, i) => K.svg(svg, "circle", { cx: c.x + (R.ex[k][0] + 0.5) * c.s, cy: c.y + (R.ex[k][1] + 0.5) * c.s, r: 4.5, fill: EXC[i], stroke: "var(--panel)" }));
+        K.svg(svg, "rect", { x: a.x + R.ex.L[0] * a.s, y: a.y + R.ex.T[1] * a.s, width: (R.ex.R[0] - R.ex.L[0]) * a.s, height: (R.ex.B[1] - R.ex.T[1]) * a.s, fill: "none", stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+        fit(svg, 6 + 3 * (P + gap), y, P, P, R.out);
+      } else K.svg(svg, "text", { x: 6 + 3 * (P + gap) + P / 2, y: y + P / 2, "text-anchor": "middle", "font-size": 13, fill: "var(--bad)" }, "没有白色区域，裁不出来");
+      K.svg(svg, "text", { x: 6, y: 218, "font-size": 12, class: "muted" }, "①上的黄色虚线框 = 最终裁剪范围；③中黄线是选中的最大轮廓，四个点依次是最左、最右、最上、最下。");
+      const bright = R.out ? R.out.W * R.out.H : 0, whole = img.W * img.H;
+      let brainPx = 0; img.a.forEach((x) => { if (x > 0.12) brainPx++; });
+      const ok = R.ex && R.out.W < img.W * 0.95 && R.out.H < img.H * 0.95;
+      K.svg(svg, "text", { x: 6, y: 244, "font-size": 13, "font-weight": 700, fill: ok ? "var(--good)" : "var(--bad)" }, ok ? "裁剪框紧贴脑部，黑边被去掉了。" : R.ex ? "裁剪框几乎和原图一样大：可能把噪点或标注也圈进来了，或者阈值太低。" : "阈值太高，整张图都被判成背景。");
+      void brainPx;
+      return { readout: [
+        { k: "白色连通块个数", v: R.lg.count },
+        { k: "最大块面积占整图", v: ((R.lg.area / whole) * 100).toFixed(1) + "%" },
+        { k: "裁剪尺寸", v: R.out ? `${R.out.W}×${R.out.H}` : "—" },
+        { k: "裁掉的面积", v: R.out ? ((1 - bright / whole) * 100).toFixed(0) + "%" : "—" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：冻结与参数量 ---------- */
+  const VGG_BLOCKS = [[3, 64, 2], [64, 128, 2], [128, 256, 3], [256, 512, 3], [512, 512, 3]];
+  function blockParams(b) { let p = 0, cin = b[0]; for (let k = 0; k < b[2]; k++) { p += 3 * 3 * cin * b[1] + b[1]; cin = b[1]; } return p; }
+  const BP = VGG_BLOCKS.map(blockParams);
+  K.lab(document.getElementById("lab2"), {
+    width: 660, height: 300,
+    controls: [
+      { id: "mode", label: "哪些层参与训练", value: "frozen", options: [["frozen", "冻结整个 VGG16（作者的做法）"], ["b5", "解冻最后一个卷积块（块5）"], ["b45", "解冻块4 + 块5"], ["all", "全部从头训练"]] },
+      { id: "size", label: "输入边长（作者用 224）", min: 96, max: 320, step: 32, value: 224 },
+      { id: "n", label: "训练图片数（推算约 193）", min: 50, max: 5000, step: 1, value: 193 },
+    ],
+    note: "参数个数按 VGG16 的结构现场算：每个 3×3 卷积层 = 3×3×输入通道×输出通道 + 输出通道个偏置。卷积部分合计 14,714,688，和输入尺寸无关；Flatten 之后的分类头参数 = (边长/32)² × 512 + 1，随输入尺寸变化。",
+    render(svg, v) {
+      const fs = Math.floor(v.size / 32), head = fs * fs * 512 + 1;
+      const trainBlocks = v.mode === "all" ? [0, 1, 2, 3, 4] : v.mode === "b45" ? [3, 4] : v.mode === "b5" ? [4] : [];
+      const total = BP.reduce((a, b) => a + b, 0) + head;
+      const train = trainBlocks.reduce((a, i) => a + BP[i], 0) + head;
+      const items = BP.map((p, i) => ({ label: `块${i + 1}`, value: p, color: trainBlocks.includes(i) ? "var(--accent)" : "var(--ink-3)" }));
+      items.push({ label: "分类头", value: head, color: "var(--accent)" });
+      K.bars(svg, { x: 10, y: 20, w: 590, h: 220 }, items, { horizontal: true, labelWidth: 70, max: Math.max(...items.map((d) => d.value)), fmt: (x) => x.toLocaleString() + (x === head ? "" : "") });
+      K.svg(svg, "text", { x: 10, y: 270, "font-size": 12, class: "muted" }, `蓝色 = 参与训练，灰色 = 冻结（🔒）。分类头：Flatten ${fs}×${fs}×512 = ${(fs * fs * 512).toLocaleString()} 维 → Dense(1)`);
+      const ratio = train / v.n;
+      return { readout: [
+        { k: "模型总参数", v: total.toLocaleString() },
+        { k: "要训练的参数", v: train.toLocaleString(), color: train > 1e6 ? "var(--bad)" : "var(--good)" },
+        { k: "每张训练图摊到的参数", v: ratio >= 100 ? Math.round(ratio).toLocaleString() : ratio.toFixed(1), color: ratio > 1000 ? "var(--bad)" : "var(--ink)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,587 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>卫星图地物分类</title>
+<meta name="description" content="Kaggle 案例拆解：用 Sentinel-2 卫星拍的 27000 张 64×64 小图，把地表分成森林、农田、河流、住宅区等 10 类。先试随机森林，再用 ResNet、VGG 迁移学习。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">卫星图像 · 10 分类 · 遥感与土地利用</div>
+  <h1>从太空认地面：用卫星小图分出森林、农田、河流和城市</h1>
+  <p class="en">Land Cover Classification with EuroSAT Dataset</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span><span class="tag dl">深度学习</span>
+    <span class="tag method">分层切分</span><span class="tag method">数据增强</span><span class="tag method">随机森林（含手写版）</span>
+    <span class="tag method">迁移学习</span><span class="tag method">ResNet50 / V2 / 152V2</span><span class="tag method">VGG16 / VGG19</span>
+    <span class="tag method">两阶段微调</span><span class="tag method">早停与学习率衰减</span><span class="tag method">混淆矩阵 / F2</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Nilesh Sonune</b></span>
+    <span>Kaggle 点赞 <b>493</b>（2026-11 抓取）</span>
+    <span>数据集 <b>nilesh789/eurosat-rgb</b>（EuroSAT RGB 版）</span>
+    <span><a href="https://www.kaggle.com/code/nilesh789/land-cover-classification-with-eurosat-dataset" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">哨兵 2 号卫星拍的 27000 张小图</div><p>每张 64×64 像素，覆盖地面一小块。原始数据有 13 个光谱波段，这份 notebook 只用红、绿、蓝三个。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这块地是 10 类里的哪一类</div><p>森林、草本植被、牧场、一年生作物、多年生作物、河流、公路、工业区、住宅区等，属于“土地利用 / 土地覆盖分类”。<span data-cell="8">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">随机森林打底，迁移学习主攻</div><p>先把 12288 个像素值直接喂给随机森林（含作者手写版）；再拿 ImageNet 上练过的 ResNet、VGG，先冻结主干只训新分类头，再整体微调。<span data-cell="29">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">对标论文：ResNet50 约 98.57%</div><p>作者引用 EuroSAT 论文：微调 ResNet50 在 RGB 数据上准确率约 98.57%。他自己各模型的分数在运行输出里，源码不带，本页不列。<span data-cell="0">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>EuroSAT</b>：来自欧洲航天局的哨兵 2 号（Sentinel-2A）卫星，覆盖欧洲多国，后被 2019 年的论文整理成土地覆盖分类的标准测试集。以下规模来自作者 notebook 的文字。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">图片数</div><div class="v">27,000</div></div>
+        <div class="stat-tile"><div class="k">类别数</div><div class="v">10</div></div>
+        <div class="stat-tile"><div class="k">每张尺寸</div><div class="v">64×64×3</div></div>
+        <div class="stat-tile"><div class="k">训练 / 测试</div><div class="v" style="font-size:18px">21,600 / 5,400</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">图片数、类别数、尺寸、原始 13 个波段见第 0 格 <span data-cell="0">出处</span>；训练 / 测试张数见第 16 格 <span data-cell="16">出处</span>。各类张数不完全一样，作者因此用了分层切分 <span data-cell="6">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">十个类别</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>类别（文件夹名）</th><th>白话</th><th>大类</th></tr>
+        <tr><td>Highway / Residential / Industrial</td><td>公路、住宅区、工业区</td><td>城市</td></tr>
+        <tr><td>AnnualCrop / PermanentCrop</td><td>一年生作物（如小麦），多年生作物（如果园、葡萄园）</td><td>农业</td></tr>
+        <tr><td>HerbaceousVegetation / Pasture / Forest</td><td>草本植被、牧场、森林</td><td>自然植被</td></tr>
+        <tr><td>River</td><td>河流</td><td>水体</td></tr>
+        <tr><td>第 10 类</td><td>作者文字没有点名；EuroSAT 论文里是海洋与湖泊</td><td>水体</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">前 9 类见第 8 格作者的分组 <span data-cell="8">出处</span>。<b>要预测的答案</b>就是图片所在的文件夹名。每个像素是红、绿、蓝三个 0–255 的亮度值。</p>
+      <p class="callout">本页动画和实验里的“卫星图”都是用代码按地物的典型颜色生成的示意图，不是数据集里的真实图片。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="8">
+    <h3>实验 A · 卫星为什么要拍“看不见的光”：真彩色、假彩色与 NDVI <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labA"></div>
+  </div>
+  <div data-at="13">
+    <h3>实验 B · 数据增强：转一转、挪一挪，答案不变 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labB"></div>
+  </div>
+  <div data-at="40">
+    <h3>实验 C · 一个 np.rint 引出的错：先四舍五入再取最大 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labC"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论与做法</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论 / 做法</th><th>出处</th></tr>
+        <tr><td>EuroSAT 论文：微调 ResNet50、RGB、80/20 切分，准确率约 98.57%</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>公路、住宅、工业区都有建筑和道路，容易互相混淆；河流可能被认成公路</td><td><span data-cell="8">第 8 格</span></td></tr>
+        <tr><td>数据集不含近红外波段，但近红外可以做植被指数，是另一条路</td><td><span data-cell="8">第 8 格</span></td></tr>
+        <tr><td>直接用 21600×12288 的像素矩阵训练随机森林很吃力；手写版只能用十分之一数据，但仍明显好于 10% 的瞎猜</td><td><span data-cell="22">第 22 格</span></td></tr>
+        <tr><td>深度模型策略：先冻结主干、用 0.01 的大学习率训练分类头，再用 0.001–0.0001 的小学习率整体微调</td><td><span data-cell="29">第 29 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">各模型的准确率、F2、混淆矩阵都在运行输出里，Kaggle 下载的源码不带，作者文字里也没写，所以这里不列分数。作者还注明这份 notebook“仍在完善中”。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li><b>文字说留 30% 测试，代码只留了 20%：</b>第 10 格写 30%，第 12 格 <code>test_size=0.2</code>，后文按 80/20 计算 <span data-cell="12">第 12 格</span>。</li>
+        <li><b>测试集兼任验证集：</b>早停、保存最佳权重、降学习率都盯着 <code>validation_data=test_generator</code>，等于用测试集挑模型，最终的测试分数会偏乐观 <span data-cell="37">第 37 格</span>。</li>
+        <li><b>先四舍五入再取最大：</b><code>np.argmax(np.rint(predictions))</code>，如果最大概率不到 0.5，四舍五入后整行都是 0，argmax 会一律返回第 0 类。应直接 <code>np.argmax(predictions)</code> <span data-cell="40">第 40 格</span>。实验 C 演示这个影响。</li>
+        <li>第 20 格注释说“小批量”，实际抽了 21600 张，就是整个训练集 <span data-cell="20">第 20 格</span>。</li>
+        <li>手写决策树用 <code>entropy(y) is 0</code>、<code>depth is self.max_depth</code> 判断，<code>is</code> 比的是“是不是同一个对象”，浮点数 0.0 永远不会 <code>is 0</code>，这个停止条件失效 <span data-cell="24">第 24 格</span>。</li>
+        <li>五个模型的训练代码几乎逐字重复，回调也重复定义了好几遍，可以写成一个循环。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一块地的卫星小图，判断它是森林、农田、水体还是城市。把整个地区切成小块逐块判断，就得到一张“土地利用地图”。</li>
+        <li><b>对社会的意义：</b>监测森林砍伐和城市扩张、核查耕地有没有被占用、估算农作物种植面积、洪水后快速圈出被淹区域、规划城市绿地和交通。以前要靠人跑野外调查，现在卫星每隔几天就能把全国拍一遍。</li>
+        <li><b>同类问题：</b>识别光伏电站和屋顶太阳能板、找非法采矿和垃圾场、灾后建筑损毁评估、冰川和湿地变化监测。</li>
+        <li><b>可迁移的套路：</b>分层切分 → 只对训练集做增强 → 预训练主干 + 新分类头 → 先冻结再微调 → 单独留验证集做早停 → 混淆矩阵找易混类别。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>分层切分：StratifiedShuffleSplit <span data-cell="12">第 12 格</span></li>
+        <li>数据增强：旋转 60°、平移、剪切、缩放、水平/垂直翻转 <span data-cell="13">第 13 格</span></li>
+        <li>传统方法：随机森林（sklearn 版、手写版） <span data-cell="21">第 21 格</span> <span data-cell="25">第 25 格</span></li>
+        <li>迁移学习：ImageNet 预训练 ResNet50/50V2/152V2、VGG16/19 + Dense 分类头 <span data-cell="32">第 32 格</span></li>
+        <li>训练控制：EarlyStopping、ModelCheckpoint、ReduceLROnPlateau <span data-cell="33">第 33 格</span></li>
+        <li>评估：精确率、召回率、F 值、混淆矩阵、F2 <span data-cell="32">第 32 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者只用了红绿蓝三个波段，丢掉了近红外等另外 10 个。你觉得哪些类别最可能因此被认错？加上近红外会好在哪里？</li>
+      <li>测试集同时被用来早停和挑最佳权重。这样报告出来的“测试准确率”还算是没见过的考卷吗？应该怎么改？</li>
+      <li>数据增强里有“垂直翻转”和“旋转 60°”。对卫星图来说这合理吗？如果是街景照片呢？</li>
+      <li>EuroSAT 的图都来自欧洲。拿这个模型去识别中国南方的水稻田或西北的戈壁，可能会出什么问题？</li>
+      <li>一张 64×64 的图覆盖地面大约几百米见方。如果一块图里一半是森林一半是农田，该给它什么标签？这对“土地利用统计”有什么影响？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Nilesh Sonune（作者注明由 silentj23 的 notebook 派生修改），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的图像与数据均为模拟示意。数据集：EuroSAT（Helber 等，基于欧洲航天局 Copernicus 哨兵 2 号数据）。
+</footer>
+</main>
+
+<script src="nb/eurosat-land-cover-cnn.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---- 典型地物在四个波段的反射率（示意值）：蓝、绿、红、近红外 ---- */
+  const SPEC = {
+    water: [0.07, 0.08, 0.05, 0.02], forest: [0.03, 0.06, 0.03, 0.38], crop: [0.04, 0.10, 0.05, 0.45],
+    soil: [0.10, 0.13, 0.18, 0.26], urban: [0.15, 0.16, 0.17, 0.21], road: [0.20, 0.21, 0.22, 0.24], grass: [0.04, 0.09, 0.07, 0.30],
+  };
+  const NAMES = { water: "水体", forest: "森林", crop: "庄稼", soil: "裸土", urban: "建筑", road: "道路", grass: "草地" };
+  /* 生成一张示意“卫星图”：每个像素一个地物类型 */
+  function scene(W, seed) {
+    const r = K.rng(seed), m = [];
+    for (let y = 0; y < W; y++) {
+      const row = [];
+      for (let x = 0; x < W; x++) {
+        const u = x / W, v = y / W;
+        const rv = 0.55 + 0.12 * Math.sin(v * 6 + seed);
+        let t;
+        if (Math.abs(u - rv) < 0.05) t = "water";
+        else if (u < rv) t = v < 0.45 ? "forest" : (Math.floor(v * 10) % 2 ? "crop" : "soil");
+        else if (v > 0.7) t = Math.abs(v - 0.82) < 0.025 || Math.abs(u - 0.85) < 0.025 ? "road" : ((Math.floor(u * 16) + Math.floor(v * 16)) % 3 ? "urban" : "grass");
+        else t = r() < 0.92 ? "grass" : "forest";
+        row.push(t);
+      }
+      m.push(row);
+    }
+    return m;
+  }
+  function bandVals(t, o, r) {
+    let b = SPEC[t].slice();
+    if (t === "crop" && o) { const g = o.growth; b = b.map((v, i) => K.lerp(SPEC.soil[i], SPEC.crop[i], g)); }
+    const n = r ? 1 + (r() - 0.5) * 0.12 : 1;
+    b = b.map((v) => v * n);
+    if (o && o.haze) b = b.map((v, i) => v * (1 - o.haze) + o.haze * [0.35, 0.33, 0.3, 0.28][i]);
+    return b;
+  }
+  function toImage(svg, x, y, w, h, W, H, pix) { // pix(i, j) -> [r,g,b] 0..1
+    const cv = document.createElement("canvas"); cv.width = W; cv.height = H;
+    const c = cv.getContext("2d"), im = c.createImageData(W, H);
+    for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) { const p = pix(i, j), k = (j * W + i) * 4; im.data[k] = K.clamp(p[0], 0, 1) * 255; im.data[k + 1] = K.clamp(p[1], 0, 1) * 255; im.data[k + 2] = K.clamp(p[2], 0, 1) * 255; im.data[k + 3] = 255; }
+    c.putImageData(im, 0, 0);
+    return K.svg(svg, "image", { href: cv.toDataURL(), x, y, width: w, height: h, preserveAspectRatio: "none", style: "image-rendering:pixelated" });
+  }
+  const trueColor = (b) => [b[2] * 3.2, b[1] * 3.2, b[0] * 3.2];
+  function tileOf(kind, seed, W) { // 单一类别的小图（示意）
+    const r = K.rng(seed), m = [];
+    for (let y = 0; y < W; y++) { const row = []; for (let x = 0; x < W; x++) {
+      let t = kind;
+      if (kind === "crop") t = Math.floor((x * 0.6 + y * 0.3) / 5) % 2 ? "crop" : "soil";
+      if (kind === "urban") t = (x % 9 < 2 || y % 11 < 2) ? "road" : (r() < 0.2 ? "grass" : "urban");
+      if (kind === "water") t = Math.abs(x - W / 2 - 6 * Math.sin(y / 6)) < W / 6 ? "water" : "grass";
+      if (kind === "forest") t = r() < 0.9 ? "forest" : "grass";
+      if (kind === "highway") t = Math.abs(x - y * 0.7 - 6) < 2.5 ? "road" : (r() < 0.5 ? "grass" : "soil");
+      row.push(t);
+    } m.push(row); }
+    const rr = K.rng(seed + 1);
+    return m.map((row) => row.map((t) => trueColor(bandVals(t, null, rr))));
+  }
+
+  const steps = [
+    {
+      at: 0, title: "从太空看地面：EuroSAT 是什么", kicker: "第 0–3 格 · 背景",
+      html: `<p><b>遥感</b>就是不接触物体、从远处（飞机、卫星）测量它。哨兵 2 号卫星在几百公里高的轨道上绕地球转，一圈圈扫过地面拍照，每个地方隔几天就能重拍一次。</p><p>EuroSAT 把这些照片切成 64×64 像素的小块，每块标上它是哪种地物。作者介绍：27000 多张、10 类；原始数据有 13 个光谱波段，这里只用 RGB；论文里微调的 ResNet50 准确率约 98.57%。</p>`,
+      cells: [0], highlight: ["27000 images", "13 spectral bands", "98.57%"],
+      draw(svg, ctx) {
+        K.svg(svg, "circle", { cx: 360, cy: 560, r: 300, fill: "var(--c3)", opacity: 0.18 });
+        const sat = K.svg(svg, "g");
+        K.svg(sat, "rect", { x: -14, y: -9, width: 28, height: 18, rx: 3, fill: "var(--ink-3)" });
+        K.svg(sat, "rect", { x: -48, y: -5, width: 30, height: 10, fill: "var(--c1)" });
+        K.svg(sat, "rect", { x: 18, y: -5, width: 30, height: 10, fill: "var(--c1)" });
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 12, class: "muted" }, "示意：卫星扫过地面，把照片切成 64×64 的小块");
+        const beam = K.svg(svg, "path", { d: "", fill: "var(--warn)", opacity: 0.18 });
+        const S = scene(48, 3), tiles = [];
+        const im = toImage(svg, 260, 180, 200, 140, 48, 34, (i, j) => trueColor(bandVals(S[j][i])));
+        im.style.opacity = 0;
+        for (let k = 0; k < 4; k++) { const g = K.svg(svg, "rect", { x: 260 + k * 50, y: 180, width: 50, height: 50, fill: "none", stroke: "var(--warn)", "stroke-width": 2 }); g.style.opacity = 0; tiles.push(g); }
+        const lab = K.svg(svg, "text", { x: 500, y: 210, "font-size": 13 }, "");
+        ctx.tween(2000, (t) => {
+          const x = 80 + t * 560, y = 70;
+          sat.setAttribute("transform", `translate(${x},${y})`);
+          beam.setAttribute("d", `M${x - 6},${y + 10} L${x - 60},180 L${x + 60},180 L${x + 6},${y + 10} Z`);
+          im.style.opacity = K.clamp((t - 0.3) * 2, 0, 1);
+        }).then(async (ok) => {
+          for (const g of tiles) { if (!ok) return; ok = await ctx.tween(250, (k) => (g.style.opacity = k)); }
+          if (ok) lab.textContent = "每块 64×64 像素 → 一张样本";
+        });
+      },
+    },
+    {
+      title: "十类地物，各有多少张", kicker: "第 4–6 格 · 类别分布",
+      html: `<p>数据按类别放在 10 个文件夹里，文件夹名就是答案。作者数了每个文件夹的图片数并画成柱状图。</p><p>结论：各类数量不完全相同，所以后面切分训练集和测试集时要“分层”，保证两边各类比例一致。</p>`,
+      cells: [4, 5], highlight: ["os.listdir", "plt.bar"],
+      draw(svg, ctx) {
+        const kinds = ["forest", "crop", "water", "urban", "highway"], zh = ["森林", "农田", "河流", "住宅", "公路"];
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 12, class: "muted" }, "每个文件夹 = 一个类别（小图为代码生成的示意，柱高也是示意）");
+        const hs = [0.9, 1, 0.75, 0.95, 0.8];
+        kinds.forEach((k, i) => {
+          const x = 50 + i * 130;
+          K.svg(svg, "path", { d: `M${x},60 h40 l8,10 h52 v12 h-100 Z`, fill: "var(--warn)", opacity: 0.7 });
+          toImage(svg, x + 10, 90, 80, 80, 32, 32, ((T) => (a, b) => T[b][a])(tileOf(k, 10 + i, 32)));
+          K.svg(svg, "text", { x: x + 50, y: 330, "text-anchor": "middle", "font-size": 13 }, zh[i]);
+          const bar = K.svg(svg, "rect", { x: x + 25, y: 312, width: 50, height: 0, rx: 3, fill: "var(--c1)" });
+          ctx.wait(300 + i * 150).then((ok) => ok && ctx.tween(700, (t) => { bar.setAttribute("height", 120 * hs[i] * t); bar.setAttribute("y", 312 - 120 * hs[i] * t); }));
+        });
+      },
+    },
+    {
+      title: "看图找不同：哪些类容易混", kicker: "第 7–8 格 · 观察与多光谱",
+      html: `<p>作者每类各看两张图，总结出三大组：<b>城市</b>（公路、住宅、工业区，都有建筑和路）、<b>农业</b>（一年生、多年生作物，田块边界是直线）、<b>自然</b>（草本植被、牧场、森林、河流）。他预判：河流可能被认成公路，公路交叉口加周围建筑可能被认成工业区。</p><p>他还提到哨兵 2 号能拍<b>近红外</b>等更多波段，可以算植被指数，只是这份数据里没有。实验 A 演示多光谱有多大用处。</p>`,
+      cells: [7, 8], highlight: ["Near-Infrared"],
+      draw(svg, ctx) {
+        const bands = [["蓝", 490, "var(--c1)"], ["绿", 560, "var(--c3)"], ["红", 665, "var(--c6)"], ["近红外", 842, "var(--ink-3)"]];
+        const ax = K.axes(svg, { x: 60, y: 30, w: 620, h: 240 }, [400, 950], [0, 0.5], { xticks: 5, yticks: 2, xlabel: "波长（纳米）  ← 人眼能看到 | 人眼看不到 →", ylabel: "反射率（示意）" });
+        bands.forEach(([n, wl, c]) => { K.svg(svg, "rect", { x: ax.sx(wl - 20), y: 30, width: ax.sx(wl + 20) - ax.sx(wl - 20), height: 240, fill: c, opacity: 0.12 }); K.svg(svg, "text", { x: ax.sx(wl), y: 46, "text-anchor": "middle", "font-size": 12 }, n); });
+        K.svg(svg, "line", { x1: ax.sx(700), x2: ax.sx(700), y1: 30, y2: 270, stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+        const curves = [["forest", "森林：近红外反射很强", "var(--good)"], ["water", "水：几乎全吸收", "var(--c1)"], ["urban", "建筑：比较平", "var(--warn)"]];
+        const wls = [490, 560, 665, 842];
+        curves.forEach(([k, lab, c], i) => {
+          const p = K.svg(svg, "path", { d: "", fill: "none", stroke: c, "stroke-width": 3 });
+          const s = SPEC[k];
+          const pts = wls.map((w, j) => [ax.sx(w), ax.sy(s[j])]);
+          const tx = K.svg(svg, "text", { x: pts[3][0] - 6, y: pts[3][1] - 8 - (k === "urban" ? 0 : 0), "text-anchor": "end", "font-size": 12, fill: c, "font-weight": 700 }, lab); tx.style.opacity = 0;
+          ctx.wait(300 + i * 700).then((ok) => ok && ctx.tween(600, (t) => {
+            const n = t * 3, a = Math.floor(n), f = n - a;
+            let d = `M${pts[0][0]},${pts[0][1]}`; for (let j = 1; j <= a; j++) d += `L${pts[j][0]},${pts[j][1]}`;
+            if (a < 3) d += `L${K.lerp(pts[a][0], pts[a + 1][0], f)},${K.lerp(pts[a][1], pts[a + 1][1], f)}`;
+            p.setAttribute("d", d); tx.style.opacity = t;
+          }));
+        });
+      },
+    },
+    {
+      at: 9, title: "分层切分：80% 训练、20% 测试", kicker: "第 9–12 格 · 预处理",
+      html: `<p>作者用 <code>StratifiedShuffleSplit</code> 做<b>分层抽样</b>：每一类都按同样比例抽出测试集，再把图片复制到 <code>training/</code> 和 <code>testing/</code> 两个目录，每类一个子文件夹，方便 Keras 按文件夹读取。</p><p>注意：第 10 格文字说留 30%，代码里写的是 <code>test_size=0.2</code>，后文也按 80/20 计算（21600 / 5400）。</p>`,
+      cells: [12], highlight: ["StratifiedShuffleSplit", "test_size=0.2"],
+      draw(svg, ctx) {
+        const cls = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c5)"], n = [10, 8, 9, 7, 10];
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 12, class: "muted" }, "每类各抽 20% 去测试集（方块 = 图片，颜色 = 类别，数量为示意）");
+        K.svg(svg, "text", { x: 470, y: 60, "font-size": 13, "font-weight": 700 }, "training/ 80%");
+        K.svg(svg, "text", { x: 470, y: 240, "font-size": 13, "font-weight": 700 }, "testing/ 20%");
+        const boxes = [];
+        n.forEach((c, i) => { for (let k = 0; k < c; k++) { const toTest = k % 5 === 0; const b = K.svg(svg, "rect", { x: 40 + k * 22, y: 50 + i * 50, width: 18, height: 18, rx: 3, fill: cls[i] }); boxes.push({ b, i, k, toTest, x0: 40 + k * 22, y0: 50 + i * 50 }); } });
+        const cnt = { tr: [0, 0, 0, 0, 0], te: [0, 0, 0, 0, 0] };
+        boxes.forEach((o) => { const key = o.toTest ? "te" : "tr"; o.slot = cnt[key][o.i]++; o.x1 = 470 + o.slot * 20 + (o.toTest ? 0 : 0); o.y1 = (o.toTest ? 250 : 70) + o.i * (o.toTest ? 14 : 30); });
+        ctx.wait(500).then((ok) => ok && ctx.tween(1600, (t) => boxes.forEach((o) => { o.b.setAttribute("x", K.lerp(o.x0, o.x1, t)); o.b.setAttribute("y", K.lerp(o.y0, o.y1, t)); if (o.toTest) { o.b.setAttribute("width", 18 - 6 * t); o.b.setAttribute("height", 18 - 6 * t); } })));
+      },
+    },
+    {
+      title: "数据增强：旋转、平移、翻转", kicker: "第 13–15 格 · ImageDataGenerator",
+      html: `<p>训练集的 <code>ImageDataGenerator</code> 每次读图时随机“变一变”：最多旋转 60°、平移 20%、剪切、缩放 20%、水平和垂直翻转，并把像素值除以 255 缩到 0–1。测试集只做缩放，不做变形。</p><p>这样同一张森林图，模型每轮看到的样子都不一样，学到的是“森林的纹理”，而不是“这张图的具体位置”。实验 B 可以亲手试。</p>`,
+      cells: [13], highlight: ["rotation_range=60", "horizontal_flip=True", "vertical_flip = True", "rescale=1./255"],
+      draw(svg, ctx) {
+        const T = tileOf("highway", 5, 32);
+        const variants = [["原图", 0, 1, 1], ["旋转", 40, 1, 1], ["水平翻转", 0, -1, 1], ["垂直翻转", 0, 1, -1], ["旋转+翻转", -50, -1, 1]];
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 12, class: "muted" }, "同一张“公路”小图的几种随机变形（示意），标签都还是“公路”");
+        const gs = variants.map(([name, ang, sx, sy], i) => {
+          const g = K.svg(svg, "g"); g.style.opacity = 0;
+          const cx = 80 + i * 140, cy = 150;
+          const img = toImage(g, -50, -50, 100, 100, 32, 32, (a, b) => T[b][a]);
+          img.setAttribute("transform", `translate(${cx},${cy}) rotate(${ang}) scale(${sx},${sy})`);
+          K.svg(g, "text", { x: cx, y: 240, "text-anchor": "middle", "font-size": 13 }, name);
+          K.svg(g, "text", { x: cx, y: 262, "text-anchor": "middle", "font-size": 12, fill: "var(--good)" }, "标签：Highway");
+          return g;
+        });
+        (async () => { for (const g of gs) if (!(await ctx.tween(350, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      at: 16, title: "先试传统方法：把像素拉直喂给随机森林", kicker: "第 16–21 格 · 机器学习基线",
+      html: `<p>作者先不用深度学习，而是把每张 64×64×3 的图<b>拉成一行 12288 个数字</b>，21600 张图就是一个 21600×12288 的大表格，交给 sklearn 的<b>随机森林</b>（20 棵树）。</p><p>这样做的问题：图片稍微挪一个像素，12288 个数字的排列就全变了，树很难学到“形状”和“纹理”。作者也说用全部数据训练“非常吃力”。</p>`,
+      cells: [17, 18, 21], highlight: ["reshape(21600, 12288)", "RandomForestClassifier(n_estimators=20"],
+      notes: { 20: "注释说“小批量”，但 size=21600 就是整个训练集" },
+      draw(svg, ctx) {
+        const T = tileOf("forest", 7, 8);
+        const im = toImage(svg, 40, 60, 160, 160, 8, 8, (a, b) => T[b][a]);
+        K.svg(svg, "text", { x: 40, y: 50, "font-size": 12 }, "一张图（示意：8×8 像素）");
+        K.svg(svg, "text", { x: 40, y: 250, "font-size": 12, class: "muted" }, "真实为 64×64×3 = 12288 个数");
+        const cells = [];
+        for (let k = 0; k < 64; k++) { const a = k % 8, b = Math.floor(k / 8); const c = T[b][a]; cells.push({ e: K.svg(svg, "rect", { x: 40 + a * 20, y: 60 + b * 20, width: 20, height: 20, fill: `rgb(${c.map((v) => Math.round(K.clamp(v, 0, 1) * 255)).join(",")})`, stroke: "var(--panel)", "stroke-width": 0.5 }), a, b, k }); }
+        im.style.opacity = 0;
+        const trees = [];
+        for (let i = 0; i < 5; i++) { const g = K.node(svg, 260 + i * 92, 220, 80, 46, "树 " + (i + 1), { fs: 12 }); g.style.opacity = 0; trees.push(g); }
+        const vote = K.node(svg, 420, 290, 140, 36, "投票 → Forest", { fs: 13, bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" }); vote.style.opacity = 0;
+        ctx.wait(500).then((ok) => ok && ctx.tween(1500, (t) => cells.forEach((c) => {
+          c.e.setAttribute("x", K.lerp(40 + c.a * 20, 240 + c.k * 7, t)); c.e.setAttribute("y", K.lerp(60 + c.b * 20, 140, t));
+          c.e.setAttribute("width", K.lerp(20, 7, t)); c.e.setAttribute("height", K.lerp(20, 30, t));
+        }))).then(async (ok) => {
+          if (!ok) return; K.svg(svg, "text", { x: 240, y: 130, "font-size": 12 }, "拉直成一行：x1, x2, …, x12288");
+          for (const g of trees) if (!(await ctx.tween(200, (t) => (g.style.opacity = t)))) return;
+          await ctx.tween(400, (t) => (vote.style.opacity = t));
+        });
+      },
+    },
+    {
+      at: 22, title: "从零手写决策树和随机森林", kicker: "第 22–28 格 · 课程作业部分",
+      html: `<p>这是作者课程作业的一部分：不用库，自己写<b>决策树</b>（用<b>信息增益</b>挑问题：问完之后，各组里的类别越“纯”越好）和<b>随机森林</b>（每棵树用 90% 的样本、随机一部分像素，最后多数投票）。</p><p>手写版很慢，只用了十分之一训练数据（2160 张）和 2 棵树。作者说，即便如此准确率也明显高于 10 类瞎猜的 10%。</p>`,
+      cells: [23, 24, 25, 27], highlight: ["def entropy", "def information_gain", "bootstrap=0.9", "n_estimators=2"],
+      draw(svg, ctx) {
+        const kinds = ["森林", "水体", "农田"], cols = ["var(--good)", "var(--c1)", "var(--warn)"];
+        const items = []; const r = K.rng(4);
+        for (let i = 0; i < 18; i++) items.push({ c: i % 3, nir: [0.38, 0.04, 0.3][i % 3] + (r() - 0.5) * 0.1, red: [0.04, 0.05, 0.14][i % 3] + (r() - 0.5) * 0.04 });
+        const root = K.node(svg, 260, 20, 200, 44, "近红外亮度 ≤ 0.15 ?", { fs: 13, bold: true });
+        const L = K.node(svg, 90, 150, 170, 40, "是 → 水体", { fs: 13 }), R = K.node(svg, 440, 150, 200, 40, "否 → 再问：红光 ≤ 0.09 ?", { fs: 12 });
+        const RL = K.node(svg, 380, 230, 120, 36, "是 → 森林", { fs: 12 }), RR = K.node(svg, 520, 230, 120, 36, "否 → 农田", { fs: 12 });
+        [L, R, RL, RR].forEach((g) => (g.style.opacity = 0));
+        const dots = items.map((it, i) => K.svg(svg, "circle", { cx: 280 + (i % 9) * 18, cy: 82 + Math.floor(i / 9) * 14, r: 5, fill: cols[it.c] }));
+        K.svg(svg, "text", { x: 30, y: 330, "font-size": 12, class: "muted" }, "示意：每次挑一个让两边“更纯”的问题（信息增益最大），一直问到叶子。手写版实际用的是 RGB 像素值。");
+        const place = (it) => (it.nir <= 0.15 ? [120, 200] : it.red <= 0.09 ? [400, 275] : [540, 275]);
+        const cnt = {};
+        ctx.wait(500).then((ok) => ok && ctx.tween(500, (t) => [L, R].forEach((g) => (g.style.opacity = t))))
+          .then((ok) => ok && ctx.tween(500, (t) => [RL, RR].forEach((g) => (g.style.opacity = t))))
+          .then((ok) => ok && ctx.tween(1200, (t) => items.forEach((it, i) => {
+            const p = place(it), key = p.join(), n = cnt[key + i] != null ? cnt[key + i] : (cnt[key + i] = (cnt[key] = (cnt[key] || 0) + 1) - 1);
+            dots[i].setAttribute("cx", K.lerp(280 + (i % 9) * 18, p[0] + (n % 8) * 14, t)); dots[i].setAttribute("cy", K.lerp(82 + Math.floor(i / 9) * 14, p[1] + 10 + Math.floor(n / 8) * 12, t));
+          })));
+      },
+    },
+    {
+      at: 29, title: "迁移学习：借 ImageNet 的眼睛", kicker: "第 29–33 格 · 深度学习",
+      html: `<p><b>卷积神经网络（CNN）</b>用一个个小窗口在图上滑动找花纹：边缘、纹理、形状，一层层组合成更复杂的特征。</p><p><b>迁移学习</b>：直接拿在 ImageNet（一百多万张日常照片）上训练好的 ResNet 或 VGG 当“主干”，去掉它原来的 1000 类输出，换上新的分类头（Flatten → Dense 2048 → Dropout → 10 类 softmax）。<code>compile_model</code> 里 <code>fine_tune=None</code> 表示主干全部冻结。回调：早停（10 轮不进步就停）、保存最佳权重、学习率减半。</p>`,
+      cells: [32, 33], highlight: ["include_top=False", "weights='imagenet'", "layer.trainable = False", "Dense(n_classes, activation='softmax')", "EarlyStopping"],
+      draw(svg, ctx) {
+        const T = tileOf("urban", 9, 16);
+        toImage(svg, 20, 120, 90, 90, 16, 16, (a, b) => T[b][a]);
+        K.svg(svg, "text", { x: 20, y: 228, "font-size": 12 }, "输入 64×64×3");
+        const blocks = [];
+        for (let i = 0; i < 5; i++) { const h = 150 - i * 20; const g = K.node(svg, 140 + i * 62, 165 - h / 2, 50, h, "", { fill: "color-mix(in srgb, var(--c1) 22%, var(--panel))", stroke: "var(--c1)" }); blocks.push(g); }
+        K.svg(svg, "text", { x: 265, y: 60, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--c1)" }, "预训练主干（ResNet / VGG）");
+        const lock = K.svg(svg, "text", { x: 265, y: 270, "text-anchor": "middle", "font-size": 13, fill: "var(--c1)" }, "🔒 冻结：权重不动");
+        const head = [K.node(svg, 470, 110, 90, 40, "Flatten", { fs: 12 }), K.node(svg, 470, 160, 90, 40, "Dense 2048", { fs: 12 }), K.node(svg, 470, 210, 90, 40, "Dropout", { fs: 12 }), K.node(svg, 590, 150, 110, 60, "softmax\n10 类", { fs: 13, bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" })];
+        head.forEach((g) => (g.style.opacity = 0));
+        K.svg(svg, "text", { x: 580, y: 90, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--accent)" }, "新换的分类头（要训练）");
+        const scan = K.svg(svg, "rect", { x: 20, y: 120, width: 22, height: 22, fill: "none", stroke: "var(--warn)", "stroke-width": 2 });
+        ctx.tween(1600, (t) => { const k = Math.floor(t * 16); scan.setAttribute("x", 20 + (k % 4) * 22.5); scan.setAttribute("y", 120 + Math.floor(k / 4) * 22.5); })
+          .then(async (ok) => { scan.style.opacity = 0; for (const g of head) { if (!ok) return; ok = await ctx.tween(300, (t) => (g.style.opacity = t)); } });
+      },
+    },
+    {
+      at: 34, title: "ResNet50：先训新头，再整体微调", kicker: "第 34–39 格 · 两阶段训练",
+      html: `<p>第一阶段：主干冻结，只训练新分类头，学习率 0.01（较大），最多 50 轮。</p><p>第二阶段：重新建一个 <code>fine_tune=0</code> 的模型（所有层都可训练），载入第一阶段的最佳权重，用 0.0001 的小学习率<b>整体微调</b>，最多 100 轮。小学习率是为了别把主干里已经学好的本事一下子冲掉。</p><p>两个阶段的 <code>validation_data</code> 都是测试集，这是本 notebook 最大的方法问题（见结果一节）。</p>`,
+      cells: [35, 37, 38], highlight: ["Adam(lr=1e-2)", "Adam(lr=1e-4), fine_tune=0", "load_weights", "validation_data=test_generator"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [0, 60], [0.3, 1], { xticks: 6, yticks: 0, xlabel: "训练轮数", ylabel: "准确率（示意曲线）" });
+        K.svg(svg, "rect", { x: ax.sx(0), y: 30, width: ax.sx(25) - ax.sx(0), height: 250, fill: "var(--c1)", opacity: 0.08 });
+        K.svg(svg, "rect", { x: ax.sx(25), y: 30, width: ax.sx(60) - ax.sx(25), height: 250, fill: "var(--accent)", opacity: 0.08 });
+        K.svg(svg, "text", { x: ax.sx(12.5), y: 50, "text-anchor": "middle", "font-size": 12, fill: "var(--c1)" }, "阶段 1：冻结主干，lr = 0.01");
+        K.svg(svg, "text", { x: ax.sx(42), y: 50, "text-anchor": "middle", "font-size": 12, fill: "var(--accent)" }, "阶段 2：全部解冻，lr = 0.0001");
+        const f = (e) => (e < 25 ? 0.4 + 0.42 * (1 - Math.exp(-e / 5)) : 0.82 + 0.14 * (1 - Math.exp(-(e - 25) / 8)));
+        const p = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--good)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 70, y: 330, "font-size": 12, class: "muted" }, "曲线形状为示意，用来说明两阶段的思路，不是作者的真实训练曲线");
+        ctx.tween(2400, (t) => { let d = ""; for (let e = 0; e <= 60 * t; e += 0.5) d += (d ? "L" : "M") + ax.sx(e) + "," + ax.sy(f(e)); p.setAttribute("d", d); });
+      },
+    },
+    {
+      at: 40, title: "评估：精确率、召回率、混淆矩阵", kicker: "第 40–41 格 · 评估",
+      html: `<p>作者载入最佳权重，对 5400 张测试图逐张预测，然后用 <code>display_results</code> 算每一类的<b>精确率</b>（说是这类的里面真是这类的比例）、<b>召回率</b>（这类里被认出来的比例）、F 值，画<b>混淆矩阵</b>，并打印准确率和 F2 分数。</p><p>注意第 40 格的 <code>np.argmax(np.rint(predictions))</code>：先把概率四舍五入成 0/1 再取最大，模型拿不准时会全部判成第 0 类。实验 C 演示它的影响。</p>`,
+      cells: [40], highlight: ["np.argmax(np.rint(predictions), axis=1)", "display_results"],
+      draw(svg, ctx) {
+        const names = ["公路", "河流", "住宅", "工业"], M = [[44, 4, 1, 1], [5, 45, 0, 0], [1, 0, 47, 2], [2, 0, 3, 45]];
+        K.svg(svg, "text", { x: 30, y: 24, "font-size": 12, class: "muted" }, "混淆矩阵示意（数字是编的，用来说明怎么读，不是作者结果）：行 = 真实，列 = 预测");
+        names.forEach((n, i) => { K.svg(svg, "text", { x: 130, y: 76 + i * 60, "text-anchor": "end", "font-size": 13 }, n); K.svg(svg, "text", { x: 170 + i * 70, y: 300, "text-anchor": "middle", "font-size": 13 }, n); });
+        const cells = [];
+        M.forEach((row, i) => row.forEach((v, j) => { const g = K.node(svg, 140 + j * 70, 46 + i * 60, 64, 54, String(v), { fs: 14, fill: K.heat(v / 50), stroke: i === j ? "var(--good)" : "var(--line)" }); g.style.opacity = 0; cells.push(g); }));
+        const note = K.svg(svg, "text", { x: 450, y: 110, "font-size": 13 }, ""), note2 = K.svg(svg, "text", { x: 450, y: 134, "font-size": 13 }, "");
+        ctx.tween(1400, (t) => cells.forEach((g, i) => (g.style.opacity = K.clamp(t * 16 - i, 0, 1)))).then((ok) => { if (ok) { note.textContent = "对角线 = 认对的"; note2.textContent = "公路↔河流 互相认错最多"; } });
+      },
+    },
+    {
+      at: 42, title: "换个主干：ResNet50V2 与 ResNet152V2", kicker: "第 42–57 格 · 更多模型",
+      html: `<p>接下来作者用同一套流程（建模型 → 冻结训练 → 解冻微调 → 评估 → 保存）换了两个主干：<b>ResNet50V2</b>（改进了残差块里各层的顺序）和更深的 <b>ResNet152V2</b>（152 层）。</p><p><b>残差连接</b>是 ResNet 的核心：每一块除了自己算出的结果，还把输入“抄近路”直接加到输出上，这样网络很深也能训得动。</p>`,
+      cells: [43, 51], highlight: ["'ResNet50V2'", "'ResNet152V2'"],
+      notes: { 44: "每个模型都重新定义了一遍回调，和第 33、36 格完全相同" },
+      draw(svg, ctx) {
+        const xs = [120, 260, 400, 540];
+        xs.forEach((x, i) => { if (i < 3) K.node(svg, x, 140, 90, 60, i === 0 ? "卷积" : i === 1 ? "卷积" : "相加 ⊕", { fs: 13, fill: i === 2 ? "var(--accent-soft)" : "var(--panel-2)" }); });
+        K.node(svg, 10, 140, 70, 60, "输入 x", { fs: 13, bold: true }); K.node(svg, 560, 140, 110, 60, "输出\nF(x) + x", { fs: 13, bold: true });
+        K.arrow(svg, 80, 170, 118, 170); K.arrow(svg, 210, 170, 258, 170); K.arrow(svg, 350, 170, 398, 170); K.arrow(svg, 490, 170, 558, 170);
+        const skip = K.svg(svg, "path", { d: "M50,140 C50,40 445,40 445,138", fill: "none", stroke: "var(--warn)", "stroke-width": 3, "stroke-dasharray": "6 4" });
+        K.svg(svg, "text", { x: 250, y: 50, "text-anchor": "middle", "font-size": 13, fill: "var(--warn)", "font-weight": 700 }, "近路（残差连接）：把 x 直接加过去");
+        const dot = K.svg(svg, "circle", { cx: 50, cy: 140, r: 7, fill: "var(--warn)" }), dot2 = K.svg(svg, "circle", { cx: 80, cy: 170, r: 7, fill: "var(--c1)" });
+        K.svg(svg, "text", { x: 360, y: 280, "text-anchor": "middle", "font-size": 13 }, "ResNet50 / 50V2 / 152V2 都由很多这样的块叠成，152V2 叠得最深");
+        const L = skip.getTotalLength();
+        ctx.tween(2000, (t) => { const p = skip.getPointAtLength(L * t); dot.setAttribute("cx", p.x); dot.setAttribute("cy", p.y); dot2.setAttribute("cx", K.lerp(80, 395, t)); });
+      },
+    },
+    {
+      at: 58, title: "VGG16 / VGG19，以及抽样看预测", kicker: "第 58–74 格 · 更多模型与可视化",
+      html: `<p>最后两个主干是 <b>VGG16</b> 和 <b>VGG19</b>：结构很规整，一串 3×3 卷积接池化，层数分别是 16 和 19。作者给 VGG 的分类头多加了一层 Dense 2048。</p><p>最后一格 <code>plot_predictions</code> 随机抽 20 张测试图，标题写“预测（真实）”，认对标绿，认错标红。作者列的 InceptionV3、Xception 写着“以后再做”。</p>`,
+      cells: [59, 67, 74], highlight: ["'VGG16'", "'VGG19'", "plot_predictions"],
+      draw(svg, ctx) {
+        const kinds = ["forest", "water", "crop", "urban", "highway", "water", "forest", "highway"], zh = { forest: "森林", water: "河流", crop: "农田", urban: "住宅", highway: "公路" };
+        const pred = ["forest", "water", "crop", "urban", "highway", "highway", "forest", "water"];
+        K.svg(svg, "text", { x: 30, y: 24, "font-size": 12, class: "muted" }, "示意：随机抽图看“预测（真实）”，绿 = 对，红 = 错（图和对错都是示意）");
+        const gs = kinds.map((k, i) => {
+          const g = K.svg(svg, "g"); g.style.opacity = 0;
+          const x = 30 + (i % 4) * 172, y = 40 + Math.floor(i / 4) * 145;
+          toImage(g, x + 30, y + 30, 90, 90, 24, 24, ((T) => (a, b) => T[b][a])(tileOf(k, 30 + i, 24)));
+          const ok = pred[i] === k;
+          K.svg(g, "text", { x: x + 75, y: y + 20, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: ok ? "var(--good)" : "var(--bad)" }, `${zh[pred[i]]}（${zh[k]}）`);
+          return g;
+        });
+        (async () => { for (const g of gs) if (!(await ctx.tween(220, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：真彩色 / 假彩色 / NDVI ---------- */
+  K.lab(document.getElementById("labA"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "mode", label: "怎么显示", value: "true", options: [["true", "真彩色：红绿蓝（人眼看到的）"], ["false", "假彩色：近红外显示成红色"], ["ndvi", "NDVI 植被指数（绿 = 植被茂盛）"]] },
+      { id: "growth", label: "庄稼长势（0 = 刚播种的裸地，1 = 茂盛）", min: 0, max: 1, step: 0.05, value: 0.6, fmt: (v) => (+v).toFixed(2) },
+      { id: "haze", label: "薄雾 / 薄云", min: 0, max: 0.6, step: 0.05, value: 0, fmt: (v) => (+v).toFixed(2) },
+    ],
+    note: "浏览器按典型地物在蓝、绿、红、近红外四个波段的反射率（示意值）生成一张 64×64 的场景，并现场计算 NDVI = (近红外 − 红) / (近红外 + 红)。在真彩色里，森林、草地、庄稼都是差不多的暗绿色；换成假彩色或 NDVI，差别一下子就出来了。EuroSAT 的 RGB 版只有前三个波段。",
+    render(svg, v) {
+      const W = 64, S = scene(W, 3), r = K.rng(5), B = [];
+      for (let y = 0; y < W; y++) { B.push([]); for (let x = 0; x < W; x++) B[y].push(bandVals(S[y][x], { growth: v.growth, haze: v.haze }, r)); }
+      const ndvi = (b) => (b[3] - b[2]) / (b[3] + b[2] + 1e-6);
+      const pix = (i, j) => {
+        const b = B[j][i];
+        if (v.mode === "true") return trueColor(b);
+        if (v.mode === "false") return [b[3] * 2.2, b[2] * 3.2, b[1] * 3.2];
+        const n = ndvi(b); return n > 0.2 ? [0.15 - n * 0.1, 0.3 + n * 0.7, 0.15] : n > 0 ? [0.75, 0.65, 0.35] : [0.25, 0.35, 0.75];
+      };
+      toImage(svg, 20, 20, 300, 300, W, W, pix);
+      const by = {}; S.forEach((row, y) => row.forEach((t, x) => { (by[t] = by[t] || []).push(ndvi(B[y][x])); }));
+      const items = ["forest", "crop", "grass", "soil", "urban", "water"].filter((k) => by[k]).map((k) => ({ label: NAMES[k], value: by[k].reduce((a, b) => a + b, 0) / by[k].length }));
+      K.svg(svg, "text", { x: 350, y: 30, "font-size": 13, "font-weight": 700 }, "各地物的平均 NDVI（现算）");
+      const ax = K.axes(svg, { x: 400, y: 44, w: 220, h: 270 }, [-0.4, 0.9], [0, items.length], { xticks: 0, yticks: 0 });
+      K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(0), y1: 44, y2: 314, stroke: "var(--ink-3)" });
+      items.forEach((d, i) => {
+        const y = 54 + i * 44, x0 = ax.sx(0), x1 = ax.sx(d.value);
+        K.svg(svg, "text", { x: 392, y: y + 18, "text-anchor": "end", "font-size": 12 }, d.label);
+        K.svg(svg, "rect", { x: Math.min(x0, x1), y, width: Math.abs(x1 - x0), height: 26, rx: 3, fill: d.value > 0.2 ? "var(--good)" : d.value > 0 ? "var(--warn)" : "var(--c1)" });
+        K.svg(svg, "text", { x: Math.max(x0, x1) + 4, y: y + 18, "font-size": 11, class: "muted" }, d.value.toFixed(2));
+      });
+      K.svg(svg, "text", { x: 20, y: 348, "font-size": 12, class: "muted" }, "左上森林、左下农田条带、中间河流、右下城市和道路（代码生成的示意场景）");
+      const g = (k) => (by[k] ? by[k].reduce((a, b) => a + b, 0) / by[k].length : 0);
+      return { readout: [
+        { k: "森林 NDVI", v: g("forest").toFixed(2), color: "var(--good)" },
+        { k: "庄稼 NDVI", v: g("crop").toFixed(2), color: g("crop") > 0.2 ? "var(--good)" : "var(--warn)" },
+        { k: "水体 NDVI", v: g("water").toFixed(2), color: "var(--c1)" },
+        { k: "建筑 NDVI", v: g("urban").toFixed(2) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：数据增强 ---------- */
+  K.lab(document.getElementById("labB"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "rot", label: "旋转角度（作者设的范围是 ±60°）", min: -60, max: 60, step: 5, value: 30, fmt: (v) => v + "°" },
+      { id: "shift", label: "水平平移（±20%）", min: -0.2, max: 0.2, step: 0.02, value: 0.1, fmt: (v) => Math.round(v * 100) + "%" },
+      { id: "zoom", label: "缩放（±20%）", min: 0.8, max: 1.2, step: 0.02, value: 1, fmt: (v) => (+v).toFixed(2) },
+      { id: "flip", label: "翻转", value: "none", options: [["none", "不翻转"], ["h", "水平翻转"], ["v", "垂直翻转"], ["hv", "两个都翻"]] },
+    ],
+    note: "对一张 64×64 的示意“河流”小图现场做几何变换：对新图的每个像素，反算它来自原图的哪个位置（最近邻取值）；超出边界的部分照 Keras 默认的 fill_mode='nearest' 用最近的边缘像素填。变换后像素几乎全变了，但答案仍然是“河流”。",
+    render(svg, v) {
+      const W = 64, T = tileOf("water", 21, W);
+      toImage(svg, 20, 30, 260, 260, W, W, (a, b) => T[b][a]);
+      K.svg(svg, "text", { x: 150, y: 20, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "原图");
+      const th = (v.rot * Math.PI) / 180, c = (W - 1) / 2, fx = v.flip.includes("h") ? -1 : 1, fy = v.flip.includes("v") ? -1 : 1;
+      let same = 0, filled = 0;
+      const out = [];
+      for (let j = 0; j < W; j++) { out.push([]); for (let i = 0; i < W; i++) {
+        let x = (i - c) / v.zoom - v.shift * W, y = (j - c) / v.zoom;
+        const xr = Math.cos(-th) * x - Math.sin(-th) * y, yr = Math.sin(-th) * x + Math.cos(-th) * y;
+        let sx = Math.round(xr * fx + c), sy = Math.round(yr * fy + c);
+        if (sx < 0 || sy < 0 || sx >= W || sy >= W) filled++;
+        sx = K.clamp(sx, 0, W - 1); sy = K.clamp(sy, 0, W - 1);
+        const p = T[sy][sx]; out[j].push(p);
+        if (Math.abs(p[0] - T[j][i][0]) + Math.abs(p[1] - T[j][i][1]) + Math.abs(p[2] - T[j][i][2]) < 0.06) same++;
+      } }
+      toImage(svg, 360, 30, 260, 260, W, W, (a, b) => out[b][a]);
+      K.svg(svg, "text", { x: 490, y: 20, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "增强后");
+      K.arrow(svg, 290, 160, 350, 160);
+      K.svg(svg, "text", { x: 20, y: 320, "font-size": 13, fill: "var(--good)", "font-weight": 700 }, "标签：River");
+      K.svg(svg, "text", { x: 360, y: 320, "font-size": 13, fill: "var(--good)", "font-weight": 700 }, "标签：仍然是 River");
+      return { readout: [
+        { k: "和原图同位置颜色相同的像素", v: ((same / (W * W)) * 100).toFixed(0) + "%" },
+        { k: "边界外用边缘像素填的", v: ((filled / (W * W)) * 100).toFixed(0) + "%", color: filled / (W * W) > 0.15 ? "var(--warn)" : "var(--ink)" },
+        { k: "标签变了吗", v: "没有", color: "var(--good)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：np.rint 的坑 ---------- */
+  K.lab(document.getElementById("labC"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "conf", label: "模型有多“自信”（越大概率越集中在一个类别）", min: 0.5, max: 6, step: 0.1, value: 1.6, fmt: (v) => (+v).toFixed(1) },
+      { id: "skill", label: "模型有多准（正确类别得分的优势）", min: 0, max: 4, step: 0.1, value: 2.6, fmt: (v) => (+v).toFixed(1) },
+      { id: "seed", label: "换一批测试样本", button: true },
+    ],
+    note: "浏览器模拟 1000 张测试图、10 个类别的 softmax 概率，分别用正确写法 argmax(p) 和作者写法 argmax(rint(p)) 取预测类别，统计准确率。作者写法里，只要最大概率不到 0.5，四舍五入后整行都是 0，argmax 就返回第 0 类（按文件夹字母顺序，第 0 类是 AnnualCrop）。",
+    render(svg, v) {
+      const r = K.rng(77 + v.seed * 13), N = 1000, C = 10;
+      let ok1 = 0, ok2 = 0, low = 0;
+      const to0 = new Array(C).fill(0), trueCnt = new Array(C).fill(0), maxp = [];
+      for (let n = 0; n < N; n++) {
+        const y = Math.floor(r() * C); trueCnt[y]++;
+        const z = []; for (let k = 0; k < C; k++) z.push((K.randn(r) + (k === y ? v.skill : 0)) * v.conf);
+        const m = Math.max(...z), e = z.map((q) => Math.exp(q - m)), s = e.reduce((a, b) => a + b, 0), p = e.map((q) => q / s);
+        const a1 = p.indexOf(Math.max(...p));
+        const rp = p.map((q) => Math.round(q)), a2 = rp.indexOf(Math.max(...rp));
+        if (a1 === y) ok1++; if (a2 === y) ok2++;
+        if (Math.max(...p) < 0.5) { low++; to0[y]++; }
+        maxp.push(Math.max(...p));
+      }
+      const bins = new Array(10).fill(0); maxp.forEach((q) => bins[Math.min(9, Math.floor(q * 10))]++);
+      const ax = K.axes(svg, { x: 50, y: 20, w: 560, h: 250 }, [0, 1], [0, Math.max(...bins) * 1.3], { xticks: 10, yticks: 3, xlabel: "每张图的最大概率", ylabel: "图片数" });
+      bins.forEach((c, b) => K.svg(svg, "rect", { x: ax.sx(b / 10) + 2, y: ax.sy(c), width: ax.sx(0.1) - ax.sx(0) - 4, height: ax.sy(0) - ax.sy(c), fill: b < 5 ? "var(--bad)" : "var(--good)", opacity: 0.8 }));
+      K.svg(svg, "line", { x1: ax.sx(0.5), x2: ax.sx(0.5), y1: 20, y2: 270, stroke: "var(--ink)", "stroke-dasharray": "5 3" });
+      K.svg(svg, "text", { x: ax.sx(0.25), y: 40, "text-anchor": "middle", "font-size": 12, fill: "var(--bad)" }, "红：最大概率 < 0.5，rint 后全是 0 → 判成第 0 类");
+      return { readout: [
+        { k: "正确写法准确率", v: ((ok1 / N) * 100).toFixed(1) + "%", color: "var(--good)" },
+        { k: "作者写法准确率", v: ((ok2 / N) * 100).toFixed(1) + "%", color: ok2 < ok1 ? "var(--bad)" : "var(--ink)" },
+        { k: "被强行判成第 0 类", v: low + " 张", color: low ? "var(--bad)" : "var(--ink)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

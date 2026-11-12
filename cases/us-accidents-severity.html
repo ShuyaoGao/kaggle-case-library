@@ -1,0 +1,639 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>车祸严重度预测</title>
+<meta name="description" content="Kaggle 案例拆解：用美国 400 多万起交通事故记录，只凭时间、地点、天气和周边设施，预测一起事故会不会严重影响交通（4 级）：数据源取舍、频率编码、欠采样、逻辑回归、随机森林与 EasyEnsemble。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格数据 · 二分类 · 交通安全</div>
+  <h1>美国车祸：哪一起会把路堵死？</h1>
+  <p class="en">USA Car Accidents Severity Prediction</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">数据源取舍</span><span class="tag method">缺失值分组填补</span><span class="tag method">频率编码</span>
+    <span class="tag method">人口普查数据拼接</span><span class="tag method">Box-Cox 变换</span><span class="tag method">随机欠采样</span>
+    <span class="tag method">逻辑回归</span><span class="tag method">随机森林</span><span class="tag method">EasyEnsemble / BalanceCascade</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Jinz Wang</b></span>
+    <span>Kaggle 点赞 <b>375</b>（2026-11 抓取）</span>
+    <span>数据集 <b>sobhanmoosavi/us-accidents</b>（2020 年 12 月版）</span>
+    <span><a href="https://www.kaggle.com/code/jingzongwang/usa-car-accidents-severity-prediction" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">美国 49 个州 400 多万起车祸记录</div><p>2016 年 2 月到 2020 年 12 月，每一行是一起事故：发生时间、地点、当时的天气、附近有没有路口和红绿灯等。<span data-cell="1">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这起事故是不是 4 级（最严重）</div><p>这里的“严重”指<b>对交通的影响</b>（堵多久），不是伤亡。4 级很少：作者估计数据里普通事故和 4 级事故约为 100 : 1。<span data-cell="128">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">先把数据洗干净，再对付“太少”</div><p>只留一个数据源、删掉事后才知道的列、补缺失值；把时间和地点做成“频率”特征；最后用欠采样 + 逻辑回归、随机森林、EasyEnsemble、BalanceCascade 建模。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">“几点钟出的事”最有用</div><p>作者结论：按分钟算的事故频率最重要，事故越少见的时刻出事，越可能是 4 级；州际公路上的事故约 2% 是 4 级，约为平均的 2.3 倍；红绿灯附近不容易出严重事故。<span data-cell="1">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>US Accidents</b>（Sobhan Moosavi 等人整理，见作者第 1 格的致谢），事故报告来自 MapQuest 和 Bing 两家交通信息接口。下面的规模和字段说明来自作者第 1、5 格对数据集的介绍。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">事故记录（行）</div><div class="v">400 万+</div></div>
+        <div class="stat-tile"><div class="k">原始字段（列）</div><div class="v">49</div></div>
+        <div class="stat-tile"><div class="k">覆盖范围</div><div class="v">49 个州</div></div>
+        <div class="stat-tile"><div class="k">普通 : 4 级（清洗后）</div><div class="v" style="color:var(--c6)">约 100 : 1</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">行数、州数、时间范围见第 1 格 <span data-cell="1">出处</span>；49 列 = 交通 12 + 地址 9 + 天气 11 + 周边设施 13 + 昼夜 4，见第 5 格 <span data-cell="5">出处</span>；约 100 : 1 见第 128 格 <span data-cell="128">出处</span>。作者最后只用了 MapQuest 报告、2019 年 3 月以后的部分。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么（挑主要的）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>Severity</code></td><td><b>要预测的答案</b>：1–4 级，1 = 对交通影响最小（短暂延误），4 = 影响最大（长时间延误）。作者改成“是不是 4 级”</td><td>类别</td></tr>
+        <tr><td><code>Source</code></td><td>是哪家接口报告的（MapQuest / Bing）</td><td>类别</td></tr>
+        <tr><td><code>Start_Time</code></td><td>事故开始时间（当地时间）</td><td>时间</td></tr>
+        <tr><td><code>End_Time</code> <code>Distance(mi)</code> <code>Description</code></td><td>事故结束时间、受影响路段长度、文字描述：<b>事后才知道</b>，被删掉</td><td>时间 / 数值 / 文本</td></tr>
+        <tr><td><code>Start_Lat</code> <code>Start_Lng</code></td><td>事故地点的纬度、经度</td><td>数值</td></tr>
+        <tr><td><code>Street</code> <code>City</code> <code>County</code> <code>State</code> <code>Zipcode</code></td><td>街道、城市、县、州、邮编</td><td>类别（取值极多）</td></tr>
+        <tr><td><code>Side</code></td><td>在道路的左侧还是右侧</td><td>类别</td></tr>
+        <tr><td><code>Airport_Code</code></td><td>最近的机场气象站（天气数据从这里来）</td><td>类别</td></tr>
+        <tr><td><code>Temperature</code> <code>Humidity</code> <code>Pressure</code> <code>Visibility</code> <code>Wind_Speed</code> <code>Precipitation</code></td><td>温度、湿度、气压、能见度、风速、降水量</td><td>数值</td></tr>
+        <tr><td><code>Weather_Condition</code> <code>Wind_Direction</code></td><td>天气描述（雨、雪、雾……）、风向</td><td>文字类别</td></tr>
+        <tr><td><code>Crossing</code> <code>Junction</code> <code>Traffic_Signal</code> <code>Stop</code> 等 13 列</td><td>POI（周边设施）：附近有没有人行横道、路口、红绿灯、停车让行牌……</td><td>是 / 否</td></tr>
+        <tr><td><code>Sunrise_Sunset</code> 等 4 列</td><td>按日出日落（或不同的晨昏标准）算，当时是白天还是夜里</td><td>白天 / 夜里</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="103">
+    <h3>动手试试 A · 频率编码：用“出事次数”代替街道名 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="139">
+    <h3>动手试试 B · 欠采样比例：多数类留多少才合适 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="146">
+    <h3>动手试试 C · EasyEnsemble：几个子集真的不一样吗 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>MapQuest 和 Bing 对“严重度”的定义不同，不能混用；作者只保留 MapQuest</td><td><span data-cell="13">第 13 格</span></td></tr>
+        <tr><td>2019 年 2 月以后 4 级事故的分布明显变了，只用 2019 年 3 月 10 日以后的数据</td><td><span data-cell="58">第 58 格</span></td></tr>
+        <tr><td>按分钟的事故频率最有用：越少出事的时刻，出的事越可能是 4 级</td><td><span data-cell="1">第 1 格</span> <span data-cell="71">第 71 格</span></td></tr>
+        <tr><td>街道、邮编这种小范围：出事多的地方更易严重；城市、机场气象区这种大范围：正好相反</td><td><span data-cell="105">第 105 格</span></td></tr>
+        <tr><td>州际公路上的事故约 2% 是 4 级，约为平均的 2.3 倍，高于其他道路类型</td><td><span data-cell="1">第 1 格</span></td></tr>
+        <tr><td>红绿灯、人行横道附近的事故不容易严重；路口附近略容易</td><td><span data-cell="119">第 119 格</span></td></tr>
+        <tr><td>随机森林里气压排第四，气压与严重度负相关</td><td><span data-cell="1">第 1 格</span></td></tr>
+        <tr><td>欠采样从 1:10 换成 1:20（多用数据）并没有更好</td><td><span data-cell="141">第 141 格</span></td></tr>
+        <tr><td>EasyEnsemble、BalanceCascade 都没有带来明显提升</td><td><span data-cell="149">第 149 格</span> <span data-cell="154">第 154 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">作者在开头说“只用有限的属性就能准确预测”，但精确率、召回率、F1 等具体分数都在运行输出里（classification_report），Kaggle 下载的源码不带输出，作者的文字里也没写具体数值，所以这里不列分数。想看可以点上方链接在 Kaggle 上看作者的运行结果。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>事故刚报上来、细节还不清楚时，凭时间、地点、天气和周边设施估计“会不会长时间堵路”，帮交警和清障车决定先去哪。</li>
+        <li><b>同类问题：</b>119 警情分级、地铁故障影响评估、电网停电规模预估、医院急诊分诊：都是“事情刚发生，信息很少，要快速判断轻重”。</li>
+        <li><b>可迁移的套路：</b>先看数据从哪来、口径是否一致 → 删掉事后才知道的列 → 取值太多的类别用频率编码 → 先切测试集，只在训练集里欠采样 → 用宏平均 F1 这类兼顾少数类的指标选模型。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>数据源取舍、按时间截断 <span data-cell="14">第 14 格</span> <span data-cell="59">第 59 格</span></li>
+        <li>删除事后字段 <span data-cell="16">第 16 格</span></li>
+        <li>天气文字拆成是/否列 <span data-cell="28">第 28 格</span></li>
+        <li>按“机场 + 月份”分组填补缺失值 <span data-cell="43">第 43 格</span></li>
+        <li>频率编码 + 对数变换 <span data-cell="70">第 70 格</span> <span data-cell="103">第 103 格</span></li>
+        <li>拼接县级人口普查数据 <span data-cell="84">第 84 格</span>；从街道名提取道路类型 <span data-cell="94">第 94 格</span></li>
+        <li>Box-Cox 变换 <span data-cell="108">第 108 格</span>；相关性筛选 <span data-cell="124">第 124 格</span>；独热编码 <span data-cell="127">第 127 格</span></li>
+        <li>随机欠采样 + 逻辑回归（类别权重平衡）<span data-cell="134">第 134 格</span>；随机森林 <span data-cell="136">第 136 格</span></li>
+        <li>EasyEnsemble <span data-cell="146">第 146 格</span>、BalanceCascade <span data-cell="152">第 152 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者删掉了 End_Time、Distance、Duration，因为它们“事后才知道”。可严重度本身就是按堵了多久来定的。还有没有别的列，其实也是事故处理过程中才记录下来的？</li>
+      <li>频率编码（第 70、103 格）和按相关性删列（第 96、124 格）都是在<b>整份数据</b>上算的，第 131 格才切出测试集。测试集的信息有没有提前“漏”进训练？会让分数偏高多少，怎么改？</li>
+      <li>第 131 格是随机切分，训练集和测试集里都混着 2019、2020 年的事故，等于有时在用“未来”的事故预测“过去”。如果模型要用在明年，应该怎么切？</li>
+      <li>EasyEnsemble 的 <code>multi_rus</code>（第 145 格）每次都用 <code>random_state=42</code>，几个“子集”其实一模一样（见实验 C）。作者说 EasyEnsemble 没带来提升，这个结论还站得住吗？</li>
+      <li>作者因为“4 级太少”选了 MapQuest 而不是 Bing。如果你是交通局长，愿意接受“只用一家口径、样本更少”的模型，还是想办法把两家的标准对齐？</li>
+      <li>“越少出事的时刻出事越严重”（半夜）是因果关系吗？夜里车少、车速快、救援慢，哪个才是真正的原因？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Jinz Wang，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：Moosavi et al., US Accidents（A Countrywide Traffic Accident Dataset, 2019）。
+</footer>
+</main>
+
+<script src="nb/us-accidents-severity.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  /* 自查开关：网址带 ?fast 时动画直接跳到最后一帧（无界面截图用） */
+  if (/fast/.test(location.search + location.hash)) {
+    K.tween = (ms, fn, ctx) => { fn(1, 1); return Promise.resolve(!ctx || ctx.alive()); };
+    K.wait = (ms, ctx) => Promise.resolve(!ctx || ctx.alive());
+    if (/nocode/.test(location.search)) document.head.appendChild(K.el("style", null, ".ch-cells > .cell, .ch-cells > .cell-note { display: none !important; }"));
+  }
+  K.initPage();
+  const T = (svg, x, y, s, o) => K.svg(svg, "text", Object.assign({ x, y, "font-size": 13 }, o || {}), s);
+  const fade = (els, v) => els.forEach((e) => (e.style.opacity = v));
+  const tint = (c, p) => `color-mix(in srgb, ${c} ${p}%, var(--panel))`;
+
+  const steps = [
+    {
+      at: 0, title: "问题：哪一起事故会把路堵死", kicker: "第 0–6 格 · 介绍与读数据",
+      html: `<p>作者的目标很明确：一起事故刚发生、还不知道细节时，只凭<b>时间、地点、天气、周边设施</b>，预测它会不会是最严重的 4 级。</p><p>这里的严重度不是伤亡，而是“对交通的影响”：1 级是短暂延误，4 级是长时间堵路 <span data-cell="5">第 5 格</span>。动画里事故点后面的车流越堵越长，就是等级越来越高。</p>`,
+      cells: [1, 6],
+      draw(svg, ctx) {
+        K.svg(svg, "rect", { x: 20, y: 120, width: 680, height: 70, rx: 6, fill: "var(--panel-2)", stroke: "var(--line)" });
+        K.svg(svg, "line", { x1: 20, y1: 155, x2: 700, y2: 155, stroke: "var(--ink-3)", "stroke-dasharray": "14 10" });
+        const crash = K.svg(svg, "text", { x: 600, y: 150, "font-size": 26, "text-anchor": "middle" }, "💥");
+        T(svg, 600, 110, "事故点", { "text-anchor": "middle", "font-weight": 700 });
+        const cars = [];
+        for (let i = 0; i < 26; i++) cars.push(K.svg(svg, "rect", { x: 570 - i * 22, y: 130 + (i % 2) * 30, width: 16, height: 10, rx: 2, fill: "var(--c1)", opacity: 0 }));
+        const lv = T(svg, 30, 240, "", { "font-size": 18, "font-weight": 700 });
+        const desc = T(svg, 30, 266, "", { class: "muted" });
+        const labels = ["1 级：影响最小，短暂延误", "2 级", "3 级", "4 级：影响最大，长时间堵路"];
+        const bars = [0, 1, 2, 3].map((k) => { K.svg(svg, "text", { x: 470 + k * 60, y: 320, "text-anchor": "middle", "font-size": 12 }, k + 1 + " 级"); return K.svg(svg, "rect", { x: 450 + k * 60, y: 300, width: 40, height: 0, fill: k === 3 ? "var(--c6)" : "var(--c1)" }); });
+        T(svg, 30, 320, "等级只看对交通的影响，不看伤亡（第 5 格）", { "font-size": 12, class: "muted" });
+        (async () => {
+          for (let k = 0; k < 4; k++) {
+            lv.textContent = `Severity = ${k + 1}`; lv.style.fill = k === 3 ? "var(--c6)" : "var(--ink)"; desc.textContent = labels[k];
+            const n = [3, 8, 15, 26][k];
+            if (!(await ctx.tween(700, (t) => cars.forEach((c, i) => (c.style.opacity = i < n * t ? 0.85 : 0))))) return;
+            if (!(await ctx.tween(300, (t) => { const h = 18 + k * 12; bars[k].setAttribute("height", h * t); bars[k].setAttribute("y", 290 - h * t); }))) return;
+            if (!(await ctx.wait(400))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 7, title: "两个数据源，两把不同的尺子", kicker: "第 7–14 格 · 只留 MapQuest",
+      html: `<p>这些报告来自两家接口：<b>MapQuest</b> 和 <b>Bing</b>。作者按来源和等级一数，发现两家报的各级比例完全不一样：MapQuest 的 4 级少得在图上都看不见，Bing 的 4 级却和 2 级差不多多 <span data-cell="9">第 9 格</span>。</p><p>再看持续时间和影响路段长度，同一个“4 级”在两家的含义也不同 <span data-cell="13">第 13 格</span>。作者判断两把尺子不能混用，只留下 MapQuest，因为“严重事故本来就少，这就是要面对的现实”。</p><p>动画里条形的比例是示意，不是原文数值。</p>`,
+      cells: [8, 11, 13, 14], highlight: ["Source']==\"MapQuest\""],
+      draw(svg, ctx) {
+        const props = { MapQuest: [0.02, 0.62, 0.35, 0.01], Bing: [0.03, 0.47, 0.06, 0.44] };
+        const cols = ["var(--c3)", "var(--c1)", "var(--warn)", "var(--c6)"];
+        const rows = [];
+        Object.keys(props).forEach((src, r) => {
+          const y = 70 + r * 110;
+          T(svg, 30, y + 30, src, { "font-weight": 700, "font-size": 15 });
+          let x = 130;
+          const segs = props[src].map((p, k) => { const s = K.svg(svg, "rect", { x, y, width: 0, height: 46, fill: cols[k] }); s._x = x; s._w = p * 520; x += p * 520; return s; });
+          rows.push({ segs, y });
+        });
+        [0, 1, 2, 3].forEach((k) => { K.svg(svg, "rect", { x: 130 + k * 110, y: 290, width: 14, height: 14, fill: cols[k] }); T(svg, 150 + k * 110, 302, k + 1 + " 级", { "font-size": 12 }); });
+        T(svg, 30, 36, "各来源报告的事故中，各等级所占比例（示意）", { class: "muted" });
+        const cross = K.svg(svg, "line", { x1: 120, y1: 205, x2: 660, y2: 205, stroke: "var(--bad)", "stroke-width": 4, opacity: 0 });
+        const keep = T(svg, 400, 160, "✓ 只保留 MapQuest：4 级更少，但定义清楚", { fill: "var(--good)", "font-weight": 700, opacity: 0 });
+        (async () => {
+          for (const r of rows) if (!(await ctx.tween(900, (t) => r.segs.forEach((s) => { s.setAttribute("width", s._w * t); })))) return;
+          if (!(await ctx.wait(600))) return;
+          await ctx.tween(500, (t) => { cross.style.opacity = t; rows[1].segs.forEach((s) => (s.style.opacity = 1 - 0.7 * t)); keep.style.opacity = t; });
+        })();
+      },
+    },
+    {
+      at: 15, title: "删掉“事后才知道”的列", kicker: "第 15–20 格 · 防止偷看答案",
+      html: `<p>作者删掉了 ID 以及 <code>TMC</code>、<code>Distance(mi)</code>、<code>End_Time</code>、<code>Duration</code>、<code>End_Lat/Lng</code>：这些都要等事故<b>处理完</b>才知道，不能拿来预测 <span data-cell="15">第 15 格</span>。文字描述 <code>Description</code> 里的设施信息已经被整理成 POI 列，也删掉。</p><p>只有一种取值的 <code>Country</code>、<code>Turning_Loop</code> 没有信息量，同样删掉 <span data-cell="19">第 19 格</span>。</p>`,
+      cells: [16, 20], highlight: ["'Distance(mi)', 'End_Time', 'Duration'"],
+      draw(svg, ctx) {
+        K.svg(svg, "line", { x1: 40, y1: 60, x2: 680, y2: 60, stroke: "var(--ink-3)", "stroke-width": 2 });
+        K.svg(svg, "circle", { cx: 300, cy: 60, r: 8, fill: "var(--c6)" });
+        T(svg, 300, 40, "事故发生（要在这一刻做预测）", { "text-anchor": "middle", "font-weight": 700 });
+        T(svg, 60, 90, "此刻已知 ✓", { fill: "var(--good)", "font-weight": 700 });
+        T(svg, 420, 90, "事后才知道 ✗", { fill: "var(--bad)", "font-weight": 700 });
+        const before = ["Start_Time", "Start_Lat/Lng", "Street / City", "天气", "POI 设施"];
+        const after = ["End_Time", "Duration", "Distance(mi)", "End_Lat/Lng", "TMC"];
+        before.forEach((s, i) => K.node(svg, 60, 105 + i * 42, 180, 34, s, { fill: tint("var(--c3)", 16), stroke: "var(--c3)" }));
+        const af = after.map((s, i) => K.node(svg, 420, 105 + i * 42, 180, 34, s, { fill: tint("var(--c6)", 16), stroke: "var(--c6)" }));
+        const bin = T(svg, 650, 320, "🗑", { "font-size": 30, "text-anchor": "middle" });
+        ctx.wait(900).then(async (ok) => {
+          if (!ok) return;
+          for (let i = 0; i < af.length; i++) {
+            if (!(await ctx.tween(380, (t) => { af[i].setAttribute("transform", `translate(${(650 - 510) * t},${(300 - (122 + i * 42)) * t}) `); af[i].style.opacity = 1 - 0.75 * t; }))) return;
+          }
+        });
+      },
+    },
+    {
+      at: 21, title: "把风向和天气文字理清楚", kicker: "第 21–29 格 · 类别清洗",
+      html: `<p>风向写法五花八门：<code>West</code>、<code>WSW</code>、<code>WNW</code> 其实都是偏西风，作者把它们合并成 <code>W</code>；东、南、北同理，再把 Calm、Variable 统一写成 CALM、VAR <span data-cell="24">第 24 格</span>。SW、NE 这类斜向保持原样。</p><p>天气描述是一句话，比如“Heavy Rain / Windy”。作者按关键词拆成 7 个是/否列：晴、云、雨、大雨、雪、大雪、雾 <span data-cell="28">第 28 格</span>。动画先合并风向，再把一句天气拆成几个开关。</p>`,
+      cells: [24, 28], highlight: ["'Wind_Direction'] = 'W'", "str.contains('Rain|storm'"],
+      draw(svg, ctx) {
+        const raw = ["West", "WSW", "WNW", "South", "SSE", "North", "NNE", "Calm"];
+        const tgt = { West: "W", WSW: "W", WNW: "W", South: "S", SSE: "S", North: "N", NNE: "N", Calm: "CALM" };
+        const ty = { W: 60, S: 110, N: 160, CALM: 210 };
+        Object.keys(ty).forEach((k) => K.node(svg, 250, ty[k] - 16, 80, 32, k, { bold: true, fill: tint("var(--c1)", 16), stroke: "var(--c1)" }));
+        const chips = raw.map((s, i) => { const g = K.node(svg, 30, 30 + i * 30, 90, 24, s, { fs: 12 }); g._dy = ty[tgt[s]] - 12 - (30 + i * 30); return g; });
+        T(svg, 30, 300, "风向：同一方向的不同写法合并成一类", { class: "muted" });
+        const sent = T(svg, 400, 60, "“Heavy Rain / Windy”", { "font-size": 15, "font-weight": 700, opacity: 0 });
+        const flags = [["Clear", 0], ["Cloud", 0], ["Rain", 1], ["Heavy_Rain", 1], ["Snow", 0], ["Heavy_Snow", 0], ["Fog", 0]];
+        const fl = flags.map(([n, v], i) => { const g = K.node(svg, 400 + (i % 4) * 75, 100 + Math.floor(i / 4) * 60, 68, 44, n + "\n" + (v ? "1" : "0"), { fs: 11, fill: v ? tint("var(--c2)", 30) : "var(--panel-2)", stroke: v ? "var(--c2)" : "var(--line)" }); g.style.opacity = 0; return g; });
+        T(svg, 400, 300, "天气：一句话 → 7 个是/否列", { class: "muted" });
+        ctx.wait(500).then((ok) => ok && ctx.tween(1200, (t) => chips.forEach((c) => c.setAttribute("transform", `translate(${130 * t},${c._dy * t})`))))
+          .then((ok) => ok && ctx.tween(500, (t) => (sent.style.opacity = t)))
+          .then((ok) => ok && ctx.tween(900, (t) => fl.forEach((f, i) => (f.style.opacity = K.clamp(t * 7 - i, 0, 1)))));
+      },
+    },
+    {
+      at: 30, title: "拆时间、补缺失值", kicker: "第 30–47 格 · 时间特征与缺失值",
+      html: `<p>天气观测时间和事故时间几乎一样，只留 <code>Start_Time</code>，拆成年、月、星期几、一年中第几天、几点、一天中第几分钟 <span data-cell="33">第 33 格</span>。</p><p>缺失值分三种办法处理：缺得太多（超过 60%）的列直接删；降水量另加一列“是否缺失”再用中位数填 <span data-cell="39">第 39 格</span>；温度、湿度、气压等按<b>同一个机场气象站、同一个月</b>分组，用组内中位数填 <span data-cell="43">第 43 格</span>，风向和天气类别用组内最常见的值填 <span data-cell="47">第 47 格</span>。</p>`,
+      cells: [33, 35, 39, 43, 47], highlight: ["groupby(['Airport_Code','Month'])"],
+      draw(svg, ctx) {
+        T(svg, 30, 30, "Start_Time = 2019-07-15 17:42", { "font-weight": 700, "font-family": "var(--mono)" });
+        const parts = [["Year", "2019"], ["Month", "7"], ["Weekday", "0"], ["Day", "196"], ["Hour", "17"], ["Minute", "1062"]];
+        const ps = parts.map(([k, v], i) => { const g = K.node(svg, 30 + i * 110, 50, 100, 44, k + "\n" + v, { fs: 12, fill: tint("var(--c1)", 14), stroke: "var(--c1)" }); g.style.opacity = 0; return g; });
+        T(svg, 30, 140, "按 机场气象站 + 月份 分组，用组内中位数填空（示意）", { class: "muted" });
+        const rows = [["KCLT", 7, 88], ["KCLT", 7, null], ["KCLT", 7, 91], ["KCLT", 7, 86], ["KBOS", 1, 30], ["KBOS", 1, null], ["KBOS", 1, 26]];
+        K.svg(svg, "text", { x: 40, y: 168, "font-size": 12, "font-weight": 700 }, "Airport_Code    Month    Temperature(F)");
+        const cellsT = rows.map((r, i) => {
+          const y = 190 + i * 20;
+          K.svg(svg, "rect", { x: 30, y: y - 14, width: 330, height: 19, fill: r[0] === "KCLT" ? tint("var(--c3)", 10) : tint("var(--c4)", 10) });
+          K.svg(svg, "text", { x: 40, y, "font-size": 12, "font-family": "var(--mono)" }, r[0]);
+          K.svg(svg, "text", { x: 170, y, "font-size": 12, "font-family": "var(--mono)" }, String(r[1]));
+          return K.svg(svg, "text", { x: 260, y, "font-size": 12, "font-family": "var(--mono)", fill: r[2] == null ? "var(--bad)" : "var(--ink)" }, r[2] == null ? "NaN" : String(r[2]));
+        });
+        const note = T(svg, 390, 230, "", { fill: "var(--good)", "font-weight": 700, "font-size": 12 });
+        const note2 = T(svg, 390, 252, "", { fill: "var(--good)", "font-weight": 700, "font-size": 12 });
+        ctx.tween(1200, (t) => ps.forEach((p, i) => (p.style.opacity = K.clamp(t * 6 - i, 0, 1))))
+          .then((ok) => ok && ctx.wait(500))
+          .then((ok) => { if (!ok) return; note.textContent = "KCLT · 7 月：中位数 88 → 填进空格"; note2.textContent = "KBOS · 1 月：中位数 28 → 填进空格"; return ctx.tween(700, (t) => { [[1, 88], [5, 28]].forEach(([i, v]) => { cellsT[i].textContent = t > 0.5 ? String(v) : "NaN"; cellsT[i].style.fill = t > 0.5 ? "var(--good)" : "var(--bad)"; }); }); });
+      },
+    },
+    {
+      at: 48, title: "只看 4 级，并发现时间上的断层", kicker: "第 48–59 格 · 目标改写与截断",
+      html: `<p>作者认为只有 4 级和其他等级区别明显，于是把目标改成 <code>Severity4</code>：4 级记 1，其余记 0 <span data-cell="49">第 49 格</span>。为了画图时看得清，他把两类各抽成 5 万条（4 级有放回地多抽）<span data-cell="50">第 50 格</span>，这份 <code>df_bl</code> 只用于探索，不用于建模。</p><p>按年份一画就露馅了：2018 年以后 4 级事故多了好几倍，其他等级反而少了，作者说“一定出了什么问题” <span data-cell="56">第 56 格</span>。按日期画热力图，变化出现在 2019 年 2 月以后，可能是 MapQuest 改了定义或收集方式，于是只留 2019 年 3 月 10 日以后的数据 <span data-cell="59">第 59 格</span>。动画里热力图是示意。</p>`,
+      cells: [49, 51, 57, 59], highlight: ["\"2019-03-10\"", "replace = True"],
+      draw(svg, ctx) {
+        const r = K.rng(4), years = [2016, 2017, 2018, 2019, 2020];
+        T(svg, 30, 30, "每天的 4 级事故数（示意热力图）：一行一年，一格一周", { class: "muted" });
+        const cells = [];
+        years.forEach((yr, yi) => {
+          T(svg, 30, 70 + yi * 40, String(yr), { "font-weight": 700 });
+          for (let w = 0; w < 52; w++) {
+            const after = yr > 2019 || (yr === 2019 && w >= 8);
+            const v = after ? 0.55 + r() * 0.4 : 0.05 + r() * 0.15;
+            cells.push({ e: K.svg(svg, "rect", { x: 80 + w * 11.5, y: 52 + yi * 40, width: 10.5, height: 28, fill: K.heat(v), opacity: 0 }), k: yi * 52 + w });
+          }
+        });
+        const cut = K.svg(svg, "line", { x1: 80 + 8 * 11.5 - 1, y1: 160, x2: 80 + 8 * 11.5 - 1, y2: 250, stroke: "var(--bad)", "stroke-width": 3, opacity: 0 });
+        const lab = T(svg, 200, 290, "2019 年 2 月后分布突变 → 只保留 2019-03-10 以后（第 59 格）", { fill: "var(--bad)", "font-weight": 700, opacity: 0 });
+        const shade = K.svg(svg, "rect", { x: 80, y: 48, width: 0, height: 115, fill: "var(--panel)", opacity: 0.75 });
+        ctx.tween(1500, (t) => cells.forEach((c) => (c.e.style.opacity = c.k < t * 260 ? 1 : 0)))
+          .then((ok) => ok && ctx.tween(500, (t) => { cut.style.opacity = t; lab.style.opacity = t; }))
+          .then((ok) => ok && ctx.tween(800, (t) => shade.setAttribute("width", 52 * 11.5 * t)));
+      },
+    },
+    {
+      at: 60, title: "什么时候出事：几点钟比哪一天更重要", kicker: "第 60–71 格 · 时间规律与分钟频率",
+      html: `<p>在平衡后的探索数据上，作者看到：周末事故少但 4 级占比更高；夜里事故少但更容易严重；白天的早晚高峰事故最多 <span data-cell="63">第 63 格</span> <span data-cell="67">第 67 格</span>。</p><p>于是他想用“一天中的第几分钟”。可 1440 个分钟做成独热会有 1440 列，太多了。办法是<b>频率编码</b>：每个分钟值换成“这一分钟一共发生过多少起事故”，再取对数 <span data-cell="69">第 69 格</span>。结果：4 级事故的分钟频率整体偏低，即越少出事的时刻出事越可能严重 <span data-cell="71">第 71 格</span>。</p>`,
+      cells: [64, 68, 70], highlight: ["transform('count')", "np.log(x+1)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 30, w: 620, h: 200 }, [0, 24], [0, 1], { yticks: 0, xticks: 6, xlabel: "一天中的小时（示意）" });
+        const prof = (h) => 0.15 + 0.75 * Math.exp(-Math.pow((h - 8) / 1.6, 2)) + 0.85 * Math.exp(-Math.pow((h - 17) / 2, 2)) + 0.3 * Math.exp(-Math.pow((h - 12.5) / 3, 2));
+        const bw = 620 / 24 - 3;
+        const bars = [];
+        for (let h = 0; h < 24; h++) { const v = Math.min(prof(h + 0.5), 1); bars.push(K.svg(svg, "rect", { x: ax.sx(h) + 1.5, y: ax.sy(0), width: bw, height: 0, fill: "var(--c1)" })); bars[h]._v = v; }
+        const sev = [];
+        for (let h = 0; h < 24; h++) { const share = 0.9 / (bars[h]._v * 6 + 1); sev.push(K.svg(svg, "rect", { x: ax.sx(h) + 1.5, y: ax.sy(0), width: bw, height: 0, fill: "var(--c6)" })); sev[h]._v = share * bars[h]._v; }
+        T(svg, 60, 290, "■ 全部事故数", { fill: "var(--c1)", "font-size": 12 });
+        T(svg, 170, 290, "■ 其中 4 级（夜里占比更高）", { fill: "var(--c6)", "font-size": 12 });
+        const f = T(svg, 60, 318, "", { "font-family": "var(--mono)", "font-size": 12 });
+        ctx.tween(1400, (t) => bars.forEach((b, h) => { const hh = (ax.sy(0) - ax.sy(b._v)) * t; b.setAttribute("y", ax.sy(0) - hh); b.setAttribute("height", hh); }))
+          .then((ok) => ok && ctx.tween(900, (t) => sev.forEach((b) => { const hh = (ax.sy(0) - ax.sy(b._v)) * t; b.setAttribute("y", ax.sy(0) - hh); b.setAttribute("height", hh); })))
+          .then((ok) => { if (ok) f.textContent = "Minute = 1062（17:42）→ 这一分钟出事很多 → Minute_Freq 大；凌晨 3 点 → Minute_Freq 小"; });
+      },
+    },
+    {
+      at: 72, title: "在哪出事：州、县和道路类型", kicker: "第 72–101 格 · 地址特征",
+      html: `<p>作者一路看了时区、州（按 4 级数量排，佛州第一，其后是佐治亚和弗吉尼亚 <span data-cell="76">第 76 格</span>）、道路左右侧（右侧更危险 <span data-cell="97">第 97 格</span>）和经纬度地图。</p><p>两处额外加工值得学：① 联网下载 2018 年县级人口普查数据（人口、开车/坐公交/步行通勤比例、收入），按“县名 + 州”拼进来，县名对不上的再补上 city、parish 重新匹配 <span data-cell="84">第 84 格</span>；② 从街道名里找出最常见的词，如 <code>I-</code>（州际公路）、<code>Hwy</code>、<code>St</code>、<code>Ave</code>，各做一个是/否列 <span data-cell="94">第 94 格</span>，再只留和 4 级相关性大于 0.1 的几列 <span data-cell="96">第 96 格</span>。</p>`,
+      cells: [77, 84, 92, 94, 96], highlight: ["'I-'", "how = 'left'"],
+      draw(svg, ctx) {
+        const streets = ["I-95 N", "Main St", "US-1 S", "Oak Ave", "I-10 W"];
+        const types = ["I-", "St", "US-", "Ave"];
+        T(svg, 30, 30, "街道名 → 道路类型是/否列", { "font-weight": 700 });
+        types.forEach((t, j) => T(svg, 200 + j * 60, 60, t, { "text-anchor": "middle", "font-weight": 700, fill: "var(--c1)" }));
+        const marks = [];
+        streets.forEach((s, i) => {
+          T(svg, 30, 92 + i * 30, s, { "font-family": "var(--mono)" });
+          types.forEach((t, j) => { const on = s.includes(t); marks.push({ e: T(svg, 200 + j * 60, 92 + i * 30, on ? "1" : "0", { "text-anchor": "middle", fill: on ? "var(--c2)" : "var(--ink-3)", "font-weight": on ? 700 : 400, opacity: 0 }), k: i * 4 + j }); });
+        });
+        T(svg, 420, 30, "按 县名 + 州 拼接人口普查数据", { "font-weight": 700 });
+        const a = K.node(svg, 420, 60, 120, 60, "事故表\nCounty, State", {});
+        const b = K.node(svg, 580, 60, 120, 60, "普查表\n人口、通勤", {});
+        const j = K.node(svg, 480, 170, 180, 70, "左连接\n对不上的补 city / parish\n再匹配一次", { fill: tint("var(--c3)", 14), stroke: "var(--c3)" });
+        const a1 = K.arrow(svg, 480, 120, 540, 168), a2 = K.arrow(svg, 640, 120, 600, 168);
+        fade([j, a1, a2], 0);
+        ctx.tween(1600, (t) => marks.forEach((m) => (m.e.style.opacity = K.clamp(t * 20 - m.k, 0, 1))))
+          .then((ok) => ok && ctx.tween(700, (t) => fade([j, a1, a2], t)));
+      },
+    },
+    {
+      at: 102, title: "地点频率编码：出事多的地方更危险吗", kicker: "第 102–106 格 · 频率编码",
+      html: `<p>街道、城市、县、邮编、机场气象站的取值成千上万，不能独热。作者照“分钟”的办法：每个取值换成它出现的次数，除以总行数再乘以取值个数，最后取对数 <span data-cell="103">第 103 格</span>。</p><p>结果出现两种相反的规律：街道、邮编这种<b>小范围</b>，出事越多越可能是 4 级；城市、机场气象区这种<b>大范围</b>，出事越多反而越不严重 <span data-cell="105">第 105 格</span>。原来的地名列随后删掉。下面的实验 A 可以亲手算一遍。</p>`,
+      cells: [103, 105], highlight: ["transform('count')", "df[i].unique().size"],
+      draw(svg, ctx) {
+        const rows = ["Main St", "I-95 N", "Main St", "Oak Ave", "Main St", "I-95 N", "Elm Rd", "Main St"];
+        const cnt = {}; rows.forEach((s) => (cnt[s] = (cnt[s] || 0) + 1));
+        const K_ = Object.keys(cnt).length, N = rows.length;
+        T(svg, 30, 30, "Street", { "font-weight": 700 });
+        T(svg, 180, 30, "出现次数", { "font-weight": 700 });
+        T(svg, 300, 30, "÷ 总行数 × 取值个数", { "font-weight": 700 });
+        T(svg, 500, 30, "log(x+1) = Street_Freq", { "font-weight": 700 });
+        const cols = rows.map((s, i) => {
+          const y = 60 + i * 32, c = cnt[s], v = (c / N) * K_;
+          T(svg, 30, y, s, { "font-family": "var(--mono)" });
+          return [T(svg, 200, y, String(c), { opacity: 0, "font-family": "var(--mono)" }), T(svg, 320, y, `${c}/${N}×${K_} = ${v.toFixed(2)}`, { opacity: 0, "font-family": "var(--mono)" }), T(svg, 520, y, Math.log(v + 1).toFixed(3), { opacity: 0, "font-family": "var(--mono)", fill: "var(--c1)", "font-weight": 700 })];
+        });
+        T(svg, 30, 330, `示意：8 行，4 种街道名 → 一列数字代替 4 列独热`, { class: "muted", "font-size": 12 });
+        (async () => { for (let c = 0; c < 3; c++) if (!(await ctx.tween(700, (t) => cols.forEach((r) => (r[c].style.opacity = t))))) return; })();
+      },
+    },
+    {
+      at: 107, title: "天气和周边设施", kicker: "第 107–120 格 · 天气与 POI",
+      html: `<p>气压、能见度、风速分布很偏，作者用 <b>Box-Cox 变换</b>把它们拉得更像钟形 <span data-cell="108">第 108 格</span>。天气方面，雨雪天略容易严重，阴天反而不容易 <span data-cell="112">第 112 格</span>。</p><p><b>POI</b> 指事故点附近的设施。作者发现：红绿灯、人行横道附近的事故不容易严重（大家会减速），路口附近略容易 <span data-cell="119">第 119 格</span>。减速带、让行牌等太少见的列被删掉 <span data-cell="120">第 120 格</span>。动画是示意路口。</p>`,
+      cells: [108, 111, 118, 119, 120], highlight: ["boxcox"],
+      draw(svg, ctx) {
+        K.svg(svg, "rect", { x: 0, y: 140, width: 720, height: 60, fill: "var(--panel-2)" });
+        K.svg(svg, "rect", { x: 330, y: 0, width: 60, height: 340, fill: "var(--panel-2)" });
+        for (let i = 0; i < 6; i++) K.svg(svg, "rect", { x: 334 + i * 9.5, y: 120, width: 6, height: 18, fill: "var(--ink-3)" });
+        const items = [
+          { x: 410, y: 110, s: "🚦 红绿灯 Traffic_Signal", c: "var(--good)", d: "附近事故不容易严重" },
+          { x: 60, y: 110, s: "🚸 人行横道 Crossing", c: "var(--good)", d: "附近事故不容易严重" },
+          { x: 410, y: 250, s: "✚ 路口 Junction", c: "var(--bad)", d: "附近事故略容易严重" },
+          { x: 60, y: 250, s: "⛔ 减速带、让行牌……", c: "var(--ink-3)", d: "太少见，删掉" },
+        ];
+        const gs = items.map((it) => { const g = K.svg(svg, "g", { opacity: 0 }); K.svg(g, "text", { x: it.x, y: it.y, "font-size": 15, "font-weight": 700, fill: it.c }, it.s); K.svg(g, "text", { x: it.x, y: it.y + 20, "font-size": 12, class: "muted" }, it.d); return g; });
+        const crash = K.svg(svg, "circle", { cx: 360, cy: 170, r: 0, fill: "var(--c6)", opacity: 0.5 });
+        ctx.tween(800, (t) => crash.setAttribute("r", 30 * t)).then(async (ok) => { if (!ok) return; for (const g of gs) if (!(await ctx.tween(450, (t) => (g.style.opacity = t)))) return; });
+      },
+    },
+    {
+      at: 121, title: "按相关性删列，再做独热编码", kicker: "第 121–127 格 · 特征筛选",
+      html: `<p>把昼夜四列独热后，作者在平衡数据上画了一张大相关矩阵，然后一次删掉二十多列：温度、湿度、降水、晴/云/雪、人行横道、路口、月份、小时、分钟本身、收入、通勤比例、城市/县/邮编/机场频率等 <span data-cell="124">第 124 格</span>。</p><p>留下来的列里，左右侧、时区、星期几再做独热编码：一个有 7 种取值的列，变成 6 个是/否列（去掉一个当基准）<span data-cell="127">第 127 格</span>。</p><p class="note">注意：第 119 格说路口附近更容易严重，第 124 格却把 Junction 删了；这一步是在整份数据上做的，测试集的信息也参与了挑列。</p>`,
+      cells: [122, 124, 127], highlight: ["get_dummies", "drop_first=True"],
+      draw(svg, ctx) {
+        const feats = [["Minute_Freq", -0.3], ["Street_Freq", 0.22], ["Pressure_bc", -0.17], ["I-", 0.15], ["Traffic_Signal", -0.12], ["Humidity", 0.04], ["Clear", -0.03], ["Month", 0.05], ["Junction", 0.06]];
+        const cx = 330;
+        T(svg, 30, 26, "与 Severity4 的相关系数（示意）；|r| 小的删掉", { class: "muted" });
+        K.svg(svg, "line", { x1: cx, y1: 40, x2: cx, y2: 320, stroke: "var(--ink-3)" });
+        const th = [cx - 0.1 * 600, cx + 0.1 * 600].map((x) => K.svg(svg, "line", { x1: x, y1: 40, x2: x, y2: 320, stroke: "var(--warn)", "stroke-dasharray": "4 3", opacity: 0 }));
+        const rs = feats.map(([n, v], i) => {
+          const y = 46 + i * 30;
+          T(svg, 120, y + 15, n, { "text-anchor": "end", "font-size": 12 });
+          const r = K.svg(svg, "rect", { x: cx, y, width: 0, height: 20, rx: 3, fill: v < 0 ? "var(--c1)" : "var(--c2)" });
+          return { r, v };
+        });
+        ctx.tween(1200, (t) => rs.forEach((d) => { const w = Math.abs(d.v) * 600 * t; d.r.setAttribute("width", w); d.r.setAttribute("x", d.v < 0 ? cx - w : cx); }))
+          .then((ok) => ok && ctx.tween(400, (t) => fade(th, t)))
+          .then((ok) => ok && ctx.tween(700, (t) => rs.forEach((d) => { if (Math.abs(d.v) < 0.1) d.r.style.opacity = 1 - 0.85 * t; })));
+        T(svg, 520, 300, "虚线：|r| = 0.1", { fill: "var(--warn)", "font-size": 12 });
+      },
+    },
+    {
+      at: 128, title: "欠采样 + 逻辑回归", kicker: "第 128–134 格 · 第一个模型",
+      html: `<p>建模前先按 7 : 3 随机切出测试集 <span data-cell="131">第 131 格</span>。普通事故约是 4 级的 100 倍 <span data-cell="128">第 128 格</span>，作者只在<b>训练集</b>里随机扔掉一部分普通事故，让它只剩 4 级的 10 倍（<code>sampling_strategy=0.1</code>）<span data-cell="133">第 133 格</span>。</p><p>然后训练<b>逻辑回归</b>，再加 <code>class_weight='balanced'</code>：算错一个 4 级的“罚分”比算错一个普通事故大得多。用网格搜索试不同的正则强度 C 和 L1/L2，按<b>宏平均 F1</b>（两类各算 F1 再平均）挑最好的 <span data-cell="134">第 134 格</span>。</p>`,
+      cells: [131, 133, 134], highlight: ["sampling_strategy = 0.1", "class_weight", "f1_macro"],
+      draw(svg, ctx) {
+        T(svg, 30, 30, "训练集（70%）", { "font-weight": 700 });
+        T(svg, 470, 30, "测试集（30%，不动）", { "font-weight": 700, fill: "var(--c3)" });
+        const dots = [];
+        for (let i = 0; i < 200; i++) dots.push(K.svg(svg, "circle", { cx: 40 + (i % 20) * 19, cy: 50 + Math.floor(i / 20) * 19, r: 5, fill: i < 2 ? "var(--c6)" : "var(--ink-3)", opacity: i < 2 ? 1 : 0.5 }));
+        for (let i = 0; i < 80; i++) K.svg(svg, "circle", { cx: 480 + (i % 10) * 19, cy: 50 + Math.floor(i / 10) * 19, r: 5, fill: i === 37 ? "var(--c6)" : "var(--ink-3)", opacity: i === 37 ? 1 : 0.5 });
+        const lab = T(svg, 30, 270, "示意：普通 198 : 4 级 2（约 100 : 1）", { "font-weight": 700 });
+        const w = T(svg, 30, 300, "", { fill: "var(--c6)" });
+        ctx.wait(700).then((ok) => ok && ctx.tween(1500, (t) => { const keep = Math.round(K.lerp(198, 20, t)); dots.forEach((d, i) => { if (i >= 2) d.style.opacity = i - 2 < keep ? 0.5 : 0.05; }); lab.textContent = `只在训练集里欠采样：普通 ${keep} : 4 级 2`; }))
+          .then((ok) => { if (!ok) return; w.textContent = "class_weight='balanced'：算错一个红点的罚分 ≈ 算错一个灰点的 10 倍"; return ctx.tween(600, (t) => { dots[0].setAttribute("r", 5 + 5 * t); dots[1].setAttribute("r", 5 + 5 * t); }); });
+      },
+    },
+    {
+      at: 135, title: "随机森林与特征重要性", kicker: "第 135–143 格 · 第二个模型",
+      html: `<p>换成<b>随机森林</b>：很多棵决策树，每棵用随机抽的样本和特征去学，最后投票 <span data-cell="136">第 136 格</span>。作者又试了把欠采样比例从 1:10 放宽到 1:20（多留一倍普通事故），结论是“更多数据并没有更好” <span data-cell="141">第 141 格</span>。</p><p>特征重要性显示，<b>精细的时空规律</b>（分钟频率、街道频率等）最有用，气压、人口、道路类型也很关键 <span data-cell="143">第 143 格</span>；开头的结论里作者写分钟频率排第一、气压排第四 <span data-cell="1">第 1 格</span>。动画只按这两条排序，条的长短是示意。</p>`,
+      cells: [136, 139, 142], highlight: ["RandomForestClassifier", "sampling_strategy = 0.05"],
+      draw(svg, ctx) {
+        const trees = [0, 1, 2, 3, 4].map((i) => { const x = 40 + i * 70; const g = K.svg(svg, "g", { opacity: 0 }); K.svg(g, "polygon", { points: `${x + 25},40 ${x},100 ${x + 50},100`, fill: tint("var(--c3)", 40), stroke: "var(--c3)" }); K.svg(g, "rect", { x: x + 20, y: 100, width: 10, height: 18, fill: "var(--ink-3)" }); K.svg(g, "text", { x: x + 25, y: 140, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: i === 2 || i === 4 ? "var(--c6)" : "var(--ink)" }, i === 2 || i === 4 ? "4 级" : "其他"); return g; });
+        const vote = T(svg, 40, 175, "", { "font-weight": 700 });
+        const imp = [["Minute_Freq（第 1）", 1], ["……", 0.7], ["……", 0.6], ["Pressure_bc（第 4）", 0.5], ["……", 0.42], ["……", 0.36]];
+        T(svg, 420, 30, "特征重要性（只按作者文字排序，长度示意）", { "font-size": 12, class: "muted" });
+        const bars = imp.map(([n, v], i) => { T(svg, 560, 60 + i * 40, n, { "text-anchor": "end", "font-size": 12 }); const r = K.svg(svg, "rect", { x: 568, y: 46 + i * 40, width: 0, height: 20, rx: 3, fill: n.startsWith("…") ? "var(--ink-3)" : "var(--accent)" }); r._w = v * 140; return r; });
+        T(svg, 40, 230, "每棵树看随机的一部分样本和特征", { class: "muted", "font-size": 12 });
+        T(svg, 40, 252, "→ 少数服从多数", { class: "muted", "font-size": 12 });
+        (async () => {
+          for (const g of trees) if (!(await ctx.tween(300, (t) => (g.style.opacity = t)))) return;
+          vote.textContent = "投票：3 票“其他” : 2 票“4 级” → 判为其他";
+          await ctx.tween(1000, (t) => bars.forEach((b) => b.setAttribute("width", b._w * t)));
+        })();
+      },
+    },
+    {
+      at: 144, title: "EasyEnsemble 与 BalanceCascade", kicker: "第 144–156 格 · 集成欠采样",
+      html: `<p>欠采样只用一小部分普通事故，太浪费。<b>EasyEnsemble</b> 的想法是：抽好几份不同的普通事故子集，每份配上全部 4 级各训一个模型，再投票 <span data-cell="146">第 146 格</span>。<b>BalanceCascade</b> 更进一步：每训完一个模型，就把它已经能判对的普通事故拿掉，下一个模型专门学难的 <span data-cell="152">第 152 格</span>。</p><p>作者结论：两种都“没有明显提升” <span data-cell="149">第 149 格</span> <span data-cell="154">第 154 格</span>。但仔细看第 145 格：<code>RandomUnderSampler(..., random_state=42)</code> 在循环外建好、每次用同一个种子，<b>每份子集其实一模一样</b>，投票等于一个模型说了三遍。实验 C 可以验证这一点。</p>`,
+      cells: [145, 146, 152], highlight: ["random_state=42", "multi_rus"],
+      draw(svg, ctx) {
+        T(svg, 30, 28, "设想：每份子集不同（EasyEnsemble 的本意）", { "font-weight": 700, fill: "var(--good)" });
+        T(svg, 30, 188, "实际：同一个 random_state=42 → 三份完全一样", { "font-weight": 700, fill: "var(--bad)" });
+        const row = (y, same) => {
+          const out = [];
+          for (let k = 0; k < 3; k++) {
+            const x = 40 + k * 220, r = K.rng(same ? 42 : 42 + k * 7);
+            K.svg(svg, "rect", { x, y, width: 190, height: 110, rx: 8, fill: "var(--panel-2)", stroke: "var(--line)" });
+            K.svg(svg, "text", { x: x + 95, y: y + 104, "text-anchor": "middle", "font-size": 12 }, `子集 ${k + 1} → 模型 ${k + 1}`);
+            for (let i = 0; i < 21; i++) {
+              const c = K.svg(svg, "circle", { cx: x + 14 + (i % 7) * 21, cy: y + 18 + Math.floor(i / 7) * 24, r: 0, fill: "var(--ink-3)" });
+              c._h = 0.35 + r() * 0.65; out.push(c);
+            }
+            for (let i = 0; i < 3; i++) K.svg(svg, "circle", { cx: x + 172, cy: y + 18 + i * 24, r: 5, fill: "var(--c6)" });
+          }
+          return out;
+        };
+        const a = row(40, false), b = row(200, true);
+        ctx.wait(400).then((ok) => ok && ctx.tween(1200, (t) => [...a, ...b].forEach((c) => { c.setAttribute("r", 5 * t); c.style.fill = `color-mix(in srgb, var(--c1) ${Math.round(c._h * 100)}%, var(--panel))`; })));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 共用：取样、逻辑回归、指标 ---------- */
+  function shuffleIdx(n, seed) { const r = K.rng(seed), a = Array.from({ length: n }, (_, i) => i); for (let i = n - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+  function makeSet(seed, nNeg, nPos) {
+    const r = K.rng(seed), X = [], y = [];
+    for (let i = 0; i < nNeg; i++) { X.push([K.randn(r), K.randn(r)]); y.push(0); }
+    for (let i = 0; i < nPos; i++) { X.push([1.7 + K.randn(r) * 0.9, 1.3 + K.randn(r) * 0.9]); y.push(1); }
+    return { X, y };
+  }
+  function trainLR(X, y, epochs, wPos) {
+    let w0 = 0, w1 = 0, b = 0; const n = X.length, lr = 0.5;
+    const wp = wPos || 1, sw = y.reduce((s, c) => s + (c ? wp : 1), 0);
+    for (let e = 0; e < epochs; e++) {
+      let g0 = 0, g1 = 0, gb = 0;
+      for (let i = 0; i < n; i++) { const p = K.sigmoid(w0 * X[i][0] + w1 * X[i][1] + b), d = (p - y[i]) * (y[i] ? wp : 1); g0 += d * X[i][0]; g1 += d * X[i][1]; gb += d; }
+      w0 -= (lr * g0) / sw; w1 -= (lr * g1) / sw; b -= (lr * gb) / sw;
+    }
+    return { w: [w0, w1], b };
+  }
+  const predict = (m, p) => (K.sigmoid(m.w[0] * p[0] + m.w[1] * p[1] + m.b) > 0.5 ? 1 : 0);
+  function metrics(yt, yp) {
+    let TP = 0, FP = 0, FN = 0, TN = 0;
+    yt.forEach((t, i) => { const p = yp[i]; if (p && t) TP++; else if (p) FP++; else if (t) FN++; else TN++; });
+    const f1 = (tp, fp, fn) => (tp ? (2 * tp) / (2 * tp + fp + fn) : 0);
+    return { TP, FP, FN, TN, rec: TP / Math.max(1, TP + FN), pre: TP + FP ? TP / (TP + FP) : 0, f1: f1(TP, FP, FN), macro: (f1(TP, FP, FN) + f1(TN, FN, FP)) / 2 };
+  }
+  function boundary(svg, ax, m, xr, style) {
+    if (Math.abs(m.w[1]) < 1e-6) return;
+    const yA = (-m.b - m.w[0] * xr[0]) / m.w[1], yB = (-m.b - m.w[0] * xr[1]) / m.w[1];
+    K.svg(svg, "line", Object.assign({ x1: ax.sx(xr[0]), y1: ax.sy(yA), x2: ax.sx(xr[1]), y2: ax.sy(yB), stroke: "var(--ink)", "stroke-width": 2 }, style || {}));
+  }
+
+  /* ---------- 实验 A：频率编码 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "k", label: "街道个数（类别取值数）", min: 10, max: 300, step: 10, value: 80 },
+      { id: "beta", label: "出事多的街道，4 级比例更高还是更低", min: -1, max: 1, step: 0.1, value: 0.6, fmt: (v) => (v > 0.05 ? "更高 " : v < -0.05 ? "更低 " : "无关 ") + v.toFixed(1) },
+      { id: "seed", label: "重新生成", button: true },
+    ],
+    note: "现场生成 6000 起模拟事故，分布在若干条街道上（少数街道出事特别多）。每行按作者第 103 格的公式算 Street_Freq = log(次数 / 总行数 × 街道数 + 1)。右图每个点是一条街：横轴 Street_Freq，纵轴这条街的 4 级比例。AUC 表示“只看这一列数字给事故排序，能把 4 级排到前面的程度”（0.5 = 瞎猜）。",
+    render(svg, v) {
+      const r = K.rng(500 + v.seed * 31), Kn = v.k, N = 6000;
+      const wts = Array.from({ length: Kn }, (_, i) => 1 / Math.pow(i + 1, 1.05) * (0.6 + r() * 0.8));
+      const sw = wts.reduce((a, b) => a + b, 0);
+      const cnt = new Array(Kn).fill(0), rows = [];
+      for (let n = 0; n < N; n++) { let u = r() * sw, s = 0; while (u > wts[s] && s < Kn - 1) { u -= wts[s]; s++; } cnt[s]++; rows.push(s); }
+      const freq = cnt.map((c) => Math.log((c / N) * Kn + 1));
+      const mf = freq.reduce((a, b) => a + b, 0) / Kn, sf = Math.sqrt(freq.reduce((a, b) => a + (b - mf) * (b - mf), 0) / Kn) || 1;
+      const raw = freq.map((f) => Math.exp(v.beta * 1.2 * (f - mf) / sf));
+      const scale = (0.02 * N) / cnt.reduce((a, c, s2) => a + c * raw[s2], 0);
+      const pS = raw.map((q) => Math.min(0.5, q * scale));
+      const sev = new Array(Kn).fill(0), ys = rows.map((s) => { const y = r() < pS[s] ? 1 : 0; sev[s] += y; return y; });
+      // AUC（按 Street_Freq 排序的秩统计）
+      const sc = rows.map((s) => freq[s]);
+      const idx = sc.map((_, i) => i).sort((a, b) => sc[a] - sc[b]);
+      let rank = 0, i = 0, sumPos = 0, nPos = 0;
+      while (i < idx.length) { let j = i; while (j + 1 < idx.length && sc[idx[j + 1]] === sc[idx[i]]) j++; const avg = (i + j) / 2 + 1; for (let k = i; k <= j; k++) if (ys[idx[k]]) { sumPos += avg; nPos++; } i = j + 1; }
+      const nNeg = N - nPos, auc = nPos && nNeg ? (sumPos - (nPos * (nPos + 1)) / 2) / (nPos * nNeg) : 0.5;
+      // 左：前 8 条街
+      T(svg, 10, 20, "街道", { "font-weight": 700, "font-size": 12 }); T(svg, 90, 20, "次数", { "font-weight": 700, "font-size": 12 }); T(svg, 140, 20, "Street_Freq", { "font-weight": 700, "font-size": 12 });
+      const order = cnt.map((c, s) => s).sort((a, b) => cnt[b] - cnt[a]);
+      const pick = order.slice(0, 7).concat([order[Math.floor(Kn / 2)], order[Kn - 1]]);
+      pick.forEach((s, j) => { const y = 44 + j * 26; T(svg, 10, y, "街道 " + (s + 1), { "font-size": 12, "font-family": "var(--mono)" }); T(svg, 90, y, String(cnt[s]), { "font-size": 12, "font-family": "var(--mono)" }); T(svg, 140, y, freq[s].toFixed(3), { "font-size": 12, "font-family": "var(--mono)", fill: "var(--c1)" }); });
+      T(svg, 10, 290, "（前 7 条最常出事的街，", { "font-size": 11, class: "muted" }); T(svg, 10, 306, " 再加中位数和最少的各一条）", { "font-size": 11, class: "muted" });
+      // 右：散点
+      const maxF = Math.max(...freq), maxR = Math.max(0.08, ...cnt.map((c, s) => (c >= 15 ? sev[s] / c : 0)));
+      const ax = K.axes(svg, { x: 290, y: 20, w: 330, h: 290 }, [0, maxF * 1.05], [0, maxR * 1.1], { xticks: 4, yticks: 4, yfmt: (q) => (q * 100).toFixed(0) + "%", xlabel: "Street_Freq（对数频率）" });
+      cnt.forEach((c, s) => { if (c < 15) return; K.svg(svg, "circle", { cx: ax.sx(freq[s]), cy: ax.sy(sev[s] / c), r: 2 + Math.min(7, Math.sqrt(c) / 3), fill: "var(--c6)", opacity: 0.55 }); });
+      T(svg, 296, 372, "点越大 = 这条街事故越多；只画出事 ≥15 起的街", { "font-size": 11, class: "muted" });
+      return { readout: [
+        { k: "独热编码要几列", v: String(Kn) },
+        { k: "频率编码要几列", v: "1", color: "var(--good)" },
+        { k: "4 级事故占比", v: ((nPos / N) * 100).toFixed(2) + "%" },
+        { k: "只用 Street_Freq 的 AUC", v: auc.toFixed(3), color: Math.abs(auc - 0.5) < 0.03 ? "var(--ink-3)" : "var(--accent)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：欠采样比例 ---------- */
+  const B_TR = makeSet(901, 5000, 50), B_TE = makeSet(902, 5000, 50);
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "ratio", label: "欠采样后 4 级 : 普通（作者 sampling_strategy）", value: "0.1", options: [["0.01", "不欠采样（约 1:100）"], ["0.05", "0.05（1:20，第 139 格）"], ["0.1", "0.1（1:10，第 133 格）"], ["0.2", "0.2（1:5）"], ["0.5", "0.5（1:2）"], ["1", "1（1:1）"]] },
+      { id: "bal", label: "逻辑回归 class_weight", value: "none", options: [["none", "不加权"], ["balanced", "balanced（第 134 格）"]] },
+      { id: "seed", label: "重新抽普通事故", button: true },
+    ],
+    note: "训练集：普通 5000、4 级 50（约 100:1）；测试集同分布、另外生成，不做任何采样。浏览器里现场训练逻辑回归（梯度下降 300 轮），黑线是判为 4 级的边界（右上方 = 4 级）。宏平均 F1 是作者网格搜索用的指标。",
+    render(svg, v) {
+      const ratio = +v.ratio, pos = [], neg = [];
+      B_TR.y.forEach((c, i) => (c ? pos : neg).push(i));
+      const keepN = Math.min(neg.length, Math.round(pos.length / ratio));
+      const negKeep = shuffleIdx(neg.length, 77 + v.seed).slice(0, keepN).map((k) => neg[k]);
+      const ids = negKeep.concat(pos), X = ids.map((i) => B_TR.X[i]), y = ids.map((i) => B_TR.y[i]);
+      const wPos = v.bal === "balanced" ? keepN / pos.length : 1;
+      const m = trainLR(X, y, 300, wPos);
+      const ax = K.axes(svg, { x: 30, y: 10, w: 600, h: 340 }, [-3.5, 5], [-3.5, 4.5], { xticks: 0, yticks: 0 });
+      B_TE.X.forEach((p, i) => { if (!B_TE.y[i] && i % 3) return; K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: B_TE.y[i] ? 4 : 2.2, fill: B_TE.y[i] ? "var(--c6)" : "var(--c1)", opacity: B_TE.y[i] ? 0.95 : 0.35 }); });
+      boundary(svg, ax, m, [-3.5, 5]);
+      T(svg, 36, 372, `测试集：蓝点 = 普通（只画 1/3），红点 = 4 级；训练用了普通 ${keepN} 条 + 4 级 ${pos.length} 条`, { "font-size": 12, class: "muted" });
+      const mt = metrics(B_TE.y, B_TE.X.map((p) => predict(m, p)));
+      return { readout: [
+        { k: "4 级召回率（抓到几成）", v: (mt.rec * 100).toFixed(0) + "%", color: mt.rec < 0.5 ? "var(--bad)" : "var(--good)" },
+        { k: "4 级精确率（报警准不准）", v: (mt.pre * 100).toFixed(0) + "%", color: mt.pre < 0.3 ? "var(--bad)" : "var(--good)" },
+        { k: "4 级 F1", v: mt.f1.toFixed(3) },
+        { k: "宏平均 F1（作者的指标）", v: mt.macro.toFixed(3), color: "var(--accent)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：EasyEnsemble 的种子 ---------- */
+  const C_TR = makeSet(1201, 3000, 30), C_TE = makeSet(1202, 5000, 50);
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "n", label: "子集个数 n_folds", min: 1, max: 9, step: 1, value: 3 },
+      { id: "mode", label: "每份子集怎么抽", value: "same", options: [["same", "作者写法：每次 random_state=42"], ["diff", "改正：每次换一个种子"]] },
+    ],
+    note: "训练集普通 3000、4 级 30；每份子集按 0.1 欠采样（普通 300 + 全部 4 级 30），各训一个逻辑回归（作者用的是随机森林，这里为了在浏览器里快速算，换成逻辑回归），再像第 146 格那样把各模型的 0/1 预测取平均，> 0.5 判为 4 级。灰线是各子模型的边界。",
+    render(svg, v) {
+      const pos = [], neg = [];
+      C_TR.y.forEach((c, i) => (c ? pos : neg).push(i));
+      const used = new Set(), models = [];
+      for (let k = 0; k < v.n; k++) {
+        const seed = v.mode === "same" ? 42 : 42 + 1000 * (k + 1);
+        const pick = shuffleIdx(neg.length, seed).slice(0, 300).map((j) => neg[j]);
+        pick.forEach((j) => used.add(j));
+        const ids = pick.concat(pos);
+        models.push(trainLR(ids.map((i) => C_TR.X[i]), ids.map((i) => C_TR.y[i]), 250, 1));
+      }
+      const ax = K.axes(svg, { x: 30, y: 10, w: 600, h: 340 }, [-3.5, 5], [-3.5, 4.5], { xticks: 0, yticks: 0 });
+      [...used].forEach((i) => { const p = C_TR.X[i]; K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 2, fill: "var(--c1)", opacity: 0.35 }); });
+      pos.forEach((i) => { const p = C_TR.X[i]; K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 4, fill: "var(--c6)" }); });
+      models.forEach((m) => boundary(svg, ax, m, [-3.5, 5], { stroke: "var(--ink-3)", "stroke-width": 1.5, opacity: 0.8 }));
+      const yp = C_TE.X.map((p) => (models.reduce((s, m) => s + predict(m, p), 0) / models.length > 0.5 ? 1 : 0));
+      const mt = metrics(C_TE.y, yp);
+      T(svg, 36, 372, `蓝点 = 被抽进子集的普通事故（共 ${used.size} 条不同的），红点 = 全部 4 级；测试集另外生成`, { "font-size": 12, class: "muted" });
+      return { readout: [
+        { k: "用到的不同普通事故", v: `${used.size} / ${neg.length}`, color: used.size <= 300 && v.n > 1 ? "var(--bad)" : "var(--good)" },
+        { k: "不同的子模型个数", v: String(v.mode === "same" ? 1 : v.n) },
+        { k: "4 级召回率", v: (mt.rec * 100).toFixed(0) + "%" },
+        { k: "宏平均 F1", v: mt.macro.toFixed(3), color: "var(--accent)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

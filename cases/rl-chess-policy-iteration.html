@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>棋子走迷宫</title>
+<meta name="description" content="Kaggle 案例拆解：一枚国际象棋棋子在 8×8 棋盘上找最短路。用策略评估、策略改进、策略迭代和值迭代这些动态规划方法，讲清强化学习里“价值”是怎么一格格算出来的。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">棋盘环境 · 已知规则 · 动态规划</div>
+  <h1>一枚棋子走最短路：策略迭代入门</h1>
+  <p class="en">Reinforcement Learning Chess 1: Policy Iteration</p>
+  <div class="tags">
+    <span class="tag rl">强化学习</span>
+    <span class="tag method">马尔可夫决策过程</span><span class="tag method">贝尔曼方程</span><span class="tag method">策略评估</span>
+    <span class="tag method">策略改进</span><span class="tag method">策略迭代</span><span class="tag method">同步 / 异步更新</span><span class="tag method">值迭代</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Arjan Groen</b></span>
+    <span>Kaggle 点赞 <b>279</b>（2026-11 抓取）</span>
+    <span>环境 <b>作者自写的 RLC 包：Move Chess</b>（无外部数据集）</span>
+    <span><a href="https://www.kaggle.com/code/arjanso/reinforcement-learning-chess-1-policy-iteration" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>问题是什么</h3><div class="big">棋子从左上角走到指定格</div><p>“Move Chess”：8×8 棋盘，起点 (0,0)，终点 (5,7)，每走一步奖励 −1。最好的走法就是用最少的步数到达终点。这是作者“用强化学习做国际象棋 AI”系列的第一篇。<span data-cell="0">出处</span> <span data-cell="7">出处</span></p></div>
+    <div class="card panel"><h3>要学什么</h3><div class="big">每一格往哪走：策略</div><p>不是预测标签，而是给 64 个格子各定一个走法（策略），让从任何格子出发到终点的总奖励最大，也就是步数最少。</p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">动态规划：评估 ⇄ 改进</div><p>规则全知道，所以可以直接“算”：先评估当前策略下每格值多少（策略评估），再让每格朝更值钱的方向走（策略改进），反复交替就是<b>策略迭代</b>；每轮只评估一次就是<b>值迭代</b>。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">随机走的王：起点价值 −185</div><p>作者算出：王完全随机走时，从起点出发的期望总奖励是 −185；策略迭代最后找到最短路线。作者还提到策略迭代用了 400 多轮评估才收敛。<span data-cell="29">出处</span> <span data-cell="48">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>问题长什么样</h2>
+  <p class="lead">没有数据文件，问题完全由规则定义。下面的设定来自 notebook 第 7、9 格的文字；作者在 RLC 包里实现了它。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">环境设定</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">状态（格子）数</div><div class="v">8 × 8 = 64</div></div>
+        <div class="stat-tile"><div class="k">起点 S</div><div class="v">(0, 0)</div></div>
+        <div class="stat-tile"><div class="k">终点 F</div><div class="v">(5, 7)</div></div>
+        <div class="stat-tile"><div class="k">每走一步奖励</div><div class="v">−1</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">设定见第 7 格 <span data-cell="7">出处</span>。智能体是一枚棋子：王、后、车、马或象，按各自的走法移动 <span data-cell="9">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">MDP 的几个要素</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>要素</th><th>在这里是什么</th></tr>
+        <tr><td>状态 s</td><td>棋子所在的格子（行, 列）</td></tr>
+        <tr><td>动作 a</td><td>这枚棋子允许的一种走法（王 8 个方向一步；车横竖任意格……）</td></tr>
+        <tr><td>奖励 R</td><td>每走一步 −1，<b>要让总和最大 = 步数最少</b></td></tr>
+        <tr><td>转移</td><td>确定的：同一格做同一动作，结果总一样（作者第 14 格特别说明）</td></tr>
+        <tr><td>策略 π</td><td>每格选各个动作的概率；一开始每个动作概率相同</td></tr>
+        <tr><td>价值 V(s)</td><td>按当前策略从 s 出发，预计总共能拿多少奖励</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">初始价值全为 0、初始策略等概率见第 17 格 <span data-cell="17">出处</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="28">
+    <h3>动手试试 A · 随机策略的价值一圈圈“渗”出来 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labA"></div>
+  </div>
+  <div data-at="40">
+    <h3>动手试试 B · 策略迭代：换棋子、换终点 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labB"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>评估一个状态 = 用后继状态的估计值来估计它（自举 bootstrapping）；这个游戏是确定性的，不用考虑一个动作导致多个结果</td><td><span data-cell="14">第 14 格</span></td></tr>
+        <tr><td>对所有格子评估一遍后，除终点外每格价值都是 −1</td><td><span data-cell="24">第 24 格</span></td></tr>
+        <tr><td>反复评估到稳定后，随机策略下从起点 (0,0) 出发的期望未来奖励是 −185</td><td><span data-cell="29">第 29 格</span></td></tr>
+        <tr><td>策略改进 = 让策略对价值函数“贪心”：把通往最值钱格子的动作概率设为 1，其余为 0</td><td><span data-cell="32">第 32 格</span></td></tr>
+        <tr><td>每格可能有多个最优动作，图里只画一个箭头</td><td><span data-cell="35">第 35 格</span></td></tr>
+        <tr><td>评估与改进交替直到策略不再变化，就得到最优策略（策略迭代）；用最新估计更新的是异步版本</td><td><span data-cell="36">第 36 格</span> <span data-cell="42">第 42 格</span></td></tr>
+        <tr><td>策略迭代用了 400 多轮才收敛；每轮只评估 1 次就是值迭代</td><td><span data-cell="48">第 48 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">价值表、策略箭头图、收敛轮数的打印都在运行输出里，Kaggle 下载的源码不带输出。上面的 −185 和“400 多轮”是作者文字里写明的；页面的动画和实验按 notebook 文字描述的规则在浏览器里重算（棋子走出棋盘时原地不动），王的随机策略同样算出 −185、约 430 轮收敛，与作者一致。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>在<b>规则完全已知</b>、状态不太多的问题里，直接算出每个状态的价值和最优走法，不需要试错。</li>
+        <li><b>同类问题：</b>仓库机器人在已知地图上找最短路、电梯 / 库存调度的小规模模型、游戏地图寻路、棋类残局表。</li>
+        <li><b>可迁移套路：</b>写出状态、动作、奖励、转移 → 策略评估（反复套贝尔曼方程）→ 策略改进（取贪心）→ 交替直到策略不变；嫌慢就改成每轮只评估一次（值迭代）或异步更新。</li>
+        <li><b>局限：</b>必须知道转移规则（“基于模型”）；状态一多（真正的国际象棋）就算不动了，这正是作者后续几篇转向蒙特卡洛、时间差分、Q 网络和树搜索的原因。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>状态评估 <code>evaluate_state</code> <span data-cell="16">第 16 格</span></li>
+        <li>策略评估 <code>evaluate_policy</code>，γ = 1，变化 &lt; 0.1 停止 <span data-cell="22">第 22 格</span> <span data-cell="28">第 28 格</span></li>
+        <li>策略改进 <code>improve_policy</code> <span data-cell="33">第 33 格</span></li>
+        <li>策略迭代 <code>policy_iteration</code> <span data-cell="38">第 38 格</span></li>
+        <li>异步策略迭代 <code>synchronous=False</code> <span data-cell="45">第 45 格</span></li>
+        <li>值迭代：车，<code>k=1</code> <span data-cell="50">第 50 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>随机乱走的王，从起点出发平均要走约 185 步；而最短路只要 7 步。为什么随机策略的价值这么差，还要先把它算出来？</li>
+      <li>折扣因子 γ = 1 意味着“未来的奖励不打折”。在实验 B 里把 γ 调小，策略会变吗？为什么在这个问题里影响不大？</li>
+      <li>在实验 A 里换成象（bishop）：为什么有一半格子的价值一直往下掉、永远收敛不了？这说明 MDP 设计时要注意什么？</li>
+      <li>同步更新要多存一份旧价值表，异步更新直接覆盖。实验 A 里两者收敛轮数差多少？什么情况下异步更快？</li>
+      <li>作者说值迭代“只是把评估轮数改成 1”。那么评估轮数取 1、10、直到收敛，各有什么利弊？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Arjan Groen，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。环境与算法由作者的 RLC 包实现，本页按 notebook 文字描述在浏览器中重写。
+</footer>
+</main>
+
+<script src="nb/rl-chess-policy-iteration.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const S0 = [0, 0], TERM = [5, 7];
+  const DIR8 = [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [-1, 1], [1, -1], [1, 1]];
+  const PNAME = { king: "王", queen: "后", rook: "车", knight: "马", bishop: "象" };
+  const PSYM = { king: "♚", queen: "♛", rook: "♜", knight: "♞", bishop: "♝" };
+  function moves(piece) {
+    if (piece === "king") return DIR8;
+    if (piece === "knight") return [[1, 2], [2, 1], [-1, 2], [-2, 1], [1, -2], [2, -1], [-1, -2], [-2, -1]];
+    const dirs = piece === "rook" ? DIR8.slice(0, 4) : piece === "bishop" ? DIR8.slice(4) : DIR8, m = [];
+    dirs.forEach((d) => { for (let k = 1; k < 8; k++) m.push([d[0] * k, d[1] * k]); });
+    return m;
+  }
+  /* 走出棋盘就原地不动（按这个规则重算，王的随机策略得到 −185，与作者第 29 格一致） */
+  const nxt = (i, j, a) => { const ni = i + a[0], nj = j + a[1]; return ni < 0 || nj < 0 || ni > 7 || nj > 7 ? [i, j] : [ni, nj]; };
+  const isT = (i, j, T) => i === T[0] && j === T[1];
+  const zeros = () => Array.from({ length: 8 }, () => new Array(8).fill(0));
+  function uniformPolicy(A) { return Array.from({ length: 8 }, () => Array.from({ length: 8 }, () => new Array(A.length).fill(1 / A.length))); }
+  /* 一轮策略评估：sync = 用上一轮的值；async = 用最新的值 */
+  function evalSweep(V, P, A, T, gamma, sync) {
+    const src = sync ? V.map((r) => r.slice()) : V; let d = 0;
+    for (let i = 0; i < 8; i++) for (let j = 0; j < 8; j++) {
+      if (isT(i, j, T)) continue;
+      let s = 0; A.forEach((a, k) => { if (P[i][j][k] > 0) { const [ni, nj] = nxt(i, j, a); s += P[i][j][k] * (-1 + gamma * src[ni][nj]); } });
+      d = Math.max(d, Math.abs(s - V[i][j])); V[i][j] = s;
+    }
+    return d;
+  }
+  function improve(V, A, T, gamma) {
+    const P = []; let best = [];
+    for (let i = 0; i < 8; i++) { P.push([]); best.push([]); for (let j = 0; j < 8; j++) {
+      const q = A.map((a) => { const [ni, nj] = nxt(i, j, a); return -1 + gamma * V[ni][nj]; });
+      const m = Math.max(...q), k = q.findIndex((x) => Math.abs(x - m) < 1e-9);
+      P[i].push(A.map((_, kk) => (kk === k ? 1 : 0))); best[i].push(k);
+    } }
+    return { P, best };
+  }
+  function policyIteration(piece, T, o) {
+    const A = moves(piece); let V = zeros(), P = uniformPolicy(A), rounds = 0, sweeps = 0, prev = null, best = null;
+    for (; rounds < 60; rounds++) {
+      for (let k = 0; k < o.k; k++) { sweeps++; if (evalSweep(V, P, A, T, o.gamma, o.sync) < 0.1) break; if (sweeps > 20000) break; }
+      const I = improve(V, A, T, o.gamma); P = I.P; best = I.best;
+      const key = best.map((r) => r.join(",")).join(";");
+      if (key === prev) break; prev = key;
+    }
+    return { V, best, A, rounds: rounds + 1, sweeps };
+  }
+  function pathFrom(best, A, T, start) {
+    const path = [start]; let [i, j] = start;
+    for (let t = 0; t < 64 && !isT(i, j, T); t++) { [i, j] = nxt(i, j, A[best[i][j]]); path.push([i, j]); }
+    return path;
+  }
+
+  /* ---------- 棋盘绘制 ---------- */
+  function board(svg, x0, y0, cs, T) {
+    const cells = [], txt = [];
+    for (let i = 0; i < 8; i++) { cells.push([]); txt.push([]); for (let j = 0; j < 8; j++) {
+      cells[i].push(K.svg(svg, "rect", { x: x0 + j * cs, y: y0 + i * cs, width: cs - 1, height: cs - 1, fill: (i + j) % 2 ? "var(--panel-2)" : "var(--panel)", stroke: "var(--line)" }));
+      txt[i].push(K.svg(svg, "text", { x: x0 + j * cs + cs / 2, y: y0 + i * cs + cs / 2 + 4, "text-anchor": "middle", "font-size": Math.max(9, Math.round(cs * 0.28)), "font-family": "var(--mono)" }, ""));
+    } }
+    K.svg(svg, "text", { x: x0 + 4, y: y0 + 12, "font-size": 10, "font-weight": 700, fill: "var(--c2)" }, "S");
+    if (T) { K.set(cells[T[0]][T[1]], { fill: "color-mix(in srgb, var(--good) 40%, var(--panel))" }); K.svg(svg, "text", { x: x0 + T[1] * cs + 4, y: y0 + T[0] * cs + 12, "font-size": 10, "font-weight": 700, fill: "var(--good)" }, "F"); }
+    const ctr = (i, j) => [x0 + j * cs + cs / 2, y0 + i * cs + cs / 2];
+    return { cells, txt, ctr, cs };
+  }
+  function paintV(B, V, T, fmt) {
+    let mn = 0; V.forEach((r) => r.forEach((v) => (mn = Math.min(mn, v))));
+    for (let i = 0; i < 8; i++) for (let j = 0; j < 8; j++) {
+      if (T && isT(i, j, T)) { B.txt[i][j].textContent = "0"; continue; }
+      K.set(B.cells[i][j], { fill: mn < 0 ? K.heat(1 - V[i][j] / mn) : "var(--panel-2)" });
+      B.txt[i][j].textContent = fmt ? fmt(V[i][j]) : Math.round(V[i][j]);
+    }
+  }
+  function arrowsFor(svg, B, best, A, T) {
+    const g = K.svg(svg, "g");
+    for (let i = 0; i < 8; i++) for (let j = 0; j < 8; j++) {
+      if (isT(i, j, T)) continue;
+      const a = A[best[i][j]], [cx, cy] = B.ctr(i, j), L = Math.hypot(a[0], a[1]), dx = (a[1] / L) * B.cs * 0.32, dy = (a[0] / L) * B.cs * 0.32;
+      K.arrow(g, cx - dx, cy - dy, cx + dx, cy + dy, { color: "var(--accent)", sw: 1.6 });
+    }
+    return g;
+  }
+  function piece(svg, B, p, at) { const [x, y] = B.ctr(at[0], at[1]); return K.svg(svg, "text", { x, y: y + B.cs * 0.25, "text-anchor": "middle", "font-size": Math.round(B.cs * 0.7), fill: "var(--c5)" }, PSYM[p]); }
+  function movePiece(ctx, el, B, a, b, ms) { const [x1, y1] = B.ctr(a[0], a[1]), [x2, y2] = B.ctr(b[0], b[1]); return ctx.tween(ms || 350, (t) => K.set(el, { x: K.lerp(x1, x2, t), y: K.lerp(y1, y2, t) + B.cs * 0.25 })); }
+
+  const steps = [
+    {
+      at: 0, title: "开场：用国际象棋学强化学习", kicker: "第 0–1 格 · 系列路线图",
+      html: `<p>作者的计划是写一系列 notebook，一步步做出能下国际象棋的强化学习 AI（RLC）。国际象棋的状态空间太大，所以从简单版本开始：</p><ul class="tight"><li><b>Move Chess</b>：在棋盘上找两格之间的最短路，状态少，适合动态规划、蒙特卡洛、时间差分、SARSA 等基础方法（本篇讲动态规划部分）；</li><li><b>Capture Chess</b>：在 n 步内吃掉尽可能多的子，用 Q-learning、经验回放、策略梯度、actor-critic；</li><li><b>Real Chess</b>：和初学者对弈，用蒙特卡洛树搜索。</li></ul><p>作者说他只引用理论、不完整讲解，推荐 David Silver 的课程和 Sutton &amp; Barto 的教材。</p>`,
+      cells: [0, 1], highlight: [],
+      draw(svg, ctx) {
+        const st = [["1. Move Chess", "找最短路", "动态规划 · MC · TD · SARSA", "var(--c1)"], ["2. Capture Chess", "多吃对方的子", "Q-learning · 回放 · 策略梯度", "var(--c5)"], ["3. Real Chess", "和人下棋", "蒙特卡洛树搜索", "var(--c6)"]];
+        const els = st.map((s, i) => { const g = K.svg(svg, "g"); K.node(g, 30 + i * 235, 80, 210, 130, s[0] + "\n" + s[1] + "\n\n" + s[2], { stroke: s[3], fill: `color-mix(in srgb, ${s[3]} 12%, var(--panel))`, fs: 13 }); g.style.opacity = 0; return g; });
+        [0, 1].forEach((i) => K.arrow(svg, 242 + i * 235, 145, 262 + i * 235, 145, { sw: 2 }));
+        K.svg(svg, "text", { x: 30, y: 50, "font-size": 14, "font-weight": 700 }, "状态空间从小到大");
+        const here = K.svg(svg, "text", { x: 135, y: 245, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--c1)" }, "▲ 本篇：动态规划部分");
+        here.style.opacity = 0;
+        (async () => { for (const g of els) if (!(await ctx.tween(500, (t) => (g.style.opacity = t)))) return; await ctx.tween(500, (t) => (here.style.opacity = t)); })();
+      },
+    },
+    {
+      at: 2, title: "准备：安装作者的 RLC 包", kicker: "第 2–5 格 · 环境、智能体、算法三件套",
+      html: `<p>作者安装了 <code>python-chess</code>（处理国际象棋规则）和自己写的 <b>RLC</b> 包，然后导入三个类：</p><ul class="tight"><li><code>Board</code>：环境（棋盘、奖励、终点）；</li><li><code>Piece</code>：智能体（一枚棋子，带价值表和策略）；</li><li><code>Reinforce</code>：算法（评估、改进、迭代）。</li></ul><p>算法代码不直接写在 notebook 里，而是在后面用 <code>inspect.getsource</code> 把函数源码打印出来讲解。</p>`,
+      cells: [3, 5], highlight: ["from RLC.move_chess.environment import Board", "from RLC.move_chess.learn import Reinforce"],
+      draw(svg, ctx) {
+        const items = [["Board", "环境：8×8 棋盘\n每步奖励 −1，终点 F", "var(--c3)"], ["Piece", "智能体：一枚棋子\n价值表 V + 策略 π", "var(--c5)"], ["Reinforce", "算法：评估 / 改进\n策略迭代 / 值迭代", "var(--c1)"]];
+        const els = items.map((it, i) => { const g = K.svg(svg, "g"); K.node(g, 40 + i * 230, 110, 200, 100, it[0] + "\n" + it[1], { stroke: it[2], fill: `color-mix(in srgb, ${it[2]} 12%, var(--panel))`, fs: 13 }); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 40, y: 260, "font-size": 13, class: "muted" }, "r = Reinforce(p, env)：把棋子和棋盘交给算法对象（第 12 格）");
+        (async () => { for (const g of els) if (!(await ctx.tween(450, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      at: 6, title: "环境：8×8 棋盘，每步 −1", kicker: "第 6–8 格 · Move Chess 的规则",
+      html: `<p>状态空间是 8×8 的网格；起点 S 在左上角 (0,0)，终点 F 在 (5,7)；每走一步奖励 −1。显然，最好的策略就是<b>用最少的步数</b>从 S 走到 F。<span data-cell="7">第 7 格</span></p><p>动画让一个王在棋盘上随便乱走，右边计分：它要很久才会碰巧走到终点，这就是后面“随机策略价值很低”的直观感受。</p>`,
+      cells: [8], highlight: ["env = Board()"],
+      draw(svg, ctx) {
+        const B = board(svg, 40, 20, 38, TERM), pc = piece(svg, B, "king", S0);
+        const sc = K.svg(svg, "text", { x: 380, y: 80, "font-size": 16, "font-weight": 700 }, "累计奖励 0");
+        const st = K.svg(svg, "text", { x: 380, y: 110, "font-size": 13, class: "muted" }, "王随机选 8 个方向之一（示意）");
+        K.svg(svg, "text", { x: 380, y: 140, "font-size": 13, class: "muted" }, "走出棋盘就原地不动");
+        const r = K.rng(9);
+        (async () => {
+          let cur = S0, tot = 0;
+          for (let t = 0; t < 80; t++) {
+            const nx = nxt(cur[0], cur[1], DIR8[Math.floor(r() * 8)]);
+            if (!(await movePiece(ctx, pc, B, cur, nx, 160))) return;
+            cur = nx; tot--; sc.textContent = "累计奖励 " + tot;
+            if (isT(cur[0], cur[1], TERM)) { st.textContent = "碰巧到达终点！"; return; }
+          }
+          st.textContent = "80 步了还没到……";
+        })();
+      },
+    },
+    {
+      at: 9, title: "智能体：一枚棋子", kicker: "第 9–12 格 · 王、后、车、马、象",
+      html: `<p>智能体是一枚棋子，可以选王、后、车、马、象；它有一个<b>行为策略</b>决定在每格怎么走。<span data-cell="9">第 9 格</span> 作者先选了王（<code>Piece(piece='king')</code>），再把棋子和棋盘交给 <code>Reinforce</code> 对象。</p><p>不同棋子的“动作集合”完全不同：王每步只能走 1 格（8 个方向），车可以横竖走任意格，马走“日”字，象只能斜走。动画依次展示它们从中间一格出发能到哪些格。</p>`,
+      cells: [10, 12], highlight: ["Piece(piece='king')", "Reinforce(p,env)"],
+      draw(svg, ctx) {
+        const B = board(svg, 40, 20, 38, null), lab = K.svg(svg, "text", { x: 380, y: 80, "font-size": 18, "font-weight": 700 }, ""), cnt = K.svg(svg, "text", { x: 380, y: 112, "font-size": 13, class: "muted" }, "");
+        let pc = null;
+        (async () => {
+          for (const p of ["king", "rook", "knight", "bishop", "queen"]) {
+            for (let i = 0; i < 8; i++) for (let j = 0; j < 8; j++) K.set(B.cells[i][j], { fill: (i + j) % 2 ? "var(--panel-2)" : "var(--panel)" });
+            if (pc) pc.remove(); pc = piece(svg, B, p, [3, 3]);
+            const A = moves(p); let n = 0;
+            A.forEach((a) => { const [ni, nj] = nxt(3, 3, a); if (ni !== 3 || nj !== 3) { K.set(B.cells[ni][nj], { fill: "color-mix(in srgb, var(--accent) 35%, var(--panel))" }); n++; } });
+            lab.textContent = PNAME[p] + "（" + p + "）"; cnt.textContent = `从 (3,3) 一步能到 ${n} 个格子`;
+            if (!(await ctx.wait(1300))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 13, title: "状态评估：一格的价值从邻居算来", kicker: "第 13–16 格 · 贝尔曼期望方程",
+      html: `<p>想让棋子朝高价值的格子走，先要会估一个格子的价值。作者的思路：</p><ul class="tight"><li>一个状态 s 的价值 = 走一步的奖励 R + 后继状态 s′ 的价值（乘折扣 γ）；</li><li>有多个动作时，按策略给的概率 π(a|s) <b>加权求和</b>；</li><li>这个游戏是确定性的，同一动作只会到一个 s′。</li></ul><p style="text-align:center"><b>V(s) = Σ<sub>a</sub> π(a|s) · [ R + γ · V(s′) ]</b></p><p>因为 s′ 的价值本身也是估计值，这叫<b>自举</b>（bootstrapping）：用一个估计去更新另一个估计。</p>`,
+      cells: [14, 16], highlight: ["evaluate_state"],
+      draw(svg, ctx) {
+        const B = board(svg, 40, 20, 38, null), c = [3, 3], [cx, cy] = B.ctr(3, 3);
+        const vals = [-4, -3, -5, -2, -4, -3, -6, -2];
+        const arrows = DIR8.map((d, k) => { const [ni, nj] = nxt(3, 3, d), [x, y] = B.ctr(ni, nj); B.txt[ni][nj].textContent = vals[k]; const g = K.arrow(svg, cx, cy, K.lerp(cx, x, 0.7), K.lerp(cy, y, 0.7), { color: "var(--c2)" }); g.style.opacity = 0; return g; });
+        K.set(B.cells[3][3], { fill: "var(--accent-soft)" });
+        const res = K.svg(svg, "text", { x: B.ctr(3, 3)[0], y: cy + 5, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, "?");
+        const f = [0, 1, 2].map((i) => K.svg(svg, "text", { x: 370, y: 90 + i * 30, "font-size": 13, "font-family": "var(--mono)" }, ""));
+        K.svg(svg, "text", { x: 370, y: 60, "font-size": 14, "font-weight": 700 }, "王：8 个动作各 1/8，γ = 1（示意邻居值）");
+        (async () => {
+          for (const g of arrows) if (!(await ctx.tween(150, (t) => (g.style.opacity = t)))) return;
+          f[0].textContent = "每个方向：1/8 × (−1 + V(s′))";
+          if (!(await ctx.wait(800))) return;
+          const v = vals.reduce((s, x) => s + (-1 + x) / 8, 0);
+          f[1].textContent = `= 1/8 × (${vals.map((x) => -1 + x).join(" ")})`;
+          if (!(await ctx.wait(800))) return;
+          f[2].textContent = `V(s) = ${v.toFixed(3)}`; f[2].style.fill = "var(--good)"; res.textContent = v.toFixed(2);
+        })();
+      },
+    },
+    {
+      at: 17, title: "演示：先评估起点这一格", kicker: "第 17–20 格 · 从全 0 开始",
+      html: `<p>演示开始时：价值表<b>全是 0</b>，策略对每个动作<b>等概率</b>。作者只评估起点 (0,0) 一格，γ = 1。</p><p>结果是 −1：王在角落，8 个方向里只有 3 个在棋盘内，另外 5 个原地不动，但不管去哪，奖励都是 −1，而所有邻居价值都还是 0，所以 V(0,0) = 8 × 1/8 × (−1 + 0) = −1。动画逐个方向演示这次计算。</p>`,
+      cells: [19], highlight: ["r.evaluate_state(state,gamma=1)"],
+      notes: { 18: "打印价值表：全是 0", 20: "再打印：只有 (0,0) 变成了 −1" },
+      draw(svg, ctx) {
+        const B = board(svg, 40, 20, 38, TERM); paintV(B, zeros(), TERM);
+        const [cx, cy] = B.ctr(0, 0), log = K.svg(svg, "text", { x: 370, y: 90, "font-size": 13, "font-family": "var(--mono)" }, ""), sum = K.svg(svg, "text", { x: 370, y: 130, "font-size": 15, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 370, y: 60, "font-size": 14, "font-weight": 700 }, "评估 (0,0)，γ = 1");
+        (async () => {
+          let s = 0;
+          for (const d of DIR8) {
+            const [ni, nj] = nxt(0, 0, d), stay = ni === 0 && nj === 0;
+            const [x, y] = B.ctr(ni, nj); const g = stay ? K.svg(svg, "circle", { cx, cy, r: 14, fill: "none", stroke: "var(--warn)", "stroke-width": 2 }) : K.arrow(svg, cx, cy, K.lerp(cx, x, 0.75), K.lerp(cy, y, 0.75), { color: "var(--c2)", sw: 2 });
+            s += (-1 + 0) / 8; log.textContent = `方向 (${d[0]},${d[1]})：${stay ? "出界，原地" : "到 (" + ni + "," + nj + ")"}，1/8×(−1+0)`; sum.textContent = "累加 = " + s.toFixed(3);
+            if (!(await ctx.wait(500))) return; g.remove();
+          }
+          B.txt[0][0].textContent = "-1"; K.set(B.cells[0][0], { fill: "color-mix(in srgb, var(--c1) 40%, var(--panel))" }); sum.textContent = "V(0,0) = −1"; sum.style.fill = "var(--good)";
+        })();
+      },
+    },
+    {
+      at: 21, title: "策略评估：64 格一起算一遍", kicker: "第 21–25 格 · 扫一遍棋盘",
+      html: `<p><b>策略评估</b>就是对状态空间里的<b>每一个</b>格子都做一次状态评估。作者的实现就是依次遍历所有状态、更新价值表，和 Sutton &amp; Barto 教材给的算法一致。</p><p>扫完第一遍，作者看到：除终点外，<b>所有格子的价值都是 −1</b>（因为邻居都还是 0）。<span data-cell="24">第 24 格</span> 动画按行扫过棋盘。</p>`,
+      cells: [22, 23], highlight: ["evaluate_policy"],
+      notes: { 25: "打印：终点 0，其余全是 −1" },
+      draw(svg, ctx) {
+        const B = board(svg, 40, 20, 38, TERM); paintV(B, zeros(), TERM);
+        const lab = K.svg(svg, "text", { x: 370, y: 80, "font-size": 14, "font-weight": 700 }, "同步评估第 1 遍");
+        const cur = K.svg(svg, "rect", { width: 37, height: 37, fill: "none", stroke: "var(--warn)", "stroke-width": 3 });
+        (async () => {
+          for (let i = 0; i < 8; i++) for (let j = 0; j < 8; j++) {
+            K.set(cur, { x: 40 + j * 38, y: 20 + i * 38 });
+            if (!isT(i, j, TERM)) { B.txt[i][j].textContent = "-1"; K.set(B.cells[i][j], { fill: "color-mix(in srgb, var(--c1) 30%, var(--panel))" }); }
+            if (!(await ctx.wait(45))) return;
+          }
+          lab.textContent = "扫完：除终点外全是 −1";
+        })();
+      },
+    },
+    {
+      at: 26, title: "反复评估：直到价值不再变化", kicker: "第 26–30 格 · 收敛到 −185",
+      html: `<p>一遍不够，作者把策略评估重复做，直到一轮里价值的最大变化 &lt; 0.1（eps = 0.1，最多 1000 轮，γ = 1，同步更新）。<span data-cell="28">第 28 格</span></p><p>结果：在“随机乱走”的策略下，从起点 (0,0) 出发的期望未来奖励是 <b>−185</b>，也就是平均要走 185 步左右才碰到终点。<span data-cell="29">第 29 格</span> 动画在浏览器里按同样规则真算：颜色越亮越接近终点，可以看到价值从终点向外一圈圈“渗”开。</p>`,
+      cells: [28], highlight: ["if value_delta_max < eps:", "r.evaluate_policy(gamma=gamma,synchronous=synchronous)"],
+      notes: { 30: "打印收敛后的价值表，(0,0) 处是 −185" },
+      draw(svg, ctx) {
+        const B = board(svg, 40, 20, 38, TERM), A = moves("king"), P = uniformPolicy(A), V = zeros();
+        const it = K.svg(svg, "text", { x: 370, y: 70, "font-size": 15, "font-weight": 700 }, ""), dl = K.svg(svg, "text", { x: 370, y: 100, "font-size": 13, "font-family": "var(--mono)" }, ""), v0 = K.svg(svg, "text", { x: 370, y: 140, "font-size": 15, "font-weight": 700, fill: "var(--c2)" }, "");
+        K.svg(svg, "text", { x: 370, y: 290, "font-size": 11, class: "muted" }, "浏览器内真算：王 · 随机策略 · γ = 1 · 同步");
+        const marks = [1, 2, 3, 5, 10, 20, 40, 80, 150, 250, 350, 1000];
+        (async () => {
+          let k = 0;
+          for (const m of marks) {
+            let d = 0; for (; k < m; k++) { d = evalSweep(V, P, A, TERM, 1, true); if (d < 0.1) { k++; break; } }
+            paintV(B, V, TERM); it.textContent = `第 ${k} 轮`; dl.textContent = `最大变化 Δ = ${d.toFixed(3)}`; v0.textContent = `V(0,0) = ${V[0][0].toFixed(1)}`;
+            if (d < 0.1) { dl.textContent += " < 0.1，停止"; return; }
+            if (!(await ctx.wait(650))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 31, title: "策略改进：朝更值钱的格子走", kicker: "第 31–35 格 · 变成贪心",
+      html: `<p>知道了每格的价值，就可以改进策略：让策略对价值函数<b>贪心</b>。作者的做法是：在每个格子，把通往<b>价值最高</b>的那个后继格的动作概率设为 1，其余为 0。<span data-cell="32">第 32 格</span></p><p>动画在上一章算出的价值表上做一次改进，每格画出新策略的箭头。作者提醒：图里每格只画一个箭头，但可能有好几个同样好的动作。<span data-cell="35">第 35 格</span> 仅仅改进一次，从起点沿箭头走就已经是一条短路了。</p>`,
+      cells: [33, 34], highlight: ["improve_policy", "visualize_policy"],
+      draw(svg, ctx) {
+        const A = moves("king"), P = uniformPolicy(A), V = zeros();
+        for (let k = 0; k < 1000; k++) if (evalSweep(V, P, A, TERM, 1, true) < 0.1) break;
+        const B = board(svg, 40, 20, 38, TERM); paintV(B, V, TERM);
+        const I = improve(V, A, TERM, 1);
+        const g = arrowsFor(svg, B, I.best, A, TERM); g.style.opacity = 0;
+        for (let i = 0; i < 8; i++) for (let j = 0; j < 8; j++) B.txt[i][j].style.opacity = 0.35;
+        const path = pathFrom(I.best, A, TERM, S0), pc = piece(svg, B, "king", S0);
+        const lab = K.svg(svg, "text", { x: 370, y: 80, "font-size": 14, "font-weight": 700 }, "改进一次后的策略");
+        const st = K.svg(svg, "text", { x: 370, y: 110, "font-size": 13 }, "");
+        (async () => {
+          if (!(await ctx.tween(800, (t) => (g.style.opacity = t)))) return;
+          for (let k = 1; k < path.length; k++) { if (!(await movePiece(ctx, pc, B, path[k - 1], path[k], 300))) return; st.textContent = `沿箭头走了 ${k} 步`; }
+          st.textContent = `从 S 到 F 只要 ${path.length - 1} 步`; st.style.fill = "var(--good)";
+        })();
+      },
+    },
+    {
+      at: 36, title: "策略迭代：评估 ⇄ 改进，直到不变", kicker: "第 36–40 格 · 找到最优策略",
+      html: `<p><b>策略迭代</b>：策略评估（算价值）和策略改进（取贪心）交替进行，直到策略不再变化，这时得到的就是最优策略。这是教材里的标准算法。<span data-cell="36">第 36 格</span></p><p>为什么一定能停？每次改进都不会让任何格子变差，而策略的种类是有限的，所以迟早会停在最优处。动画显示每一轮“评估 → 改进”后，有多少个格子的箭头发生了变化。</p>`,
+      cells: [38, 40], highlight: ["policy_iteration"],
+      draw(svg, ctx) {
+        const A = moves("king"), B = board(svg, 40, 20, 38, TERM);
+        let V = zeros(), P = uniformPolicy(A), prev = null, ag = null;
+        const lab = K.svg(svg, "text", { x: 370, y: 70, "font-size": 15, "font-weight": 700 }, ""), ch = K.svg(svg, "text", { x: 370, y: 100, "font-size": 13 }, ""), v0 = K.svg(svg, "text", { x: 370, y: 130, "font-size": 13, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 370, y: 290, "font-size": 11, class: "muted" }, "浏览器内真算：王 · γ = 1");
+        (async () => {
+          for (let round = 1; round <= 10; round++) {
+            let n = 0; for (; n < 1000; n++) if (evalSweep(V, P, A, TERM, 1, true) < 0.1) break;
+            paintV(B, V, TERM); for (let i = 0; i < 8; i++) for (let j = 0; j < 8; j++) B.txt[i][j].style.opacity = 0.35;
+            lab.textContent = `第 ${round} 轮：评估 ${n + 1} 遍`; v0.textContent = `V(0,0) = ${V[0][0].toFixed(1)}`;
+            if (!(await ctx.wait(700))) return;
+            const I = improve(V, A, TERM, 1); P = I.P;
+            let changed = 0; if (prev) for (let i = 0; i < 8; i++) for (let j = 0; j < 8; j++) if (prev[i][j] !== I.best[i][j]) changed++;
+            if (ag) ag.remove(); ag = arrowsFor(svg, B, I.best, A, TERM);
+            ch.textContent = prev ? `改进：${changed} 个格子换了箭头` : "改进：从随机变成贪心";
+            if (prev && changed === 0) { ch.textContent = "策略不再变化 → 最优策略"; ch.style.fill = "var(--good)"; return; }
+            prev = I.best;
+            if (!(await ctx.wait(900))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 41, title: "同步 vs 异步：用旧值还是新值", kicker: "第 41–46 格 · 两种更新方式",
+      html: `<p>评估时要用到邻居的价值，那用哪一份？</p><ul class="tight"><li><b>同步</b>：这一遍所有格子都用<b>上一遍</b>的旧值，需要两份表；</li><li><b>异步</b>：用<b>最新</b>的值，某个邻居这一遍已经更新过，就直接用新值。</li></ul><p>实现上只差一个参数 <code>synchronous=False</code>。<span data-cell="42">第 42 格</span> 动画对比王的随机策略评估：两种方式各要多少遍才收敛（浏览器内真算）。异步的新信息传得更快。</p>`,
+      cells: [45, 46], highlight: ["synchronous=False"],
+      notes: { 44: "重新建一个王，从头开始" },
+      draw(svg, ctx) {
+        const A = moves("king"), P = uniformPolicy(A), res = {};
+        [true, false].forEach((sync) => { const V = zeros(); let k = 0; for (; k < 2000; k++) if (evalSweep(V, P, A, TERM, 1, sync) < 0.1) break; res[sync] = { k: k + 1, v: V[0][0] }; });
+        const Bs = [board(svg, 30, 40, 30, TERM), board(svg, 380, 40, 30, TERM)];
+        K.svg(svg, "text", { x: 30, y: 28, "font-size": 14, "font-weight": 700 }, "同步（用上一遍的值）");
+        K.svg(svg, "text", { x: 380, y: 28, "font-size": 14, "font-weight": 700 }, "异步（用最新的值）");
+        const t1 = K.svg(svg, "text", { x: 30, y: 300, "font-size": 13, "font-family": "var(--mono)" }, ""), t2 = K.svg(svg, "text", { x: 380, y: 300, "font-size": 13, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 30, y: 325, "font-size": 11, class: "muted" }, `收敛：同步 ${res[true].k} 遍，异步 ${res[false].k} 遍（浏览器内真算，王 · 随机策略）`);
+        const Vs = [zeros(), zeros()];
+        (async () => {
+          for (let k = 1; k <= 12; k++) {
+            evalSweep(Vs[0], P, A, TERM, 1, true); evalSweep(Vs[1], P, A, TERM, 1, false);
+            [0, 1].forEach((b) => { paintV(Bs[b], Vs[b], TERM); }); t1.textContent = `第 ${k} 遍  V(0,0)=${Vs[0][0][0].toFixed(1)}`; t2.textContent = `第 ${k} 遍  V(0,0)=${Vs[1][0][0].toFixed(1)}`;
+            if (!(await ctx.wait(600))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 47, title: "值迭代：每轮只评估一次", kicker: "第 47–50 格 · 换成车",
+      html: `<p>作者指出：值迭代只是策略迭代的一个参数变化。策略评估<b>不必等到完全收敛</b>才去改进策略；上面的策略迭代用了 400 多轮评估才收敛，如果每轮只评估 <b>1 次</b>就改进，就叫<b>值迭代</b>。<span data-cell="48">第 48 格</span></p><p>这次作者换了一枚<b>车</b>，调用 <code>policy_iteration(k=1, gamma=1)</code>。车可以横竖一口气走到底，所以从 (0,0) 到 (5,7) 只要 2 步。动画在浏览器里用值迭代求解车的策略，并走一遍。</p>`,
+      cells: [50], highlight: ["Piece(piece='rook')", "r.policy_iteration(k=1,gamma=1)"],
+      draw(svg, ctx) {
+        const R = policyIteration("rook", TERM, { k: 1, gamma: 1, sync: true });
+        const B = board(svg, 40, 20, 38, TERM); paintV(B, R.V, TERM);
+        for (let i = 0; i < 8; i++) for (let j = 0; j < 8; j++) B.txt[i][j].style.opacity = 0.5;
+        const path = pathFrom(R.best, R.A, TERM, S0), pc = piece(svg, B, "rook", S0);
+        K.svg(svg, "text", { x: 370, y: 70, "font-size": 15, "font-weight": 700 }, "车 · 值迭代（k = 1）");
+        K.svg(svg, "text", { x: 370, y: 100, "font-size": 13 }, `改进了 ${R.rounds} 轮，共评估 ${R.sweeps} 遍`);
+        const st = K.svg(svg, "text", { x: 370, y: 130, "font-size": 13 }, "");
+        K.svg(svg, "text", { x: 370, y: 290, "font-size": 11, class: "muted" }, "格中数字 = 最优策略下的价值 = −(到终点的步数)");
+        (async () => { if (!(await ctx.wait(600))) return; for (let k = 1; k < path.length; k++) { if (!(await movePiece(ctx, pc, B, path[k - 1], path[k], 600))) return; st.textContent = `走了 ${k} 步`; } st.textContent = `${path.length - 1} 步到达终点`; st.style.fill = "var(--good)"; })();
+      },
+    },
+    {
+      at: 51, title: "结尾：下一篇走向免模型方法", kicker: "第 51–53 格 · 预告与参考",
+      html: `<p>作者在结尾预告：下一篇会讲<b>免模型</b>方法，比如蒙特卡洛和时间差分，它们在<b>不知道 MDP 转移概率</b>时也能用。本篇的所有方法都需要事先知道“走一步会到哪”，在现实中往往做不到。</p><p>参考资料是 Sutton &amp; Barto 的《Reinforcement Learning: An Introduction》和 David Silver 的强化学习课程。动画把本篇的四个方法放在一张关系图里。</p>`,
+      cells: [51, 53], highlight: [],
+      draw(svg, ctx) {
+        const nodes = [["状态评估", 60, 60], ["策略评估\n（扫所有格）", 60, 170], ["策略改进\n（取贪心）", 300, 170], ["策略迭代\n评估到收敛 ⇄ 改进", 540, 110], ["值迭代\n评估 1 次 ⇄ 改进", 540, 230]];
+        const els = nodes.map(([t, x, y]) => { const g = K.svg(svg, "g"); K.node(g, x, y, 150, 60, t, { fs: 12 }); g.style.opacity = 0; return g; });
+        const arr = [[135, 120, 135, 168], [210, 200, 298, 200], [450, 190, 538, 145], [450, 200, 538, 255]].map((a) => { const g = K.arrow(svg, ...a, { sw: 1.6 }); g.style.opacity = 0; return g; });
+        const nxtt = K.node(svg, 220, 280, 300, 44, "下一篇：蒙特卡洛 · 时间差分 · SARSA（免模型）", { fs: 12, stroke: "var(--c6)" }); nxtt.style.opacity = 0;
+        (async () => { for (let i = 0; i < els.length; i++) { if (!(await ctx.tween(350, (t) => { els[i].style.opacity = t; if (i && arr[i - 1]) arr[i - 1].style.opacity = t; }))) return; } await ctx.tween(500, (t) => (nxtt.style.opacity = t)); })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：随机策略评估 ---------- */
+  K.lab(document.getElementById("labA"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "p", label: "棋子", value: "king", options: [["king", "王"], ["rook", "车"], ["knight", "马"], ["bishop", "象"], ["queen", "后"]] },
+      { id: "k", label: "评估遍数", min: 0, max: 600, step: 1, value: 20 },
+      { id: "sync", label: "更新方式", value: "sync", options: [["sync", "同步（同作者第 28 格）"], ["async", "异步"]] },
+      { id: "gamma", label: "折扣因子 γ", min: 0.8, max: 1, step: 0.01, value: 1, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "随机策略（每个动作等概率）下反复做策略评估。走出棋盘时原地不动；格中数字是价值 V(s)，颜色越亮越接近终点。王、γ = 1、同步时，大约 430 遍收敛、V(0,0) ≈ −185，与作者第 28–29 格一致。试试：换成象会怎样？把 γ 调到 0.9 呢？",
+    render(svg, v) {
+      const A = moves(v.p), P = uniformPolicy(A), V = zeros(); let d = 0, conv = -1;
+      for (let k = 0; k < v.k; k++) { d = evalSweep(V, P, A, TERM, v.gamma, v.sync === "sync"); if (d < 0.1 && conv < 0) conv = k + 1; }
+      const B = board(svg, 10, 10, 38, TERM); paintV(B, V, TERM);
+      K.svg(svg, "text", { x: 340, y: 40, "font-size": 30, fill: "var(--c5)" }, PSYM[v.p]);
+      K.svg(svg, "text", { x: 380, y: 40, "font-size": 15, "font-weight": 700 }, PNAME[v.p] + " · 随机策略");
+      if (v.p === "bishop") { K.svg(svg, "text", { x: 340, y: 80, "font-size": 12, fill: "var(--warn)" }, "象只能走同色格：有一半格子永远到不了终点，"); K.svg(svg, "text", { x: 340, y: 98, "font-size": 12, fill: "var(--warn)" }, "那些格子的价值会一直往下掉，Δ 永远不会 < 0.1。"); }
+      else { K.svg(svg, "text", { x: 340, y: 80, "font-size": 12, class: "muted" }, "随机乱走的棋子要很多步才碰到终点，"); K.svg(svg, "text", { x: 340, y: 98, "font-size": 12, class: "muted" }, "所以价值是很大的负数。"); }
+      return { readout: [
+        { k: "V(0,0)", v: V[0][0].toFixed(1) },
+        { k: "这一遍最大变化 Δ", v: v.k ? d.toFixed(3) : "—" },
+        { k: "第几遍满足 Δ < 0.1", v: conv > 0 ? conv : "还没有", color: conv > 0 ? "var(--good)" : "var(--warn)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：策略迭代 ---------- */
+  K.lab(document.getElementById("labB"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "p", label: "棋子", value: "king", options: [["king", "王"], ["rook", "车"], ["knight", "马"], ["queen", "后"]] },
+      { id: "ti", label: "终点行", min: 0, max: 7, step: 1, value: 5 },
+      { id: "tj", label: "终点列", min: 0, max: 7, step: 1, value: 7 },
+      { id: "k", label: "每轮评估遍数上限", value: "1000", options: [["1", "1（值迭代）"], ["3", "3"], ["10", "10"], ["1000", "直到收敛（策略迭代）"]] },
+      { id: "gamma", label: "折扣因子 γ", min: 0.5, max: 1, step: 0.01, value: 1, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "按第 38 格的思路在浏览器里做策略迭代：评估（最多 k 遍或 Δ < 0.1）→ 贪心改进 → 直到策略不再变化。箭头是最终策略，黄色路线是从 S 出发按策略走的路。比较“1（值迭代）”和“直到收敛”：改进轮数和总评估遍数各是多少？",
+    render(svg, v) {
+      const T = [v.ti, v.tj], R = policyIteration(v.p, T, { k: +v.k, gamma: v.gamma, sync: true });
+      const B = board(svg, 10, 10, 38, T); paintV(B, R.V, T, (x) => (Math.abs(x) < 100 ? Math.round(x) : ""));
+      for (let i = 0; i < 8; i++) for (let j = 0; j < 8; j++) B.txt[i][j].style.opacity = 0.4;
+      arrowsFor(svg, B, R.best, R.A, T);
+      const path = pathFrom(R.best, R.A, T, S0);
+      K.svg(svg, "path", { d: path.map((q, i) => { const [x, y] = B.ctr(q[0], q[1]); return (i ? "L" : "M") + x + "," + y; }).join(""), fill: "none", stroke: "var(--c5)", "stroke-width": 4, opacity: 0.8 });
+      const ok = isT(path[path.length - 1][0], path[path.length - 1][1], T);
+      K.svg(svg, "text", { x: 340, y: 40, "font-size": 30, fill: "var(--c5)" }, PSYM[v.p]);
+      K.svg(svg, "text", { x: 380, y: 40, "font-size": 15, "font-weight": 700 }, PNAME[v.p] + " · 终点 (" + v.ti + "," + v.tj + ")");
+      return { readout: [
+        { k: "从 S 到终点的步数", v: ok ? path.length - 1 : "到不了", color: ok ? "var(--good)" : "var(--bad)" },
+        { k: "策略改进轮数", v: R.rounds },
+        { k: "总评估遍数", v: R.sweeps },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

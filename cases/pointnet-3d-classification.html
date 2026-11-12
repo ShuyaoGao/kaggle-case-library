@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PointNet 点云分类</title>
+<meta name="description" content="Kaggle 案例拆解：PointNet 直接读一堆没有顺序的三维点，用共享 MLP + 最大池化做到“点的顺序怎么换结果都不变”，在 ModelNet40 上做 40 类三维物体分类。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">三维点云 · 40 类分类 · 集合上的神经网络</div>
+  <h1>PointNet：一袋没有顺序的点，怎么认出是飞机还是椅子</h1>
+  <p class="en">PointNet for 3D Object Classification II [PyTorch]</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">PointNet</span><span class="tag method">共享 MLP（1×1 卷积）</span><span class="tag method">最大池化（对称函数）</span>
+    <span class="tag method">T-Net 对齐</span><span class="tag method">正交正则</span><span class="tag method">网格表面采样</span><span class="tag method">旋转 + 噪声增强</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Balraj Ashwath</b></span>
+    <span>Kaggle 点赞 <b>259</b>（2026-11 抓取）</span>
+    <span>数据集 <b>balraj98/modelnet40-princeton-3d-object-dataset</b></span>
+    <span><a href="https://www.kaggle.com/code/balraj98/pointnet-for-3d-object-classification-ii-pytorch" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">40 类三维 CAD 模型</div><p>普林斯顿大学的 ModelNet40：飞机、椅子、杯子、吉他……每个模型是一个三角网格（OFF 文件）。<span data-cell="5">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这团点是哪一类物体</div><p>从每个网格表面随机撒 1024 个点，只给网络这 1024 个 (x, y, z)，让它说出 40 类中的哪一类。<span data-cell="19">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">每个点各算各的，再取最大值</div><p>同一个小网络处理每一个点（共享 MLP），再对所有点逐维取最大值得到 1024 维的全局特征，最后全连接分类。<span data-cell="29">出处</span></p></div>
+    <div class="card panel"><h3>特别在哪里</h3><div class="big">点的顺序随便换，结果不变</div><p>图片的像素有固定的上下左右，CNN 靠这个滑动卷积；句子有先后，RNN 靠这个逐个读。点云只是一“袋”点，没有顺序。PointNet 用“取最大值”这种不管顺序的操作，专门处理这种集合数据。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>ModelNet40</b>（普林斯顿大学）：40 个类别的三维 CAD 模型，每类分 <code>train</code> 和 <code>test</code> 两个文件夹。作者把 <code>test</code> 当验证集用。<span data-cell="23">出处</span></p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者的设置</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">类别数</div><div class="v">40</div></div>
+        <div class="stat-tile"><div class="k">每个物体采样点数</div><div class="v">1024</div></div>
+        <div class="stat-tile"><div class="k">每个点的特征</div><div class="v">x, y, z</div></div>
+        <div class="stat-tile"><div class="k">批大小（训练 / 验证）</div><div class="v">32 / 64</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">40 类见第 29 格 <code>classes = 40</code>，1024 点见第 19、22 格，批大小见第 26 格 <span data-cell="26">出处</span>。训练集、验证集各有多少个模型在第 25 格的运行输出里，源码不带输出，这里不写。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">一个 OFF 文件里有什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>部分</th><th>含义</th></tr>
+        <tr><td>第一行 <code>OFF</code></td><td>文件格式标记（有的文件把它和下一行连在一起，第 7 格做了兼容）</td></tr>
+        <tr><td>顶点数、面数</td><td>这个模型有多少个顶点、多少个三角面</td></tr>
+        <tr><td>顶点列表</td><td>每行一个顶点的 x、y、z 坐标</td></tr>
+        <tr><td>面列表</td><td>每行一个面：“3 a b c”表示由第 a、b、c 个顶点组成的三角形</td></tr>
+        <tr><td>标签</td><td><b>要预测的答案</b>：文件所在的文件夹名，如 <code>airplane</code></td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">作者示范读的是 <code>airplane/train/airplane_0001.off</code> <span data-cell="8">出处</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="29">
+    <h3>动手试试 A · 打乱点的顺序，特征变不变 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="36">
+    <h3>动手试试 B · 现场训练一个迷你 PointNet <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>用 PointNet 在 ModelNet40 上做三维物体分类，代码借鉴 Nikita Karaev 的实现</td><td><span data-cell="0">第 0 格</span> <span data-cell="2">第 2 格</span></td></tr>
+        <tr><td>如果有上一版保存的权重就先加载，再训练 1 轮（逐版本接着训练）</td><td><span data-cell="32">第 32 格</span> <span data-cell="36">第 36 格</span></td></tr>
+        <tr><td>每轮结束打印验证准确率，最后画归一化和不归一化两张 40×40 混淆矩阵</td><td><span data-cell="35">第 35 格</span> <span data-cell="41">第 41 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">作者没有在文字里写准确率，验证准确率和混淆矩阵都在运行输出里，Kaggle 下载的源码不带输出，这里不列分数。</p>
+      <h3>读代码时发现的问题（原文未改，供讨论）</h3>
+      <ul class="tight">
+        <li><b>随机种子没设上</b>：第 4 格写的是 <code>random.seed = 42</code>，把函数覆盖成了数字，应该是 <code>random.seed(42)</code>；而且后面采样、旋转都依赖 <code>random</code>，结果不可复现。<span data-cell="4">第 4 格</span></li>
+        <li><b>测试循环没把数据搬到 GPU</b>：第 38 格的 <code>inputs</code> 没有 <code>.to(device)</code>。这份 notebook 在 CPU 上跑所以没报错，换到 GPU 上会出错。<span data-cell="38">第 38 格</span></li>
+        <li>验证集和最终测试用的是同一份 <code>test</code> 文件夹，又一直保存最后一轮的模型，严格说没有独立的“考卷”。<span data-cell="23">第 23 格</span></li>
+        <li>验证集也是每次随机采 1024 个点，同一个模型每次评估的点不一样，准确率会有一点波动。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一团三维扫描点，判断是什么物体。</li>
+        <li><b>同类问题：</b>自动驾驶激光雷达识别行人和车辆、机器人抓取、室内扫描分割墙和家具、文物和零件的三维检测。</li>
+        <li><b>和 CNN、RNN 的区别：</b>CNN 要求数据排在规则网格上；把点云塞进三维网格（体素）会很浪费、很粗糙。RNN 要求有先后顺序。PointNet 把输入当成<b>集合</b>：每个点用同一个小网络独立处理（所以叫“共享”），再用最大值这种<b>对称函数</b>汇总，点怎么排列都得到同样的结果。</li>
+        <li><b>T-Net 的作用：</b>先预测一个变换矩阵，把点云“摆正”，减少物体朝向不同带来的干扰。</li>
+        <li><b>局限：</b>最大池化只保留每一维最突出的那个点，点和点之间的局部关系看得不够，后来的 PointNet++、点云 Transformer 在这上面做了改进。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>按三角形面积加权、在面内用重心坐标采点 <span data-cell="12">第 12 格</span></li>
+        <li>减去中心、除以最大半径归一化 <span data-cell="14">第 14 格</span></li>
+        <li>绕 z 轴随机旋转 + 高斯噪声（标准差 0.02） <span data-cell="16">第 16 格</span></li>
+        <li>T-Net(3) 与 T-Net(64)，输出初始化为单位矩阵 <span data-cell="29">第 29 格</span></li>
+        <li>共享 MLP：Conv1d 3→64→128→1024，最大池化，全连接 1024→512→256→40 <span data-cell="29">第 29 格</span></li>
+        <li>损失 = NLL + 0.0001 × 两个变换矩阵偏离正交的程度 <span data-cell="30">第 30 格</span></li>
+        <li>Adam，学习率 0.0008 <span data-cell="33">第 33 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>除了“取最大值”，还有哪些运算不管输入顺序、结果都一样？（求和、平均……）它们和最大值比，各有什么优缺点？</li>
+      <li>如果把 1024 个点按 x 坐标排好序，再交给普通的全连接网络，能不能解决“顺序”问题？会遇到什么麻烦？</li>
+      <li>作者训练时只绕 z 轴（竖直方向）随机旋转。为什么不绕所有方向随机转？</li>
+      <li>最大池化之后，只有少数“关键点”决定了全局特征（实验 B 里亮起的点）。这对抵抗噪声、缺失点有什么好处？</li>
+      <li>激光雷达扫到的点云，远处稀疏、近处密集，还会被遮挡。直接用在 ModelNet40 上训练的模型会遇到什么问题？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Balraj Ashwath，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的点云均为模拟示意。数据集：ModelNet40（Princeton）；PointNet 论文：Qi et al., 2017。
+</footer>
+</main>
+
+<script src="nb/pointnet-3d-classification.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+  /* 简单三维投影 */
+  const proj = (p, a, cx, cy, s) => { const ca = Math.cos(a), sa = Math.sin(a); const x = p[0] * ca - p[1] * sa, y = p[0] * sa + p[1] * ca; return [cx + x * s, cy - p[2] * s + y * s * 0.35, y]; };
+  /* 一个简易“飞机”网格的采样点 */
+  function planePts(seed, n) {
+    const r = K.rng(seed), pts = [];
+    for (let i = 0; i < n; i++) {
+      const u = r();
+      if (u < 0.45) pts.push([-1 + 2 * r(), (r() - 0.5) * 0.18, (r() - 0.5) * 0.18]);           // 机身
+      else if (u < 0.85) pts.push([(r() - 0.5) * 0.4, -1 + 2 * r(), (r() - 0.5) * 0.04]);      // 机翼
+      else pts.push([-0.85 + r() * 0.15, (r() - 0.5) * 0.5, r() * 0.35]);                        // 尾翼
+    }
+    return pts;
+  }
+  /* 二维形状轮廓采样：0 圆 1 线段 2 三角形 3 十字 */
+  const SHAPES = ["圆", "线段", "三角形", "十字"];
+  function shape2d(kind, n, r, rot, noise) {
+    const pts = [];
+    for (let i = 0; i < n; i++) {
+      let p, t = r();
+      if (kind === 0) { const a = t * Math.PI * 2; p = [Math.cos(a), Math.sin(a)]; }
+      else if (kind === 1) { p = [t * 2 - 1, (r() - 0.5) * 0.12]; }
+      else if (kind === 2) { const V = [[0, 1.1], [0.95, -0.55], [-0.95, -0.55]], e = Math.floor(t * 3), s = r(), A = V[e], B = V[(e + 1) % 3]; p = [A[0] + (B[0] - A[0]) * s, A[1] + (B[1] - A[1]) * s]; }
+      else { const s = r() * 2 - 1; p = t < 0.5 ? [s, (r() - 0.5) * 0.25] : [(r() - 0.5) * 0.25, s]; }
+      const c = Math.cos(rot), sn = Math.sin(rot);
+      pts.push([p[0] * c - p[1] * sn + K.randn(r) * noise, p[0] * sn + p[1] * c + K.randn(r) * noise]);
+    }
+    // 第 14 格的归一化：减中心，除以最大半径
+    const m = [0, 1].map((k) => pts.reduce((s, q) => s + q[k], 0) / n);
+    pts.forEach((q) => { q[0] -= m[0]; q[1] -= m[1]; });
+    const R = Math.max(...pts.map((q) => Math.hypot(q[0], q[1])));
+    pts.forEach((q) => { q[0] /= R; q[1] /= R; });
+    return pts;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "PointNet：直接读一袋三维点", kicker: "第 0–5 格 · 介绍与导入",
+      html: `<p>作者用斯坦福 2017 年提出的 <b>PointNet</b> 在 ModelNet40 上做三维物体分类。论文的应用图展示了它能做物体分类、零件分割、场景分割。</p><p>点云就是一堆三维坐标 (x, y, z)。动画里同一架“飞机”的点，换一种顺序存储，仍然是同一架飞机：这正是 PointNet 要解决的问题。</p>`,
+      cells: [0, 5], highlight: ["PointNet", "classes = {folder: i for i, folder in enumerate(folders)};"],
+      draw(svg, ctx) {
+        const P = planePts(3, 220);
+        const dots = P.map((p) => K.svg(svg, "circle", { cx: 0, cy: 0, r: 2.6, fill: "var(--c1)" }));
+        const lab = K.svg(svg, "text", { x: 20, y: 30, "font-size": 13 }, "1024 个 (x, y, z) 点，没有固定顺序（示意 220 个）");
+        ctx.tween(4000, (t) => {
+          const a = 0.6 + t * Math.PI * 1.2;
+          P.forEach((p, i) => { const q = proj(p, a, 260, 190, 150); K.set(dots[i], { cx: q[0], cy: q[1], opacity: 0.45 + 0.5 * (q[2] + 1) / 2 }); });
+        });
+        const rows = [];
+        for (let i = 0; i < 7; i++) rows.push(K.svg(svg, "text", { x: 520, y: 80 + i * 22, "font-size": 11, "font-family": "var(--mono)" }, ""));
+        K.svg(svg, "text", { x: 520, y: 60, "font-size": 12, "font-weight": 700 }, "存储顺序（会被打乱）");
+        (async () => {
+          for (let round = 0; round < 4; round++) {
+            const r = K.rng(round + 1);
+            rows.forEach((row, i) => { const p = P[Math.floor(r() * P.length)]; row.textContent = `${p[0].toFixed(2)}, ${p[1].toFixed(2)}, ${p[2].toFixed(2)}`; });
+            if (!(await ctx.wait(900))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "读 OFF 网格，转着看", kicker: "第 6–11 格 · 读文件与可视化",
+      html: `<p><code>read_off</code> 读 OFF 文件：先读顶点数和面数，再读每个顶点的坐标、每个三角面由哪三个顶点组成。作者用 plotly 画了三种样子：半透明的三角网格、只画顶点、以及可以转动的散点图。</p><p>注意<b>只用顶点</b>的话，点分布很不均匀：平整的大面上可能没几个顶点，弯曲的细节处顶点很密。</p>`,
+      cells: [7, 8], highlight: ["n_verts, n_faces, __ = tuple([int(s) for s in file.readline().strip().split(' ')])", "airplane_0001.off"],
+      draw(svg, ctx) {
+        // 网格示意：一个四棱锥 + 顶点
+        const V = [[-1, -1, -0.6], [1, -1, -0.6], [1, 1, -0.6], [-1, 1, -0.6], [0, 0, 1]], F = [[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4], [0, 1, 2], [0, 2, 3]];
+        const faces = F.map(() => K.svg(svg, "path", { fill: "color-mix(in srgb, var(--c3) 22%, transparent)", stroke: "var(--c3)" }));
+        const verts = V.map(() => K.svg(svg, "circle", { r: 6, fill: "var(--c2)" }));
+        K.svg(svg, "text", { x: 470, y: 90, "font-size": 13 }, "OFF 文件：");
+        K.svg(svg, "text", { x: 470, y: 116, "font-size": 12, "font-family": "var(--mono)" }, "OFF");
+        K.svg(svg, "text", { x: 470, y: 136, "font-size": 12, "font-family": "var(--mono)" }, "5 6 0");
+        K.svg(svg, "text", { x: 470, y: 156, "font-size": 12, "font-family": "var(--mono)", fill: "var(--c2)" }, "-1 -1 -0.6  …（5 个顶点）");
+        K.svg(svg, "text", { x: 470, y: 176, "font-size": 12, "font-family": "var(--mono)", fill: "var(--c3)" }, "3 0 1 4  …（6 个面）");
+        K.svg(svg, "text", { x: 30, y: 325, "font-size": 11, class: "muted" }, "简化示意：真实飞机模型有成千上万个面");
+        ctx.tween(4000, (t) => {
+          const a = 0.4 + t * Math.PI;
+          const Q = V.map((p) => proj(p, a, 230, 190, 110));
+          F.forEach((f, i) => faces[i].setAttribute("d", "M" + f.map((k) => Q[k][0] + "," + Q[k][1]).join("L") + "Z"));
+          Q.forEach((q, i) => K.set(verts[i], { cx: q[0], cy: q[1] }));
+        });
+      },
+    },
+    {
+      title: "按面积在网格表面撒点", kicker: "第 12–13 格 · PointSampler",
+      html: `<p>为了让点均匀分布在物体表面，<code>PointSampler</code> 分两步：</p><ol class="tight"><li>用海伦公式算每个三角形的面积，<b>按面积加权</b>随机挑三角形，大面被挑中的次数多；</li><li>在挑中的三角形里用<b>重心坐标</b>随机取一个点：两个 0–1 的随机数排序后得到三个权重 s、t−s、1−t，对三个顶点加权平均。</li></ol><p>示范时撒了 3000 个点，训练时每个物体撒 1024 个。</p>`,
+      cells: [12, 13], highlight: ["weights=areas", "s, t = sorted([random.random(), random.random()])"],
+      draw(svg, ctx) {
+        const T = [{ p: [[40, 300], [340, 300], [190, 60]], c: "var(--c1)" }, { p: [[380, 300], [470, 300], [425, 230]], c: "var(--c2)" }, { p: [[500, 300], [700, 300], [600, 120]], c: "var(--c3)" }];
+        const area = (p) => Math.abs((p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1])) / 2;
+        const A = T.map((t) => area(t.p)), S = A.reduce((a, b) => a + b, 0);
+        T.forEach((t, i) => { K.svg(svg, "path", { d: "M" + t.p.map((q) => q.join(",")).join("L") + "Z", fill: `color-mix(in srgb, ${t.c} 12%, transparent)`, stroke: t.c }); K.svg(svg, "text", { x: (t.p[0][0] + t.p[1][0]) / 2, y: 322, "text-anchor": "middle", "font-size": 12 }, "面积占 " + Math.round(A[i] / S * 100) + "%"); });
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13 }, "面积越大，分到的点越多；点落在三角形内部的随机位置");
+        const r = K.rng(5);
+        (async () => {
+          for (let k = 0; k < 150; k++) {
+            let u = r() * S, i = 0; while (u > A[i]) { u -= A[i]; i++; }
+            let [s, t] = [r(), r()].sort((a, b) => a - b); const p = T[i].p;
+            const x = s * p[0][0] + (t - s) * p[1][0] + (1 - t) * p[2][0], y = s * p[0][1] + (t - s) * p[1][1] + (1 - t) * p[2][1];
+            K.svg(svg, "circle", { cx: x, cy: y, r: 2.5, fill: T[i].c });
+            if (k % 6 === 5 && !(await ctx.wait(40))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "归一化、随机旋转、加噪声", kicker: "第 14–19 格 · 预处理与增强",
+      html: `<p>三个变换：</p><ul class="tight"><li><b>Normalize</b>：减去所有点的平均位置（移到原点），再除以离原点最远的距离，物体都缩进半径 1 的球里，大小不再影响判断；</li><li><b>RandRotation_z</b>：绕竖直的 z 轴随机转一个角度，物体朝哪个方向都应该认得出；</li><li><b>RandomNoise</b>：每个坐标加标准差 0.02 的随机抖动，模拟扫描误差。</li></ul><p>验证集只做采样和归一化，不做旋转和噪声。</p>`,
+      cells: [14, 16, 17], highlight: ["norm_pointcloud /= np.max(np.linalg.norm(norm_pointcloud, axis=1))", "theta = random.random() * 2. * math.pi", "np.random.normal(0, 0.02, (pointcloud.shape))"],
+      draw(svg, ctx) {
+        const P = planePts(8, 160).map((p) => [p[0] * 1.6 + 0.8, p[1] * 1.6 + 0.5, p[2] * 1.6]);
+        const dots = P.map(() => K.svg(svg, "circle", { r: 2.4, fill: "var(--c1)" }));
+        const ring = K.svg(svg, "circle", { cx: 360, cy: 175, r: 120, fill: "none", stroke: "var(--ink-3)", "stroke-dasharray": "4 4", opacity: 0 });
+        const lab = K.svg(svg, "text", { x: 20, y: 30, "font-size": 14, "font-weight": 700 }, "原始：不在中心、尺寸各异");
+        const r = K.rng(2), noise = P.map(() => [K.randn(r) * 0.02, K.randn(r) * 0.02, K.randn(r) * 0.02]);
+        const draw = (fn) => P.forEach((p, i) => { const q = proj(fn(p, i), 0.5, 360, 175, 120); K.set(dots[i], { cx: q[0], cy: q[1] }); });
+        draw((p) => [p[0] / 2.4 + 0.5, p[1] / 2.4 + 0.3, p[2] / 2.4]);
+        (async () => {
+          if (!(await ctx.wait(700))) return;
+          lab.textContent = "① 归一化：移到中心，缩进单位球";
+          if (!(await ctx.tween(1000, (t) => { ring.style.opacity = t; draw((p) => [K.lerp(p[0] / 2.4 + 0.5, (p[0] - 0.8) / 1.6, t), K.lerp(p[1] / 2.4 + 0.3, (p[1] - 0.5) / 1.6, t), K.lerp(p[2] / 2.4, p[2] / 1.6, t)]); }))) return;
+          lab.textContent = "② 绕 z 轴随机旋转";
+          if (!(await ctx.tween(1200, (t) => draw((p) => { const a = t * 1.9, x = (p[0] - 0.8) / 1.6, y = (p[1] - 0.5) / 1.6; return [x * Math.cos(a) - y * Math.sin(a), x * Math.sin(a) + y * Math.cos(a), p[2] / 1.6]; })))) return;
+          lab.textContent = "③ 每个坐标加一点噪声（放大画）";
+          await ctx.tween(800, (t) => draw((p, i) => { const a = 1.9, x = (p[0] - 0.8) / 1.6, y = (p[1] - 0.5) / 1.6; return [x * Math.cos(a) - y * Math.sin(a) + noise[i][0] * 3 * t, x * Math.sin(a) + y * Math.cos(a) + noise[i][1] * 3 * t, p[2] / 1.6 + noise[i][2] * 3 * t]; }));
+        })();
+      },
+    },
+    {
+      title: "数据集与加载器", kicker: "第 20–26 格 · Dataset / DataLoader",
+      html: `<p><code>PointCloudData</code> 遍历 40 个类别文件夹，记录每个 OFF 文件的路径和类别；取数据时读网格、做变换，返回 1024×3 的点云和类别编号。</p><p>训练集用带旋转和噪声的变换；验证集读 <code>test</code> 文件夹，用不带增强的默认变换。训练批大小 32 并打乱，验证批大小 64。</p>`,
+      cells: [21, 22, 23, 26], highlight: ["self.transforms = transform if not valid else default_transforms()", "valid_ds = PointCloudData(path, valid=True, folder='test', transform=train_transforms)", "batch_size=32, shuffle=True"],
+      draw(svg, ctx) {
+        const cls = ["airplane", "bathtub", "bed", "bench", "…", "xbox"];
+        cls.forEach((c, i) => { K.node(svg, 20, 30 + i * 46, 110, 36, c, { fs: 11 }); });
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 11, class: "muted" }, "40 个类别文件夹");
+        const steps2 = [["读 OFF", 180], ["采 1024 点", 320], ["归一化\n(+旋转+噪声)", 460], ["1024×3 张量\n+ 类别编号", 600]];
+        const ns = steps2.map((s) => K.node(svg, s[1] - 10, 140, 120, 60, s[0], { fs: 12 }));
+        const ar = [K.arrow(svg, 132, 170, 168, 170), ...[0, 1, 2].map((i) => K.arrow(svg, steps2[i][1] + 110, 170, steps2[i + 1][1] - 12, 170))];
+        hide([...ns, ...ar]);
+        (async () => { for (let i = 0; i < 4; i++) { if (!(await ctx.tween(300, (t) => { ar[i].style.opacity = t; ns[i].style.opacity = t; }))) return; } })();
+      },
+    },
+    {
+      title: "共享 MLP + 最大池化：顺序无关的秘诀", kicker: "第 27 格 · 结构总览",
+      html: `<p>作者贴了论文的结构图。核心想法只有两条：</p><ul class="tight"><li><b>共享 MLP</b>：每个点的 (x, y, z) 单独送进<b>同一个</b>小网络，变成 64、128、最后 1024 维特征。代码里用卷积核大小为 1 的 <code>Conv1d</code> 实现，相当于对每个点做同样的全连接；</li><li><b>最大池化</b>：1024 个点、每个 1024 维特征，在每一维上取所有点里的<b>最大值</b>，得到一个 1024 维的全局特征。</li></ul><p>取最大值不管顺序，所以点怎么排列，全局特征都一样。代码见第 29 格的 <code>Transform</code> 类 <span data-cell="29">第 29 格</span>。</p>`,
+      cells: [27], highlight: [],
+      draw(svg, ctx) {
+        const n = 6, pts = [];
+        for (let i = 0; i < n; i++) pts.push(K.node(svg, 20, 30 + i * 46, 80, 34, "点 " + (i + 1), { fs: 11 }));
+        const mlps = []; for (let i = 0; i < n; i++) mlps.push(K.node(svg, 140, 30 + i * 46, 90, 34, "同一个 MLP", { fs: 10, fill: "var(--accent-soft)", stroke: "var(--accent)" }));
+        const r = K.rng(4), F = [];
+        for (let i = 0; i < n; i++) { const row = []; for (let d = 0; d < 8; d++) { const v = r(); row.push(v); K.svg(svg, "rect", { x: 270 + d * 22, y: 33 + i * 46, width: 20, height: 28, fill: K.heat(v) }); } F.push(row); }
+        K.svg(svg, "text", { x: 270, y: 22, "font-size": 11 }, "每个点的特征（8 维示意）");
+        const mx = Array.from({ length: 8 }, (_, d) => Math.max(...F.map((row) => row[d])));
+        const am = Array.from({ length: 8 }, (_, d) => F.findIndex((row) => row[d] === mx[d]));
+        const rings = am.map((i, d) => K.svg(svg, "rect", { x: 269 + d * 22, y: 32 + i * 46, width: 22, height: 30, fill: "none", stroke: "var(--c2)", "stroke-width": 2.5 }));
+        const out = mx.map((v, d) => K.svg(svg, "rect", { x: 520 + d * 22, y: 150, width: 20, height: 34, fill: K.heat(v) }));
+        K.svg(svg, "text", { x: 520, y: 140, "font-size": 12, "font-weight": 700, fill: "var(--c2)" }, "每一维取最大值");
+        K.svg(svg, "text", { x: 520, y: 210, "font-size": 11, class: "muted" }, "= 全局特征 → 分类");
+        K.arrow(svg, 450, 167, 512, 167);
+        hide([...mlps, ...rings, ...out]);
+        (async () => {
+          if (!(await ctx.tween(600, (t) => mlps.forEach((m) => (m.style.opacity = t))))) return;
+          for (let d = 0; d < 8; d++) if (!(await ctx.tween(180, (t) => { rings[d].style.opacity = t; out[d].style.opacity = t; }))) return;
+        })();
+      },
+    },
+    {
+      title: "T-Net：先把点云“摆正”", kicker: "第 28–29 格 · 模型定义",
+      html: `<p>第 29 格定义了三个类：</p><ul class="tight"><li><b>Tnet(k)</b>：本身就是一个迷你 PointNet（共享 MLP + 最大池化 + 全连接），输出一个 k×k 矩阵，并<b>加上单位矩阵</b>，让它一开始“什么都不变”；</li><li><b>Transform</b>：先用 3×3 的 T-Net 变换输入坐标，经过一层共享 MLP 后，再用 64×64 的 T-Net 变换特征，接着共享 MLP 到 1024 维，最大池化；</li><li><b>PointNet</b>：全局特征 → 512 → 256（带 Dropout 0.3）→ 40 类的 log-softmax。</li></ul>`,
+      cells: [29], highlight: ["init = torch.eye(self.k, requires_grad=True).repeat(bs,1,1)", "matrix = self.fc3(xb).view(-1,self.k,self.k) + init", "xb = nn.MaxPool1d(xb.size(-1))(xb)", "self.fc3 = nn.Linear(256, classes)"],
+      draw(svg, ctx) {
+        const P = planePts(12, 120);
+        const dots = P.map(() => K.svg(svg, "circle", { r: 2.4, fill: "var(--c1)" }));
+        const tilt = 1.1;
+        const draw = (a) => P.forEach((p, i) => { const q = proj(p, a, 200, 180, 110); K.set(dots[i], { cx: q[0], cy: q[1] }); });
+        draw(tilt);
+        K.node(svg, 380, 140, 130, 60, "T-Net\n预测 3×3 矩阵", { fs: 12, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        K.svg(svg, "text", { x: 380, y: 230, "font-size": 12 }, "初始化 = 单位矩阵 I");
+        K.svg(svg, "text", { x: 380, y: 252, "font-size": 12, class: "muted" }, "（一开始不改变点云）");
+        const lab = K.svg(svg, "text", { x: 30, y: 40, "font-size": 13, "font-weight": 700 }, "输入：歪着的点云");
+        ctx.wait(800).then((ok) => { if (ok) lab.textContent = "乘上 T-Net 的矩阵 → 摆到“标准朝向”"; return ok && ctx.tween(1500, (t) => draw(K.lerp(tilt, 0.15, t))); });
+        K.svg(svg, "text", { x: 30, y: 325, "font-size": 11, class: "muted" }, "示意：真实的 T-Net 学到的不一定是严格的旋转");
+      },
+    },
+    {
+      title: "损失：分类 + 让变换矩阵接近正交", kicker: "第 30–33 格 · 损失与优化器",
+      html: `<p><code>pointnetloss</code> = 分类的负对数似然（NLL）+ 0.0001 ×（‖I − A·Aᵀ‖ 对 3×3 和 64×64 两个矩阵之和）÷ 批大小。</p><p>第二项是<b>正则</b>：希望 T-Net 输出的矩阵接近<b>正交矩阵</b>（只旋转、翻转，不拉伸压扁），这样变换不会把信息“挤掉”。64×64 的特征变换参数很多，没有这个约束容易训练不稳。</p><p>然后建模型，若有上一版保存的权重就加载，优化器 Adam，学习率 0.0008。</p>`,
+      cells: [30, 32, 33], highlight: ["diff3x3 = id3x3-torch.bmm(m3x3,m3x3.transpose(1,2))", "alpha * (torch.norm(diff3x3)+torch.norm(diff64x64)) / float(bs)", "lr=0.0008"],
+      draw(svg, ctx) {
+        const sq = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+        const cx1 = 180, cx2 = 500, cy = 170, S = 70;
+        const shape = (cx, M) => "M" + sq.map((p) => [cx + (M[0][0] * p[0] + M[0][1] * p[1]) * S, cy - (M[1][0] * p[0] + M[1][1] * p[1]) * S].join(",")).join("L") + "Z";
+        K.svg(svg, "text", { x: cx1, y: 40, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--good)" }, "正交：只转动");
+        K.svg(svg, "text", { x: cx2, y: 40, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--bad)" }, "不正交：被拉伸压扁");
+        [cx1, cx2].forEach((c) => K.svg(svg, "path", { d: shape(c, [[1, 0], [0, 1]]), fill: "none", stroke: "var(--ink-3)", "stroke-dasharray": "4 4" }));
+        const a = K.svg(svg, "path", { fill: "color-mix(in srgb, var(--good) 25%, transparent)", stroke: "var(--good)", "stroke-width": 2 });
+        const b = K.svg(svg, "path", { fill: "color-mix(in srgb, var(--bad) 25%, transparent)", stroke: "var(--bad)", "stroke-width": 2 });
+        const tb = K.svg(svg, "text", { x: cx2, y: 300, "text-anchor": "middle", "font-size": 12 }, "");
+        K.svg(svg, "text", { x: cx1, y: 300, "text-anchor": "middle", "font-size": 12 }, "惩罚项 ‖I − AAᵀ‖ = 0");
+        ctx.tween(2200, (t) => {
+          const th = t * 0.8; a.setAttribute("d", shape(cx1, [[Math.cos(th), -Math.sin(th)], [Math.sin(th), Math.cos(th)]]));
+          const M = [[1 + 0.6 * t, 0.5 * t], [0, 1 - 0.5 * t]]; b.setAttribute("d", shape(cx2, M));
+          const AAt = [[M[0][0] ** 2 + M[0][1] ** 2, M[0][0] * M[1][0] + M[0][1] * M[1][1]], [0, M[1][0] ** 2 + M[1][1] ** 2]]; AAt[1][0] = AAt[0][1];
+          const d = Math.sqrt((1 - AAt[0][0]) ** 2 + 2 * AAt[0][1] ** 2 + (1 - AAt[1][1]) ** 2);
+          tb.textContent = "惩罚项 ‖I − AAᵀ‖ = " + d.toFixed(2);
+        });
+      },
+    },
+    {
+      title: "训练 1 轮，验证一次，保存权重", kicker: "第 34–36 格 · 训练",
+      html: `<p><code>train</code>：每批把点云转置成 (批, 3, 1024)，前向得到预测和两个变换矩阵，算损失、反向传播、更新；每 5 批打印一次平均损失。一轮结束在验证集上算准确率，然后保存 <code>save.pth</code>。</p><p>这一版只调用了 <code>epochs=1</code>，配合第 32 格“先加载上一版的权重”，相当于每发布一个新版本，就在之前的基础上多训练一轮。</p>`,
+      cells: [35, 36], highlight: ["outputs, m3x3, m64x64 = pointnet(inputs.transpose(1,2))", "torch.save(pointnet.state_dict(), \"save.pth\")", "train(pointnet, train_loader, valid_loader)"],
+      draw(svg, ctx) {
+        const vs = ["版本 1", "版本 2", "版本 3", "版本 4"];
+        const ns = vs.map((v, i) => K.node(svg, 40 + i * 170, 130, 130, 70, v + "\n训练 1 轮", { fs: 12 }));
+        const ar = vs.slice(1).map((v, i) => K.arrow(svg, 170 + i * 170, 165, 208 + i * 170, 165, { color: "var(--accent)" }));
+        const tags = vs.slice(1).map((v, i) => K.svg(svg, "text", { x: 190 + i * 170, y: 120, "text-anchor": "middle", "font-size": 11, fill: "var(--accent)" }, "save.pth"));
+        K.svg(svg, "text", { x: 40, y: 260, "font-size": 12 }, "每个版本先加载上一版的权重，再训练 1 轮（接力训练）");
+        hide([...ns, ...ar, ...tags]);
+        (async () => { for (let i = 0; i < 4; i++) { if (i) if (!(await ctx.tween(250, (t) => { ar[i - 1].style.opacity = t; tags[i - 1].style.opacity = t; }))) return; if (!(await ctx.tween(300, (t) => (ns[i].style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      title: "测试：40×40 的混淆矩阵", kicker: "第 37–42 格 · 评估",
+      html: `<p>在验证集上逐批预测，收集所有预测和真实类别，算混淆矩阵：第 i 行第 j 列 = 真实是第 i 类、被判成第 j 类的数量。作者画了两版：归一化（每行除以该类总数，看各类的召回率）和不归一化（看实际数量）。</p><p>对角线越亮越好；对角线外的亮点说明哪两类容易混，比如桌子和书桌、花盆和花瓶这种形状相近的类别。</p>`,
+      cells: [38, 39, 41], highlight: ["cm = confusion_matrix(all_labels, all_preds)", "normalize=True"],
+      draw(svg, ctx) {
+        const n = 12, s = 22, x0 = 120, y0 = 30, r = K.rng(7), cells = [];
+        for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) { const v = i === j ? 0.6 + r() * 0.4 : (r() < 0.08 ? r() * 0.35 : r() * 0.04); cells.push({ v, e: K.svg(svg, "rect", { x: x0 + j * s, y: y0 + i * s, width: s - 1, height: s - 1, fill: K.heat(0) }) }); }
+        K.svg(svg, "text", { x: x0, y: y0 + n * s + 18, "font-size": 11 }, "预测类别 →");
+        K.svg(svg, "text", { x: x0 - 10, y: y0 + 60, "text-anchor": "end", "font-size": 11 }, "真实类别 ↓");
+        K.svg(svg, "text", { x: 440, y: 80, "font-size": 13 }, "对角线 = 判对");
+        K.svg(svg, "text", { x: 440, y: 106, "font-size": 13 }, "对角线外的亮格 = 容易混淆的两类");
+        K.svg(svg, "text", { x: 440, y: 140, "font-size": 11, class: "muted" }, "示意：画 12 类，作者是 40 类；数值随机");
+        ctx.tween(1500, (t) => cells.forEach((c) => K.set(c.e, { fill: K.heat(c.v * t) })));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ===== 实验 A：顺序无关 ===== */
+  const wr = K.rng(99), H = 8;
+  const W1 = Array.from({ length: H }, () => [K.randn(wr), K.randn(wr)]), B1 = Array.from({ length: H }, () => K.randn(wr) * 0.3);
+  const W2 = Array.from({ length: H }, () => Array.from({ length: H }, () => K.randn(wr) * 0.5));
+  const NPT = 20, Wf = Array.from({ length: H }, () => Array.from({ length: NPT * 2 }, () => K.randn(wr) * 0.3));
+  const shared = (p) => { const h = W1.map((w, k) => Math.max(0, w[0] * p[0] + w[1] * p[1] + B1[k])); return W2.map((w) => Math.max(0, w.reduce((s, x, k) => s + x * h[k], 0))); };
+  let order = null, lastKind = -1;
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "kind", label: "形状", value: "2", options: [["0", "圆"], ["1", "线段"], ["2", "三角形"], ["3", "十字"]] },
+      { id: "shuf", label: "打乱点的存储顺序", button: true },
+    ],
+    note: "同一组 20 个点。左：PointNet 式“每点过同一个小网络（2→8→8），再逐维取最大值”；右：把 20 个点的坐标按存储顺序排成 40 个数，交给一个普通全连接层。点“打乱”后，几何形状没变，看两边的 8 维特征谁变了。权重固定、随机初始化。",
+    render(svg, v) {
+      const kind = +v.kind, P = shape2d(kind, NPT, K.rng(5 + kind), 0.2, 0.02);
+      if (kind !== lastKind || !order) { order = P.map((_, i) => i); lastKind = kind; }
+      if (v.shuf) { const r = K.rng(v.shuf * 31 + kind); for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; } }
+      const Q = order.map((i) => P[i]);
+      // 画点和序号
+      Q.forEach((p, k) => { const x = 110 + p[0] * 80, y = 120 - p[1] * 80; K.svg(svg, "circle", { cx: x, cy: y, r: 9, fill: "var(--accent-soft)", stroke: "var(--accent)" }); K.svg(svg, "text", { x, y: y + 3.5, "text-anchor": "middle", "font-size": 9 }, k + 1); });
+      K.svg(svg, "text", { x: 30, y: 230, "font-size": 11, class: "muted" }, "圈里的数字 = 存储顺序");
+      const F1 = Array(H).fill(-Infinity); Q.forEach((p) => shared(p).forEach((x, k) => (F1[k] = Math.max(F1[k], x))));
+      const flat = Q.flatMap((p) => p), F2 = Wf.map((w) => w.reduce((s, x, k) => s + x * flat[k], 0));
+      const base1 = Array(H).fill(-Infinity); P.forEach((p) => shared(p).forEach((x, k) => (base1[k] = Math.max(base1[k], x))));
+      const fl0 = P.flatMap((p) => p), base2 = Wf.map((w) => w.reduce((s, x, k) => s + x * fl0[k], 0));
+      const bars = (x0, F, B, title, color) => {
+        K.svg(svg, "text", { x: x0, y: 30, "font-size": 13, "font-weight": 700, fill: color }, title);
+        const mx = Math.max(3, ...F.map(Math.abs), ...B.map(Math.abs));
+        F.forEach((f, k) => {
+          const y = 48 + k * 30;
+          K.svg(svg, "rect", { x: x0, y, width: Math.abs(B[k]) / mx * 170, height: 10, fill: "var(--line)" });
+          K.svg(svg, "rect", { x: x0, y: y + 11, width: Math.abs(f) / mx * 170, height: 10, fill: color });
+        });
+        K.svg(svg, "text", { x: x0, y: 300, "font-size": 11, class: "muted" }, "灰 = 原始顺序时的特征，彩色 = 现在");
+      };
+      bars(250, F1, base1, "共享 MLP + 最大池化", "var(--good)");
+      bars(450, F2, base2, "按顺序拼接 + 全连接", "var(--bad)");
+      const d1 = Math.max(...F1.map((x, k) => Math.abs(x - base1[k]))), d2 = Math.max(...F2.map((x, k) => Math.abs(x - base2[k])));
+      return { readout: [
+        { k: "PointNet 特征最大变化", v: d1.toFixed(4), color: d1 < 1e-9 ? "var(--good)" : "var(--bad)" },
+        { k: "拼接法特征最大变化", v: d2.toFixed(3), color: d2 > 1e-9 ? "var(--bad)" : "var(--good)" },
+        { k: "已打乱次数", v: String(v.shuf) },
+      ] };
+    },
+  });
+
+  /* ===== 实验 B：迷你 PointNet 训练 ===== */
+  const N = 32, H1 = 12, H2 = 24, C = 4;
+  function makeSet(seed, n, rot) {
+    const r = K.rng(seed), X = [], y = [];
+    for (let i = 0; i < n; i++) { const c = i % C; X.push(shape2d(c, N, r, rot ? r() * Math.PI * 2 : 0.2, 0.04)); y.push(c); }
+    return { X, y };
+  }
+  function initNet(seed) {
+    const r = K.rng(seed), m = (a, b, s) => Array.from({ length: a }, () => Array.from({ length: b }, () => K.randn(r) * s));
+    return { W1: m(H1, 2, 0.9), b1: Array(H1).fill(0.1), W2: m(H2, H1, 0.35), b2: Array(H2).fill(0.05), Wc: m(C, H2, 0.3), bc: Array(C).fill(0) };
+  }
+  function forward(net, pts) {
+    const h1 = [], h2 = [];
+    pts.forEach((p) => { const a = net.W1.map((w, k) => Math.max(0, w[0] * p[0] + w[1] * p[1] + net.b1[k])); h1.push(a); h2.push(net.W2.map((w, k) => Math.max(0, w.reduce((s, x, j) => s + x * a[j], 0) + net.b2[k]))); });
+    const g = Array(H2).fill(-Infinity), arg = Array(H2).fill(0);
+    h2.forEach((h, i) => h.forEach((x, k) => { if (x > g[k]) { g[k] = x; arg[k] = i; } }));
+    const z = net.Wc.map((w, c) => w.reduce((s, x, k) => s + x * g[k], 0) + net.bc[c]);
+    const mz = Math.max(...z), e = z.map((x) => Math.exp(x - mz)), Z = e.reduce((a, b) => a + b, 0);
+    return { h1, h2, g, arg, p: e.map((x) => x / Z) };
+  }
+  function trainNet(net, data, epochs, lr, seed) {
+    const r = K.rng(seed), keys = ["W1", "b1", "W2", "b2", "Wc", "bc"], mom = {}, vel = {};
+    const zero = (a) => (Array.isArray(a) ? a.map(zero) : 0);
+    keys.forEach((k) => { mom[k] = zero(net[k]); vel[k] = zero(net[k]); });
+    let step = 0; const hist = [];
+    const idx = data.X.map((_, i) => i);
+    for (let ep = 0; ep < epochs; ep++) {
+      for (let i = idx.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [idx[i], idx[j]] = [idx[j], idx[i]]; }
+      let L = 0;
+      for (let b0 = 0; b0 < idx.length; b0 += 16) {
+        const G = {}; keys.forEach((k) => (G[k] = zero(net[k])));
+        const bs = Math.min(16, idx.length - b0);
+        for (let t = b0; t < b0 + bs; t++) {
+          const pts = data.X[idx[t]], yv = data.y[idx[t]], f = forward(net, pts);
+          L -= Math.log(f.p[yv] + 1e-9);
+          const dz = f.p.map((p, c) => (p - (c === yv ? 1 : 0)) / bs);
+          const dg = Array(H2).fill(0);
+          dz.forEach((d, c) => { G.bc[c] += d; for (let k = 0; k < H2; k++) { G.Wc[c][k] += d * f.g[k]; dg[k] += d * net.Wc[c][k]; } });
+          // 梯度只流向每一维取到最大值的那个点
+          for (let k = 0; k < H2; k++) {
+            const i = f.arg[k]; if (f.h2[i][k] <= 0 || dg[k] === 0) continue;
+            const d = dg[k]; G.b2[k] += d;
+            const a = f.h1[i];
+            for (let j = 0; j < H1; j++) { G.W2[k][j] += d * a[j]; if (a[j] > 0) { const d1 = d * net.W2[k][j]; G.b1[j] += d1; G.W1[j][0] += d1 * pts[i][0]; G.W1[j][1] += d1 * pts[i][1]; } }
+          }
+        }
+        step++;
+        const upd = (P, Gk, Mk, Vk) => { for (let a = 0; a < P.length; a++) { if (Array.isArray(P[a])) upd(P[a], Gk[a], Mk[a], Vk[a]); else { Mk[a] = 0.9 * Mk[a] + 0.1 * Gk[a]; Vk[a] = 0.999 * Vk[a] + 0.001 * Gk[a] * Gk[a]; const mh = Mk[a] / (1 - Math.pow(0.9, step)), vh = Vk[a] / (1 - Math.pow(0.999, step)); P[a] -= lr * mh / (Math.sqrt(vh) + 1e-8); } } };
+        keys.forEach((k) => upd(net[k], G[k], mom[k], vel[k]));
+      }
+      hist.push(L / idx.length);
+    }
+    return hist;
+  }
+  const acc = (net, d) => d.X.reduce((s, pts, i) => { const p = forward(net, pts).p; return s + (p.indexOf(Math.max(...p)) === d.y[i] ? 1 : 0); }, 0) / d.X.length;
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "ep", label: "训练轮数", min: 0, max: 50, step: 2, value: 30 },
+      { id: "aug", label: "训练时随机旋转（第 16 格的增强）", value: "1", options: [["1", "旋转"], ["0", "不旋转（都朝同一个方向）"]] },
+      { id: "test", label: "测试点云", value: "1", options: [["1", "随机朝向"], ["0", "和训练默认朝向相同"]] },
+      { id: "seed", label: "换一组数据和初始值", button: true },
+    ],
+    note: "4 类二维“点云”（圆、线段、三角形、十字的轮廓上各采 32 个点，加噪声并按第 14 格归一化）。网络：共享 MLP 2→12→24（ReLU），逐维最大池化，再接 4 类 softmax；Adam 学习率 0.02，训练集 160 个、测试集 80 个，全部在浏览器里现场计算。右图橙色大点是“关键点”：在某一维上取到最大值、真正决定全局特征的点。",
+    render(svg, v) {
+      const sd = 3 + v.seed * 17, tr = makeSet(sd, 160, v.aug === "1"), te = makeSet(sd + 500, 80, v.test === "1");
+      const net = initNet(sd + 1), hist = trainNet(net, tr, v.ep, 0.02, sd + 2);
+      const ax = K.axes(svg, { x: 50, y: 20, w: 250, h: 200 }, [0, Math.max(1, v.ep)], [0, 1.6], { xlabel: "轮数", ylabel: "训练损失", yticks: 4 });
+      if (hist.length) { let d = ""; hist.forEach((l, k) => (d += (k ? "L" : "M") + ax.sx(k + 1) + "," + ax.sy(Math.min(1.6, l)))); K.svg(svg, "path", { d, fill: "none", stroke: "var(--accent)", "stroke-width": 2 }); }
+      // 展示 4 个测试样本
+      for (let c = 0; c < 4; c++) {
+        const pts = te.X[c], f = forward(net, pts), pred = f.p.indexOf(Math.max(...f.p)), crit = new Set(f.arg);
+        const cx = 380 + (c % 2) * 135, cy = 75 + Math.floor(c / 2) * 140;
+        K.svg(svg, "rect", { x: cx - 60, y: cy - 58, width: 120, height: 116, rx: 6, fill: "var(--panel-2)", stroke: pred === te.y[c] ? "var(--good)" : "var(--bad)" });
+        pts.forEach((p, i) => K.svg(svg, "circle", { cx: cx + p[0] * 42, cy: cy - p[1] * 42, r: crit.has(i) ? 4 : 2, fill: crit.has(i) ? "var(--c2)" : "var(--ink-3)" }));
+        K.svg(svg, "text", { x: cx, y: cy + 52, "text-anchor": "middle", "font-size": 11, fill: pred === te.y[c] ? "var(--good)" : "var(--bad)" }, "判为" + SHAPES[pred] + "（" + (f.p[pred] * 100).toFixed(0) + "%）");
+      }
+      K.svg(svg, "text", { x: 50, y: 290, "font-size": 11, class: "muted" }, "右边 4 个测试样本：绿框判对、红框判错；橙色 = 关键点");
+      const a1 = acc(net, tr), a2 = acc(net, te);
+      return { readout: [
+        { k: "训练集准确率", v: (a1 * 100).toFixed(1) + "%" },
+        { k: "测试集准确率", v: (a2 * 100).toFixed(1) + "%", color: a2 > 0.85 ? "var(--good)" : "var(--warn)" },
+        { k: "随机猜", v: "25%", color: "var(--ink-3)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

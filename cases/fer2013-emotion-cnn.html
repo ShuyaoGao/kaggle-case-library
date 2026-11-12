@@ -1,0 +1,668 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>人脸表情识别</title>
+<meta name="description" content="Kaggle 案例拆解：在 FER2013 的 48×48 灰度人脸上，只保留开心、难过、平静三类，用一个 6 层卷积网络（ELU、BatchNorm、Dropout）识别表情。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">人脸图像 · 多分类 · 卷积神经网络</div>
+  <h1>人脸表情识别：48×48 的小脸上看出开心还是难过</h1>
+  <p class="en">Facial Emotion Recognition</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">深度卷积网络 DCNN</span><span class="tag method">ELU 激活 + he_normal 初始化</span><span class="tag method">BatchNormalization</span>
+    <span class="tag method">Dropout</span><span class="tag method">分层抽样划分</span><span class="tag method">数据增强</span>
+    <span class="tag method">EarlyStopping / ReduceLROnPlateau</span><span class="tag method">混淆矩阵</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Gaurav Sharma</b></span>
+    <span>Kaggle 点赞 <b>2,491</b>（2026-11 抓取）</span>
+    <span>数据集 <b>ashishpatel26/facial-expression-recognitionferchallenge</b>（FER2013）</span>
+    <span><a href="https://www.kaggle.com/code/gauravsharma99/facial-emotion-recognition" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">FER2013：几万张 48×48 灰度人脸</div><p>每张脸以 2,304 个像素数字的形式存在 CSV 的一个格子里，标签是 7 种情绪之一。<span data-cell="4">出处</span> <span data-cell="8">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这张脸是开心、难过还是平静</div><p>作者只保留样本最多的三类（3 开心、4 难过、6 平静），做三分类。<span data-cell="7">出处</span> <span data-cell="10">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">6 层卷积 + ELU + BN + Dropout</div><p>自己搭的深度卷积网络，激活函数用 ELU、初始化用 he_normal；配合数据增强、早停和学习率衰减，最多训练 100 轮。<span data-cell="22">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">训练和验证准确率都超过 83%</div><p>作者写明准确率逐渐升到 83% 以上，后期开始过拟合；开心识别得好，难过和平静容易混淆。<span data-cell="28">出处</span> <span data-cell="31">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">FER2013 是 2013 年 ICML 表情识别挑战赛发布的数据集：一个 <code>fer2013.csv</code> 文件，每一行是一张 48×48 的灰度人脸。下面的总量和各类数量来自数据集公开说明；作者代码里用到的列和编码标了出处。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">人脸图片（行）</div><div class="v">35,887</div></div>
+        <div class="stat-tile"><div class="k">原始情绪类别</div><div class="v">7</div></div>
+        <div class="stat-tile"><div class="k">每张图大小</div><div class="v">48×48 灰度</div></div>
+        <div class="stat-tile"><div class="k">作者保留的三类合计</div><div class="v">21,264</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">35,887 张、7 类为数据集公开说明；48×48 见第 8 格（2,304 个像素开平方）<span data-cell="8">出处</span>；三类合计 = 8,989 + 6,077 + 6,198，由数据集各类数量相加得到。</p>
+      <h3>每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td style="white-space:nowrap"><code>emotion</code></td><td><b>要预测的答案</b>：0 生气、1 厌恶、2 害怕、3 开心、4 难过、5 惊讶、6 平静 <span data-cell="4">出处</span></td><td>类别</td></tr>
+        <tr><td style="white-space:nowrap"><code>pixels</code></td><td>2,304 个用空格隔开的灰度值（0–255），按行排成 48×48 <span data-cell="13">出处</span></td><td>字符串</td></tr>
+        <tr><td style="white-space:nowrap"><code>Usage</code></td><td>原比赛的划分：Training / PublicTest / PrivateTest（作者没用这一列）</td><td>类别</td></tr>
+      </table></div>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">7 种情绪各有多少张</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>编号</th><th>情绪</th><th>图片数</th><th>作者是否保留</th></tr>
+        <tr><td>0</td><td>anger 生气</td><td>4,953</td><td></td></tr>
+        <tr><td>1</td><td>disgust 厌恶</td><td>547</td><td></td></tr>
+        <tr><td>2</td><td>fear 害怕</td><td>5,121</td><td></td></tr>
+        <tr><td>3</td><td><b>happiness 开心</b></td><td><b>8,989</b></td><td>✓</td></tr>
+        <tr><td>4</td><td><b>sadness 难过</b></td><td><b>6,077</b></td><td>✓</td></tr>
+        <tr><td>5</td><td>surprise 惊讶</td><td>4,002</td><td></td></tr>
+        <tr><td>6</td><td><b>neutral 平静</b></td><td><b>6,198</b></td><td>✓</td></tr>
+      </table></div>
+      <p style="font-size:13px;color:var(--ink-3)">各类数量为 FER2013 数据集的公开统计；作者在第 5–6 格用 <code>value_counts</code> 和柱状图看过同样的分布，输出不在下载的源码里。原比赛划分为训练 28,709 张、公开测试 3,589 张、私有测试 3,589 张。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="22">
+    <h3>动手试试 A · 为什么作者用 ELU 和 he_normal：看信号在 6 层网络里怎么传 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="24">
+    <h3>动手试试 B · 数据增强：在一张生成的小脸上旋转、平移、剪切、缩放、翻转 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>样本最多的是开心、难过、平静，作者只关心这三类</td><td><span data-cell="7">第 7 格</span></td></tr>
+        <tr><td>训练和验证准确率逐渐上升，都达到 83% 以上；后期模型开始过拟合训练数据</td><td><span data-cell="28">第 28 格</span></td></tr>
+        <tr><td>开心类识别得好，另外两类表现较差；原因之一是这两类样本更少，另一个是有些图人也很难分辨难过和平静</td><td><span data-cell="31">第 31 格</span></td></tr>
+        <tr><td>表情因人而异，有些人的平静脸看起来像难过</td><td><span data-cell="31">第 31 格</span></td></tr>
+        <tr><td>Nadam 和 Adam 结果差别不大（注释说最终用 Nadam，但代码实际传入的是 <code>optims[1]</code>，即 Adam）</td><td><span data-cell="25">第 25 格</span></td></tr>
+        <tr><td>ELU 能避免 ReLU 的“神经元死亡”问题，在这里比 LeakyReLU 表现好；he_normal 适合 ELU</td><td><span data-cell="22">第 22 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">分类报告、混淆矩阵的具体数字都在运行输出里，Kaggle 下载的源码不带输出，作者正文只写了“83% 以上”，所以这里不列其他分数。想看可以点上方链接在 Kaggle 上看作者的运行结果。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一张已经裁好、对齐的人脸（48×48 灰度），输出“开心 / 难过 / 平静”三个概率。实际系统前面还要先做人脸检测和裁剪。</li>
+        <li><b>同类问题：</b>手写字符识别、交通标志识别、商品小图分类、显微镜细胞分类：都是“小尺寸、多类别、类间差别细微”的图像分类。</li>
+        <li><b>可迁移的套路：</b>CSV 里的像素串 → reshape 成图 → 分层抽样划分 → 归一化 → “两层卷积 + BN + 池化 + Dropout”堆三组 → 增强 + 早停 + 学习率衰减 → 看混淆矩阵，再回头看被混淆的样本。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>像素串转图像：<code>split</code> + <code>reshape(48, 48, 1)</code> <span data-cell="13">第 13 格</span></li>
+        <li>标签：LabelEncoder + one-hot <span data-cell="15">第 15 格</span></li>
+        <li>划分：<code>train_test_split(stratify=..., test_size=0.1)</code> <span data-cell="18">第 18 格</span></li>
+        <li>网络：6 个 Conv2D（64, 64, 128, 128, 256, 256）+ BN + 3 次最大池化 + Dropout，Dense(128) → softmax(3) <span data-cell="22">第 22 格</span></li>
+        <li>回调：EarlyStopping(patience=11, 恢复最佳权重)、ReduceLROnPlateau(factor=0.5, patience=7) <span data-cell="23">第 23 格</span></li>
+        <li>增强：旋转 15°、平移 / 剪切 / 缩放 15%、水平翻转 <span data-cell="24">第 24 格</span></li>
+        <li>训练：batch 32，最多 100 轮 <span data-cell="25">第 25 格</span>；评估：混淆矩阵 + 分类报告 <span data-cell="30">第 30 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者没有用数据自带的 Usage 列，而是自己随机切了 10% 当验证集；EarlyStopping 又是根据这份验证集决定“哪一轮最好”。那么最后报告的验证准确率，还能算模型在“新数据”上的表现吗？应该怎么改？</li>
+      <li>作者只保留了三类。如果要做完整的 7 类，只有 547 张的“厌恶”该怎么办？类别权重、过采样、合并类别，各有什么利弊？</li>
+      <li>FER2013 里很多图本身就有歧义，人来标也会标错。标签有噪声时，把准确率从 83% 刷到 90% 一定是好事吗？</li>
+      <li>一个人“看起来在笑”就一定开心吗？把表情识别用在课堂专注度评估、招聘面试里，你觉得合适吗？</li>
+      <li>注释说“最终选了 Nadam”，代码却用的是 <code>optims[1]</code>（Adam）。读别人代码时，注释和代码不一致应该信哪个？你还能在这份 notebook 里找到类似的地方吗？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Gaurav Sharma，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意，人脸图像均由代码生成。数据集：FER2013（Challenges in Representation Learning: Facial Expression Recognition Challenge, ICML 2013）。
+</footer>
+</main>
+
+<script src="nb/fer2013-emotion-cnn.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* ===== 页面专用：像素图工具（用代码生成小图并在浏览器里真算卷积、池化、仿射变换） ===== */
+  const PX = (function () {
+    function rgbOf(name, fb) {
+      let s = (K.css(name) || fb || "#888888").trim();
+      if (s[0] !== "#") return [128, 128, 128];
+      if (s.length === 4) s = "#" + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+      return [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
+    }
+    function grid(W, H, f) { const a = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) a[y * W + x] = f(x, y); return { W, H, a }; }
+    function at(m, x, y) { return m.a[y * m.W + x]; }
+    function atClamp(m, x, y) { x = x < 0 ? 0 : x >= m.W ? m.W - 1 : x; y = y < 0 ? 0 : y >= m.H ? m.H - 1 : y; return m.a[y * m.W + x]; }
+    function atZero(m, x, y) { return x < 0 || y < 0 || x >= m.W || y >= m.H ? 0 : m.a[y * m.W + x]; }
+    /* Keras padding='same'：边界外按 0 补 */
+    function conv(m, k) { const n = k.length, r = (n - 1) / 2; return grid(m.W, m.H, (x, y) => { let s = 0; for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) s += k[j][i] * atZero(m, x + i - r, y + j - r); return s; }); }
+    function map(m, f) { const o = { W: m.W, H: m.H, a: new Float32Array(m.a.length) }; for (let i = 0; i < m.a.length; i++) o.a[i] = f(m.a[i], i); return o; }
+    const relu = (m) => map(m, (v) => (v > 0 ? v : 0));
+    function pool(m, s) { s = s || 2; const W = Math.ceil(m.W / s), H = Math.ceil(m.H / s); return grid(W, H, (x, y) => { let b = -Infinity; for (let j = 0; j < s; j++) for (let i = 0; i < s; i++) { const xx = x * s + i, yy = y * s + j; if (xx < m.W && yy < m.H) b = Math.max(b, at(m, xx, yy)); } return b; }); }
+    function range(m) { let lo = Infinity, hi = -Infinity; for (const v of m.a) { if (v < lo) lo = v; if (v > hi) hi = v; } return [lo, hi]; }
+    function bilinear(m, x, y) {
+      const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+      return (atClamp(m, x0, y0) * (1 - fx) + atClamp(m, x0 + 1, y0) * fx) * (1 - fy) + (atClamp(m, x0, y0 + 1) * (1 - fx) + atClamp(m, x0 + 1, y0 + 1) * fx) * fy;
+    }
+    /* 类似 Keras ImageDataGenerator：绕中心旋转/剪切/缩放/平移/翻转，边界外用最近像素填充（fill_mode='nearest'） */
+    function affine(m, p) {
+      const th = ((p.rot || 0) * Math.PI) / 180, c = Math.cos(th), s = Math.sin(th), sh = p.shear || 0, z = p.zoom || 1;
+      const cx = (m.W - 1) / 2, cy = (m.H - 1) / 2, tx = (p.tx || 0) * m.W, ty = (p.ty || 0) * m.H;
+      return grid(m.W, m.H, (x, y) => {
+        let u = x - cx - tx, v = y - cy - ty;
+        if (p.flip) u = -u;
+        if (p.vflip) v = -v;
+        let a = c * u + s * v, b = -s * u + c * v;
+        a = a - sh * b;
+        return bilinear(m, a / z + cx, b / z + cy) * (p.bright == null ? 1 : p.bright);
+      });
+    }
+    function toURL(m, mode, lo, hi) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      const P = rgbOf("--panel", "#ffffff"), A = rgbOf("--c1"), B = rgbOf("--c2");
+      if (lo == null || hi == null) { const r = range(m); if (lo == null) lo = r[0]; if (hi == null) hi = r[1]; }
+      const span = hi - lo || 1, amax = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+      for (let i = 0; i < m.a.length; i++) {
+        const v = m.a[i]; let r, gg, b;
+        if (mode === "div") { const t = Math.max(-1, Math.min(1, v / amax)), C = t >= 0 ? B : A, k = Math.abs(t); r = P[0] + (C[0] - P[0]) * k; gg = P[1] + (C[1] - P[1]) * k; b = P[2] + (C[2] - P[2]) * k; }
+        else if (mode === "heat") { const k = Math.max(0, Math.min(1, (v - lo) / span)); r = P[0] + (A[0] - P[0]) * k; gg = P[1] + (A[1] - P[1]) * k; b = P[2] + (A[2] - P[2]) * k; }
+        else { const k = Math.max(0, Math.min(1, (v - lo) / span)) * 255; r = gg = b = k; }
+        d[i * 4] = r; d[i * 4 + 1] = gg; d[i * 4 + 2] = b; d[i * 4 + 3] = 255;
+      }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    /* 彩色图：m 为 {W,H,rgb:[Float32Array*3]}，取值 0–1 */
+    function rgbURL(m) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      for (let i = 0; i < m.W * m.H; i++) { for (let c = 0; c < 3; c++) d[i * 4 + c] = Math.max(0, Math.min(1, m.rgb[c][i])) * 255; d[i * 4 + 3] = 255; }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    function draw(svg, x, y, w, h, m, mode, lo, hi) {
+      const e = K.svg(svg, "image", { x, y, width: w, height: h, preserveAspectRatio: "none" });
+      e.style.imageRendering = "pixelated";
+      e.setAttribute("href", m.rgb ? rgbURL(m) : toURL(m, mode, lo, hi));
+      K.svg(svg, "rect", { x, y, width: w, height: h, fill: "none", stroke: "var(--line)" });
+      return e;
+    }
+    function update(e, m, mode, lo, hi) { e.setAttribute("href", m.rgb ? rgbURL(m) : toURL(m, mode, lo, hi)); }
+    function lines(svg, x, y, w, h, W, H, op) {
+      const g = K.svg(svg, "g");
+      for (let i = 0; i <= W; i++) K.svg(g, "line", { x1: x + (w * i) / W, x2: x + (w * i) / W, y1: y, y2: y + h, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      for (let j = 0; j <= H; j++) K.svg(g, "line", { y1: y + (h * j) / H, y2: y + (h * j) / H, x1: x, x2: x + w, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      return g;
+    }
+    const smooth = (e0, e1, x) => { const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+    const blob = (x, y, cx, cy, sx, sy) => Math.exp(-(((x - cx) * (x - cx)) / (2 * sx * sx) + ((y - cy) * (y - cy)) / (2 * sy * sy)));
+    return { grid, at, atClamp, conv, map, relu, pool, range, bilinear, affine, toURL, rgbURL, draw, update, lines, smooth, blob, rgbOf };
+  })();
+
+  /* 用代码画一张 N×N 的卡通灰度人脸。expr：happy / sad / neutral / 其他（surprise、angry 等只用于开场展示） */
+  function face(N, expr, seed) {
+    const r = K.rng(seed || 1);
+    const jx = (r() - 0.5) * 0.04, jy = (r() - 0.5) * 0.04, skin = 0.62 + r() * 0.12;
+    const curve = { happy: -2.4, sad: 1.9, neutral: 0, surprise: 0, angry: 1.2, fear: 0.8, disgust: 1.4 }[expr] || 0;
+    const brow = { happy: 0, sad: -0.05, neutral: 0, surprise: -0.04, angry: 0.06, fear: -0.05, disgust: 0.04 }[expr] || 0;
+    const open = expr === "surprise" ? 0.06 : expr === "fear" ? 0.035 : 0;
+    const noise = Array.from({ length: N * N }, () => (r() - 0.5) * 0.06);
+    return PX.grid(N, N, (px, py) => {
+      const x = (px + 0.5) / N - jx, y = (py + 0.5) / N - jy;
+      let v = 0.25 + 0.1 * y;
+      const fd = ((x - 0.5) / 0.33) ** 2 + ((y - 0.53) / 0.42) ** 2;
+      if (fd < 1) {
+        v = skin - 0.12 * fd;
+        if (y < 0.24 + 0.05 * Math.cos((x - 0.5) * 6)) v = 0.12;
+        for (const ex of [0.37, 0.63]) {
+          const e = ((x - ex) / 0.06) ** 2 + ((y - 0.45) / (0.032 + open * 0.3)) ** 2;
+          if (e < 1) v = 0.1;
+          const side = ex < 0.5 ? 1 : -1, by = 0.37 + brow * (x - ex) * side * 10 * 0.5 - Math.abs(brow) * 0.2;
+          if (Math.abs(x - ex) < 0.08 && Math.abs(y - (by + 0.3 * brow * side * (x - ex) / 0.08 * 0.1)) < 0.014) v = 0.15;
+        }
+        if (Math.abs(x - 0.5) < 0.02 && y > 0.5 && y < 0.6) v -= 0.08;
+        const dx = x - 0.5, my = 0.7 + (curve > 0 ? 0.02 : 0);
+        if (Math.abs(dx) < 0.15) {
+          const cy = my + curve * (dx * dx) * (curve < 0 ? 1 : 1) - curve * 0.15 * 0.15 * 0.5;
+          if (open > 0) { if (((dx) / 0.07) ** 2 + ((y - my) / (open + 0.02)) ** 2 < 1) v = 0.08; }
+          else if (Math.abs(y - cy) < 0.018) v = 0.12;
+        }
+      }
+      return K.clamp(v + noise[py * N + px], 0, 1);
+    });
+  }
+  const EMO = [["anger 生气", "angry"], ["disgust 厌恶", "disgust"], ["fear 害怕", "fear"], ["happiness 开心", "happy"], ["sadness 难过", "sad"], ["surprise 惊讶", "surprise"], ["neutral 平静", "neutral"]];
+  const COUNTS = [4953, 547, 5121, 8989, 6077, 4002, 6198];
+
+  const steps = [
+    {
+      title: "开场：读入 FER2013 表格", at: 0, kicker: "第 0–4 格 · 导入与读数据",
+      cells: [2, 4], highlight: ["read_csv", "emotion_label_to_text"],
+      html: `<p>作者用 pandas 读入 <code>fer2013.csv</code>，每一行是一张脸。标签是 0–6 的整数，第 4 格写了编号和情绪的对应关系：0 生气、1 厌恶、2 害怕、3 开心、4 难过、5 惊讶、6 平静。</p><p>动画里 7 张脸是代码画的示意图，真实数据是 48×48 的真人灰度照片。</p>`,
+      draw(svg, ctx) {
+        EMO.forEach((e, i) => {
+          const x = 18 + i * 100, img = PX.draw(svg, x, 70, 86, 86, face(32, e[1], 11 + i), "gray", 0, 1);
+          const t1 = K.svg(svg, "text", { x: x + 43, y: 180, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, i);
+          const t2 = K.svg(svg, "text", { x: x + 43, y: 200, "text-anchor": "middle", "font-size": 11 }, e[0]);
+          [img, t1, t2].forEach((el) => (el.style.opacity = 0));
+          ctx.wait(150 * i).then((ok) => ok && ctx.tween(400, (t) => [img, t1, t2].forEach((el) => (el.style.opacity = t))));
+        });
+        K.svg(svg, "text", { x: 360, y: 40, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "emotion 列的 7 个编号（示意脸，代码生成）");
+        K.svg(svg, "text", { x: 360, y: 250, "text-anchor": "middle", "font-size": 13, class: "muted" }, "表格的每一行：emotion（0–6）＋ pixels（2304 个数字）＋ Usage");
+        K.node(svg, 150, 270, 420, 44, "3, \"70 80 82 72 58 58 60 63 54 58 60 48 …\", Training", { fs: 12 });
+      },
+    },
+    {
+      title: "数一数：7 种情绪很不均匀", kicker: "第 5–7 格 · 看分布",
+      cells: [5, 6, 7], highlight: ["value_counts", "countplot"],
+      html: `<p>用 <code>value_counts()</code> 和 <code>countplot</code> 看各类数量。第 7 格作者写道：多数样本属于 3 开心、4 难过、6 平静，<b>只关心这三类</b>。</p><p>柱子高度用的是 FER2013 的公开统计（不是 notebook 输出）。</p>`,
+      draw(svg, ctx) {
+        const items = EMO.map((e, i) => ({ label: e[0].split(" ")[1], value: COUNTS[i], color: [3, 4, 6].includes(i) ? "var(--c1)" : "var(--ink-3)" }));
+        const els = K.bars(svg, { x: 40, y: 40, w: 640, h: 230 }, items, { max: 9500, fmt: (v) => Math.round(v).toLocaleString() });
+        els.forEach((e, i) => { const h = +e.rect.getAttribute("height"), y = +e.rect.getAttribute("y"); e.rect.setAttribute("height", 0); e.rect.setAttribute("y", y + h); e.text.style.opacity = 0; e.h = h; e.y = y; });
+        K.svg(svg, "text", { x: 40, y: 325, "font-size": 12, class: "muted" }, "蓝色 = 作者保留的三类；数字为 FER2013 公开统计");
+        ctx.tween(1400, (t) => els.forEach((e) => { e.rect.setAttribute("height", e.h * t); e.rect.setAttribute("y", e.y + e.h * (1 - t)); e.text.style.opacity = t; }));
+      },
+    },
+    {
+      title: "一串数字怎么变成一张脸", kicker: "第 8–9 格 · 看图片",
+      cells: [8, 9], highlight: ["math.sqrt", "reshape(48, 48)"],
+      html: `<p><code>math.sqrt(len(df.pixels[0].split(' ')))</code>：像素个数开平方得 48，所以每张图是 48×48。</p><p>第 9 格把像素串 <code>reshape(48, 48)</code> 后，按 7 类各画 7 张样例。动画演示一串数字逐行“铺”成一张脸。</p>`,
+      draw(svg, ctx) {
+        const N = 16, img = face(N, "happy", 4), c = 15, x0 = 400, y0 = 50;
+        const vals = Array.from(img.a, (v) => Math.round(v * 255));
+        K.svg(svg, "text", { x: 20, y: 40, "font-size": 13, "font-weight": 700 }, "pixels 字符串（示意，16×16 便于观看；真实是 48×48 = 2304 个）");
+        const strEl = K.svg(svg, "text", { x: 20, y: 70, "font-size": 12, "font-family": "var(--mono)" }, "");
+        const strEl2 = K.svg(svg, "text", { x: 20, y: 90, "font-size": 12, "font-family": "var(--mono)" }, "");
+        const cells = [];
+        for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) cells.push(K.svg(svg, "rect", { x: x0 + i * c, y: y0 + j * c, width: c - 1, height: c - 1, fill: "var(--panel-2)" }));
+        K.svg(svg, "text", { x: x0, y: y0 + N * c + 22, "font-size": 12, class: "muted" }, "reshape：每 16 个数字排一行");
+        const rowLab = K.svg(svg, "text", { x: 20, y: 140, "font-size": 14, "font-weight": 700, fill: "var(--accent)" }, "");
+        (async () => {
+          for (let j = 0; j < N; j++) {
+            const row = vals.slice(j * N, (j + 1) * N);
+            strEl.textContent = row.slice(0, 8).join(" ") + " …";
+            strEl2.textContent = "第 " + (j + 1) + " 行";
+            rowLab.textContent = "→ 填进第 " + (j + 1) + " 行";
+            row.forEach((v, i) => { const g = Math.round(v); cells[j * N + i].style.fill = `rgb(${g},${g},${g})`; });
+            if (!(await ctx.wait(160))) return;
+          }
+          rowLab.textContent = "一张脸拼好了";
+        })();
+      },
+    },
+    {
+      title: "只保留开心、难过、平静三类", kicker: "第 10–12 格 · 筛选",
+      cells: [10, 11], highlight: ["INTERESTED_LABELS = [3, 4, 6]", "isin"],
+      html: `<p><code>INTERESTED_LABELS = [3, 4, 6]</code>，<code>df[df.emotion.isin(...)]</code> 只留下开心、难过、平静。按 FER2013 公开统计，三类合计 21,264 张。</p><p>代价：模型只会回答这三种，看到其他表情也会被迫三选一。</p>`,
+      draw(svg, ctx) {
+        const r = K.rng(5), items = [];
+        for (let k = 0; k < 21; k++) {
+          const e = Math.floor(r() * 7), x = 30 + (k % 7) * 95, y = 30 + Math.floor(k / 7) * 70;
+          const img = PX.draw(svg, x, y, 56, 56, face(24, EMO[e][1], 100 + k), "gray", 0, 1);
+          const lab = K.svg(svg, "text", { x: x + 62, y: y + 32, "font-size": 11 }, e);
+          items.push({ e, img, lab, frame: img.nextSibling, x, y });
+        }
+        K.svg(svg, "line", { x1: 20, x2: 700, y1: 252, y2: 252, stroke: "var(--accent)", "stroke-width": 3, "stroke-dasharray": "10 6" });
+        K.svg(svg, "text", { x: 360, y: 280, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--accent)" }, "df.emotion.isin([3, 4, 6])");
+        K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 12, class: "muted" }, "编号不是 3 / 4 / 6 的脸从筛子漏下去（示意）");
+        ctx.wait(700).then((ok) => ok && ctx.tween(1200, (t) => items.forEach((it) => { if (![3, 4, 6].includes(it.e)) { const dy = t * 200; [it.img, it.frame].forEach((el) => { el.setAttribute("y", it.y + dy); el.style.opacity = 1 - t; }); it.lab.setAttribute("y", it.y + 32 + dy); it.lab.style.opacity = 1 - t; } })));
+      },
+    },
+    {
+      title: "整理成张量，标签改成 one-hot", kicker: "第 13–16 格 · 整理数据",
+      cells: [13, 15], highlight: ["reshape(48, 48, 1)", "LabelEncoder", "to_categorical"],
+      html: `<p>第 13 格把每行像素串 <code>split</code> 后 <code>reshape(48, 48, 1)</code>，再 <code>np.stack</code> 成一个大数组。</p><p>第 15 格：<code>LabelEncoder</code> 把 3/4/6 编成 0/1/2，<code>to_categorical</code> 再转成 one-hot 向量，对应关系见第 16 格（开心 0、难过 1、平静 2）。</p>`,
+      draw(svg, ctx) {
+        const rows = [[3, "开心", "happy"], [4, "难过", "sad"], [6, "平静", "neutral"]];
+        K.svg(svg, "text", { x: 40, y: 34, "font-size": 13, "font-weight": 700 }, "原标签");
+        K.svg(svg, "text", { x: 200, y: 34, "font-size": 13, "font-weight": 700 }, "LabelEncoder");
+        K.svg(svg, "text", { x: 400, y: 34, "font-size": 13, "font-weight": 700 }, "one-hot（to_categorical）");
+        const anim = [];
+        rows.forEach((rw, i) => {
+          const y = 60 + i * 88;
+          PX.draw(svg, 40, y, 64, 64, face(24, rw[2], 50 + i), "gray", 0, 1);
+          K.svg(svg, "text", { x: 120, y: y + 38, "font-size": 18, "font-weight": 700, "font-family": "var(--mono)" }, rw[0]);
+          const a1 = K.arrow(svg, 145, y + 32, 195, y + 32);
+          const enc = K.svg(svg, "text", { x: 215, y: y + 38, "font-size": 18, "font-weight": 700, "font-family": "var(--mono)", fill: "var(--accent)" }, i);
+          const a2 = K.arrow(svg, 245, y + 32, 395, y + 32);
+          const boxes = [0, 1, 2].map((k) => { const b = K.node(svg, 405 + k * 62, y + 10, 54, 44, String(k === i ? 1 : 0), { fs: 16, bold: k === i, fill: k === i ? "color-mix(in srgb, var(--c1) 35%, var(--panel))" : "var(--panel-2)", stroke: k === i ? "var(--c1)" : "var(--line)" }); return b; });
+          K.svg(svg, "text", { x: 600, y: y + 38, "font-size": 13 }, rw[1]);
+          [a1, enc, a2, ...boxes].forEach((e) => (e.style.opacity = 0));
+          anim.push([a1, enc, a2, ...boxes]);
+        });
+        K.svg(svg, "text", { x: 405, y: 330, "font-size": 12, class: "muted" }, "三个格子依次对应：开心 / 难过 / 平静");
+        (async () => { for (const g of anim) { if (!(await ctx.tween(600, (t) => g.forEach((e) => (e.style.opacity = t))))) return; } })();
+      },
+    },
+    {
+      title: "分层抽 10% 做验证集，再归一化", at: 17, kicker: "第 17–21 格 · 划分与归一化",
+      cells: [18, 21], highlight: ["stratify=img_labels", "test_size=0.1", "/ 255."],
+      html: `<p><code>train_test_split(..., stratify=img_labels, test_size=0.1)</code>：按类别<b>分层</b>抽 10% 做验证集，三类在训练、验证里比例一致。注意作者没有另留测试集，也没用数据自带的 Usage 划分。</p><p>第 21 格把像素除以 255 归一化到 [0,1]。</p>`,
+      draw(svg, ctx) {
+        const cls = [["开心", 8989, "var(--c3)"], ["难过", 6077, "var(--c1)"], ["平静", 6198, "var(--c5)"]];
+        const W = 460 / 8989;
+        K.svg(svg, "text", { x: 40, y: 34, "font-size": 13, "font-weight": 700 }, "每一类都按 9 : 1 切开（长度按 FER2013 各类数量）");
+        const parts = [];
+        cls.forEach((c, i) => {
+          const y = 70 + i * 80, w = c[1] * W;
+          K.svg(svg, "text", { x: 40, y: y + 26, "font-size": 13 }, c[0]);
+          const tr = K.svg(svg, "rect", { x: 90, y, width: w * 0.9, height: 40, rx: 4, fill: c[2], opacity: 0.75 });
+          const va = K.svg(svg, "rect", { x: 90 + w * 0.9, y, width: w * 0.1, height: 40, rx: 4, fill: c[2], stroke: "var(--ink)" });
+          const lab = K.svg(svg, "text", { x: 90 + w + 12, y: y + 26, "font-size": 12, class: "muted" }, "→ 验证集");
+          parts.push({ va, lab, x0: 90 + w * 0.9, w });
+        });
+        K.svg(svg, "text", { x: 90, y: 320, "font-size": 12, class: "muted" }, "左边深色 = 训练 90%；带黑框的小段 = 验证 10%");
+        ctx.wait(600).then((ok) => ok && ctx.tween(1000, (t) => parts.forEach((p) => { p.va.setAttribute("x", p.x0 + t * (600 - p.x0)); p.lab.setAttribute("x", p.x0 + t * (600 - p.x0) + p.w * 0.1 + 8); })));
+      },
+    },
+    {
+      title: "ELU 激活与 he_normal 初始化", at: 22, kicker: "第 22 格 · 模型①激活函数",
+      html: `<p>第 22 格的文档字符串里，作者说明：用 <b>ELU</b> 是因为它能避免 ReLU 的“神经元死亡”问题，而且在这个任务上比 LeakyReLU 好；<b>he_normal</b> 初始化适合 ELU；还用了 BatchNorm 和规律间隔的 Dropout。</p><p>ELU：x &gt; 0 时输出 x；x ≤ 0 时输出 e<sup>x</sup> − 1，平滑地趋近 −1。</p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 360, h: 260 }, [-4, 3], [-1.5, 3], { xticks: 7, yticks: 3, xlabel: "神经元收到的输入 x" });
+        const f = { relu: (x) => Math.max(0, x), elu: (x) => (x > 0 ? x : Math.exp(x) - 1), leaky: (x) => (x > 0 ? x : 0.1 * x) };
+        const paths = [["relu", "var(--c1)", "ReLU"], ["leaky", "var(--ink-3)", "LeakyReLU(0.1)"], ["elu", "var(--c2)", "ELU"]].map((d, i) => {
+          const p = K.svg(svg, "path", { d: "", fill: "none", stroke: d[1], "stroke-width": i === 2 ? 3 : 2, "stroke-dasharray": i === 1 ? "5 4" : null });
+          K.svg(svg, "text", { x: 470, y: 60 + i * 26, "font-size": 13, fill: d[1], "font-weight": 700 }, "— " + d[2]);
+          return { p, fn: f[d[0]] };
+        });
+        K.svg(svg, "text", { x: 470, y: 160, "font-size": 12 }, "x < 0 时：");
+        K.svg(svg, "text", { x: 470, y: 182, "font-size": 12, fill: "var(--c1)" }, "ReLU 恒为 0 → 梯度也是 0");
+        K.svg(svg, "text", { x: 470, y: 204, "font-size": 12, fill: "var(--c1)" }, "   一直为负的神经元“死掉”");
+        K.svg(svg, "text", { x: 470, y: 230, "font-size": 12, fill: "var(--c2)" }, "ELU 平滑地趋近 −1 → 还能学");
+        const dot = K.svg(svg, "circle", { cx: 0, cy: 0, r: 6, fill: "var(--c2)" }), dot2 = K.svg(svg, "circle", { cx: 0, cy: 0, r: 6, fill: "var(--c1)" });
+        ctx.tween(1400, (t) => paths.forEach((o) => { let d = ""; for (let x = -4; x <= -4 + 7 * t + 1e-9; x += 0.05) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(o.fn(x)); o.p.setAttribute("d", d); }))
+          .then(async (ok) => { if (!ok) return; for (let k = 0; k < 2; k++) { if (!(await ctx.tween(2200, (t) => { const x = K.lerp(2.5, -3.8, k % 2 ? 1 - t : t); K.set(dot, { cx: ax.sx(x), cy: ax.sy(f.elu(x)) }); K.set(dot2, { cx: ax.sx(x), cy: ax.sy(f.relu(x)) }); }))) return; } });
+      },
+    },
+    {
+      title: "6 层卷积的深度网络 DCNN", at: 22, kicker: "第 22 格 · 模型②整体结构",
+      cells: [22], highlight: ["kernel_size=(5,5)", "filters=128", "filters=256", "BatchNormalization", "MaxPooling2D", "Dropout(0.4", "Dropout(0.5", "Dropout(0.6", "activation='softmax'"],
+      html: `<p>结构是三组“<b>两层 Conv2D + BN</b> → 最大池化 → Dropout”：</p><ul class="tight"><li>第 1 组：64 个 5×5 卷积 ×2，48×48 → 池化 24×24，Dropout 0.4</li><li>第 2 组：128 个 3×3 卷积 ×2 → 12×12，Dropout 0.4</li><li>第 3 组：256 个 3×3 卷积 ×2 → 6×6，Dropout 0.5</li></ul><p>然后 Flatten（6×6×256 = 9,216）→ Dense(128, ELU) + BN + Dropout 0.6 → Dense(3, softmax)。损失是分类交叉熵。</p>`,
+      draw(svg, ctx) {
+        const L = [[48, 1, "输入"], [48, 64, "组1 卷积×2"], [24, 64, "池化"], [24, 128, "组2 卷积×2"], [12, 128, "池化"], [12, 256, "组3 卷积×2"], [6, 256, "池化"]];
+        const gs = []; let x = 40;
+        L.forEach((d) => {
+          const s = 26 + d[0] * 3.2, depth = 5 + Math.sqrt(d[1]) * 2.4, y = 160 - s / 2, o = Math.min(10, s * 0.12);
+          const g = K.svg(svg, "g");
+          K.svg(g, "path", { d: `M${x},${y} l${o},${-o} l${depth},0 l${-o},${o}Z`, fill: "color-mix(in srgb, var(--c4) 45%, var(--panel))", stroke: "var(--c4)" });
+          K.svg(g, "path", { d: `M${x + depth},${y} l${o},${-o} l0,${s} l${-o},${o}Z`, fill: "color-mix(in srgb, var(--c4) 18%, var(--panel))", stroke: "var(--c4)" });
+          K.svg(g, "rect", { x, y, width: depth, height: s, fill: "color-mix(in srgb, var(--c4) 30%, var(--panel))", stroke: "var(--c4)" });
+          K.svg(g, "text", { x: x + depth / 2, y: 300, "text-anchor": "middle", "font-size": 11, "font-weight": 700 }, d[2]);
+          K.svg(g, "text", { x: x + depth / 2, y: 316, "text-anchor": "middle", "font-size": 10, class: "muted" }, `${d[0]}×${d[0]}×${d[1]}`);
+          g.style.opacity = 0; gs.push(g); x += depth + o + 24;
+        });
+        const n1 = K.node(svg, 560, 135, 58, 50, "Flatten\n9216", { fs: 11 }), n2 = K.node(svg, 560, 200, 58, 50, "Dense\n128", { fs: 11 }), n3 = K.node(svg, 640, 160, 68, 60, "softmax\n3 类", { fs: 11, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        [n1, n2, n3].forEach((e) => { e.style.opacity = 0; gs.push(e); });
+        K.svg(svg, "text", { x: 40, y: 30, "font-size": 12, class: "muted" }, "方块高 ∝ 边长、厚 ∝ 通道数（示意比例）；每个卷积后都接 BatchNorm");
+        (async () => { for (const g of gs) { if (!(await ctx.tween(320, (t) => (g.style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      title: "两个回调：早停和学习率减半", kicker: "第 23 格 · 训练控制",
+      cells: [23], highlight: ["EarlyStopping", "patience=11", "restore_best_weights=True", "ReduceLROnPlateau", "factor=0.5", "patience=7"],
+      html: `<p><code>EarlyStopping(monitor='val_accuracy', patience=11, restore_best_weights=True)</code>：连续 11 轮验证准确率不涨就停，并恢复最佳那一轮的权重。</p><p><code>ReduceLROnPlateau(factor=0.5, patience=7, min_lr=1e-7)</code>：连续 7 轮不涨，学习率减半。动画曲线为示意。</p>`,
+      draw(svg, ctx) {
+        const r = K.rng(9), acc = [];
+        let s = 0;
+        for (let e = 0; e < 46; e++) { s += (1 - s) * (e < 30 ? 0.09 : 0.01); acc.push(0.45 + 0.38 * s + (K.randn(r) * 0.012) - (e > 32 ? (e - 32) * 0.002 : 0)); }
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 190 }, [0, 45], [0.4, 0.9], { xticks: 9, yticks: 5, yfmt: (v) => v.toFixed(1) });
+        K.svg(svg, "text", { x: 66, y: 44, "font-size": 12, class: "muted" }, "验证准确率（示意）");
+        const ax2 = K.axes(svg, { x: 60, y: 250, w: 600, h: 60 }, [0, 45], [0, 1], { xticks: 0, yticks: 0 });
+        K.svg(svg, "text", { x: 66, y: 264, "font-size": 12, class: "muted" }, "学习率");
+        K.svg(svg, "text", { x: 360, y: 336, "text-anchor": "middle", "font-size": 12, class: "muted" }, "轮次 epoch");
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2 }), lrp = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        const note = K.svg(svg, "text", { x: 400, y: 120, "font-size": 13, "font-weight": 700, fill: "var(--warn)" }, "");
+        (async () => {
+          let best = -1, bi = 0, wES = 0, wLR = 0, lr = 1, d = "", dl = "";
+          for (let e = 0; e < acc.length; e++) {
+            const v = acc[e]; d += (d ? "L" : "M") + ax.sx(e) + "," + ax.sy(v); path.setAttribute("d", d);
+            const nb = v > best; K.svg(svg, "circle", { cx: ax.sx(e), cy: ax.sy(v), r: 3, fill: nb ? "var(--c6)" : "var(--panel)", stroke: "var(--c6)" });
+            dl += (dl ? "L" : "M") + ax2.sx(Math.max(0, e - 0.5)) + "," + ax2.sy(lr) + "L" + ax2.sx(e + 0.5) + "," + ax2.sy(lr); lrp.setAttribute("d", dl);
+            if (nb) { best = v; bi = e; wES = 0; wLR = 0; } else { wES++; wLR++; if (wLR >= 7) { lr *= 0.5; wLR = 0; note.textContent = `第 ${e + 1} 轮：学习率减半`; K.svg(svg, "line", { x1: ax.sx(e + 0.5), x2: ax.sx(e + 0.5), y1: 30, y2: 310, stroke: "var(--warn)", "stroke-dasharray": "4 3" }); } }
+            if (wES >= 11) { note.textContent = `第 ${e + 1} 轮早停，退回第 ${bi + 1} 轮的权重`; K.svg(svg, "line", { x1: ax.sx(bi), x2: ax.sx(bi), y1: 30, y2: 220, stroke: "var(--good)", "stroke-width": 3 }); break; }
+            if (!(await ctx.wait(110))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "数据增强：让小脸多几种样子", kicker: "第 24 格 · 数据增强",
+      cells: [24], highlight: ["rotation_range=15", "width_shift_range=0.15", "shear_range=0.15", "zoom_range=0.15", "horizontal_flip=True"],
+      html: `<p>“手头数据相对任务偏少，所以用 ImageDataGenerator”：随机旋转 ±15°，水平/竖直平移 15%，剪切 0.15，缩放 15%，水平翻转。表情左右翻转后含义不变，所以翻转是安全的。</p><p>下方实验 B 可以亲手拖动这些参数。</p>`,
+      draw(svg, ctx) {
+        const base = face(48, "happy", 7);
+        PX.draw(svg, 50, 60, 200, 200, base, "gray", 0, 1);
+        K.svg(svg, "text", { x: 150, y: 285, "text-anchor": "middle", "font-size": 13 }, "原图（示意）");
+        const out = PX.draw(svg, 440, 60, 200, 200, base, "gray", 0, 1);
+        const lab = K.svg(svg, "text", { x: 540, y: 285, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--accent)" }, "");
+        K.arrow(svg, 275, 160, 420, 160); K.svg(svg, "text", { x: 347, y: 150, "text-anchor": "middle", "font-size": 12, class: "muted" }, "ImageDataGenerator");
+        const seq = [["旋转 +15°", { rot: 15 }], ["旋转 −15°", { rot: -15 }], ["水平平移 15%", { tx: 0.15 }], ["竖直平移 15%", { ty: 0.15 }], ["剪切 0.15", { shear: 0.15 }], ["放大 15%", { zoom: 1.15 }], ["水平翻转", { flip: true }], ["随机组合", { rot: -9, tx: 0.06, ty: -0.05, shear: 0.08, zoom: 0.92, flip: true }]];
+        (async () => {
+          for (const [name, p] of seq) {
+            lab.textContent = name;
+            if (!(await ctx.tween(600, (t) => { const q = {}; for (const k in p) q[k] = k === "flip" ? t > 0.5 : k === "zoom" ? K.lerp(1, p[k], t) : p[k] * t; PX.update(out, PX.affine(base, q), "gray", 0, 1); }))) return;
+            if (!(await ctx.wait(400))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "开始训练：batch 32，最多 100 轮", kicker: "第 25–26 格 · 训练",
+      cells: [25, 26], highlight: ["batch_size = 32", "epochs = 100", "optims[1]", "Nadam"],
+      html: `<p><code>batch_size = 32</code>（注释：32 效果最好），<code>epochs = 100</code>，训练时用增强生成器 <code>train_datagen.flow(...)</code> 喂数据，验证用原始验证集。</p><p>注释说试了 Nadam 和 Adam、“最终用了 Nadam”，但代码是 <code>build_net(optims[1])</code>，实际是 <b>Adam(0.001)</b>。第 26 格把模型结构和权重存成 yaml / h5。</p>`,
+      draw(svg, ctx) {
+        const imgs = [0, 1, 2, 3].map((i) => { const e = PX.draw(svg, 30 + (i % 2) * 54, 90 + Math.floor(i / 2) * 54, 48, 48, face(24, ["happy", "sad", "neutral", "happy"][i], 60 + i), "gray", 0, 1); return e; });
+        K.svg(svg, "text", { x: 84, y: 220, "text-anchor": "middle", "font-size": 12 }, "一批 32 张");
+        K.svg(svg, "text", { x: 84, y: 236, "text-anchor": "middle", "font-size": 11, class: "muted" }, "（画 4 张示意）");
+        const net = K.node(svg, 200, 110, 140, 80, "DCNN\n（6 层卷积）", { fill: "color-mix(in srgb, var(--c4) 20%, var(--panel))", stroke: "var(--c4)" });
+        K.arrow(svg, 145, 150, 198, 150); K.arrow(svg, 342, 150, 395, 150);
+        const names = ["开心", "难过", "平静"], bars = [];
+        names.forEach((n, i) => { K.svg(svg, "text", { x: 400, y: 120 + i * 30, "font-size": 12 }, n); bars.push(K.svg(svg, "rect", { x: 440, y: 108 + i * 30, width: 0, height: 16, rx: 3, fill: i === 0 ? "var(--c3)" : "var(--ink-3)" })); });
+        const truth = K.svg(svg, "text", { x: 600, y: 126, "font-size": 12, fill: "var(--good)" }, "正确答案：开心");
+        const back = K.arrow(svg, 560, 220, 270, 220, { color: "var(--warn)", dash: "5 4" });
+        const bl = K.svg(svg, "text", { x: 415, y: 245, "text-anchor": "middle", "font-size": 12, fill: "var(--warn)" }, "误差反向传播，微调权重");
+        const ep = K.svg(svg, "text", { x: 30, y: 40, "font-size": 15, "font-weight": 700, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 30, y: 310, "font-size": 12, class: "muted" }, "优化器：代码里实际是 Adam(learning_rate=0.001)；概率条为示意");
+        (async () => {
+          for (let it = 0; it < 6; it++) {
+            ep.textContent = `第 ${it + 1} 批`;
+            back.style.opacity = bl.style.opacity = 0;
+            const p = [0.34 + it * 0.1, 0.33 - it * 0.05, 0.33 - it * 0.05].map((v) => Math.max(0.03, v));
+            if (!(await ctx.tween(600, (t) => bars.forEach((b, i) => b.setAttribute("width", 120 * p[i] * t))))) return;
+            if (!(await ctx.tween(400, (t) => (back.style.opacity = bl.style.opacity = t)))) return;
+            if (!(await ctx.wait(300))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "学习曲线：83% 以上，后期过拟合", kicker: "第 27–29 格 · 看曲线",
+      cells: [27, 28], highlight: ["history.history['val_accuracy']"],
+      html: `<p>第 28 格作者写：准确率逐渐提高，<b>训练集和验证集都达到 83% 以上</b>，但到最后模型开始过拟合训练数据。<span data-cell="28">出处</span></p><p>第 29 格又用小提琴图看了两组准确率和损失的分布。动画曲线是示意，不是作者的真实曲线。</p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [0, 60], [0.4, 1], { xticks: 6, yticks: 6, xlabel: "轮次 epoch（示意）", yfmt: (v) => v.toFixed(1) });
+        const tr = [], va = [];
+        for (let e = 0; e <= 60; e++) { tr.push(0.48 + 0.42 * (1 - Math.exp(-e / 14)) + (e > 35 ? (e - 35) * 0.002 : 0)); va.push(0.5 + 0.34 * (1 - Math.exp(-e / 12)) - (e > 40 ? (e - 40) * 0.0012 : 0) + Math.sin(e * 1.7) * 0.008); }
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 }), p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(60), y1: ax.sy(0.83), y2: ax.sy(0.83), stroke: "var(--warn)", "stroke-dasharray": "5 4" });
+        K.svg(svg, "text", { x: ax.sx(1), y: ax.sy(0.83) - 6, "font-size": 12, fill: "var(--warn)" }, "作者：都达到 83% 以上");
+        K.svg(svg, "text", { x: 520, y: 200, "font-size": 12, fill: "var(--c1)" }, "— 训练");
+        K.svg(svg, "text", { x: 520, y: 220, "font-size": 12, fill: "var(--c6)" }, "— 验证");
+        const gap = K.svg(svg, "text", { x: ax.sx(46), y: ax.sy(0.93), "font-size": 13, "font-weight": 700, fill: "var(--bad)" }, "");
+        ctx.tween(2200, (t) => { const n = Math.round(60 * t); let a = "", b = ""; for (let e = 0; e <= n; e++) { a += (a ? "L" : "M") + ax.sx(e) + "," + ax.sy(tr[e]); b += (b ? "L" : "M") + ax.sx(e) + "," + ax.sy(va[e]); } p1.setAttribute("d", a); p2.setAttribute("d", b); })
+          .then((ok) => { if (ok) gap.textContent = "↕ 差距拉开 = 过拟合"; });
+      },
+    },
+    {
+      title: "混淆矩阵：开心好认，难过和平静易混", kicker: "第 30–32 格 · 评估",
+      cells: [30, 31], highlight: ["plot_confusion_matrix", "classification_report"],
+      html: `<p>第 30 格用 <code>scikitplot</code> 画验证集的混淆矩阵，并打印判错总数和分类报告。</p><p>第 31 格作者结论：<b>开心类表现好，另外两类较差</b>；原因可能是这两类数据更少，而且有些图人也难分辨难过还是平静，表情也因人而异。<span data-cell="31">出处</span> 下图深浅为示意，不是真实数字。</p>`,
+      draw(svg, ctx) {
+        const names = ["开心", "难过", "平静"], M = [[0.9, 0.04, 0.06], [0.07, 0.62, 0.31], [0.06, 0.27, 0.67]];
+        const x0 = 200, y0 = 50, c = 82;
+        K.svg(svg, "text", { x: x0 + 1.5 * c, y: 36, "text-anchor": "middle", "font-size": 13, class: "muted" }, "模型判断 →");
+        K.svg(svg, "text", { x: 130, y: y0 + 1.5 * c, "text-anchor": "middle", "font-size": 13, class: "muted", transform: `rotate(-90 130 ${y0 + 1.5 * c})` }, "真实表情");
+        const cells = [];
+        names.forEach((n, i) => {
+          K.svg(svg, "text", { x: x0 - 10, y: y0 + i * c + c / 2 + 4, "text-anchor": "end", "font-size": 13 }, n);
+          K.svg(svg, "text", { x: x0 + i * c + c / 2, y: y0 + 3 * c + 20, "text-anchor": "middle", "font-size": 13 }, n);
+          names.forEach((m, j) => cells.push({ i, j, r: K.svg(svg, "rect", { x: x0 + j * c, y: y0 + i * c, width: c - 4, height: c - 4, rx: 6, fill: "var(--panel-2)", stroke: "var(--line)" }) }));
+        });
+        const ring = K.svg(svg, "rect", { x: x0 + c - 6, y: y0 + c - 6, width: 2 * c + 8, height: 2 * c + 8, rx: 10, fill: "none", stroke: "var(--warn)", "stroke-width": 3, "stroke-dasharray": "6 4" }); ring.style.opacity = 0;
+        K.svg(svg, "text", { x: 480, y: 120, "font-size": 13, "font-weight": 700, fill: "var(--good)" }, "对角线 = 判对");
+        const t2 = K.svg(svg, "text", { x: 480, y: 200, "font-size": 13, "font-weight": 700, fill: "var(--warn)" }, "黄框：难过 ↔ 平静 互相混淆"); t2.style.opacity = 0;
+        K.svg(svg, "text", { x: 480, y: 300, "font-size": 12, class: "muted" }, "颜色深浅为示意，真实数字在运行输出里");
+        ctx.tween(1200, (t) => cells.forEach((d) => (d.r.style.fill = `color-mix(in srgb, ${d.i === d.j ? "var(--c3)" : "var(--c6)"} ${Math.round(M[d.i][d.j] * 90 * t)}%, var(--panel-2))`)))
+          .then((ok) => ok && ctx.tween(500, (t) => (ring.style.opacity = t2.style.opacity = t)));
+      },
+    },
+    {
+      title: "看看难过和平静的样例", kicker: "第 33–34 格 · 看难例",
+      cells: [33, 34], highlight: ["random_sad_imgs", "random_neutral_imgs"],
+      html: `<p>第 33 格随机抽验证集中真实为“难过”“平静”的各 9 张，标出预测。第 34 格作者点评：第一行第 7 张看起来更像平静，模型也判为平静；第二行最后一张标为平静，却明显很难过。<b>部分“错误”其实是标注本身的歧义。</b></p>`,
+      draw(svg, ctx) {
+        const exprs = ["sad", "neutral"], preds = [["难过", "难过", "平静", "难过", "难过", "平静", "平静"], ["平静", "难过", "平静", "平静", "难过", "平静", "难过"]];
+        exprs.forEach((ex, row) => {
+          K.svg(svg, "text", { x: 20, y: 70 + row * 140, "font-size": 13, "font-weight": 700 }, row ? "真实：平静" : "真实：难过");
+          for (let k = 0; k < 7; k++) {
+            const x = 110 + k * 86, y = 30 + row * 140;
+            const e = PX.draw(svg, x, y, 72, 72, face(24, k % 3 === 2 ? (ex === "sad" ? "neutral" : "sad") : ex, 300 + row * 10 + k), "gray", 0, 1); e.style.opacity = 0;
+            const ok = (row === 0 && preds[0][k] === "难过") || (row === 1 && preds[1][k] === "平静");
+            const t = K.svg(svg, "text", { x: x + 36, y: y + 92, "text-anchor": "middle", "font-size": 12, fill: ok ? "var(--good)" : "var(--bad)" }, "预测 " + preds[row][k]); t.style.opacity = 0;
+            ctx.wait(120 * (row * 7 + k)).then((o) => o && ctx.tween(300, (tt) => (e.style.opacity = t.style.opacity = tt)));
+          }
+        });
+        K.svg(svg, "text", { x: 360, y: 330, "text-anchor": "middle", "font-size": 12, class: "muted" }, "示意：代码生成的脸，嘴角弧度只差一点；红字 = 与标签不一致");
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：激活函数、初始化、BN 对信号传播的影响 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 660, height: 340,
+    controls: [
+      { id: "act", label: "激活函数", value: "elu", options: [["relu", "ReLU"], ["elu", "ELU（作者的选择）"], ["leaky", "LeakyReLU(0.1)"]] },
+      { id: "init", label: "权重初始化", value: "he", options: [["he", "he_normal：标准差 √(2/输入数)"], ["small", "小随机数：标准差 0.01"], ["big", "偏大：标准差 √(6/输入数)"]] },
+      { id: "bn", label: "每层后接 BatchNorm 吗", value: "no", options: [["no", "不接"], ["yes", "接（每个神经元按这批数据标准化）"]] },
+      { id: "seed", label: "换一批随机权重", button: true },
+    ],
+    note: "浏览器里真算：6 层全连接网络，每层 128 个神经元，输入 200 个标准正态随机样本。柱高 = 该层输出的标准差（对数刻度），红色部分 = 对这 200 个样本输出全是 0 的“死神经元”比例。卷积层的道理相同，这里用全连接只是为了算得快。",
+    render(svg, v) {
+      const r = K.rng(5 + v.seed * 31), n = 128, B = 200, L = 6;
+      const act = v.act === "relu" ? (x) => (x > 0 ? x : 0) : v.act === "elu" ? (x) => (x > 0 ? x : Math.exp(x) - 1) : (x) => (x > 0 ? x : 0.1 * x);
+      const std = v.init === "he" ? Math.sqrt(2 / n) : v.init === "small" ? 0.01 : Math.sqrt(6 / n);
+      let X = Array.from({ length: B }, () => Float64Array.from({ length: n }, () => K.randn(r)));
+      const stats = [];
+      for (let l = 0; l < L; l++) {
+        const W = Array.from({ length: n }, () => Float64Array.from({ length: n }, () => K.randn(r) * std));
+        let Z = X.map((x) => { const z = new Float64Array(n); for (let j = 0; j < n; j++) { let s = 0; const w = W[j]; for (let i = 0; i < n; i++) s += w[i] * x[i]; z[j] = s; } return z; });
+        if (v.bn === "yes") for (let j = 0; j < n; j++) { let m = 0, q = 0; for (const z of Z) m += z[j]; m /= B; for (const z of Z) q += (z[j] - m) ** 2; const sd = Math.sqrt(q / B + 1e-5); for (const z of Z) z[j] = (z[j] - m) / sd; }
+        X = Z.map((z) => z.map(act));
+        let m = 0, q = 0, dead = 0;
+        for (const x of X) for (const a of x) m += a;
+        m /= B * n; for (const x of X) for (const a of x) q += (a - m) ** 2;
+        for (let j = 0; j < n; j++) { let alive = false; for (const x of X) if (Math.abs(x[j]) > 1e-12) { alive = true; break; } if (!alive) dead++; }
+        stats.push({ sd: Math.sqrt(q / (B * n)), dead: dead / n, frac0: X.reduce((s, x) => s + x.filter((a) => a === 0).length, 0) / (B * n) });
+      }
+      const lo = -6, hi = 1.5;
+      const ax = K.axes(svg, { x: 70, y: 20, w: 560, h: 240 }, [0, L], [lo, hi], { xticks: 0, yticks: 0 });
+      [-6, -4, -2, 0, 1].forEach((p) => { K.svg(svg, "line", { x1: 70, x2: 630, y1: ax.sy(p), y2: ax.sy(p), stroke: "var(--line)", "stroke-dasharray": "2 3" }); K.svg(svg, "text", { x: 64, y: ax.sy(p) + 4, "text-anchor": "end", "font-size": 11, class: "muted" }, "1e" + p); });
+      K.svg(svg, "text", { x: 74, y: 16, "font-size": 12, class: "muted" }, "各层输出的标准差（对数刻度）");
+      stats.forEach((s, l) => {
+        const x = ax.sx(l + 0.18), w = ax.sx(l + 0.82) - x, top = ax.sy(K.clamp(Math.log10(Math.max(s.sd, 1e-9)), lo, hi));
+        K.svg(svg, "rect", { x, y: top, width: w, height: ax.sy(lo) - top, rx: 3, fill: "var(--c4)", opacity: 0.8 });
+        if (s.dead > 0) K.svg(svg, "rect", { x, y: ax.sy(lo) - (ax.sy(lo) - top) * s.dead, width: w, height: (ax.sy(lo) - top) * s.dead, fill: "var(--bad)" });
+        K.svg(svg, "text", { x: x + w / 2, y: 280, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, "第 " + (l + 1) + " 层");
+        K.svg(svg, "text", { x: x + w / 2, y: 298, "text-anchor": "middle", "font-size": 11, class: "muted" }, "σ=" + (s.sd < 1e-3 ? s.sd.toExponential(0) : s.sd.toFixed(2)));
+        K.svg(svg, "text", { x: x + w / 2, y: 314, "text-anchor": "middle", "font-size": 11, fill: s.dead > 0 ? "var(--bad)" : "var(--ink-3)" }, "死 " + Math.round(s.dead * 100) + "%");
+      });
+      K.svg(svg, "text", { x: 70, y: 334, "font-size": 11, class: "muted" }, "紫色柱 = 信号强度；柱底红色 = 死神经元比例；“输出恰好为 0 的比例”见右侧指标");
+      const last = stats[L - 1];
+      return { readout: [
+        { k: "第 6 层输出标准差", v: last.sd < 1e-3 ? last.sd.toExponential(1) : last.sd.toFixed(3), color: last.sd < 0.05 ? "var(--bad)" : "var(--good)" },
+        { k: "第 6 层死神经元", v: Math.round(last.dead * 100) + "%", color: last.dead > 0 ? "var(--bad)" : "var(--good)" },
+        { k: "第 6 层输出恰为 0 的比例", v: Math.round(last.frac0 * 100) + "%" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：数据增强 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 660, height: 360,
+    controls: [
+      { id: "expr", label: "表情（代码生成的脸）", value: "happy", options: [["happy", "开心"], ["sad", "难过"], ["neutral", "平静"]] },
+      { id: "rot", label: "旋转角度（作者上限 ±15°）", min: -45, max: 45, step: 1, value: 0, fmt: (v) => v + "°" },
+      { id: "tx", label: "水平平移（作者上限 ±15%）", min: -0.3, max: 0.3, step: 0.01, value: 0, fmt: (v) => Math.round(v * 100) + "%" },
+      { id: "shear", label: "剪切强度（作者上限 0.15）", min: -0.4, max: 0.4, step: 0.01, value: 0, fmt: (v) => v.toFixed(2) },
+      { id: "zoom", label: "缩放（作者上限 ±15%）", min: 0.7, max: 1.3, step: 0.01, value: 1, fmt: (v) => "×" + v.toFixed(2) },
+      { id: "flip", label: "水平翻转", value: "no", options: [["no", "不翻转"], ["yes", "翻转"]] },
+      { id: "seed", label: "按作者的范围随机抽 6 张", button: true },
+    ],
+    note: "每个像素都按反向映射 + 双线性插值现场计算，出界的地方用最近的边缘像素填充（和 Keras 默认的 fill_mode='nearest' 一样）。下面一排 6 张是按作者第 24 格的参数范围随机抽的。",
+    render(svg, v) {
+      const base = face(48, v.expr, 7);
+      const p = { rot: v.rot, tx: v.tx, shear: v.shear, zoom: v.zoom, flip: v.flip === "yes" };
+      PX.draw(svg, 20, 30, 170, 170, base, "gray", 0, 1);
+      PX.draw(svg, 250, 30, 170, 170, PX.affine(base, p), "gray", 0, 1);
+      K.svg(svg, "text", { x: 105, y: 20, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "原图");
+      K.svg(svg, "text", { x: 335, y: 20, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "按滑块变换后");
+      K.arrow(svg, 198, 115, 244, 115);
+      const over = Math.abs(v.rot) > 15 || Math.abs(v.tx) > 0.15 || Math.abs(v.shear) > 0.15 || Math.abs(v.zoom - 1) > 0.15;
+      K.svg(svg, "text", { x: 450, y: 70, "font-size": 13, "font-weight": 700, fill: over ? "var(--warn)" : "var(--good)" }, over ? "已超出作者设定的范围" : "在作者设定的范围内");
+      K.svg(svg, "text", { x: 450, y: 96, "font-size": 12, class: "muted" }, "标签不变：仍然是“" + { happy: "开心", sad: "难过", neutral: "平静" }[v.expr] + "”");
+      K.svg(svg, "text", { x: 450, y: 120, "font-size": 12, class: "muted" }, "48×48 = 2,304 个像素逐个重算");
+      const r = K.rng(900 + v.seed * 17);
+      K.svg(svg, "text", { x: 20, y: 232, "font-size": 13, "font-weight": 700 }, "按作者范围随机抽样（rotation 15, shift 0.15, shear 0.15, zoom 0.15, 水平翻转）：");
+      for (let k = 0; k < 6; k++) {
+        const q = { rot: (r() * 2 - 1) * 15, tx: (r() * 2 - 1) * 0.15, ty: (r() * 2 - 1) * 0.15, shear: (r() * 2 - 1) * 0.15, zoom: 1 + (r() * 2 - 1) * 0.15, flip: r() < 0.5 };
+        PX.draw(svg, 20 + k * 106, 245, 96, 96, PX.affine(base, q), "gray", 0, 1);
+      }
+      return { readout: [
+        { k: "旋转", v: v.rot + "°" },
+        { k: "平移 / 剪切", v: Math.round(v.tx * 100) + "% / " + v.shear.toFixed(2) },
+        { k: "缩放", v: "×" + v.zoom.toFixed(2) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

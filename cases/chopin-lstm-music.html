@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LSTM 作曲</title>
+<meta name="description" content="Kaggle 案例拆解：把肖邦钢琴曲的 MIDI 拆成音符序列，用两层 LSTM 学“下一个音符是什么”，再一个音一个音地续写出新旋律。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">音乐序列 · 生成模型 · 下一个音符预测</div>
+  <h1>让 LSTM 学肖邦写曲子：一个音符接一个音符地续写</h1>
+  <p class="en">Music Generation: LSTM 🎹</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">MIDI 解析（music21）</span><span class="tag method">音符 / 和弦编码</span><span class="tag method">稀有音符过滤</span>
+    <span class="tag method">滑动窗口</span><span class="tag method">两层 LSTM</span><span class="tag method">softmax 逐步生成</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Karnika Kapoor</b></span>
+    <span>Kaggle 点赞 <b>1,880</b>（2026-11 抓取）</span>
+    <span>数据集 <b>soumikrakshit/classical-music-midi</b>（肖邦部分）</span>
+    <span><a href="https://www.kaggle.com/code/karnikakapoor/music-generation-lstm" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">肖邦钢琴曲的 MIDI 文件</div><p>MIDI 不是录音，而是“电子乐谱”：记录哪个键、什么时候按下。作者只用了数据集里肖邦文件夹的曲子。<span data-cell="3">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">看 40 个音符，猜第 41 个</div><p>把所有曲子接成一条长长的音符序列，每 40 个连续音符做题目，紧跟着的那个音符做答案。<span data-cell="24">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">两层 LSTM + softmax</div><p>LSTM（512）→ LSTM（256）→ 全连接（256）→ softmax 给每个音符打概率，训练 200 轮。<span data-cell="29">出处</span> <span data-cell="31">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">续写出 100 个音符的新旋律</div><p>从一段种子开始，每次把预测出的音符接到末尾再预测下一个。作者说“听起来确实像音乐”，还把生成的曲子发成了一张“专辑”。<span data-cell="36">出处</span> <span data-cell="40">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>Classical Music MIDI</b>（Kaggle 用户 soumikrakshit 上传），按作曲家分文件夹存放古典钢琴曲的 MIDI 文件。作者只读取 <code>chopin/</code> 文件夹 <span data-cell="4">第 4 格</span>。数据集说明里写明这些 MIDI 只含钢琴声部 <span data-cell="5">第 5 格</span>。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">使用的曲子</div><div class="v">肖邦文件夹全部 .mid</div></div>
+        <div class="stat-tile"><div class="k">乐器</div><div class="v">只有钢琴</div></div>
+        <div class="stat-tile"><div class="k">每道题的长度</div><div class="v" style="color:var(--c1)">40 个音符</div></div>
+        <div class="stat-tile"><div class="k">稀有音符门槛</div><div class="v" style="color:var(--c6)">出现 &lt; 100 次</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">音符总数、不重复音符数等作者用 <code>print</code> 打印在运行输出里 <span data-cell="6">第 6 格</span> <span data-cell="14">第 14 格</span> <span data-cell="22">第 22 格</span>，Kaggle 下载的源码不带输出，这里不写具体数字。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">一个“音符”长什么样</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>写法</th><th>含义</th><th>来源</th></tr>
+        <tr><td><code>E4</code>、<code>B-3</code></td><td>单个音：音名 + 第几个八度（<code>-</code> 表示降半音）</td><td><code>str(element.pitch)</code></td></tr>
+        <tr><td><code>4.9</code>、<code>0.4.7</code></td><td>和弦：几个同时按下的音，用 0–11 的“音级”编号，以点连接</td><td><code>normalOrder</code></td></tr>
+        <tr><td>第 41 个音符</td><td><b>要预测的答案</b>：紧跟在 40 个音符后面的那一个</td><td><span data-cell="24">第 24 格</span></td></tr>
+      </table></div>
+      <p class="note">表中写法来自作者代码里的转换规则 <span data-cell="6">第 6 格</span>，不是从数据里抄的样例。注意：只保留了“音高”，节奏（每个音多长）全部丢掉了。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="20">
+    <h3>动手试试 A · 边遍历边删除，会漏掉谁？ <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="35">
+    <h3>动手试试 B · 续写旋律：总挑最可能的 vs 按概率抽 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>语料里有些音符极少出现，会带来很多问题，所以去掉出现不到 100 次的音符</td><td><span data-cell="16">第 16 格</span> <span data-cell="18">第 18 格</span></td></tr>
+        <tr><td>生成的 100 个音符画成乐谱后“看起来确实像音乐”</td><td><span data-cell="36">第 36 格</span></td></tr>
+        <tr><td>对生成的旋律“相当满意”：音乐不像歌词那样必须守语法；是不是杰作作者说自己不懂，基础 RNN “效果还行”</td><td><span data-cell="40">第 40 格</span></td></tr>
+        <tr><td>把生成的曲子发布成博客上的“专辑”《Down The Uncanny Valley》</td><td><span data-cell="40">第 40 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">作者没有给出数字型的评估（损失值画在学习曲线图里，在运行输出中）。生成音乐本来就很难用一个分数衡量，作者的评估方式是“看乐谱、听一听”。</p>
+      <p class="callout">读代码发现的问题（不影响跑通，但会影响结果）：<br>① <b>边遍历边删除</b> <span data-cell="20">第 20 格</span>：在 <code>for element in Corpus</code> 里 <code>Corpus.remove(element)</code>，列表变短后下一个元素会被跳过，一部分稀有音符删不干净（见实验 A）。<br>② <b>“多样性”参数没起作用</b> <span data-cell="35">第 35 格</span>：概率先取对数除以 1.0 再变回来（等于没变），最后又用 <code>argmax</code> 只取最大值，所以生成过程完全确定，容易陷入重复（见实验 B）。<br>③ <b>和弦重复添加</b> <span data-cell="10">第 10 格</span>：<code>Melody.append(chord_snip)</code> 写在内层循环里，一个三音和弦会被加进去三次（含不完整的半个和弦）。<br>④ 输入把音符编号除以总数当成一个“大小”，相当于告诉网络 C4 比 D4“小”，这种编号本身没有大小关系，用 one-hot 或嵌入层更合理 <span data-cell="25">第 25 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>给一段开头，自动续写旋律；做作曲辅助、游戏背景音乐的变奏。</li>
+        <li><b>同类问题：</b>文字续写（同一作者还做过歌词生成）、代码补全、股票价格的逐步预测、DNA 序列建模，本质都是“根据前面猜下一个”。</li>
+        <li><b>可迁移的套路：</b>把序列切成词表 → 建“词 ↔ 编号”字典 → 滑动窗口造题 → 序列模型输出下一个词的概率 → 自回归地一步步生成，用温度控制保守还是冒险。</li>
+        <li><b>今天的大模型</b>（如 ChatGPT）生成文字，用的也是同一个“预测下一个词”的思路，只是模型换成了 Transformer、数据大了几个数量级。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>解析：music21 读 MIDI，取音符 / 和弦 <span data-cell="4">第 4 格</span> <span data-cell="6">第 6 格</span></li>
+        <li>探索：Counter 统计频次、直方图 <span data-cell="14">第 14 格</span> <span data-cell="17">第 17 格</span></li>
+        <li>清洗：去掉出现 &lt; 100 次的音符 <span data-cell="19">第 19 格</span></li>
+        <li>编码：字典映射、长度 40 滑窗、one-hot 目标 <span data-cell="22">第 22 格</span> <span data-cell="24">第 24 格</span></li>
+        <li>模型：LSTM 512 → LSTM 256 → Dense 256 → softmax，Adamax 0.01，batch 256，200 轮 <span data-cell="29">第 29 格</span> <span data-cell="31">第 31 格</span></li>
+        <li>生成：从 20% 的“种子”里随机挑一段，自回归生成 100 个音符 <span data-cell="27">第 27 格</span> <span data-cell="35">第 35 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者只保留了音高，扔掉了每个音的长短和力度。只靠音高，生成的音乐会缺少什么？你会怎么把节奏也加进来？</li>
+      <li>“出现不到 100 次就删掉”这条规则合理吗？肖邦作品里偶尔出现的特别和弦，会不会恰恰是他的风格所在？</li>
+      <li>生成时总挑概率最大的音符（argmax），结果为什么容易反复绕圈？“温度”调高、调低分别会怎样？</li>
+      <li>模型训练了 200 轮，又没有验证集。它有没有可能只是把肖邦的原句“背”下来再拼贴？怎么检验？</li>
+      <li>如果 AI 学了某位在世作曲家的全部作品，写出风格很像的新曲子，版权和署名应该怎么算？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Karnika Kapoor，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意；实验 B 的训练旋律是两段公有领域的旋律（《欢乐颂》主题、《小星星》），不是作者的肖邦数据。数据集：soumikrakshit/classical-music-midi。
+</footer>
+</main>
+
+<script src="nb/chopin-lstm-music.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  const NAMES = ["C", "C#", "D", "E-", "E", "F", "F#", "G", "G#", "A", "B-", "B"];
+  const midiName = (m) => NAMES[m % 12] + (Math.floor(m / 12) - 1);
+  /* 画钢琴卷帘：notes = [[midi, t]] */
+  function roll(svg, box, lo, hi, n) {
+    K.svg(svg, "rect", { x: box.x, y: box.y, width: box.w, height: box.h, fill: "var(--panel-2)", stroke: "var(--line)" });
+    const rh = box.h / (hi - lo + 1);
+    for (let m = lo; m <= hi; m++) if ([1, 3, 6, 8, 10].includes(m % 12)) K.svg(svg, "rect", { x: box.x, y: box.y + (hi - m) * rh, width: box.w, height: rh, fill: "var(--line)", opacity: 0.35 });
+    return { y: (m) => box.y + (hi - m) * rh, x: (t) => box.x + (t * box.w) / n, rh, cw: box.w / n };
+  }
+
+  const steps = [
+    {
+      at: 0, title: "开场：给 LSTM 发一张专辑", kicker: "第 0–3 格 · 安装与导入",
+      html: `<p>作者之前做过用 RNN 写歌词，这次把同样的思路搬到音乐上：给网络一串音符，让它猜下一个 <span data-cell="1">第 1 格</span>。她坦白自己不是音乐家，只懂一点乐理、会弹尤克里里。</p><p>开头先装 <code>music21</code>（MIT 开发的音乐分析库，能读写 MIDI、画乐谱）和画五线谱用的 <code>lilypond</code>，再导入 Keras 的 LSTM 等工具 <span data-cell="0">第 0 格</span> <span data-cell="2">第 2 格</span>。</p><p>动画：整个项目的流程。</p>`,
+      cells: [0, 1, 2], highlight: ["music21", "lilypond"],
+      draw(svg, ctx) {
+        const S = ["读 MIDI", "拆成音符", "删稀有音符", "编号 + 滑窗", "训练 LSTM", "续写旋律"];
+        const nodes = S.map((s, i) => { const g = K.node(svg, 20 + i * 117, 130, 100, 70, s, { fill: i === 4 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 4 ? "var(--accent)" : "var(--ink-3)" }); g.style.opacity = 0; return g; });
+        const arr = S.slice(1).map((_, i) => { const a = K.arrow(svg, 122 + i * 117, 165, 135 + i * 117, 165); a.style.opacity = 0; return a; });
+        K.svg(svg, "text", { x: 360, y: 260, "text-anchor": "middle", "font-size": 14 }, "♪ 作者给的流程：读数据 → 预处理 → 建字典 → 建模型 → 生成音乐");
+        (async () => { for (let i = 0; i < S.length; i++) { if (!(await ctx.tween(350, (t) => { nodes[i].style.opacity = t; if (i) arr[i - 1].style.opacity = t; }))) return; } })();
+      },
+    },
+    {
+      title: "读入肖邦的 MIDI 文件", kicker: "第 4–5 格 · 读数据",
+      html: `<p>作者遍历 <code>chopin/</code> 文件夹，把每个 <code>.mid</code> 文件用 <code>converter.parse</code> 解析成 music21 的“乐曲流”，放进列表 <code>all_midis</code> <span data-cell="4">第 4 格</span>。</p><p>MIDI 不存声音，存的是“按键记录”：几点几分按下哪个键、按多久、按多重。动画用<b>钢琴卷帘</b>来画：横轴是时间，纵轴是琴键高低，每个色块是一次按键（示意）。</p>`,
+      cells: [4], highlight: ["converter.parse", "chopin"],
+      draw(svg, ctx) {
+        const R = roll(svg, { x: 60, y: 30, w: 620, h: 260 }, 55, 79, 32);
+        for (let m = 55; m <= 79; m += 12) K.svg(svg, "text", { x: 54, y: R.y(m) + R.rh - 1, "text-anchor": "end", "font-size": 10, class: "muted" }, midiName(m));
+        const r = K.rng(3), blocks = [];
+        let m = 67;
+        for (let t = 0; t < 32; t++) {
+          m = K.clamp(m + Math.round(K.randn(r) * 2.2), 60, 77);
+          blocks.push(K.svg(svg, "rect", { x: R.x(t) + 1, y: R.y(m), width: R.cw * (1 + (r() < 0.3)) - 2, height: R.rh, rx: 2, fill: "var(--c1)", opacity: 0 }));
+          if (t % 4 === 0) blocks.push(K.svg(svg, "rect", { x: R.x(t) + 1, y: R.y(m - 12 + (r() < 0.5 ? 0 : -3)), width: R.cw * 4 - 2, height: R.rh, rx: 2, fill: "var(--c2)", opacity: 0 }));
+        }
+        K.svg(svg, "text", { x: 60, y: 316, "font-size": 12, class: "muted" }, "蓝 = 右手旋律，橙 = 左手低音（示意）");
+        const head = K.svg(svg, "line", { x1: 60, x2: 60, y1: 30, y2: 290, stroke: "var(--warn)", "stroke-width": 2 });
+        ctx.tween(3200, (t) => { const x = 60 + 620 * t; K.set(head, { x1: x, x2: x }); blocks.forEach((b) => { if (+b.getAttribute("x") <= x) b.style.opacity = 0.85; }); });
+      },
+    },
+    {
+      title: "把乐曲拆成一串“音符单词”", kicker: "第 6–7 格 · 提取音符和和弦",
+      html: `<p><code>extract_notes</code> 逐个读乐曲里的元素 <span data-cell="6">第 6 格</span>：</p><ul class="tight"><li>如果是<b>单个音</b>，记成音名 + 八度，如 <code>E4</code>；</li><li>如果是<b>和弦</b>（几个音同时按），把每个音换成 0–11 的音级编号，用点连起来，如 <code>4.9</code>。</li></ul><p>所有曲子首尾相接，得到一个长长的字符串列表 <code>Corpus</code>（语料）。每个字符串就像一个“单词”，后面整个问题就变成了“写句子”。注意这里只留了音高，<b>节奏和时值都丢了</b>。</p>`,
+      cells: [6], highlight: ["note.Note", "chord.Chord", "normalOrder"],
+      draw(svg, ctx) {
+        const items = [[[64], "E4"], [[67], "G4"], [[60, 64, 67], "0.4.7"], [[65], "F4"], [[62, 65, 69], "2.5.9"], [[64], "E4"], [[62], "D4"], [[60], "C4"]];
+        const R = roll(svg, { x: 40, y: 30, w: 640, h: 150 }, 58, 71, 8);
+        const els = [];
+        items.forEach((it, t) => {
+          it[0].forEach((m) => K.svg(svg, "rect", { x: R.x(t) + 6, y: R.y(m), width: R.cw - 12, height: R.rh, rx: 2, fill: it[0].length > 1 ? "var(--c2)" : "var(--c1)" }));
+          const g = K.node(svg, 40 + t * 80 + 4, 230, 72, 40, it[1], { bold: true, fill: it[0].length > 1 ? "color-mix(in srgb, var(--c2) 18%, var(--panel))" : "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: it[0].length > 1 ? "var(--c2)" : "var(--c1)" });
+          g.style.opacity = 0; els.push(g);
+        });
+        K.svg(svg, "text", { x: 40, y: 300, "font-size": 12, class: "muted" }, "蓝 = 单个音（音名+八度），橙 = 和弦（音级编号，C=0 … B=11）。示意，非真实乐句");
+        (async () => { for (const g of els) if (!(await ctx.tween(280, (t) => { g.style.opacity = t; g.setAttribute("transform", `translate(0,${(1 - t) * -40})`); }))) return; })();
+      },
+    },
+    {
+      title: "看看前 50 个音符，画成五线谱", kicker: "第 8–13 格 · 初看数据",
+      html: `<p>作者打印语料的前 50 个音符 <span data-cell="8">第 8 格</span>，再写了 <code>chords_n_notes</code> 把字符串还原成 music21 的音符和和弦，用 lilypond 画成五线谱 <span data-cell="10">第 10 格</span>。因为 Kaggle 网页上不能直接播 MIDI，她在本地转成了 wav 放上来试听 <span data-cell="11">第 11 格</span>。</p><p>还原时每个音符的 <code>offset</code>（出现时刻）都只加 1，所以所有音都一样长。另外细看代码：<code>Melody.append(chord_snip)</code> 写在了内层循环里，一个三音和弦会先后加入“1 个音、2 个音、3 个音”三个和弦（动画演示）。</p>`,
+      cells: [8, 10], highlight: ["offset += 1", "Melody.append(chord_snip)"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 36, "font-size": 14, "font-weight": 700 }, "把字符串 \"0.4.7\" 还原成和弦（第 10 格的循环）");
+        const lines = [];
+        for (let i = 0; i < 5; i++) lines.push(K.svg(svg, "line", { x1: 40, x2: 680, y1: 120 + i * 14, y2: 120 + i * 14, stroke: "var(--ink-3)" }));
+        const ys = [190, 176, 162];
+        const groups = [];
+        for (let k = 0; k < 3; k++) {
+          const g = K.svg(svg, "g"); g.style.opacity = 0;
+          for (let j = 0; j <= k; j++) K.svg(g, "ellipse", { cx: 140 + k * 170, cy: ys[j] - 50, rx: 9, ry: 7, fill: "var(--c2)" });
+          K.svg(g, "text", { x: 140 + k * 170, y: 250, "text-anchor": "middle", "font-size": 12 }, `第 ${k + 1} 次 append：${k + 1} 个音`);
+          groups.push(g);
+        }
+        const warn = K.svg(svg, "text", { x: 30, y: 300, "font-size": 13, fill: "var(--bad)" }, "本该只加 1 个三音和弦，结果加了 3 个（其中 2 个不完整）");
+        warn.style.opacity = 0;
+        (async () => { for (const g of groups) if (!(await ctx.tween(500, (t) => (g.style.opacity = t)))) return; await ctx.tween(400, (t) => (warn.style.opacity = t)); })();
+      },
+    },
+    {
+      title: "数一数：每个音符出现了几次", kicker: "第 14–18 格 · 频次分布",
+      html: `<p>用 <code>Counter</code> 统计每个音符 / 和弦出现的次数 <span data-cell="14">第 14 格</span>，再算平均出现次数、最多和最少的次数 <span data-cell="15">第 15 格</span>，最后画直方图 <span data-cell="17">第 17 格</span>。</p><p>作者发现：有些音符极少出现，<b>有的只出现过 1 次</b> <span data-cell="16">第 16 格</span>。这是典型的“长尾”：少数音符很常见，大量音符（尤其是各种和弦组合）很罕见。直方图上那条竖线画在 100 处，就是下一步的门槛。</p>`,
+      cells: [14, 15, 17], highlight: ["Counter(Corpus)", "axvline(x=100"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 230 }, [0, 30], [0, 1], { xticks: 0, yticks: 0, xlabel: "按出现次数从多到少排列的音符（示意）", ylabel: "出现次数" });
+        const v = []; for (let i = 0; i < 30; i++) v.push(1 / Math.pow(i + 1, 1.05));
+        const bars = v.map((h, i) => K.svg(svg, "rect", { x: ax.sx(i) + 2, y: ax.sy(0), width: 16, height: 0, fill: h * 1000 < 100 ? "var(--c6)" : "var(--c1)" }));
+        const th = K.svg(svg, "line", { x1: 60, x2: 660, y1: ax.sy(0.1), y2: ax.sy(0.1), stroke: "var(--warn)", "stroke-dasharray": "5 3", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 655, y: ax.sy(0.1) - 6, "text-anchor": "end", "font-size": 12, fill: "var(--warn)" }, "门槛：100 次");
+        K.svg(svg, "text", { x: 360, y: 316, "text-anchor": "middle", "font-size": 12, class: "muted" }, "红色 = 低于门槛的稀有音符：种类很多，但每种都很少");
+        ctx.tween(1600, (t) => bars.forEach((b, i) => K.set(b, { y: ax.sy(v[i] * t), height: ax.sy(0) - ax.sy(v[i] * t) })));
+      },
+    },
+    {
+      title: "删掉出现不到 100 次的稀有音符", kicker: "第 19–21 格 · 清洗",
+      html: `<p>作者的理由很直白：“如果肖邦喜欢它们，就会弹得更多” <span data-cell="18">第 18 格</span>。先列出出现不到 100 次的音符 <code>rare_note</code> <span data-cell="19">第 19 格</span>，再从语料里删掉 <span data-cell="20">第 20 格</span>。</p><p>为什么要删？每个音符都是输出层里的一个选项。只出现一两次的选项，网络几乎学不到它该什么时候出现，还会让输出层变大、训练变难。</p><p>但删除的写法有个经典陷阱：<code>for element in Corpus: Corpus.remove(element)</code>。<b>一边遍历列表一边删</b>，后面的元素往前挪一格，下一个元素就被跳过了。动画演示：两个相邻的红色稀有音符，第二个被“跳过”留了下来。下面的实验 A 可以真算一下漏掉多少。</p>`,
+      cells: [19, 20], highlight: ["value < 100", "Corpus.remove(element)"],
+      draw(svg, ctx) {
+        const L = ["E4", "x1", "x2", "G4", "C4", "x3", "D4", "x4", "x5", "x6", "A4"];
+        const rare = (s) => s[0] === "x";
+        let arr = L.map((s, i) => ({ s, el: K.node(svg, 30 + i * 60, 130, 52, 46, s, { fill: rare(s) ? "color-mix(in srgb, var(--c6) 20%, var(--panel))" : "var(--panel-2)", stroke: rare(s) ? "var(--c6)" : "var(--ink-3)" }) }));
+        const ptr = K.svg(svg, "path", { d: "M0,0 L-8,-14 L8,-14 Z", fill: "var(--accent)", transform: "translate(56,124)" });
+        const info = K.svg(svg, "text", { x: 30, y: 250, "font-size": 14 }, "");
+        K.svg(svg, "text", { x: 30, y: 60, "font-size": 13, class: "muted" }, "红色 x = 稀有音符；箭头 = for 循环当前读到的位置（Python 内部用一个下标往后走）");
+        arr.forEach((a, k) => (a.pos = k));
+        let px = 56;
+        (async () => {
+          let i = 0;
+          while (i < arr.length) {
+            const from = px, to = 56 + i * 60;
+            if (!(await ctx.tween(350, (t) => ptr.setAttribute("transform", `translate(${K.lerp(from, to, t)},124)`)))) return;
+            px = to;
+            const cur = arr[i]; i++;
+            if (rare(cur.s)) {
+              info.textContent = `读到 ${cur.s}：删掉它，后面的元素整体左移一格，下标却照常 +1`;
+              const j = arr.findIndex((a) => a.s === cur.s);
+              const gone = arr.splice(j, 1)[0];
+              if (!(await ctx.tween(300, (t) => (gone.el.style.opacity = 1 - t)))) return;
+              const old = arr.map((a) => a.pos);
+              if (!(await ctx.tween(350, (t) => arr.forEach((a, k) => a.el.setAttribute("transform", `translate(${(K.lerp(old[k], k, t) - L.indexOf(a.s)) * 60},0)`))))) return;
+              arr.forEach((a, k) => (a.pos = k));
+            } else info.textContent = `读到 ${cur.s}：不是稀有音符，跳过`;
+            if (!(await ctx.wait(350))) return;
+          }
+          const left = arr.filter((a) => rare(a.s)).map((a) => a.s);
+          info.textContent = `循环结束：仍然留下了 ${left.join("、")}（被“跳过”的稀有音符）`;
+          K.set(info, { fill: "var(--bad)" });
+        })();
+      },
+    },
+    {
+      title: "建字典：每个音符一个编号", kicker: "第 22–23 格 · 编码",
+      html: `<p>电脑只认数字，所以把所有不重复的音符排序，给每个一个编号：<code>mapping</code> 是“音符 → 编号”，<code>reverse_mapping</code> 是“编号 → 音符”，生成时用来翻译回去 <span data-cell="22">第 22 格</span>。</p><p>作者在第 21 格写的流程图也说明了这一步的位置：读数据 → 预处理 → <b>建映射字典</b> → 建模型 → 生成音乐。</p>`,
+      cells: [22], highlight: ["mapping = dict", "reverse_mapping"],
+      draw(svg, ctx) {
+        const toks = ["0.4.7", "2.5.9", "A4", "B-3", "C4", "D4", "E4", "G4"];
+        const rows = toks.map((s, i) => {
+          const a = K.node(svg, 120, 20 + i * 38, 110, 32, s, { fill: "var(--panel-2)", stroke: "var(--ink-3)" });
+          const b = K.node(svg, 470, 20 + i * 38, 70, 32, String(i), { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+          const l1 = K.arrow(svg, 234, 36 + i * 38, 466, 36 + i * 38, { color: "var(--c1)" });
+          [b, l1].forEach((e) => (e.style.opacity = 0));
+          return [b, l1];
+        });
+        K.svg(svg, "text", { x: 175, y: 334, "text-anchor": "middle", "font-size": 12 }, "音符（排好序）");
+        K.svg(svg, "text", { x: 505, y: 334, "text-anchor": "middle", "font-size": 12 }, "编号");
+        K.svg(svg, "text", { x: 350, y: 334, "text-anchor": "middle", "font-size": 12, class: "muted" }, "mapping →   ← reverse_mapping");
+        (async () => { for (const r of rows) if (!(await ctx.tween(220, (t) => r.forEach((e) => (e.style.opacity = t))))) return; })();
+      },
+    },
+    {
+      title: "滑动窗口：40 个音符出一道题", kicker: "第 24–26 格 · 造训练样本",
+      html: `<p>把整条语料切成一道道题：第 1–40 个音符是题目，第 41 个是答案；然后窗口往后挪 1 格，第 2–41 个是题目，第 42 个是答案……<span data-cell="24">第 24 格</span>。</p><p>输入 <code>X</code> 被整理成（题数, 40, 1）的形状，并把编号除以音符总数缩到 0–1；答案 <code>y</code> 做成 <b>one-hot</b>：一长排 0，只有正确音符的位置是 1 <span data-cell="25">第 25 格</span>。</p><p>小问题：把编号直接当成“大小”喂进去，等于告诉网络“编号 3 的音符比编号 2 的大一点”，其实编号只是按字母排序随便给的。</p>`,
+      cells: [24, 25], highlight: ["length = 40", "to_categorical"],
+      draw(svg, ctx) {
+        const N = 16, W = 40;
+        const seq = []; const r = K.rng(7); for (let i = 0; i < N; i++) seq.push(Math.floor(r() * 9));
+        seq.forEach((v, i) => { K.svg(svg, "rect", { x: 20 + i * W, y: 80, width: W - 4, height: 40, rx: 4, fill: "var(--panel-2)", stroke: "var(--ink-3)" }); K.svg(svg, "text", { x: 20 + i * W + 18, y: 105, "text-anchor": "middle", "font-size": 13, "font-family": "var(--mono)" }, String(v)); });
+        const win = K.svg(svg, "rect", { x: 16, y: 74, width: 6 * W, height: 52, rx: 6, fill: "var(--c1)", "fill-opacity": 0.12, stroke: "var(--c1)", "stroke-width": 2 });
+        const tgt = K.svg(svg, "rect", { x: 16 + 6 * W, y: 74, width: W, height: 52, rx: 6, fill: "var(--c6)", "fill-opacity": 0.15, stroke: "var(--c6)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 20, y: 60, "font-size": 13, fill: "var(--c1)" }, "题目（真实长度 40，这里画 6）");
+        K.svg(svg, "text", { x: 20, y: 160, "font-size": 13, fill: "var(--c6)" }, "答案 → one-hot：");
+        const oh = []; for (let k = 0; k < 9; k++) oh.push(K.svg(svg, "rect", { x: 140 + k * 34, y: 145, width: 30, height: 24, rx: 3, fill: "var(--panel-2)", stroke: "var(--line)" }));
+        const ohT = []; for (let k = 0; k < 9; k++) ohT.push(K.svg(svg, "text", { x: 155 + k * 34, y: 162, "text-anchor": "middle", "font-size": 12, "font-family": "var(--mono)" }, "0"));
+        const cnt = K.svg(svg, "text", { x: 20, y: 230, "font-size": 14 }, "");
+        (async () => {
+          for (let s = 0; s + 6 < N; s++) {
+            const ans = seq[s + 6];
+            oh.forEach((o, k) => K.set(o, { fill: k === ans ? "var(--c6)" : "var(--panel-2)" }));
+            ohT.forEach((o, k) => (o.textContent = k === ans ? "1" : "0"));
+            cnt.textContent = `第 ${s + 1} 道题：看 [${seq.slice(s, s + 6).join(", ")}]，答案是 ${ans}`;
+            if (!(await ctx.tween(500, (t) => { K.set(win, { x: 16 + (s + t) * W }); K.set(tgt, { x: 16 + (s + 6 + t) * W }); }))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "切出 20% 当“种子”", kicker: "第 27–28 格 · 划分",
+      html: `<p>用 <code>train_test_split</code> 切出 20% 的题目 <span data-cell="27">第 27 格</span>。但这 20% 不是用来考试的测试集，作者叫它 <b>seed（种子）</b>：生成音乐时，从里面随机挑一段 40 个音符当“开头”，让模型往下续写。</p><p>值得想一想：窗口每次只挪 1 格，相邻两道题有 39 个音符是重叠的。随机切分后，种子里的片段和训练题目几乎一模一样，所以它也起不到“没见过的数据”的作用。</p>`,
+      cells: [27], highlight: ["test_size=0.2"],
+      draw(svg, ctx) {
+        const r = K.rng(4), cells = [];
+        for (let i = 0; i < 50; i++) cells.push({ seed: r() < 0.2, el: K.svg(svg, "rect", { x: 40 + (i % 25) * 26, y: 70 + Math.floor(i / 25) * 60, width: 22, height: 40, rx: 3, fill: "var(--c1)", opacity: 0.7 }) });
+        K.svg(svg, "text", { x: 40, y: 50, "font-size": 13 }, "每个小块 = 一道 40 音符的题（示意）");
+        K.svg(svg, "text", { x: 40, y: 240, "font-size": 13, fill: "var(--c1)" }, "■ 80% 训练");
+        K.svg(svg, "text", { x: 160, y: 240, "font-size": 13, fill: "var(--warn)" }, "■ 20% 种子：生成时挑一段当开头");
+        K.svg(svg, "text", { x: 40, y: 290, "font-size": 12, class: "muted" }, "相邻的题只差 1 个音符，所以种子和训练题高度重叠");
+        ctx.wait(500).then((ok) => ok && ctx.tween(900, (t) => cells.forEach((c) => c.seed && K.set(c.el, { fill: "var(--warn)", y: +c.el.getAttribute("y") + (t > 0.99 ? 0 : 0) }))));
+      },
+    },
+    {
+      title: "两层 LSTM：边读边记笔记", kicker: "第 29–32 格 · 建模与训练",
+      html: `<p>模型 <span data-cell="29">第 29 格</span>：</p><ul class="tight"><li><code>LSTM(512, return_sequences=True)</code>：第一层读 40 个音符，每一步都输出一份“读后感”给下一层；</li><li><code>LSTM(256)</code>：第二层读完整段，只交出最后的总结；</li><li><code>Dense(256)</code> + <code>Dropout(0.1)</code>，最后 <code>Dense(音符种数, softmax)</code> 给每个音符一个概率。</li></ul><p>损失用分类交叉熵，优化器 Adamax（学习率 0.01），每批 256 道题，训练 200 轮 <span data-cell="31">第 31 格</span>。<b>LSTM</b> 的特别之处是有“门”：决定哪些旧信息继续记着、哪些可以忘掉。</p>`,
+      cells: [29, 31], highlight: ["LSTM(512", "LSTM(256)", "softmax", "epochs=200"],
+      draw(svg, ctx) {
+        const n = 6, xs = (i) => 70 + i * 100;
+        const cellsL = [], mem = [];
+        for (let i = 0; i < n; i++) {
+          K.node(svg, xs(i) - 22, 270, 44, 30, ["E4", "G4", "C4", "E4", "D4", "…"][i], {});
+          cellsL.push(K.node(svg, xs(i) - 34, 160, 68, 60, "LSTM", { fill: "var(--panel-2)", stroke: "var(--c1)" }));
+          K.arrow(svg, xs(i), 268, xs(i), 222);
+          if (i) mem.push(K.arrow(svg, xs(i - 1) + 36, 190, xs(i) - 36, 190, { color: "var(--c3)" }));
+        }
+        K.svg(svg, "text", { x: 70, y: 150, "font-size": 12, fill: "var(--c3)" }, "绿色箭头：记忆（细胞状态）一路往后传");
+        const out = K.node(svg, 600, 40, 100, 60, "softmax\n下一个音符", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        K.arrow(svg, xs(5), 158, 640, 102);
+        const bars = []; const p = [0.05, 0.4, 0.1, 0.25, 0.08, 0.12];
+        p.forEach((v, k) => bars.push(K.svg(svg, "rect", { x: 420 + k * 26, y: 100, width: 20, height: 0, fill: k === 1 ? "var(--c6)" : "var(--ink-3)" })));
+        K.svg(svg, "text", { x: 420, y: 118, "font-size": 11, class: "muted" }, "各音符的概率（示意）");
+        (async () => {
+          for (let i = 0; i < n; i++) if (!(await ctx.tween(300, (t) => K.set(cellsL[i].querySelector("rect"), { fill: `color-mix(in srgb, var(--c1) ${Math.round(t * 40)}%, var(--panel-2))` })))) return;
+          await ctx.tween(700, (t) => bars.forEach((b, k) => K.set(b, { y: 100 - p[k] * 120 * t, height: p[k] * 120 * t })));
+        })();
+      },
+    },
+    {
+      title: "学习曲线：损失越练越低", kicker: "第 33–34 格 · 评估",
+      html: `<p>作者把训练时每一轮的损失画成曲线 <span data-cell="33">第 33 格</span>。曲线一路下降，说明模型越来越会“猜下一个音符”。</p><p>但这里<b>只有训练损失</b>，没有在没见过的曲子上测试。损失很低可能只说明它把肖邦的原句背熟了。具体数值在运行输出的图里，这里不列。动画曲线是示意。</p>`,
+      cells: [33], highlight: ["history_df[\"loss\"]"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 580, h: 240 }, [0, 200], [0, 1], { xticks: 4, yticks: 0, xlabel: "训练轮数（epoch）", ylabel: "训练损失（示意）" });
+        const p = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const r = K.rng(5), f = (e) => 0.08 + 0.85 * Math.exp(-e / 35) + (r() - 0.5) * 0.02;
+        const pts = []; for (let e = 0; e <= 200; e += 2) pts.push([e, f(e)]);
+        ctx.tween(2400, (t) => { let d = ""; pts.forEach((q) => { if (q[0] <= 200 * t) d += (d ? "L" : "M") + ax.sx(q[0]) + "," + ax.sy(q[1]); }); p.setAttribute("d", d); });
+        K.svg(svg, "text", { x: 400, y: 70, "font-size": 13, fill: "var(--warn)" }, "只看训练损失：背熟了也会很低");
+      },
+    },
+    {
+      title: "一个音一个音地续写", kicker: "第 35–36 格 · 生成旋律",
+      html: `<p><code>Malody_Generator</code>（作者拼成了 Malody）<span data-cell="35">第 35 格</span>：</p><ol class="tight"><li>从种子里随机挑一段 40 个音符；</li><li>让模型给所有音符打概率，<b>挑一个</b>；</li><li>把挑中的音符接到末尾，扔掉最前面的一个，窗口往前滑；</li><li>重复 100 次，再用 <code>chords_n_notes</code> 变回乐谱。</li></ol><p>这种“用自己刚写的接着写”的方式叫<b>自回归生成</b>。代码里有一行注释写着 diversity（多样性），本意是用“温度”调节随机程度，但除以的是 1.0，而且最后用 <code>argmax</code> 永远挑最大的那个，所以同一个开头每次都生成完全一样的曲子。实验 B 可以对比两种挑法。</p>`,
+      cells: [35], highlight: ["/ 1.0 #diversity", "np.argmax(prediction)", "seed = seed[1:]"],
+      draw(svg, ctx) {
+        const W = 44, n = 9;
+        const toks = ["C4", "E4", "G4", "E4", "C4", "D4", "F4"];
+        const gen = ["A4", "G4", "F4", "E4", "D4", "C4"];
+        const boxes = [];
+        const add = (s, i, c) => { const g = K.node(svg, 30 + i * (W + 6), 120, W, 40, s, { fill: c ? "color-mix(in srgb, var(--c6) 20%, var(--panel))" : "var(--panel-2)", stroke: c ? "var(--c6)" : "var(--ink-3)" }); boxes.push(g); return g; };
+        toks.forEach((s, i) => add(s, i, false));
+        const win = K.svg(svg, "rect", { x: 26, y: 112, width: 7 * (W + 6), height: 56, rx: 6, fill: "none", stroke: "var(--c1)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+        K.svg(svg, "text", { x: 30, y: 100, "font-size": 12, fill: "var(--c1)" }, "当前窗口（真实是 40 个）");
+        const model = K.node(svg, 300, 220, 140, 50, "LSTM → argmax", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        K.svg(svg, "text", { x: 30, y: 320, "font-size": 12, class: "muted" }, "红色 = 模型自己写出来的音符，又被当成下一步的输入（示意）");
+        (async () => {
+          for (let k = 0; k < gen.length; k++) {
+            if (!(await ctx.tween(350, (t) => K.set(model.querySelector("rect"), { "stroke-width": 1 + 3 * Math.sin(t * Math.PI) })))) return;
+            const g = add(gen[k], toks.length + k, true);
+            g.style.opacity = 0;
+            if (!(await ctx.tween(350, (t) => (g.style.opacity = t)))) return;
+            if (toks.length + k + 1 > n + 3) break;
+            if (!(await ctx.tween(350, (t) => K.set(win, { x: 26 + (k + t) * (W + 6) })))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "听一听，发张专辑", kicker: "第 37–40 格 · 结果与结论",
+      html: `<p>生成的 100 个音符画成乐谱，作者说“看起来确实像音乐” <span data-cell="36">第 36 格</span>，再保存成 MIDI，并放了两段她在本地转好的 wav 试听 <span data-cell="37">第 37 格</span> <span data-cell="39">第 39 格</span>。</p><p>结论 <span data-cell="40">第 40 格</span>：对结果“相当满意”；音乐不像歌词那样必须遵守语法；是不是好作品她说自己不是行家，但基础 RNN 效果还行。最后她把这些曲子在博客上发成了一张名为 <i>Down The Uncanny Valley</i>（“走下恐怖谷”）的专辑。</p>`,
+      cells: [37, 39],
+      draw(svg, ctx) {
+        K.svg(svg, "circle", { cx: 200, cy: 170, r: 120, fill: "var(--ink)", opacity: 0.9 });
+        for (let k = 1; k < 6; k++) K.svg(svg, "circle", { cx: 200, cy: 170, r: 30 + k * 16, fill: "none", stroke: "var(--panel-2)", opacity: 0.4 });
+        const lab = K.svg(svg, "circle", { cx: 200, cy: 170, r: 28, fill: "var(--accent)" });
+        const g = K.svg(svg, "g");
+        K.svg(g, "line", { x1: 200, y1: 170, x2: 200, y2: 60, stroke: "var(--c6)", "stroke-width": 3 });
+        K.svg(svg, "text", { x: 360, y: 120, "font-size": 20, "font-weight": 700 }, "Down The Uncanny Valley");
+        K.svg(svg, "text", { x: 360, y: 150, "font-size": 14 }, "作曲：两层 LSTM");
+        K.svg(svg, "text", { x: 360, y: 176, "font-size": 14 }, "训练素材：肖邦钢琴曲 MIDI");
+        K.svg(svg, "text", { x: 360, y: 220, "font-size": 12, class: "muted" }, "作者在博客上发布的“专辑”（示意封面）");
+        ctx.tween(4000, (t) => g.setAttribute("transform", `rotate(${t * 720} 200 170)`));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：边遍历边删除 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "th", label: "稀有门槛：出现少于几次就删", min: 2, max: 60, step: 1, value: 20 },
+      { id: "zipf", label: "长尾程度（越大，稀有音符越多）", min: 0.6, max: 1.6, step: 0.05, value: 1.1, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "重新生成语料", button: true },
+    ],
+    note: "随机生成一份 4000 个“音符”的语料（60 种音符，出现频率呈长尾分布），然后分别用两种写法删除稀有音符：作者的 for … remove 写法（逐步模拟 Python 列表的真实行为），和正确写法 [x for x in Corpus if x not in rare]。",
+    render(svg, v) {
+      const r = K.rng(900 + v.seed * 7), S = 60, N = 4000;
+      const w = []; let tot = 0; for (let i = 0; i < S; i++) { w.push(1 / Math.pow(i + 1, v.zipf)); tot += w[i]; }
+      const corpus = [];
+      for (let k = 0; k < N; k++) { let u = r() * tot, i = 0; while (u > w[i] && i < S - 1) { u -= w[i]; i++; } corpus.push(i); }
+      // 随机打乱顺序，模拟音乐里音符交错出现
+      const cnt = new Array(S).fill(0); corpus.forEach((x) => cnt[x]++);
+      const rare = new Set(); cnt.forEach((c, i) => { if (c > 0 && c < v.th) rare.add(i); });
+      // 作者的写法：for element in Corpus: if element in rare: Corpus.remove(element)
+      const L = corpus.slice(); let i = 0;
+      while (i < L.length) { const e = L[i]; i++; if (rare.has(e)) { const j = L.indexOf(e); L.splice(j, 1); } }
+      const good = corpus.filter((x) => !rare.has(x));
+      const leftRare = L.filter((x) => rare.has(x)).length;
+      const leftKinds = new Set(L.filter((x) => rare.has(x))).size;
+      const rareTokens = N - good.length;
+      // 画每种音符的计数：原始 / 作者写法后
+      const cnt2 = new Array(S).fill(0); L.forEach((x) => cnt2[x]++);
+      const ax = K.axes(svg, { x: 50, y: 20, w: 570, h: 250 }, [0, S], [0, Math.log10(N)], { xticks: 0, yticks: 3, yfmt: (y) => Math.round(Math.pow(10, y)), xlabel: "60 种音符，按出现次数从多到少（纵轴是对数刻度）" });
+      const bw = 570 / S;
+      for (let k = 0; k < S; k++) {
+        if (cnt[k] > 0) K.svg(svg, "rect", { x: ax.sx(k) + 1, y: ax.sy(Math.log10(cnt[k] + 1)), width: bw - 2, height: ax.sy(0) - ax.sy(Math.log10(cnt[k] + 1)), fill: rare.has(k) ? "var(--c6)" : "var(--c1)", opacity: 0.25 });
+        if (cnt2[k] > 0) K.svg(svg, "rect", { x: ax.sx(k) + 1, y: ax.sy(Math.log10(cnt2[k] + 1)), width: bw - 2, height: ax.sy(0) - ax.sy(Math.log10(cnt2[k] + 1)), fill: rare.has(k) ? "var(--c6)" : "var(--c1)" });
+      }
+      K.svg(svg, "line", { x1: 50, x2: 620, y1: ax.sy(Math.log10(v.th + 1)), y2: ax.sy(Math.log10(v.th + 1)), stroke: "var(--warn)", "stroke-dasharray": "5 3" });
+      K.svg(svg, "text", { x: 615, y: ax.sy(Math.log10(v.th + 1)) - 5, "text-anchor": "end", "font-size": 11, fill: "var(--warn)" }, "门槛");
+      K.svg(svg, "text", { x: 50, y: 322, "font-size": 11, class: "muted" }, "浅色 = 原始次数；深色 = 用作者写法删完后剩下的次数。红色 = 稀有音符，理想情况下深红应该全部消失");
+      return { readout: [
+        { k: "稀有音符种类 / 出现次数", v: `${rare.size} 种 / ${rareTokens} 次` },
+        { k: "作者写法后还剩（应为 0）", v: `${leftRare} 次（${leftKinds} 种）`, color: leftRare ? "var(--bad)" : "var(--good)" },
+        { k: "正确写法后还剩", v: "0 次", color: "var(--good)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：n 元模型续写 + 温度 ---------- */
+  const P = (s) => s.trim().split(/\s+/).map((x) => { const m = x.match(/^([A-G])(#?)(\d)$/); const base = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 }[m[1]]; return 12 * (+m[3] + 1) + base + (m[2] ? 1 : 0); });
+  const ODE = P("E4 E4 F4 G4 G4 F4 E4 D4 C4 C4 D4 E4 E4 D4 D4 E4 E4 F4 G4 G4 F4 E4 D4 C4 C4 D4 E4 D4 C4 C4 D4 D4 E4 C4 D4 E4 F4 E4 C4 D4 E4 F4 E4 D4 C4 D4 G3 E4 E4 F4 G4 G4 F4 E4 D4 C4 C4 D4 E4 D4 C4 C4");
+  const TWINKLE = P("C4 C4 G4 G4 A4 A4 G4 F4 F4 E4 E4 D4 D4 C4 G4 G4 F4 F4 E4 E4 D4 G4 G4 F4 F4 E4 E4 D4 C4 C4 G4 G4 A4 A4 G4 F4 F4 E4 E4 D4 D4 C4");
+  const TRAIN = ODE.concat(TWINKLE);
+  let lastPlay = 0, actx = null;
+  function play(notes) {
+    try {
+      actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+      const t0 = actx.currentTime + 0.05;
+      notes.forEach((m, i) => {
+        const o = actx.createOscillator(), g = actx.createGain();
+        o.type = "triangle"; o.frequency.value = 440 * Math.pow(2, (m - 69) / 12);
+        g.gain.setValueAtTime(0.0001, t0 + i * 0.28); g.gain.exponentialRampToValueAtTime(0.25, t0 + i * 0.28 + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0 + i * 0.28 + 0.26);
+        o.connect(g).connect(actx.destination); o.start(t0 + i * 0.28); o.stop(t0 + i * 0.28 + 0.27);
+      });
+    } catch (e) { /* 没有声音设备时静默 */ }
+  }
+  K.lab(document.getElementById("lab2"), {
+    width: 660, height: 360,
+    controls: [
+      { id: "ord", label: "看前面几个音符（上下文长度）", value: "2", options: [["1", "1 个"], ["2", "2 个"], ["3", "3 个"]] },
+      { id: "temp", label: "温度（0 = 作者的 argmax，总挑最大）", min: 0, max: 2, step: 0.05, value: 0, fmt: (v) => (v === 0 ? "0（argmax）" : v.toFixed(2)) },
+      { id: "seed", label: "换一个随机开头 / 重新抽", button: true },
+      { id: "play", label: "▶ 播放生成的旋律", button: true },
+    ],
+    note: "这里用最简单的“n 元模型”代替 LSTM：数一数训练旋律里“某几个音后面跟着什么音”，得到下一个音的概率表，再像作者那样一步步续写 32 个音。训练旋律：《欢乐颂》主题和《小星星》（公有领域）。温度 > 0 时按 p^(1/温度) 重新归一化后随机抽。",
+    render(svg, v) {
+      const k = +v.ord, r = K.rng(31 + v.seed * 17);
+      const table = new Map();
+      for (let i = 0; i + k < TRAIN.length; i++) { const key = TRAIN.slice(i, i + k).join(","); if (!table.has(key)) table.set(key, new Map()); const m = table.get(key); m.set(TRAIN[i + k], (m.get(TRAIN[i + k]) || 0) + 1); }
+      const st = Math.floor(r() * (TRAIN.length - k));
+      const out = TRAIN.slice(st, st + k);
+      let backoff = 0;
+      for (let s = 0; s < 32; s++) {
+        let m = table.get(out.slice(-k).join(","));
+        if (!m) { backoff++; m = table.get(TRAIN.slice(0, k).join(",")); }
+        const ent = [...m.entries()], tot = ent.reduce((a, e) => a + e[1], 0);
+        let pick;
+        if (v.temp === 0) pick = ent.reduce((a, e) => (e[1] > a[1] ? e : a))[0];
+        else { const w = ent.map((e) => Math.pow(e[1] / tot, 1 / v.temp)), sw = w.reduce((a, b) => a + b, 0); let u = r() * sw, j = 0; while (u > w[j] && j < w.length - 1) { u -= w[j]; j++; } pick = ent[j][0]; }
+        out.push(pick);
+      }
+      const gen = out.slice(k);
+      if (v.play !== lastPlay) { lastPlay = v.play; play(out); }
+      const R = roll(svg, { x: 50, y: 20, w: 590, h: 240 }, 55, 70, out.length);
+      for (let m = 55; m <= 70; m++) if (m % 12 === 0 || m % 12 === 7) K.svg(svg, "text", { x: 44, y: R.y(m) + R.rh - 2, "text-anchor": "end", "font-size": 10, class: "muted" }, midiName(m));
+      out.forEach((m, i) => K.svg(svg, "rect", { x: R.x(i) + 1, y: R.y(m), width: R.cw - 2, height: R.rh, rx: 2, fill: i < k ? "var(--c3)" : "var(--c1)" }));
+      // 统计：重复片段、和训练集重合
+      let copied = 0; const trainStr = "," + TRAIN.join(",") + ",";
+      for (let i = 0; i + 4 <= gen.length; i++) if (trainStr.includes("," + gen.slice(i, i + 4).join(",") + ",")) copied++;
+      let period = 0;
+      for (let p = 1; p <= 12 && !period; p++) { let ok = true; for (let i = gen.length - 12; i < gen.length; i++) if (gen[i] !== gen[i - p]) { ok = false; break; } if (ok) period = p; }
+      K.svg(svg, "text", { x: 50, y: 290, "font-size": 12 }, "生成的音符：" + gen.slice(0, 16).map(midiName).join(" ") + " …");
+      K.svg(svg, "text", { x: 50, y: 312, "font-size": 11, class: "muted" }, "绿 = 随机挑的开头（种子），蓝 = 续写的 32 个音");
+      return { readout: [
+        { k: "不同音高种数", v: String(new Set(gen).size) },
+        { k: "结尾陷入循环？", v: period ? `是，每 ${period} 个音重复` : "否", color: period ? "var(--bad)" : "var(--good)" },
+        { k: "4 音片段与训练旋律重合", v: Math.round((100 * copied) / (gen.length - 3)) + "%", color: "var(--ink-3)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

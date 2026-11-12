@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>心脏病模型解释</title>
+<meta name="description" content="Kaggle 案例拆解：用随机森林预测心脏病，再用置换重要性、部分依赖图和 SHAP 值打开黑箱，看模型凭什么下判断。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格数据 · 二分类 · 可解释机器学习</div>
+  <h1>心脏病诊断：打开随机森林的黑箱</h1>
+  <p class="en">What Causes Heart Disease? Explaining the Model</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">哑变量编码</span><span class="tag method">随机森林</span><span class="tag method">决策树可视化</span>
+    <span class="tag method">敏感度 / 特异度</span><span class="tag method">ROC-AUC</span><span class="tag method">置换重要性</span>
+    <span class="tag method">部分依赖图 PDP</span><span class="tag method">SHAP 值</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Rob Harrand（tentotheminus9）</b></span>
+    <span>Kaggle 点赞 <b>2,386</b>（2026-11 抓取）</span>
+    <span>数据集 <b>UCI Heart Disease（heart.csv）</b></span>
+    <span><a href="https://www.kaggle.com/code/tentotheminus9/what-causes-heart-disease-explaining-the-model" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">303 名就诊者的检查结果</div><p>UCI 心脏病数据（Cleveland 部分，数据集说明）。13 个特征：年龄、性别、胸痛类型、静息血压、胆固醇、空腹血糖、静息心电图、最大心率、运动诱发心绞痛、ST 段压低、ST 斜率、主要血管数、地中海贫血检查结果。</p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">是否患心脏病（target）</div><p>但这本 notebook 的重点不是分数，而是回答：<b>模型凭什么这么判断？</b>医疗场景里，没有理由的“黑箱”结论很难被医生和病人接受。<span data-cell="4">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">随机森林 + 三种解释工具</div><p>先训练一个最大深度 5 的随机森林；再用<b>置换重要性</b>看哪些特征重要、<b>部分依赖图</b>看特征怎样影响预测、<b>SHAP 值</b>看每个病人的每个特征各推高或拉低了多少。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">两个病人：36% 和 70%（基线 58.4%）</div><p>作者用 SHAP 解释单个病人：一位的预测概率 36%，另一位 70%，平均基线 58.4%，并说出各自的主要因素。<span data-cell="68">出处</span> <span data-cell="70">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>UCI Heart Disease</b>（Cleveland 部分，Kaggle 上的 <code>heart.csv</code>）。规模来自数据集说明；字段含义来自作者第 12 格的整理。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">就诊者（行）</div><div class="v">303</div></div>
+        <div class="stat-tile"><div class="k">特征数</div><div class="v">13</div></div>
+        <div class="stat-tile"><div class="k">测试集比例</div><div class="v">20%</div></div>
+        <div class="stat-tile"><div class="k">SHAP 基线（作者文字）</div><div class="v">58.4%</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">字段说明见第 12 格 <span data-cell="12">出处</span>；测试集 20% 见第 29 格 <span data-cell="29">出处</span>；基线 58.4% 见第 68 格 <span data-cell="68">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>原列名 → 新列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>age</code></td><td>年龄</td><td>数值</td></tr>
+        <tr><td><code>sex</code></td><td>性别（1 = 男）</td><td>类别</td></tr>
+        <tr><td><code>cp</code> → chest_pain_type</td><td>胸痛类型（典型心绞痛 / 非典型 / 非心绞痛 / 无症状）</td><td>类别</td></tr>
+        <tr><td><code>trestbps</code></td><td>静息血压（mm Hg）</td><td>数值</td></tr>
+        <tr><td><code>chol</code></td><td>胆固醇（mg/dl）</td><td>数值</td></tr>
+        <tr><td><code>fbs</code></td><td>空腹血糖是否 &gt; 120 mg/dl</td><td>类别</td></tr>
+        <tr><td><code>restecg</code></td><td>静息心电图结果</td><td>类别</td></tr>
+        <tr><td><code>thalach</code> → max_heart_rate_achieved</td><td>运动时达到的最大心率</td><td>数值</td></tr>
+        <tr><td><code>exang</code></td><td>运动是否诱发心绞痛</td><td>类别</td></tr>
+        <tr><td><code>oldpeak</code> → st_depression</td><td>运动相对静息时的 ST 段压低</td><td>数值</td></tr>
+        <tr><td><code>slope</code></td><td>运动峰值时 ST 段的斜率</td><td>类别</td></tr>
+        <tr><td><code>ca</code> → num_major_vessels</td><td>主要血管数（0–3）</td><td>数值</td></tr>
+        <tr><td><code>thal</code></td><td>地中海贫血检查结果</td><td>类别</td></tr>
+        <tr><td><code>target</code></td><td><b>要预测的答案</b>：是否患心脏病</td><td>类别</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="56">
+    <h3>动手试试 A · 置换重要性与部分依赖 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="67">
+    <h3>动手试试 B · 给一位病人算 Shapley 值（SHAP 的理论基础） <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>按 AUC 经验分档（0.9 以上优秀、0.8–0.9 良好…），作者认为模型“工作良好”</td><td><span data-cell="45">第 45 格</span>、<span data-cell="47">第 47 格</span></td></tr>
+        <tr><td>置换重要性最高的是地中海贫血“可逆缺损”；最大心率也很重要</td><td><span data-cell="51">第 51 格</span></td></tr>
+        <tr><td>部分依赖：主要血管数越多，预测患病概率越低</td><td><span data-cell="53">第 53 格</span></td></tr>
+        <tr><td>年龄、ST 压低的部分依赖方向与常识相反，作者自己也觉得“奇怪”</td><td><span data-cell="55">第 55 格</span>、<span data-cell="58">第 58 格</span>、<span data-cell="60">第 60 格</span></td></tr>
+        <tr><td>SHAP：主要血管数排第一；男性在模型里反而风险更低，与常识不符</td><td><span data-cell="62">第 62 格</span>、<span data-cell="64">第 64 格</span></td></tr>
+        <tr><td>单个病人：一位预测 36%、一位 70%，基线 58.4%，并给出各自的主要因素</td><td><span data-cell="68">第 68 格</span>、<span data-cell="70">第 70 格</span></td></tr>
+        <tr><td>原以为胆固醇、年龄会是主要因素，实际是血管数和心电图相关指标主导</td><td><span data-cell="75">第 75 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">敏感度、特异度、AUC 的具体数值在运行输出里，源码不带输出，这里不列。另外第 42 格的敏感度公式取的是混淆矩阵的 [0,0] 和 [1,0]，按 scikit-learn 的排列（行 = 真实，列 = 预测），这算出来的是“阴性预测值”，不是敏感度；读作者输出时要注意。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>根据一次检查的 13 项结果给出患病概率，同时列出“推高风险”和“降低风险”的因素，供医生参考。</li>
+        <li><b>同类问题：</b>任何需要向人解释的模型：贷款拒绝原因、保险定价、招聘筛选、司法风险评估。很多地方的法规要求能说明自动化决策的理由。</li>
+        <li><b>可迁移的套路：</b>先训练好模型 → 置换重要性看全局排名 → 部分依赖图看单个特征的作用方向 → SHAP 看个体解释 → 拿解释和领域知识对照，发现数据或模型的问题。</li>
+        <li><b>最有价值的一点：</b>解释工具让作者发现了“男性风险更低”“年龄越大风险越低”这类反常识结果。这往往说明数据编码、样本选择或模型本身有问题，而不是医学新发现。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>改列名、数值转文字类别 <span data-cell="14">第 14 格</span>、<span data-cell="16">第 16 格</span></li>
+        <li>哑变量 drop_first <span data-cell="23">第 23 格</span></li>
+        <li>随机森林 max_depth=5 <span data-cell="30">第 30 格</span></li>
+        <li>导出一棵树 <span data-cell="33">第 33 格</span></li>
+        <li>置换重要性（eli5） <span data-cell="50">第 50 格</span></li>
+        <li>部分依赖图（pdpbox） <span data-cell="52">第 52 格</span>，二维 <span data-cell="59">第 59 格</span></li>
+        <li>SHAP 汇总图 <span data-cell="61">第 61 格</span>，单人力图 <span data-cell="66">第 66 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>模型说“男性风险更低”“年龄越大风险越低”。你会先怀疑医学常识错了、数据有问题，还是模型有问题？怎么验证？（提示：检查各列的实际取值与说明文档是否一致。）</li>
+      <li>置换重要性和随机森林自带的 <code>feature_importances_</code> 有什么不同？为什么作者要在<b>测试集</b>上做置换？</li>
+      <li>两个特征高度相关时（实验 A 可以想象“年龄”和“工龄”），置换其中一个，重要性会被低估还是高估？</li>
+      <li>部分依赖图是“所有人的平均效果”。如果对一半人是正作用、另一半人是负作用，PDP 会显示什么？SHAP 能不能看出来？</li>
+      <li>测试集只有约 60 人。在这么小的数据上得到的解释，你会有多大信心？</li>
+      <li>第 42 格的敏感度、特异度公式取错了混淆矩阵的位置。请写出正确的公式，并说说为什么这类 bug 很难被发现。</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Rob Harrand（Kaggle 账号 tentotheminus9），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意，不构成任何医学建议。数据集：UCI Machine Learning Repository, Heart Disease（Cleveland）。
+</footer>
+</main>
+
+<script src="nb/heart-disease-explain.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* 自查用：地址带 #fast 时动画直接跳到终态 */
+  if (/fast/.test(location.hash)) { K.tween = (ms, fn, c) => { if (c && !c.alive()) return Promise.resolve(false); fn(1, 1); return Promise.resolve(true); }; K.wait = (ms, c) => Promise.resolve(!c || c.alive()); }
+
+  function table(svg, x, y, cols, rows, opt) {
+    opt = opt || {};
+    const rh = opt.rh || 26, fs = opt.fs || 12, cells = [], rowG = [], head = [];
+    let cx = x; const xs = cols.map((c) => { const v = cx; cx += c.w; return v; });
+    cols.forEach((c, j) => {
+      const g = K.svg(svg, "g"); head.push(g);
+      K.svg(g, "rect", { x: xs[j], y, width: c.w, height: rh, fill: c.hl ? "color-mix(in srgb, var(--accent) 22%, var(--panel))" : "var(--panel-2)", stroke: "var(--line)" });
+      K.svg(g, "text", { x: xs[j] + c.w / 2, y: y + rh / 2 + 4, "text-anchor": "middle", "font-size": fs, "font-weight": 700 }, c.h);
+    });
+    rows.forEach((r, i) => {
+      const g = K.svg(svg, "g"); rowG.push(g);
+      cells.push(r.map((v, j) => ({ rect: K.svg(g, "rect", { x: xs[j], y: y + (i + 1) * rh, width: cols[j].w, height: rh, fill: "var(--panel)", stroke: "var(--line)" }), t: K.svg(g, "text", { x: xs[j] + cols[j].w / 2, y: y + (i + 1) * rh + rh / 2 + 4, "text-anchor": "middle", "font-size": fs }, v) })));
+    });
+    return { cells, rows: rowG, head, xs, rh };
+  }
+  const fade = (els, v) => els.forEach((e) => (e.style.opacity = v));
+  const tint = (c, p) => `color-mix(in srgb, ${c} ${p}%, var(--panel))`;
+
+  const steps = [
+    {
+      title: "为什么医疗模型必须能解释", kicker: "第 0–8 格 · 动机",
+      html: `<p>作者开篇就说：用一个黑箱诊断严重疾病，“总是很难让人接受”。如果模型的输出决定了要不要治疗、要不要手术，人们一定会问<b>为什么</b>。</p><p>所以这本 notebook 的结构是：先训练一个简单的随机森林，然后把重点放在用可解释机器学习（ML explainability）工具“拆开”它。</p>`,
+      cells: [0, 4],
+      draw(svg, ctx) {
+        const p = K.node(svg, 30, 130, 130, 70, "病人的\n13 项检查", { fill: tint("var(--c1)", 14), stroke: "var(--c1)" });
+        const box = K.svg(svg, "rect", { x: 260, y: 100, width: 180, height: 130, rx: 10, fill: "var(--ink)", opacity: 0.85 });
+        const bt = K.svg(svg, "text", { x: 350, y: 172, "text-anchor": "middle", "font-size": 16, "font-weight": 700, fill: "var(--panel)" }, "黑箱模型");
+        const out = K.node(svg, 540, 130, 150, 70, "患病概率\n70%", { bold: true, fill: tint("var(--bad)", 16), stroke: "var(--bad)" });
+        K.arrow(svg, 160, 165, 255, 165); K.arrow(svg, 440, 165, 535, 165);
+        const q = K.svg(svg, "text", { x: 615, y: 110, "text-anchor": "middle", "font-size": 28, "font-weight": 700, fill: "var(--warn)", opacity: 0 }, "为什么？");
+        const reasons = [["主要血管数 = 0", "+"], ["ST 斜率平坦", "+"], ["最大心率高", "−"]].map((r, i) => { const t = K.svg(svg, "text", { x: 270, y: 262 + i * 22, "font-size": 13, fill: r[1] === "+" ? "var(--bad)" : "var(--good)", opacity: 0 }, (r[1] === "+" ? "▲ 推高：" : "▼ 拉低：") + r[0]); return t; });
+        (async () => {
+          if (!(await ctx.wait(700))) return;
+          if (!(await ctx.tween(500, (t) => (q.style.opacity = t)))) return;
+          if (!(await ctx.wait(500))) return;
+          if (!(await ctx.tween(800, (t) => { box.style.opacity = 0.85 * (1 - t) + 0.1 * t; }))) return;
+          bt.textContent = "解释工具"; bt.style.fill = "var(--ink)";
+          for (const r of reasons) { if (!(await ctx.tween(300, (t) => (r.style.opacity = t)))) return; }
+          K.svg(svg, "text", { x: 270, y: 330, "font-size": 11, class: "muted" }, "（示意，非真实病人）");
+        })();
+      },
+    },
+    {
+      title: "看懂每一列，并改成好读的名字", kicker: "第 9–14 格 · 认识数据",
+      html: `<p>原始列名是缩写：cp、trestbps、thalach、oldpeak、ca、thal……作者逐个查文档解释含义，并把列名改成完整英文，比如 <code>thalach → max_heart_rate_achieved</code>、<code>ca → num_major_vessels</code>。</p><p>他还特意先上网查了心脏病的诊断方式和风险因素，<b>在看结果之前</b>写下自己的预期（避免“看到结果再编理由”，即 HARKing）。</p>`,
+      cells: [9, 12, 14], highlight: ["max_heart_rate_achieved", "num_major_vessels"],
+      draw(svg, ctx) {
+        const m = [["cp", "chest_pain_type", "胸痛类型"], ["trestbps", "resting_blood_pressure", "静息血压"], ["chol", "cholesterol", "胆固醇"], ["thalach", "max_heart_rate_achieved", "最大心率"], ["exang", "exercise_induced_angina", "运动诱发心绞痛"], ["oldpeak", "st_depression", "ST 段压低"], ["ca", "num_major_vessels", "主要血管数"], ["thal", "thalassemia", "地中海贫血检查"]];
+        const T = table(svg, 30, 20, [{ h: "原列名", w: 110 }, { h: "新列名", w: 250, hl: 1 }, { h: "含义", w: 170 }], m.map((r) => [r[0], "", ""]), { rh: 34, fs: 13 });
+        (async () => { for (let i = 0; i < m.length; i++) { T.cells[i][1].t.textContent = m[i][1]; T.cells[i][2].t.textContent = m[i][2]; if (!(await ctx.tween(220, (t) => { T.cells[i][1].t.style.opacity = t; T.cells[i][2].t.style.opacity = t; }))) return; } })();
+      },
+    },
+    {
+      title: "数字编码 → 文字类别 → 哑变量", kicker: "第 15–27 格 · 编码",
+      html: `<p>胸痛类型、心电图、ST 斜率、地贫检查这些列用 1、2、3 编码，但它们是<b>类别</b>，不是大小。作者先把数字替换成文字（如 1 → typical angina），改成 object 类型，再用 <code>pd.get_dummies(drop_first=True)</code> 变成 0/1 哑变量。</p><p>drop_first 去掉每组第一个类别，例如只留 <code>sex_male</code>：1 是男、0 就是女。把数字改成文字还有个好处：后面的解释图里会直接显示有含义的名字。</p>`,
+      cells: [15, 16, 23], highlight: ["get_dummies", "drop_first=True"],
+      draw(svg, ctx) {
+        const A = table(svg, 20, 40, [{ h: "st_slope", w: 90 }], [["1"], ["2"], ["3"], ["2"]], { rh: 34 });
+        const B = table(svg, 150, 40, [{ h: "st_slope（文字）", w: 150 }], [["upsloping"], ["flat"], ["downsloping"], ["flat"]], { rh: 34 });
+        const C = table(svg, 340, 40, [{ h: "st_slope_flat", w: 140, hl: 1 }, { h: "st_slope_upsloping", w: 170, hl: 1 }], [["0", "1"], ["1", "0"], ["0", "0"], ["1", "0"]], { rh: 34 });
+        fade(B.head.concat(B.rows, C.head, C.rows), 0);
+        const msg = K.svg(svg, "text", { x: 20, y: 250, "font-size": 13 }, "");
+        (async () => {
+          if (!(await ctx.wait(400))) return;
+          if (!(await ctx.tween(600, (t) => fade(B.head.concat(B.rows), t)))) return;
+          msg.textContent = "数字 → 有含义的文字";
+          if (!(await ctx.wait(500))) return;
+          if (!(await ctx.tween(600, (t) => fade(C.head.concat(C.rows), t)))) return;
+          msg.textContent = "get_dummies(drop_first=True)：downsloping 被当作“第一类”删掉，两列都是 0 时就是它";
+        })();
+      },
+    },
+    {
+      title: "训练一个随机森林", kicker: "第 28–30 格 · 建模",
+      html: `<p>80% 训练、20% 测试（<code>test_size=.2</code>），训练 <code>RandomForestClassifier(max_depth=5)</code>。</p><p><b>随机森林</b>：用有放回抽样得到很多份略有不同的训练集，每份训练一棵决策树（每次分裂只看一部分随机特征），预测时所有树投票。限制深度 5 是为了不让树把训练集背下来。作者刻意选了一个简单模型，因为重点在后面的解释。</p>`,
+      cells: [28, 29, 30], highlight: ["max_depth=5", "test_size = .2"],
+      draw(svg, ctx) {
+        const trees = [];
+        const tree = (x, y, s, vote) => { const g = K.svg(svg, "g"); const pts = [[0, 0], [-30, 34], [30, 34], [-45, 68], [-15, 68], [15, 68], [45, 68]]; [[0, 1], [0, 2], [1, 3], [1, 4], [2, 5], [2, 6]].forEach(([a, b]) => K.svg(g, "line", { x1: x + pts[a][0] * s, y1: y + pts[a][1] * s, x2: x + pts[b][0] * s, y2: y + pts[b][1] * s, stroke: "var(--ink-3)" })); pts.forEach((p, i) => K.svg(g, "circle", { cx: x + p[0] * s, cy: y + p[1] * s, r: 6 * s, fill: i > 2 ? (vote ? "var(--bad)" : "var(--c1)") : "var(--panel-2)", stroke: "var(--ink-3)" })); g.style.opacity = 0; return { g, vote }; };
+        const votes = [1, 1, 0, 1, 0, 1, 1];
+        votes.forEach((v, i) => trees.push(tree(70 + i * 96, 60, 0.9, v)));
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "每棵树：不同的有放回样本 + 每次分裂随机挑部分特征（示意）");
+        const tally = K.svg(svg, "text", { x: 360, y: 250, "text-anchor": "middle", "font-size": 18, "font-weight": 700 }, "");
+        const tally2 = K.svg(svg, "text", { x: 360, y: 280, "text-anchor": "middle", "font-size": 13, class: "muted" }, "");
+        (async () => {
+          for (const t of trees) { if (!(await ctx.tween(220, (k) => (t.g.style.opacity = k)))) return; }
+          if (!(await ctx.wait(400))) return;
+          const arrows = trees.map((t, i) => K.arrow(svg, 70 + i * 96, 140, 360, 220, { color: t.vote ? "var(--bad)" : "var(--c1)" }));
+          fade(arrows, 0);
+          if (!(await ctx.tween(600, (k) => fade(arrows, k)))) return;
+          const n = votes.filter((v) => v).length;
+          tally.textContent = `${n} / ${votes.length} 棵树投“患病” → 概率 ≈ ${(n / votes.length).toFixed(2)}`;
+          tally2.textContent = "predict_proba 就是各棵树概率的平均";
+        })();
+      },
+    },
+    {
+      title: "画出其中一棵树", kicker: "第 31–34 格 · 第一种解释",
+      html: `<p>作者用 <code>export_graphviz</code> 把森林里的第 2 棵树（<code>estimators_[1]</code>）画成图：每个节点写着按哪个特征、在哪个值切分，以及落到这里的样本比例。</p><p>这是最直观的解释方式，但作者也承认：一眼看去<b>很难总结出哪些特征最重要</b>，而且森林里有上百棵这样的树。所以需要后面更“汇总”的工具。</p>`,
+      cells: [31, 32, 33], highlight: ["estimators_[1]", "export_graphviz"],
+      draw(svg, ctx) {
+        const N = [
+          { x: 360, y: 30, t: "num_major_vessels ≤ 0.5", d: 0 },
+          { x: 190, y: 120, t: "thalassemia_rev ≤ 0.5", d: 1, p: 0 }, { x: 530, y: 120, t: "chest_pain_atyp ≤ 0.5", d: 1, p: 0 },
+          { x: 100, y: 210, t: "max_hr ≤ 150", d: 2, p: 1 }, { x: 280, y: 210, t: "患病 0.86", d: 2, p: 1, leaf: 1 },
+          { x: 440, y: 210, t: "无病 0.79", d: 2, p: 2, leaf: 0 }, { x: 620, y: 210, t: "st_depr ≤ 1.2", d: 2, p: 2 },
+          { x: 50, y: 300, t: "无病 0.70", d: 3, p: 3, leaf: 0 }, { x: 160, y: 300, t: "患病 0.65", d: 3, p: 3, leaf: 1 },
+          { x: 580, y: 300, t: "患病 0.60", d: 3, p: 6, leaf: 1 }, { x: 680, y: 300, t: "无病 0.75", d: 3, p: 6, leaf: 0 },
+        ];
+        const els = N.map((n) => {
+          const g = K.svg(svg, "g");
+          if (n.p != null) K.svg(g, "line", { x1: N[n.p].x, y1: N[n.p].y + 16, x2: n.x, y2: n.y - 14, stroke: "var(--ink-3)" });
+          const w = n.leaf != null ? 90 : 170;
+          K.svg(g, "rect", { x: n.x - w / 2, y: n.y - 14, width: w, height: 30, rx: 6, fill: n.leaf == null ? "var(--panel-2)" : n.leaf ? tint("var(--bad)", 22) : tint("var(--c1)", 22), stroke: n.leaf == null ? "var(--line)" : n.leaf ? "var(--bad)" : "var(--c1)" });
+          K.svg(g, "text", { x: n.x, y: n.y + 5, "text-anchor": "middle", "font-size": 11 }, n.t);
+          g.style.opacity = 0; return { g, d: n.d };
+        });
+        K.svg(svg, "text", { x: 20, y: 334, "font-size": 11, class: "muted" }, "示意树：切分特征和数值为说明用，不是作者那棵树的真实内容");
+        (async () => { for (let d = 0; d < 4; d++) { if (!(await ctx.tween(450, (t) => els.forEach((e) => { if (e.d === d) e.g.style.opacity = t; })))) return; } })();
+      },
+    },
+    {
+      title: "敏感度、特异度与 AUC", kicker: "第 35–48 格 · 评估",
+      html: `<p>诊断试验常用两个指标：<b>敏感度</b> = TP/(TP+FN)，有病的人里查出了多少；<b>特异度</b> = TN/(TN+FP)，没病的人里排除了多少。作者再画 ROC 曲线、算 AUC，并按经验分档（0.9–1 优秀，0.8–0.9 良好…）判断“模型工作良好”。</p><p>注意第 42 格：代码用 <code>[0,0]/([0,0]+[1,0])</code> 算“敏感度”。scikit-learn 的混淆矩阵行是真实、列是预测，[0,0] 是 TN、[1,0] 是 FN，所以这算的是 TN/(TN+FN)。动画对比代码取的格子和公式需要的格子。</p>`,
+      cells: [35, 37, 42, 45], highlight: ["confusion_matrix[0,0]", "confusion_matrix[1,0]"],
+      draw(svg, ctx) {
+        const L = [["[0,0]", "TN", "真无病 · 判无病"], ["[0,1]", "FP", "真无病 · 判患病"], ["[1,0]", "FN", "真患病 · 判无病"], ["[1,1]", "TP", "真患病 · 判患病"]];
+        const box = L.map((d, i) => {
+          const x = 60 + (i % 2) * 140, y = 50 + Math.floor(i / 2) * 120;
+          const g = K.svg(svg, "g");
+          const r = K.svg(g, "rect", { x, y, width: 130, height: 110, rx: 8, fill: "var(--panel-2)", stroke: "var(--line)", "stroke-width": 2 });
+          K.svg(g, "text", { x: x + 65, y: y + 22, "text-anchor": "middle", "font-size": 12, "font-family": "var(--mono)", class: "muted" }, d[0]);
+          K.svg(g, "text", { x: x + 65, y: y + 60, "text-anchor": "middle", "font-size": 26, "font-weight": 700 }, d[1]);
+          K.svg(g, "text", { x: x + 65, y: y + 88, "text-anchor": "middle", "font-size": 11 }, d[2]);
+          return r;
+        });
+        K.svg(svg, "text", { x: 60, y: 36, "font-size": 12, class: "muted" }, "行 = 真实，列 = 预测（scikit-learn 约定）");
+        const l1 = K.svg(svg, "text", { x: 360, y: 90, "font-size": 14 }, "");
+        const l2 = K.svg(svg, "text", { x: 360, y: 116, "font-size": 12, class: "muted" }, "");
+        const l3 = K.svg(svg, "text", { x: 360, y: 180, "font-size": 14 }, "");
+        const l4 = K.svg(svg, "text", { x: 360, y: 206, "font-size": 12, class: "muted" }, "");
+        (async () => {
+          if (!(await ctx.wait(500))) return;
+          [0, 2].forEach((i) => { box[i].style.stroke = "var(--warn)"; box[i].style.strokeWidth = 4; });
+          l1.textContent = "第 42 格：[0,0] / ([0,0] + [1,0])"; l1.style.fill = "var(--warn)";
+          l2.textContent = "= TN / (TN + FN)：判“无病”的人里真无病的比例";
+          if (!(await ctx.wait(1500))) return;
+          [0, 2].forEach((i) => { box[i].style.stroke = "var(--line)"; box[i].style.strokeWidth = 2; });
+          [3, 2].forEach((i) => { box[i].style.stroke = "var(--good)"; box[i].style.strokeWidth = 4; });
+          l3.textContent = "敏感度应为：[1,1] / ([1,1] + [1,0])"; l3.style.fill = "var(--good)";
+          l4.textContent = "= TP / (TP + FN)：真患病的人里被查出的比例";
+        })();
+      },
+    },
+    {
+      title: "置换重要性：打乱一列，看准确率掉多少", kicker: "第 49–51 格 · 全局解释",
+      html: `<p><b>置换重要性</b>（permutation importance）：模型训练好之后，在测试集上把某一列的值随机打乱，其他列不动，看准确率下降多少。下降越多，说明模型越依赖这一列。作者用 eli5 的 <code>PermutationImportance</code> 实现。</p><p>作者的结果：最重要的是地中海贫血检查的“可逆缺损”，最大心率也很重要。他认为最大心率反映检查当下的状态，比年龄这种笼统因素更直接。</p>`,
+      cells: [49, 50, 51], highlight: ["PermutationImportance"],
+      draw(svg, ctx) {
+        const T = table(svg, 30, 30, [{ h: "最大心率", w: 100, hl: 1 }, { h: "年龄", w: 70 }, { h: "血管数", w: 80 }, { h: "真实", w: 70 }, { h: "预测", w: 70 }], [["172", "52", "0", "1", "1"], ["115", "60", "2", "0", "0"], ["163", "45", "0", "1", "1"], ["125", "58", "1", "0", "0"], ["178", "41", "0", "1", "1"], ["108", "66", "3", "0", "0"]], { rh: 32, fs: 13 });
+        const orig = T.cells.map((r) => r[0].t.textContent);
+        const perm = [3, 5, 1, 0, 2, 4];
+        const after = ["0", "0", "1", "1", "0", "0"];
+        const acc = K.svg(svg, "text", { x: 480, y: 80, "font-size": 16, "font-weight": 700 }, "准确率 6/6");
+        const msg = K.svg(svg, "text", { x: 480, y: 110, "font-size": 12, class: "muted" }, "");
+        (async () => {
+          if (!(await ctx.wait(700))) return;
+          msg.textContent = "打乱“最大心率”这一列……";
+          if (!(await ctx.tween(900, (t) => T.cells.forEach((r, i) => { const dy = (perm[i] - i) * 32 * t; r[0].t.setAttribute("transform", `translate(0,${dy})`); })))) return;
+          T.cells.forEach((r, i) => { r[0].t.setAttribute("transform", ""); r[0].t.textContent = orig[perm.indexOf(i)]; });
+          if (!(await ctx.wait(400))) return;
+          let ok = 0;
+          T.cells.forEach((r, i) => { r[4].t.textContent = after[i]; const good = after[i] === r[3].t.textContent; if (good) ok++; r[4].rect.style.fill = good ? tint("var(--good)", 20) : tint("var(--bad)", 25); });
+          acc.textContent = `准确率 ${ok}/6`;
+          msg.textContent = `下降 ${6 - ok}/6 → 这一列很重要（示意）`;
+          K.svg(svg, "text", { x: 480, y: 170, "font-size": 12 }, "对每一列都做一遍，");
+          K.svg(svg, "text", { x: 480, y: 190, "font-size": 12 }, "重复几次取平均，");
+          K.svg(svg, "text", { x: 480, y: 210, "font-size": 12 }, "按下降幅度排序。");
+        })();
+      },
+    },
+    {
+      title: "部分依赖图：只动一个特征", kicker: "第 52–57 格 · 特征作用方向",
+      html: `<p><b>部分依赖图</b>（PDP）：对测试集的每个病人，把某个特征依次改成不同取值、其他特征保持不变，看预测概率怎么变；再对所有病人取平均，得到一条曲线。</p><p>作者的发现：主要血管数越多，患病概率越低（他解释为血液更容易到达心脏）；但年龄越大、ST 压低越大，预测概率反而<b>越低</b>，与常识不符，他自己也觉得“奇怪”，并指出置信区间包含了基线。</p>`,
+      cells: [52, 53, 54, 55], highlight: ["pdp_isolate"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 20, w: 560, h: 260 }, [0, 3], [0, 1], { xlabel: "主要血管数 num_major_vessels（示意）", ylabel: "预测患病概率", xticks: 3, yticks: 4, xfmt: (v) => v.toFixed(0), yfmt: (v) => v.toFixed(2) });
+        const r = K.rng(4), rows = [];
+        for (let i = 0; i < 14; i++) { const b = K.randn(r) * 0.12; rows.push((x) => K.clamp(0.75 + b - 0.2 * x + (r() - 0.5) * 0.05, 0.03, 0.97)); }
+        const lines = rows.map(() => K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 1, opacity: 0.4 }));
+        const avg = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--accent)", "stroke-width": 4 });
+        const dot = K.svg(svg, "line", { x1: 0, x2: 0, y1: 20, y2: 280, stroke: "var(--warn)", "stroke-dasharray": "4 3" });
+        K.svg(svg, "text", { x: 470, y: 50, "font-size": 12, fill: "var(--c1)" }, "细线：单个病人（ICE）");
+        K.svg(svg, "text", { x: 470, y: 70, "font-size": 12, fill: "var(--accent)" }, "粗线：平均 = PDP");
+        ctx.tween(2200, (t) => {
+          const X = 3 * t;
+          lines.forEach((l, i) => { let d = ""; for (let x = 0; x <= X + 1e-9; x += 0.05) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(rows[i](x)); l.setAttribute("d", d); });
+          let d = ""; for (let x = 0; x <= X + 1e-9; x += 0.05) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(rows.reduce((s, f) => s + f(x), 0) / rows.length); avg.setAttribute("d", d);
+          dot.setAttribute("x1", ax.sx(X)); dot.setAttribute("x2", ax.sx(X));
+        });
+      },
+    },
+    {
+      title: "二维部分依赖：看两个特征的交互", kicker: "第 58–59 格 · 交互作用",
+      html: `<p>ST 压低“越大越安全”的结果很反常。作者猜测：也许重要的不是压低的幅度，而是它和 ST 段<b>斜率</b>的组合。于是画二维 PDP：同时改变两个特征，用等高线图显示预测概率。</p><p>他分别看了“上斜型 × ST 压低”和“平坦型 × ST 压低”，结论是两种情况下低压低都对应更高的风险，“奇怪”。没有强行解释，而是如实记录，这也是值得学习的态度。</p>`,
+      cells: [58, 59], highlight: ["pdp_interact"],
+      draw(svg, ctx) {
+        const nx = 16, ny = 8, x0 = 120, y0 = 30, cw = 32, ch = 30;
+        const f = (i, j) => K.clamp(0.75 - 0.08 * i * 0.3 - 0.25 * (j / (ny - 1)) + 0.05 * Math.sin(i / 2), 0.1, 0.9);
+        const cells = [];
+        for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) cells.push({ i, j, e: K.svg(svg, "rect", { x: x0 + i * cw, y: y0 + (ny - 1 - j) * ch, width: cw - 1, height: ch - 1, fill: "var(--panel-2)" }) });
+        K.svg(svg, "text", { x: x0 + (nx * cw) / 2, y: y0 + ny * ch + 26, "text-anchor": "middle", "font-size": 12 }, "ST 压低 st_depression →");
+        K.svg(svg, "text", { x: x0 - 10, y: y0 + 14, "text-anchor": "end", "font-size": 12 }, "上斜型 = 1");
+        K.svg(svg, "text", { x: x0 - 10, y: y0 + ny * ch - 6, "text-anchor": "end", "font-size": 12 }, "上斜型 = 0");
+        K.svg(svg, "text", { x: x0, y: 330, "font-size": 11, class: "muted" }, "暖色 = 预测患病概率较高，冷色 = 较低（示意）。纵轴是二值特征，作者图中只有 0、1 两档");
+        ctx.tween(1600, (t) => cells.forEach((c) => { const k = K.clamp(t * (nx + ny) - (c.i + c.j), 0, 1); c.e.style.fill = K.heat((f(c.i, c.j) - 0.45) * 2.6 * k, true); }));
+      },
+    },
+    {
+      title: "SHAP 汇总：每个病人、每个特征的贡献", kicker: "第 60–64 格 · SHAP",
+      html: `<p><b>SHAP 值</b>来自博弈论里的 Shapley 值：把“预测值 − 平均预测”这笔账公平地分给各个特征。每个病人、每个特征都有一个 SHAP 值，正的推高患病概率，负的拉低。</p><p>作者先用条形图看平均影响（主要血管数第一），再用散点汇总图：每个点是一个病人，横轴是 SHAP 值，颜色是特征取值高低。他读出：血管数少 → 风险高；地贫“可逆缺损”分界很清楚；ST 斜率平坦是坏信号；而<b>男性在模型里风险更低</b>，与常识相反。</p>`,
+      cells: [60, 61, 63], highlight: ["TreeExplainer", "summary_plot"],
+      draw(svg, ctx) {
+        const feats = ["num_major_vessels", "thalassemia_rev", "chest_pain_atyp", "st_slope_flat", "max_heart_rate", "exercise_angina", "sex_male"];
+        const cx = 420;
+        K.svg(svg, "line", { x1: cx, x2: cx, y1: 16, y2: 300, stroke: "var(--ink-3)" });
+        K.svg(svg, "text", { x: cx + 6, y: 318, "font-size": 11, class: "muted" }, "SHAP > 0：推高患病概率 →");
+        K.svg(svg, "text", { x: cx - 6, y: 318, "text-anchor": "end", "font-size": 11, class: "muted" }, "← 拉低");
+        const r = K.rng(12), dots = [];
+        feats.forEach((f, k) => {
+          const y = 34 + k * 38, spread = 120 - k * 12;
+          K.svg(svg, "text", { x: 200, y: y + 4, "text-anchor": "end", "font-size": 12 }, f);
+          for (let i = 0; i < 40; i++) {
+            const hi = r() < 0.5, base = (hi ? 1 : -1) * (k === 0 ? -1 : k === 3 ? 1 : k === 6 ? -1 : 1) * (0.3 + r() * 0.7) * spread * 0.6;
+            dots.push({ e: K.svg(svg, "circle", { cx, cy: y + (r() - 0.5) * 18, r: 3, fill: hi ? "var(--bad)" : "var(--c1)", opacity: 0.75 }), x: cx + base });
+          }
+        });
+        K.svg(svg, "text", { x: 560, y: 40, "font-size": 11, fill: "var(--bad)" }, "● 特征值高");
+        K.svg(svg, "text", { x: 560, y: 58, "font-size": 11, fill: "var(--c1)" }, "● 特征值低");
+        K.svg(svg, "text", { x: 20, y: 334, "font-size": 11, class: "muted" }, "示意散点：方向按作者第 64 格的描述，幅度为示意");
+        ctx.tween(1600, (t) => dots.forEach((d) => d.e.setAttribute("cx", K.lerp(cx, d.x, t))));
+      },
+    },
+    {
+      title: "单个病人的解释：从 58.4% 到 36%", kicker: "第 65–75 格 · 个体解释",
+      html: `<p>SHAP 最有用的地方是解释<b>单个病人</b>。力图（force plot）从所有人的平均预测（基线 58.4%）出发，每个特征把概率往上推或往下拉，最后停在这个人的预测值。</p><p>作者举了两个人：第一位预测 36%，有利因素包括有一条主要血管、地贫可逆缺损、ST 斜率不平坦；第二位预测 70%，不利因素是没有主要血管、ST 斜率平坦、不是可逆缺损。（第 68 格）（第 70 格）</p>`,
+      cells: [65, 66, 68], highlight: ["force_plot", "expected_value[1]"],
+      draw(svg, ctx) {
+        const people = [{ name: "病人 1（第 68 格）", end: 0.36, parts: [["主要血管数 = 1", -0.1], ["地贫可逆缺损", -0.08], ["ST 斜率不平坦", -0.05], ["其他特征合计", 0.004]] }, { name: "病人 2（第 70 格）", end: 0.7, parts: [["主要血管数 = 0", 0.06], ["ST 斜率平坦", 0.04], ["非可逆缺损", 0.03], ["其他特征合计", -0.014]] }];
+        const ax = K.axes(svg, { x: 40, y: 290, w: 640, h: 1 }, [0.2, 0.85], [0, 1], { xticks: 13, yticks: 0, xfmt: (v) => Math.round(v * 100) + "%" });
+        K.svg(svg, "line", { x1: ax.sx(0.584), x2: ax.sx(0.584), y1: 20, y2: 290, stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+        K.svg(svg, "text", { x: ax.sx(0.584) + 4, y: 16, "font-size": 12 }, "基线 58.4%");
+        (async () => {
+          for (let p = 0; p < 2; p++) {
+            const P = people[p], y0 = 34 + p * 128;
+            K.svg(svg, "text", { x: 40, y: y0, "font-size": 13, "font-weight": 700 }, P.name);
+            let cur = 0.584;
+            for (let k = 0; k < P.parts.length; k++) {
+              const [lab, dv] = P.parts[k], y = y0 + 10 + k * 22, from = cur, to = cur + dv;
+              const rr = K.svg(svg, "rect", { x: ax.sx(from), y, width: 0, height: 16, rx: 3, fill: dv > 0 ? "var(--bad)" : "var(--good)" });
+              const tt = K.svg(svg, "text", { x: ax.sx(Math.min(from, to)) - 6, y: y + 12, "text-anchor": "end", "font-size": 11 }, lab);
+              tt.style.opacity = 0;
+              if (!(await ctx.tween(380, (t) => { const a = from, b = from + dv * t; rr.setAttribute("x", ax.sx(Math.min(a, b))); rr.setAttribute("width", Math.abs(ax.sx(b) - ax.sx(a))); tt.style.opacity = t; }))) return;
+              cur = to;
+            }
+            K.svg(svg, "line", { x1: ax.sx(P.end), x2: ax.sx(P.end), y1: y0 + 8, y2: y0 + 98, stroke: P.end > 0.584 ? "var(--bad)" : "var(--good)", "stroke-width": 2 });
+            K.svg(svg, "text", { x: ax.sx(P.end) + (p ? 6 : -6), y: y0 + 112, "text-anchor": p ? "start" : "end", "font-size": 14, "font-weight": 700, fill: P.end > 0.584 ? "var(--bad)" : "var(--good)" }, "预测 " + Math.round(P.end * 100) + "%");
+          }
+          K.svg(svg, "text", { x: 40, y: 330, "font-size": 11, class: "muted" }, "起点、终点来自作者文字；中间各段的长度为示意，只保证加起来等于终点");
+        })();
+      },
+    },
+  ];
+  const P = K.pipeline(document.getElementById("pipe"), steps);
+  const hs = location.hash.match(/step=(\d+)/); if (hs && P && P.go) P.go(+hs[1] - 1);
+  if (/fold/.test(location.hash)) document.head.appendChild(K.el("style", null, ".walk .cell{display:none}"));
+
+  /* ---------------- 模拟数据 + 随机森林 ---------------- */
+  const FN = ["主要血管数", "最大心率", "ST 压低", "年龄", "胆固醇（弱）", "随机编号（无关）"];
+  const RANGE = [[0, 3], [90, 200], [0, 4], [30, 77], [130, 400], [0, 1]];
+  function gen(seed, n) {
+    const r = K.rng(seed), X = [], y = [];
+    for (let i = 0; i < n; i++) {
+      const age = K.clamp(54 + K.randn(r) * 9, 30, 77);
+      const ca = Math.min(3, Math.floor(-Math.log(1 - r() * 0.95) * (0.5 + (age - 30) / 70)));
+      const hr = K.clamp(175 - 0.9 * (age - 30) + K.randn(r) * 18, 90, 200);
+      const st = K.clamp(-Math.log(1 - r() * 0.97) * 0.9, 0, 4);
+      const chol = K.clamp(245 + K.randn(r) * 50, 130, 400), id = r();
+      const z = -0.3 + 1.1 * ca - 0.035 * (hr - 150) + 0.85 * (st - 1) + 0.02 * (age - 54) + 0.004 * (chol - 245);
+      X.push([ca, hr, st, age, chol, id]); y.push(r() < K.sigmoid(z) ? 1 : 0);
+    }
+    return { X, y };
+  }
+  function tree(X, y, idx, depth, rng, mtry) {
+    const d = X[0].length;
+    function build(ii, dep) {
+      const n = ii.length; let tot = 0; ii.forEach((i) => (tot += y[i]));
+      if (dep === 0 || n < 8 || tot === 0 || tot === n) return { v: tot / n };
+      const fs = []; while (fs.length < mtry) { const f = Math.floor(rng() * d); if (!fs.includes(f)) fs.push(f); }
+      let best = null;
+      for (const f of fs) {
+        const s = ii.slice().sort((a, b) => X[a][f] - X[b][f]); let ls = 0;
+        for (let k = 0; k < n - 1; k++) {
+          ls += y[s[k]]; const nl = k + 1, nr = n - nl;
+          if (nl < 4 || nr < 4 || X[s[k]][f] === X[s[k + 1]][f]) continue;
+          const g = (ls * ls) / nl + ((tot - ls) * (tot - ls)) / nr;
+          if (!best || g > best.g) best = { g, f, thr: (X[s[k]][f] + X[s[k + 1]][f]) / 2, k: nl, s };
+        }
+      }
+      if (!best) return { v: tot / n };
+      return { f: best.f, thr: best.thr, l: build(best.s.slice(0, best.k), dep - 1), r: build(best.s.slice(best.k), dep - 1) };
+    }
+    const root = build(idx, depth);
+    return (x) => { let nd = root; while (nd.f !== undefined) nd = x[nd.f] <= nd.thr ? nd.l : nd.r; return nd.v; };
+  }
+  const cache = {};
+  function forest(seed) {
+    if (cache[seed]) return cache[seed];
+    const D = gen(seed, 420), tr = { X: D.X.slice(0, 300), y: D.y.slice(0, 300) }, te = { X: D.X.slice(300), y: D.y.slice(300) };
+    const r = K.rng(seed + 1), T = [];
+    for (let b = 0; b < 40; b++) { const idx = []; for (let i = 0; i < 300; i++) idx.push(Math.floor(r() * 300)); T.push(tree(tr.X, tr.y, idx, 4, r, 2)); }
+    const f = (x) => T.reduce((s, t) => s + t(x), 0) / T.length;
+    const accOf = (X) => X.reduce((s, x, i) => s + ((f(x) > 0.5 ? 1 : 0) === te.y[i] ? 1 : 0), 0) / X.length;
+    const base = accOf(te.X);
+    return (cache[seed] = { tr, te, f, base, accOf });
+  }
+
+  /* ---------------- 实验 A ---------------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 400,
+    controls: [
+      { id: "feat", label: "部分依赖图看哪个特征", value: "1", options: FN.map((n, i) => [String(i), n]) },
+      { id: "rep", label: "每列打乱重复次数（eli5 默认 5）", min: 1, max: 10, step: 1, value: 5 },
+      { id: "shuf", label: "换一批随机打乱", button: true },
+      { id: "seed", label: "重新抽样并重训森林", button: true },
+    ],
+    note: "训练 300 人、测试 120 人；随机森林 40 棵树、深度 4、每次分裂随机看 2 个特征。左：置换重要性 = 打乱该列后测试准确率的平均下降（误差线 = 重复间的标准差）。右：所选特征的部分依赖曲线（粗线）和 15 个病人的个体曲线（细线）。",
+    render(svg, v) {
+      const F = forest(7 + v.seed * 13), r = K.rng(99 + v.shuf * 7);
+      const imp = FN.map((_, j) => {
+        const ds = [];
+        for (let k = 0; k < v.rep; k++) {
+          const col = F.te.X.map((x) => x[j]);
+          for (let i = col.length - 1; i > 0; i--) { const q = Math.floor(r() * (i + 1)); [col[i], col[q]] = [col[q], col[i]]; }
+          ds.push(F.base - F.accOf(F.te.X.map((x, i) => { const z = x.slice(); z[j] = col[i]; return z; })));
+        }
+        const m = ds.reduce((s, x) => s + x, 0) / ds.length;
+        return { j, m, sd: Math.sqrt(ds.reduce((s, x) => s + (x - m) ** 2, 0) / ds.length) };
+      });
+      const sorted = imp.slice().sort((a, b) => b.m - a.m);
+      const mx = Math.max(0.05, ...imp.map((d) => d.m + d.sd));
+      K.svg(svg, "text", { x: 10, y: 18, "font-size": 12, "font-weight": 700 }, "置换重要性（准确率下降）");
+      sorted.forEach((d, k) => {
+        const y = 34 + k * 48, x0 = 130, W = 160;
+        K.svg(svg, "text", { x: x0 - 6, y: y + 15, "text-anchor": "end", "font-size": 12 }, FN[d.j]);
+        const w = Math.max(0, (d.m / mx) * W);
+        K.svg(svg, "rect", { x: x0, y: y + 3, width: w, height: 16, rx: 3, fill: +v.feat === d.j ? "var(--accent)" : "var(--c1)" });
+        K.svg(svg, "line", { x1: x0 + Math.max(0, ((d.m - d.sd) / mx) * W), x2: x0 + ((d.m + d.sd) / mx) * W, y1: y + 11, y2: y + 11, stroke: "var(--ink)", "stroke-width": 1.5 });
+        K.svg(svg, "text", { x: x0, y: y + 34, "font-size": 11, class: "muted" }, (d.m >= 0 ? "" : "") + (d.m * 100).toFixed(1) + " ± " + (d.sd * 100).toFixed(1) + " 个点");
+      });
+      // PDP
+      const j = +v.feat, R = RANGE[j];
+      const ax = K.axes(svg, { x: 370, y: 24, w: 250, h: 260 }, R, [0, 1], { xlabel: FN[j], ylabel: "预测患病概率", xticks: 3, yticks: 4, yfmt: (q) => q.toFixed(2) });
+      const grid = []; for (let k = 0; k <= 20; k++) grid.push(R[0] + ((R[1] - R[0]) * k) / 20);
+      const ice = F.te.X.slice(0, 15).map((x) => grid.map((g) => { const z = x.slice(); z[j] = g; return F.f(z); }));
+      ice.forEach((c) => K.svg(svg, "path", { d: c.map((p, k) => (k ? "L" : "M") + ax.sx(grid[k]) + "," + ax.sy(p)).join(""), fill: "none", stroke: "var(--c1)", "stroke-width": 1, opacity: 0.35 }));
+      const pdp = grid.map((g) => F.te.X.reduce((s, x) => { const z = x.slice(); z[j] = g; return s + F.f(z); }, 0) / F.te.X.length);
+      K.svg(svg, "path", { d: pdp.map((p, k) => (k ? "L" : "M") + ax.sx(grid[k]) + "," + ax.sy(p)).join(""), fill: "none", stroke: "var(--accent)", "stroke-width": 3.5 });
+      K.svg(svg, "text", { x: 370, y: 350, "font-size": 12, class: "muted" }, `PDP 从 ${pdp[0].toFixed(2)} 变到 ${pdp[20].toFixed(2)}`);
+      return { readout: [
+        { k: "测试准确率（不打乱）", v: (F.base * 100).toFixed(1) + "%" },
+        { k: "最重要的特征", v: FN[sorted[0].j] },
+        { k: "“随机编号”的重要性", v: (imp[5].m * 100).toFixed(1) + " 个点", color: Math.abs(imp[5].m) < 0.02 ? "var(--good)" : "var(--warn)" },
+        { k: "PDP 变化幅度", v: (Math.max(...pdp) - Math.min(...pdp)).toFixed(2) },
+      ] };
+    },
+  });
+
+  /* ---------------- 实验 B：精确 Shapley ---------------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "p", label: "选一位测试集病人（编号）", min: 0, max: 119, step: 1, value: 3 },
+      { id: "seed", label: "重新抽样并重训森林", button: true },
+    ],
+    note: "对 6 个特征的全部 2⁶ = 64 种组合，计算“只知道这些特征时”的平均预测（未知特征用 40 个背景病人的值代入取平均），再按 Shapley 公式加权求每个特征的边际贡献。各贡献之和严格等于“该病人预测 − 基线”。",
+    render(svg, v) {
+      const F = forest(7 + v.seed * 13), x = F.te.X[v.p], M = 6;
+      const bg = F.tr.X.slice(0, 40);
+      const val = new Array(1 << M);
+      for (let S = 0; S < 1 << M; S++) { let s = 0; bg.forEach((b) => { const z = b.slice(); for (let j = 0; j < M; j++) if (S & (1 << j)) z[j] = x[j]; s += F.f(z); }); val[S] = s / bg.length; }
+      const fact = [1, 1, 2, 6, 24, 120, 720];
+      const pc = (S) => { let c = 0; while (S) { c += S & 1; S >>= 1; } return c; };
+      const phi = new Array(M).fill(0);
+      for (let j = 0; j < M; j++) for (let S = 0; S < 1 << M; S++) { if (S & (1 << j)) continue; const s = pc(S); phi[j] += ((fact[s] * fact[M - s - 1]) / fact[M]) * (val[S | (1 << j)] - val[S]); }
+      const base = val[0], pred = val[(1 << M) - 1];
+      // 瀑布图
+      const ax = K.axes(svg, { x: 200, y: 20, w: 420, h: 1 }, [0, 1], [0, 1], { xticks: 0, yticks: 0 });
+      const lo = Math.min(base, pred, ...phi.map((_, k) => base + phi.slice(0, k + 1).reduce((s, q) => s + q, 0))) - 0.05;
+      const hi = Math.max(base, pred, ...phi.map((_, k) => base + phi.slice(0, k + 1).reduce((s, q) => s + q, 0))) + 0.05;
+      const sx = (q) => 200 + ((q - lo) / (hi - lo)) * 420;
+      K.svg(svg, "line", { x1: sx(base), x2: sx(base), y1: 20, y2: 290, stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+      K.svg(svg, "text", { x: sx(base), y: 14, "text-anchor": "middle", "font-size": 11 }, "基线 " + base.toFixed(2));
+      const order = phi.map((p, j) => j).sort((a, b) => Math.abs(phi[b]) - Math.abs(phi[a]));
+      let cur = base;
+      order.forEach((j, k) => {
+        const y = 30 + k * 40, nx = cur + phi[j];
+        K.svg(svg, "text", { x: 190, y: y + 14, "text-anchor": "end", "font-size": 12 }, `${FN[j]} = ${j === 5 ? x[j].toFixed(2) : j === 2 ? x[j].toFixed(1) : Math.round(x[j])}`);
+        K.svg(svg, "rect", { x: sx(Math.min(cur, nx)), y: y + 2, width: Math.max(1, Math.abs(sx(nx) - sx(cur))), height: 18, rx: 3, fill: phi[j] > 0 ? "var(--bad)" : "var(--good)" });
+        K.svg(svg, "text", { x: sx(Math.max(cur, nx)) + 4, y: y + 15, "font-size": 11, class: "muted" }, (phi[j] >= 0 ? "+" : "") + phi[j].toFixed(3));
+        if (k < M - 1) K.svg(svg, "line", { x1: sx(nx), x2: sx(nx), y1: y + 20, y2: y + 42, stroke: "var(--ink-3)" });
+        cur = nx;
+      });
+      K.svg(svg, "line", { x1: sx(pred), x2: sx(pred), y1: 20, y2: 290, stroke: "var(--accent)", "stroke-width": 2 });
+      K.svg(svg, "text", { x: sx(pred), y: 306, "text-anchor": "middle", "font-size": 12, fill: "var(--accent)", "font-weight": 700 }, "该病人预测 " + pred.toFixed(2));
+      K.svg(svg, "text", { x: 20, y: 344, "font-size": 12, class: "muted" }, "红 = 推高患病概率，绿 = 拉低；按贡献绝对值从大到小排列");
+      return { readout: [
+        { k: "基线（平均预测）", v: base.toFixed(3) },
+        { k: "该病人预测", v: pred.toFixed(3), color: "var(--accent)" },
+        { k: "贡献之和", v: (phi.reduce((s, q) => s + q, 0) >= 0 ? "+" : "") + phi.reduce((s, q) => s + q, 0).toFixed(3) },
+        { k: "真实标签（模拟）", v: F.te.y[v.p] ? "患病" : "无病" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

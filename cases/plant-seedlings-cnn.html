@@ -1,0 +1,771 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>幼苗与杂草识别</title>
+<meta name="description" content="Kaggle 案例拆解：先用 HSV 绿色掩膜把泥土背景抠掉，再用 6 层卷积的 Keras CNN 认出 12 种作物幼苗和杂草。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">图像数据 · 12 类多分类 · 农业视觉</div>
+  <h1>幼苗还是杂草：先抠掉泥土，再让 CNN 认 12 种苗</h1>
+  <p class="en">Plant Seedlings with CNN and Image Processing</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">高斯模糊</span><span class="tag method">HSV 绿色掩膜</span><span class="tag method">形态学闭运算</span>
+    <span class="tag method">独热编码</span><span class="tag method">分层划分</span><span class="tag method">数据增强</span>
+    <span class="tag method">Keras CNN</span><span class="tag method">BatchNorm / Dropout</span><span class="tag method">学习率衰减</span><span class="tag method">混淆矩阵</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Nikita Konstantinov（nikkonst）</b></span>
+    <span>Kaggle 点赞 <b>392</b>（2026-11 抓取）</span>
+    <span>竞赛 <b>plant-seedlings-classification</b></span>
+    <span><a href="https://www.kaggle.com/code/nikkonst/plant-seedlings-with-cnn-and-image-processing" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">俯拍的幼苗彩色照片</div><p>每张照片里是一株刚出土的小苗，背景是泥土和石子。训练图按物种放在不同文件夹里，文件夹名就是答案。<span data-cell="2">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这株苗是 12 种里的哪一种</div><p>12 种里有小麦、玉米、甜菜这样的<b>作物</b>，也有猪殃殃、荠菜这样的<b>田间杂草</b>。<span data-cell="13">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">先“抠图”去背景，再用 CNN 分类</div><p>高斯模糊 → 转 HSV 颜色空间 → 只留绿色 → 闭运算补洞；然后做数据增强，用 6 层卷积 + 3 层全连接的 Keras 网络分类。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">权重文件名记着验证准确率 0.96</div><p>作者没在 Kaggle 上训练，而是加载事先训好的权重，文件名 <code>weights.best_17-0.96</code> 按第 23 格的命名规则表示第 17 轮、验证准确率 0.96。<span data-cell="25">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据来自 Kaggle 竞赛 <b>Plant Seedlings Classification</b>。训练图放在 <code>train/&lt;物种名&gt;/*.png</code>，测试图放在 <code>test/*.png</code>，没有答案。下面的信息来自 notebook 的代码和文字，以及竞赛文件列表。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">类别数</div><div class="v">12</div></div>
+        <div class="stat-tile"><div class="k">图片格式</div><div class="v">PNG 彩色</div></div>
+        <div class="stat-tile"><div class="k">作者缩放到</div><div class="v">70×70×3</div></div>
+        <div class="stat-tile"><div class="k">验证集比例</div><div class="v">10%</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">12 类见 <span data-cell="13">第 13 格</span>；70×70 见 <span data-cell="2">第 2 格</span>；10% 见 <span data-cell="16">第 16 格</span>。作者在 <span data-cell="15">第 15 格</span> 说各类图片数量不均衡，具体张数在运行输出（柱状图）里，源码不带，这里不列。提交文件两列：<code>file</code>、<code>species</code>（<span data-cell="34">第 34 格</span>）。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">12 个类别（文件夹名）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>文件夹名</th><th>中文名</th><th>身份</th></tr>
+        <tr><td><code>Common wheat</code></td><td>普通小麦</td><td>作物</td></tr>
+        <tr><td><code>Maize</code></td><td>玉米</td><td>作物</td></tr>
+        <tr><td><code>Sugar beet</code></td><td>甜菜</td><td>作物</td></tr>
+        <tr><td><code>Black-grass</code></td><td>大穗看麦娘（禾本科）</td><td>杂草</td></tr>
+        <tr><td><code>Loose Silky-bent</code></td><td>风剪股颖（禾本科）</td><td>杂草</td></tr>
+        <tr><td><code>Charlock</code></td><td>野芥</td><td>杂草</td></tr>
+        <tr><td><code>Cleavers</code></td><td>猪殃殃</td><td>杂草</td></tr>
+        <tr><td><code>Common Chickweed</code></td><td>繁缕</td><td>杂草</td></tr>
+        <tr><td><code>Fat Hen</code></td><td>藜（灰灰菜）</td><td>杂草</td></tr>
+        <tr><td><code>Scentless Mayweed</code></td><td>无味母菊</td><td>杂草</td></tr>
+        <tr><td><code>Shepherds Purse</code></td><td>荠菜</td><td>杂草</td></tr>
+        <tr><td><code>Small-flowered Cranesbill</code></td><td>小花老鹳草</td><td>杂草</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">英文名照 <span data-cell="13">第 13 格</span>；中文名和“作物 / 杂草”是本页补充的常识说明（在农田里的身份），不是原数据里的列。<b>要预测的答案</b>就是文件夹名。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="7">
+    <h3>动手试试 A · 调 HSV 绿色范围，把幼苗从泥土里抠出来 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="19">
+    <h3>动手试试 B · 数据增强：一株苗变出很多张 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+  <div data-at="21">
+    <h3>动手试试 C · 卷积核扫叶子，再 2×2 最大池化 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>每张照片都有泥土背景，去掉它有助于提高准确率（作者的判断，文中没有做“去 / 不去背景”的对比实验）</td><td><span data-cell="5">第 5 格</span></td></tr>
+        <tr><td>绿色掩膜去掉了大部分背景</td><td><span data-cell="10">第 10 格</span></td></tr>
+        <tr><td>各类图片数量不均衡，所以划分验证集时用分层抽样</td><td><span data-cell="15">第 15 格</span> <span data-cell="16">第 16 格</span></td></tr>
+        <tr><td>训练太慢，没有在 Kaggle 上训练，训练代码被注释掉，改为加载事先训好的权重</td><td><span data-cell="22">第 22 格</span> <span data-cell="24">第 24 格</span></td></tr>
+        <tr><td>加载的权重文件名为 <code>weights.best_17-0.96.hdf5</code>；按第 23 格的命名模板 <code>best_{epoch}-{val_acc}</code>，表示第 17 轮、验证准确率 0.96</td><td><span data-cell="23">第 23 格</span> <span data-cell="25">第 25 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">第 25 格 <code>model.evaluate</code> 打印的训练 / 验证准确率、第 27 格的混淆矩阵都在运行输出里，Kaggle 下载的源码不带输出，作者文字里也没写具体数值，所以这里只列文件名里的 0.96。它是作者自己划分的验证集上的成绩，不是竞赛排行榜分数。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一张俯拍的幼苗照片，输出 12 个物种各自的概率，取最大的那个。</li>
+        <li><b>农业上的用处：</b>苗期分清庄稼和杂草，才能“只打杂草不伤苗”：精准喷药机器人、除草机械臂、田间杂草密度统计，都要先过这一关。</li>
+        <li><b>同类问题：</b>果园里数果子、病叶面积估算、显微镜下数细胞、工业流水线上找某种颜色的零件。凡是目标颜色和背景差别明显的，都可以先做颜色分割。</li>
+        <li><b>可迁移的套路：</b>传统图像处理先把“噪声”去掉 → 再交给 CNN；训练集和测试集必须走<b>完全相同</b>的预处理（第 30 格照抄了第 7 格）。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>读图与缩放：OpenCV <code>imread</code> + <code>resize</code> 到 70×70 <span data-cell="2">第 2 格</span></li>
+        <li>去背景：高斯模糊、BGR→HSV、<code>inRange</code> 绿色范围、椭圆核闭运算、布尔掩膜 <span data-cell="7">第 7 格</span></li>
+        <li>预处理：除以 255 归一化 <span data-cell="12">第 12 格</span>、LabelEncoder + 独热编码 <span data-cell="14">第 14 格</span></li>
+        <li>划分：<code>train_test_split</code>，10%，分层 <span data-cell="17">第 17 格</span></li>
+        <li>增强：<code>ImageDataGenerator</code> 旋转 180°、缩放、平移、水平 / 垂直翻转 <span data-cell="19">第 19 格</span></li>
+        <li>模型：6 个 5×5 卷积层（64-64-128-128-256-256）+ 3 次最大池化 + BatchNorm + Dropout + 两层 256 全连接 + softmax <span data-cell="21">第 21 格</span></li>
+        <li>训练设置：Adam、ReduceLROnPlateau、ModelCheckpoint <span data-cell="23">第 23 格</span></li>
+        <li>评估：混淆矩阵 <span data-cell="27">第 27 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>绿色掩膜的范围 <code>(25,40,50)–(75,255,255)</code> 是作者“凭经验”调出来的。如果换一块田、换一种光照（阴天、傍晚），这个范围还靠得住吗？有没有办法让它自动适应？</li>
+      <li>有的苗叶片发黄或带紫色，有的盆里长着绿色苔藓。掩膜会把它们怎么处理？这对分类有什么影响？</li>
+      <li>第 23 格里 <code>steps_per_epoch=trainX.shape[0]</code>，而每批是 75 张。这样一“轮”实际看了多少遍数据？正确的写法应该是什么？</li>
+      <li>第 25 格评估用的是从 <code>Data.npz</code> 读进来的训练 / 验证集，而不是本 notebook 第 17 格切出来的那一份。读者怎样才能确认 0.96 是在“没见过的图”上测的？</li>
+      <li>按第 21 格的结构推算：70×70 的图经过 6 次 5×5 卷积（不补边）和 3 次池化后，只剩 1×1×256。你觉得把输入放大到 128×128 会怎样？</li>
+      <li>小麦和看麦娘、风剪股颖都是细长的禾本科叶子，你觉得模型最容易在哪几类之间混淆？农民最怕哪一种错误：把杂草认成庄稼，还是把庄稼认成杂草？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Nikita Konstantinov（Kaggle：nikkonst），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意（幼苗图片都是用代码生成的，不是竞赛原图）。数据：Kaggle 竞赛 Plant Seedlings Classification。
+</footer>
+</main>
+
+<script src="nb/plant-seedlings-cnn.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ===== 页面专用：像素图工具 ===== */
+  const PX = (function () {
+    function rgbOf(name, fb) {
+      let s = (K.css(name) || fb || "#888888").trim();
+      if (s[0] !== "#") return [128, 128, 128];
+      if (s.length === 4) s = "#" + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+      return [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
+    }
+    function grid(W, H, f) { const a = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) a[y * W + x] = f(x, y); return { W, H, a }; }
+    function at(m, x, y) { return m.a[y * m.W + x]; }
+    function atClamp(m, x, y) { x = x < 0 ? 0 : x >= m.W ? m.W - 1 : x; y = y < 0 ? 0 : y >= m.H ? m.H - 1 : y; return m.a[y * m.W + x]; }
+    /* Keras 默认 padding='valid'：不补边，输出边长 = 输入 − 核 + 1 */
+    function convValid(m, k) { const n = k.length, W = m.W - n + 1, H = m.H - n + 1; return grid(W, H, (x, y) => { let s = 0; for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) s += k[j][i] * at(m, x + i, y + j); return s; }); }
+    function map(m, f) { const o = { W: m.W, H: m.H, a: new Float32Array(m.a.length) }; for (let i = 0; i < m.a.length; i++) o.a[i] = f(m.a[i], i); return o; }
+    const relu = (m) => map(m, (v) => (v > 0 ? v : 0));
+    /* Keras MaxPooling2D((2,2))：默认 valid，多出来的一行/列丢掉 */
+    function pool(m) { const W = Math.floor(m.W / 2), H = Math.floor(m.H / 2); return grid(W, H, (x, y) => Math.max(at(m, 2 * x, 2 * y), at(m, 2 * x + 1, 2 * y), at(m, 2 * x, 2 * y + 1), at(m, 2 * x + 1, 2 * y + 1))); }
+    function range(m) { let lo = Infinity, hi = -Infinity; for (const v of m.a) { if (v < lo) lo = v; if (v > hi) hi = v; } return [lo, hi]; }
+    function bilinear(m, x, y) {
+      const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+      return (atClamp(m, x0, y0) * (1 - fx) + atClamp(m, x0 + 1, y0) * fx) * (1 - fy) + (atClamp(m, x0, y0 + 1) * (1 - fx) + atClamp(m, x0 + 1, y0 + 1) * fx) * fy;
+    }
+    function toURL(m, mode, lo, hi) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      const P = rgbOf("--panel", "#ffffff"), A = rgbOf("--c1"), B = rgbOf("--c2");
+      if (lo == null || hi == null) { const r = range(m); if (lo == null) lo = r[0]; if (hi == null) hi = r[1]; }
+      const span = hi - lo || 1, amax = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+      for (let i = 0; i < m.a.length; i++) {
+        const v = m.a[i]; let r, gg, b;
+        if (mode === "div") { const t = Math.max(-1, Math.min(1, v / amax)), C = t >= 0 ? B : A, k = Math.abs(t); r = P[0] + (C[0] - P[0]) * k; gg = P[1] + (C[1] - P[1]) * k; b = P[2] + (C[2] - P[2]) * k; }
+        else if (mode === "heat") { const k = Math.max(0, Math.min(1, (v - lo) / span)); r = P[0] + (A[0] - P[0]) * k; gg = P[1] + (A[1] - P[1]) * k; b = P[2] + (A[2] - P[2]) * k; }
+        else { const k = Math.max(0, Math.min(1, (v - lo) / span)) * 255; r = gg = b = k; }
+        d[i * 4] = r; d[i * 4 + 1] = gg; d[i * 4 + 2] = b; d[i * 4 + 3] = 255;
+      }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    function rgbURL(m) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      for (let i = 0; i < m.W * m.H; i++) { for (let c = 0; c < 3; c++) d[i * 4 + c] = Math.max(0, Math.min(1, m.rgb[c][i])) * 255; d[i * 4 + 3] = 255; }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    /* 自定义每个像素颜色：f(i) 返回 [r,g,b] 0–255 */
+    function customURL(W, H, f) {
+      const cv = document.createElement("canvas"); cv.width = W; cv.height = H;
+      const g = cv.getContext("2d"), id = g.createImageData(W, H), d = id.data;
+      for (let i = 0; i < W * H; i++) { const c = f(i); d[i * 4] = c[0]; d[i * 4 + 1] = c[1]; d[i * 4 + 2] = c[2]; d[i * 4 + 3] = 255; }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    function img(svg, x, y, w, h, url) {
+      const e = K.svg(svg, "image", { x, y, width: w, height: h, preserveAspectRatio: "none" });
+      e.style.imageRendering = "pixelated";
+      e.setAttribute("href", url);
+      K.svg(svg, "rect", { x, y, width: w, height: h, fill: "none", stroke: "var(--line)" });
+      return e;
+    }
+    function draw(svg, x, y, w, h, m, mode, lo, hi) { return img(svg, x, y, w, h, m.rgb ? rgbURL(m) : toURL(m, mode, lo, hi)); }
+    return { grid, at, atClamp, convValid, map, relu, pool, range, bilinear, toURL, rgbURL, customURL, img, draw, rgbOf };
+  })();
+
+  /* ===== 用代码生成一张“俯拍幼苗”照片（RGB 0–1）+ 真值掩膜 =====
+     kind：broad 宽叶（双子叶，像野芥、甜菜）/ grass 细长叶（禾本科，像小麦、看麦娘）
+     背景：泥土 + 灰石子 + 一小块绿色苔藓；叶子：一片叶在阴影里、叶尖发黄 */
+  function seedling(N, kind, seed, opt) {
+    opt = opt || {};
+    const r = K.rng(seed || 1);
+    const R = new Float32Array(N * N), G = new Float32Array(N * N), B = new Float32Array(N * N), truth = new Uint8Array(N * N);
+    const pebbles = [], nP = 6 + Math.floor(r() * 5);
+    for (let i = 0; i < nP; i++) pebbles.push([r() * N, r() * N, (0.025 + r() * 0.03) * N, 0.5 + r() * 0.15]);
+    const moss = opt.moss === false ? null : [(r() < 0.5 ? 0.15 : 0.85) * N, (0.15 + r() * 0.7) * N, 0.07 * N];
+    const cx = N * (0.45 + r() * 0.1), cy = N * (0.45 + r() * 0.1);
+    const leaves = [], nL = kind === "grass" ? 3 + Math.floor(r() * 3) : 3 + Math.floor(r() * 2), a0 = r() * Math.PI * 2;
+    for (let i = 0; i < nL; i++) {
+      const a = a0 + (i * 2 * Math.PI) / nL + (r() - 0.5) * 0.6;
+      const L = kind === "grass" ? N * (0.32 + r() * 0.12) : N * (0.2 + r() * 0.1);
+      const Wd = kind === "grass" ? N * 0.028 : L * (0.42 + r() * 0.1);
+      leaves.push({ a, L, Wd, bend: kind === "grass" ? (r() - 0.5) * 0.6 : 0, shade: i === 0, yellow: i === 1 });
+    }
+    const tone = 0.9 + r() * 0.2;
+    for (let py = 0; py < N; py++) for (let px = 0; px < N; px++) {
+      const i = py * N + px, x = px + 0.5, y = py + 0.5;
+      const lf = Math.sin(px * 0.31 + seed) * Math.cos(py * 0.27 - seed) * 0.03;
+      const nz = (r() - 0.5) * 0.09;
+      let c = [0.46 + lf + nz, 0.34 + lf + nz * 0.8, 0.22 + lf * 0.6 + nz * 0.6];
+      for (const p of pebbles) if (Math.hypot(x - p[0], y - p[1]) < p[2]) { const v = p[3] + nz * 0.5; c = [v, v * 0.97, v * 0.92]; }
+      if (moss && Math.hypot(x - moss[0], (y - moss[1]) * 1.4) < moss[2]) c = [0.3 + nz * 0.5, 0.37 + nz * 0.5, 0.26 + nz * 0.5];
+      let plant = false;
+      for (const l of leaves) {
+        const dx = x - cx, dy = y - cy;
+        let u = dx * Math.cos(l.a) + dy * Math.sin(l.a), v = -dx * Math.sin(l.a) + dy * Math.cos(l.a);
+        v -= l.bend * u * u / (l.L || 1);
+        if (u < 0 || u > l.L) continue;
+        const t = u / l.L, hw = kind === "grass" ? l.Wd * (1 - 0.6 * t) + 0.6 : (l.Wd / 2) * Math.pow(Math.sin(Math.PI * Math.min(1, t * 1.05)), 0.8) + (t < 0.25 ? 0.7 : 0);
+        if (Math.abs(v) <= hw) {
+          plant = true;
+          let g = [0.25 * tone, 0.55 * tone, 0.18 * tone];
+          if (Math.abs(v) < 0.6 && kind !== "grass") g = [0.42, 0.62, 0.3];
+          if (l.yellow && t > 0.72) g = [0.62, 0.6, 0.2];
+          if (l.shade && t > 0.35) g = g.map((q) => q * 0.4);
+          c = [g[0] + nz * 0.4, g[1] + nz * 0.4, g[2] + nz * 0.4];
+        }
+      }
+      if (!plant && Math.hypot(x - cx, y - cy) < N * 0.025) { plant = true; c = [0.45, 0.6, 0.3]; }
+      R[i] = c[0]; G[i] = c[1]; B[i] = c[2]; truth[i] = plant ? 1 : 0;
+    }
+    return { W: N, H: N, rgb: [R, G, B], truth };
+  }
+  /* OpenCV 8 位约定的 HSV：H 0–179（角度 ÷ 2），S、V 0–255 */
+  function hsv(r, g, b) {
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+    let h = 0;
+    if (d > 1e-9) { if (mx === r) h = 60 * (((g - b) / d) % 6); else if (mx === g) h = 60 * ((b - r) / d + 2); else h = 60 * ((r - g) / d + 4); }
+    if (h < 0) h += 360;
+    return [h / 2, mx > 0 ? (d / mx) * 255 : 0, mx * 255];
+  }
+  /* 5×5 高斯模糊（OpenCV ksize=5、sigma=0 时 sigma≈1.1） */
+  const GK = (function () { const s = 1.1, k = []; let t = 0; for (let j = -2; j <= 2; j++) { const row = []; for (let i = -2; i <= 2; i++) { const v = Math.exp(-(i * i + j * j) / (2 * s * s)); row.push(v); t += v; } k.push(row); } return k.map((r) => r.map((v) => v / t)); })();
+  function blurRGB(im) {
+    const out = im.rgb.map((ch) => { const m = { W: im.W, H: im.H, a: ch }; return PX.grid(im.W, im.H, (x, y) => { let s = 0; for (let j = -2; j <= 2; j++) for (let i = -2; i <= 2; i++) s += GK[j + 2][i + 2] * PX.atClamp(m, x + i, y + j); return s; }).a; });
+    return { W: im.W, H: im.H, rgb: out, truth: im.truth };
+  }
+  function greenMask(im, lo, hi) {
+    const n = im.W * im.H, m = new Uint8Array(n);
+    for (let i = 0; i < n; i++) { const h = hsv(im.rgb[0][i], im.rgb[1][i], im.rgb[2][i]); m[i] = h[0] >= lo[0] && h[0] <= hi[0] && h[1] >= lo[1] && h[1] <= hi[1] && h[2] >= lo[2] && h[2] <= hi[2] ? 1 : 0; }
+    return m;
+  }
+  /* 椭圆（圆盘）结构元素的膨胀 / 腐蚀；闭运算 = 先膨胀再腐蚀 */
+  function disc(k) { const r = (k - 1) / 2, o = []; for (let j = -r; j <= r; j++) for (let i = -r; i <= r; i++) if ((i * i) / ((r + 0.5) * (r + 0.5)) + (j * j) / ((r + 0.5) * (r + 0.5)) <= 1) o.push([i, j]); return o; }
+  function morph(m, W, H, k, dilate) {
+    const off = disc(k), o = new Uint8Array(W * H);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      let v = dilate ? 0 : 1;
+      for (const [i, j] of off) { const xx = x + i, yy = y + j; const q = xx < 0 || yy < 0 || xx >= W || yy >= H ? (dilate ? 0 : 1) : m[yy * W + xx]; if (dilate && q) { v = 1; break; } if (!dilate && !q) { v = 0; break; } }
+      o[y * W + x] = v;
+    }
+    return o;
+  }
+  const closeM = (m, W, H, k) => (k > 1 ? morph(morph(m, W, H, k, true), W, H, k, false) : m);
+  function applyMask(im, m) { return { W: im.W, H: im.H, rgb: im.rgb.map((ch) => ch.map((v, i) => (m[i] ? v : 0))) }; }
+  function maskURL(m, W, H) { return PX.customURL(W, H, (i) => (m[i] ? [255, 255, 255] : [20, 20, 20])); }
+  /* 对每个通道做仿射（旋转/缩放/平移/翻转），越界取最近像素，同 Keras fill_mode='nearest' */
+  function affineRGB(im, p) {
+    const th = ((p.rot || 0) * Math.PI) / 180, c = Math.cos(th), s = Math.sin(th), z = p.zoom || 1, W = im.W, H = im.H;
+    const cx = (W - 1) / 2, cy = (H - 1) / 2, tx = (p.tx || 0) * W, ty = (p.ty || 0) * H;
+    return { W, H, rgb: im.rgb.map((ch) => { const m = { W, H, a: ch }; return PX.grid(W, H, (x, y) => { let u = x - cx - tx, v = y - cy - ty; if (p.flip) u = -u; if (p.vflip) v = -v; const a = c * u + s * v, b = -s * u + c * v; return PX.bilinear(m, a * z + cx, b * z + cy); }).a; }) };
+  }
+  const CLASSES = ["Black-grass", "Charlock", "Cleavers", "Common Chickweed", "Common wheat", "Fat Hen", "Loose Silky-bent", "Maize", "Scentless Mayweed", "Shepherds Purse", "Small-flowered Cranesbill", "Sugar beet"];
+  const CLEAN = (N, kind, seed) => { const im = seedling(N, kind, seed); const b = blurRGB(im); const m = closeM(greenMask(b, [25, 40, 50], [75, 255, 255]), N, N, 5); return { im, m, clear: applyMask(im, m) }; };
+
+  const steps = [
+    {
+      title: "任务：分清 12 种幼苗和杂草", kicker: "第 0 格 · 作者的四步计划", at: 0,
+      html: `<p>作者开篇把流程写成四步：<b>读数据</b>（读图片和标签）→ <b>清洗数据</b>（去掉背景、归一化、整理标签）→ <b>建模</b>（划分训练 / 验证、搭模型、训练）→ <b>评估</b>（看效果、对测试图做预测）。</p><p>为什么农业上要做这件事？苗刚出土时，庄稼和杂草长得很像。能自动分清，喷药机器人就能“只打杂草不伤苗”，少用农药。</p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        const names = ["① 读数据\n图片 + 文件夹名", "② 清洗数据\n去背景 · 归一化", "③ 建模\n划分 · CNN · 训练", "④ 评估\n混淆矩阵 · 提交"];
+        const nodes = names.map((n, i) => { const g = K.node(svg, 20 + i * 178, 40, 150, 70, n, { bold: i === 1 }); g.style.opacity = 0; return g; });
+        const arrows = [0, 1, 2].map((i) => { const a = K.arrow(svg, 172 + i * 178, 75, 196 + i * 178, 75); a.style.opacity = 0; return a; });
+        const row = [["broad", 3, "作物"], ["grass", 5, "杂草"], ["broad", 8, "杂草"], ["grass", 11, "作物"], ["broad", 14, "杂草"]];
+        const thumbs = row.map((d, i) => { const e = PX.draw(svg, 60 + i * 124, 160, 96, 96, seedling(40, d[0], d[1])); e.style.opacity = 0; return e; });
+        const labs = row.map((d, i) => { const t = K.svg(svg, "text", { x: 108 + i * 124, y: 280, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: d[2] === "作物" ? "var(--good)" : "var(--bad)" }, d[2] === "作物" ? "✓ 留着" : "✗ 打药"); t.style.opacity = 0; return t; });
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 12, class: "muted" }, "下排是用代码画的示意苗（不是竞赛原图），身份标签也只是示意");
+        (async () => {
+          for (let i = 0; i < 4; i++) { if (!(await ctx.tween(350, (t) => { nodes[i].style.opacity = t; if (i) arrows[i - 1].style.opacity = t; }))) return; }
+          for (let i = 0; i < 5; i++) { if (!(await ctx.tween(250, (t) => { thumbs[i].style.opacity = t; }))) return; }
+          await ctx.tween(500, (t) => labs.forEach((l) => (l.style.opacity = t)));
+        })();
+      },
+    },
+    {
+      title: "读图：缩到 70×70，文件夹名就是答案", kicker: "第 1–2 格 · 读入", cells: [2], highlight: ["ScaleTo = 70", "cv2.resize", "split('/')[-2]"],
+      html: `<p>作者用 <code>glob</code> 找出 <code>train/*/*.png</code> 下的所有图片，每张用 OpenCV 读进来，统一缩成 <b>70×70 像素</b>（为了训练快）。</p><p>标签不用另外的表格：路径 <code>train/Charlock/xxx.png</code> 按 “/” 切开，倒数第二段 <code>Charlock</code> 就是物种名。</p>`,
+      draw(svg, ctx) {
+        const big = seedling(140, "broad", 21, {}), small = seedling(70, "broad", 21, {});
+        const path = K.svg(svg, "text", { x: 30, y: 36, "font-size": 15, "font-family": "var(--mono)" }, "../train/");
+        const sp = K.svg(svg, "tspan", { fill: "var(--accent)", "font-weight": 700 }, "Charlock");
+        path.appendChild(sp);
+        K.svg(path, "tspan", {}, "/0a7e1ca41.png");
+        const lab = K.svg(svg, "text", { x: 470, y: 36, "font-size": 14, "font-weight": 700, fill: "var(--accent)" }, "");
+        const im = PX.draw(svg, 40, 60, 240, 240, big);
+        K.svg(svg, "text", { x: 160, y: 320, "text-anchor": "middle", "font-size": 12, class: "muted" }, "原图（示意，实际照片更大）");
+        const out = PX.draw(svg, 420, 100, 160, 160, small); out.style.opacity = 0;
+        const t2 = K.svg(svg, "text", { x: 500, y: 285, "text-anchor": "middle", "font-size": 13 }, "70 × 70 × 3（B、G、R 三个通道）"); t2.style.opacity = 0;
+        const ar = K.arrow(svg, 300, 180, 400, 180); ar.style.opacity = 0;
+        K.svg(svg, "text", { x: 350, y: 168, "text-anchor": "middle", "font-size": 12 }, "cv2.resize");
+        ctx.wait(500).then((ok) => { if (ok) lab.textContent = "→ 标签：Charlock"; return ok && ctx.tween(700, (t) => (ar.style.opacity = t)); })
+          .then((ok) => ok && ctx.tween(900, (t) => { out.style.opacity = t; t2.style.opacity = t; }));
+      },
+    },
+    {
+      title: "看一眼原图：背景太杂", kicker: "第 3–5 格 · 观察", cells: [4],
+      html: `<p>作者把前 8 张图画出来，发现每张照片都有<b>背景</b>：泥土、石子，有时还有别的东西。他的判断是：把背景去掉，模型就不会被泥土的纹理分心，准确率会更好（<span data-cell="5">第 5 格</span>）。</p><p>注意这是作者的判断，notebook 里没有做“去背景 / 不去背景”的对比实验。</p>`,
+      draw(svg, ctx) {
+        const kinds = ["broad", "grass", "broad", "grass", "broad", "grass", "broad", "grass"];
+        const ims = kinds.map((k, i) => { const e = PX.draw(svg, 28 + (i % 4) * 172, 20 + Math.floor(i / 4) * 150, 140, 140, seedling(48, k, 40 + i)); e.style.opacity = 0; return e; });
+        const note = K.svg(svg, "text", { x: 360, y: 330, "text-anchor": "middle", "font-size": 13, fill: "var(--warn)", "font-weight": 700 }, "棕色泥土 · 灰色石子 · 角落的苔藓：都不是我们要认的东西（示意图）");
+        note.style.opacity = 0;
+        (async () => { for (let i = 0; i < 8; i++) if (!(await ctx.tween(180, (t) => (ims[i].style.opacity = t)))) return; await ctx.tween(500, (t) => (note.style.opacity = t)); })();
+      },
+    },
+    {
+      title: "去背景的思路：植物都是绿的，先模糊去噪", kicker: "第 6 格 · 高斯模糊", cells: [6],
+      html: `<p>作者利用一个简单事实：<b>照片里的植物都是绿色的</b>。只要留下“绿色”的像素，其他像素涂黑，背景就没了。</p><p>第一步先做 <b>5×5 高斯模糊</b>：每个像素换成周围 25 个像素的加权平均，离得越近权重越大。这样泥土里零星的噪点被抹平，不会被误认成绿色。动画左边是放大的局部，中间是 5×5 权重，右边是模糊后的结果（浏览器现场算的）。</p>`,
+      draw(svg, ctx) {
+        const im = seedling(48, "broad", 7), bl = blurRGB(im);
+        const crop = (m) => ({ W: 16, H: 16, rgb: m.rgb.map((ch) => { const o = new Float32Array(256); for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) o[y * 16 + x] = ch[(y + 14) * 48 + x + 14]; return o; }) });
+        const a = crop(im), b = crop(bl);
+        PX.draw(svg, 20, 40, 240, 240, a);
+        K.svg(svg, "text", { x: 140, y: 30, "text-anchor": "middle", "font-size": 13 }, "原图局部（16×16 像素）");
+        const box = K.svg(svg, "rect", { x: 20, y: 40, width: 75, height: 75, fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        for (let j = 0; j < 5; j++) for (let i = 0; i < 5; i++) {
+          const w = GK[j][i];
+          K.svg(svg, "rect", { x: 290 + i * 28, y: 90 + j * 28, width: 26, height: 26, fill: K.heat(w / GK[2][2]), stroke: "var(--line)" });
+          K.svg(svg, "text", { x: 303 + i * 28, y: 107 + j * 28, "text-anchor": "middle", "font-size": 9 }, (w * 100).toFixed(1));
+        }
+        K.svg(svg, "text", { x: 360, y: 80, "text-anchor": "middle", "font-size": 13 }, "5×5 高斯权重（%）");
+        K.svg(svg, "text", { x: 360, y: 250, "text-anchor": "middle", "font-size": 12, class: "muted" }, "中间重、四周轻，加起来 = 100%");
+        const outImg = PX.draw(svg, 460, 40, 240, 240, b); outImg.style.opacity = 0.15;
+        K.svg(svg, "text", { x: 580, y: 30, "text-anchor": "middle", "font-size": 13 }, "模糊后");
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 12, class: "muted" }, "示意图片由代码生成；模糊结果按 OpenCV GaussianBlur((5,5), 0) 的权重现场计算");
+        ctx.tween(2600, (t) => {
+          const k = Math.floor(t * 143.99), x = k % 12, y = Math.floor(k / 12);
+          box.setAttribute("x", 20 + x * 15); box.setAttribute("y", 40 + y * 15);
+          outImg.style.opacity = 0.15 + 0.85 * t;
+        });
+      },
+    },
+    {
+      title: "转 HSV：用“色相”框出绿色", kicker: "第 7 格 · inRange 绿色范围", cells: [7], highlight: ["COLOR_BGR2HSV", "lower_green = (25, 40, 50)", "upper_green = (75, 255, 255)", "cv2.inRange"],
+      html: `<p>在 RGB 里，“绿”不好描述：亮绿、暗绿、黄绿的 R、G、B 三个数都不一样。所以作者先把图转成 <b>HSV</b>：</p><ul class="tight"><li><b>H 色相</b>：什么颜色（红、黄、绿、蓝……绕一圈），OpenCV 里取 0–179，等于角度 ÷ 2</li><li><b>S 饱和度</b>：颜色有多“纯”，灰色接近 0</li><li><b>V 明度</b>：有多亮，黑色是 0</li></ul><p>作者的范围是 H 25–75（约 50°–150°，黄绿到青绿）、S ≥ 40、V ≥ 50。动画把图里的像素按色相角度、饱和度放到色环上，落在扇形里的保留。</p>`,
+      draw(svg, ctx) {
+        const N = 40, im = blurRGB(seedling(N, "broad", 12)), cx = 520, cy = 175, R0 = 140;
+        PX.draw(svg, 30, 55, 230, 230, im);
+        K.svg(svg, "text", { x: 145, y: 45, "text-anchor": "middle", "font-size": 13 }, "模糊后的图（示意）");
+        for (let d = 0; d < 360; d += 5) {
+          const a1 = (d * Math.PI) / 180, a2 = ((d + 5) * Math.PI) / 180;
+          K.svg(svg, "path", { d: `M${cx + Math.cos(a1) * (R0 - 10)},${cy - Math.sin(a1) * (R0 - 10)} L${cx + Math.cos(a1) * R0},${cy - Math.sin(a1) * R0} L${cx + Math.cos(a2) * R0},${cy - Math.sin(a2) * R0} L${cx + Math.cos(a2) * (R0 - 10)},${cy - Math.sin(a2) * (R0 - 10)} Z`, fill: `hsl(${d},70%,50%)` });
+        }
+        const s1 = (50 * Math.PI) / 180, s2 = (150 * Math.PI) / 180, rIn = ((R0 - 12) * 40) / 255;
+        const sector = K.svg(svg, "path", { d: `M${cx + Math.cos(s1) * rIn},${cy - Math.sin(s1) * rIn} L${cx + Math.cos(s1) * (R0 - 12)},${cy - Math.sin(s1) * (R0 - 12)} A${R0 - 12},${R0 - 12} 0 0 0 ${cx + Math.cos(s2) * (R0 - 12)},${cy - Math.sin(s2) * (R0 - 12)} L${cx + Math.cos(s2) * rIn},${cy - Math.sin(s2) * rIn} A${rIn},${rIn} 0 0 1 ${cx + Math.cos(s1) * rIn},${cy - Math.sin(s1) * rIn} Z`, fill: "var(--good)", "fill-opacity": 0.12, stroke: "var(--good)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+        sector.style.opacity = 0;
+        K.svg(svg, "text", { x: cx, y: cy - R0 - 8, "text-anchor": "middle", "font-size": 12 }, "H≈45（90°）绿");
+        K.svg(svg, "text", { x: cx + R0 + 6, y: cy + 4, "font-size": 12 }, "0 红");
+        K.svg(svg, "text", { x: cx, y: cy + R0 + 18, "text-anchor": "middle", "font-size": 12, class: "muted" }, "离圆心越远 = 饱和度越高");
+        const r = K.rng(3), pts = [];
+        for (let k = 0; k < 140; k++) {
+          const i = Math.floor(r() * N * N), h = hsv(im.rgb[0][i], im.rgb[1][i], im.rgb[2][i]);
+          const ang = (h[0] * 2 * Math.PI) / 180, rad = ((R0 - 12) * h[1]) / 255;
+          const keep = h[0] >= 25 && h[0] <= 75 && h[1] >= 40 && h[2] >= 50;
+          const col = `rgb(${im.rgb[0][i] * 255},${im.rgb[1][i] * 255},${im.rgb[2][i] * 255})`;
+          const x0 = 30 + ((i % N) + 0.5) * (230 / N), y0 = 55 + (Math.floor(i / N) + 0.5) * (230 / N);
+          pts.push({ x0, y0, x1: cx + Math.cos(ang) * rad, y1: cy - Math.sin(ang) * rad, keep, e: K.svg(svg, "circle", { cx: x0, cy: y0, r: 3.5, fill: col, stroke: "var(--ink)", "stroke-width": 0.6 }) });
+        }
+        const msg = K.svg(svg, "text", { x: 30, y: 320, "font-size": 13, "font-weight": 700, fill: "var(--good)" }, "");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1800, (t) => pts.forEach((p) => { p.e.setAttribute("cx", K.lerp(p.x0, p.x1, t)); p.e.setAttribute("cy", K.lerp(p.y0, p.y1, t)); })))
+          .then((ok) => ok && ctx.tween(600, (t) => (sector.style.opacity = t)))
+          .then((ok) => { if (!ok) return; pts.forEach((p) => { if (!p.keep) p.e.style.opacity = 0.18; }); msg.textContent = "扇形里（H 25–75、S≥40、V≥50）的像素 → 掩膜里记 1，其余记 0"; });
+      },
+    },
+    {
+      title: "闭运算补洞，再把掩膜“盖”回原图", kicker: "第 7–10 格 · 形态学 + 布尔掩膜", cells: [7], highlight: ["MORPH_ELLIPSE, (11, 11)", "cv2.MORPH_CLOSE", "bMask = mask > 0", "clear[bMask] = img[bMask]"],
+      html: `<p>只按颜色挑出来的掩膜常常有<b>小洞和缺口</b>：叶脉发白、叶片反光、阴影里的部分都可能被漏掉。作者用 11×11 椭圆核做<b>闭运算</b>：先“膨胀”（白色区域往外长一圈，把洞填上），再“腐蚀”（往回缩一圈，恢复原来的轮廓）。</p><p>最后把掩膜变成真 / 假的布尔矩阵，新建一张全黑的图，只把掩膜为真的像素从原图拷过来。第 9 格作者展示了 8 张去背景后的效果，第 10 格说“去掉了大部分背景”。</p>`,
+      draw(svg, ctx) {
+        const W = 18, H = 14, m0 = new Uint8Array(W * H);
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const d = Math.hypot((x - 8.5) / 6.5, (y - 6.5) / 4.6); if (d < 1) m0[y * W + x] = 1; }
+        [[5, 5], [6, 5], [9, 7], [12, 6], [8, 3], [11, 9], [4, 8], [13, 7]].forEach(([x, y]) => (m0[y * W + x] = 0));
+        [[2, 6], [15, 5]].forEach(([x, y]) => (m0[y * W + x] = 0));
+        const md = morph(m0, W, H, 3, true), mc = morph(md, W, H, 3, false), cs = 15;
+        const cellsA = [];
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const e = K.svg(svg, "rect", { x: 20 + x * cs, y: 50 + y * cs, width: cs - 1, height: cs - 1, rx: 2, fill: m0[y * W + x] ? "var(--ink)" : "var(--panel-2)" }); e.dataset.on = m0[y * W + x] ? "1" : "0"; cellsA.push(e); }
+        const title = K.svg(svg, "text", { x: 155, y: 38, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "① 颜色掩膜：有小洞");
+        const sets = [[md, "② 膨胀：白区往外长一圈，洞被填上"], [mc, "③ 腐蚀：再缩回来 = 闭运算"]];
+        const im = seedling(48, "broad", 31), bl = blurRGB(im), mk = closeM(greenMask(bl, [25, 40, 50], [75, 255, 255]), 48, 48, 7);
+        const ia = PX.draw(svg, 330, 60, 120, 120, im), ib = PX.img(svg, 460, 60, 120, 120, maskURL(mk, 48, 48)), ic = PX.draw(svg, 590, 60, 120, 120, applyMask(im, mk));
+        [ib, ic].forEach((e) => (e.style.opacity = 0));
+        K.svg(svg, "text", { x: 390, y: 198, "text-anchor": "middle", "font-size": 12 }, "原图");
+        const tb = K.svg(svg, "text", { x: 520, y: 198, "text-anchor": "middle", "font-size": 12 }, "布尔掩膜"), tc = K.svg(svg, "text", { x: 650, y: 198, "text-anchor": "middle", "font-size": 12 }, "套回原图");
+        [tb, tc].forEach((e) => (e.style.opacity = 0));
+        K.svg(svg, "text", { x: 20, y: 290, "font-size": 12, class: "muted" }, "左：18×14 的小掩膜用 3×3 圆形核演示（作者在 70×70 图上用 11×11）。");
+        K.svg(svg, "text", { x: 20, y: 310, "font-size": 12, class: "muted" }, "右：示意图在浏览器里真算：模糊 → HSV 范围 → 闭运算 → 套回原图。黑色就是被去掉的背景。");
+        (async () => {
+          for (const [m, txt] of sets) {
+            if (!(await ctx.wait(1100))) return;
+            title.textContent = txt;
+            const changed = [];
+            cellsA.forEach((c, i) => { const was = c.dataset.on === "1"; if (was !== !!m[i]) changed.push([c, m[i]]); });
+            if (!(await ctx.tween(600, (t) => changed.forEach(([c, v]) => { c.style.fill = v ? "var(--accent)" : "var(--warn)"; c.style.opacity = 0.4 + 0.6 * t; })))) return;
+            await ctx.wait(400);
+            changed.forEach(([c, v]) => { c.style.fill = v ? "var(--ink)" : "var(--panel-2)"; c.dataset.on = v ? "1" : "0"; });
+          }
+          if (!(await ctx.tween(600, (t) => { ib.style.opacity = tb.style.opacity = t; }))) return;
+          await ctx.tween(600, (t) => { ic.style.opacity = tc.style.opacity = t; });
+        })();
+      },
+    },
+    {
+      title: "像素除以 255；12 个物种名变成独热编码", kicker: "第 11–15 格 · 归一化与标签", cells: [12, 14], highlight: ["/ 255", "LabelEncoder", "to_categorical"],
+      html: `<p><b>归一化</b>：像素原本是 0–255 的整数，作者全部除以 255 变成 0–1 的小数。作者的理由是：输入在 0–1 之间，CNN 训练得更快。</p><p><b>独热编码</b>：12 个物种名先按字母顺序编成 0–11 的号码，再变成 12 个格子里只有一个是 1 的向量，比如 <code>Charlock</code> → <code>[0,1,0,0,0,0,0,0,0,0,0,0]</code>（作者在第 13 格举的例子）。第 15 格作者指出：各物种的图片数量<b>不一样多</b>。</p>`,
+      draw(svg, ctx) {
+        const vals = [0, 37, 128, 200, 255];
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 14, "font-weight": 700 }, "像素值 ÷ 255");
+        const ts = vals.map((v, i) => { K.node(svg, 20 + i * 62, 44, 54, 40, "", { fill: `rgb(${v},${v},${v})` }); return K.svg(svg, "text", { x: 47 + i * 62, y: 108, "text-anchor": "middle", "font-size": 14, "font-family": "var(--mono)" }, String(v)); });
+        K.svg(svg, "text", { x: 360, y: 30, "font-size": 14, "font-weight": 700 }, "物种名 → 独热向量（第 13 格的例子）");
+        const label = K.svg(svg, "text", { x: 360, y: 60, "font-size": 15, "font-family": "var(--mono)", fill: "var(--accent)" }, "'Charlock'");
+        const boxes = CLASSES.map((c, i) => { const r = K.svg(svg, "rect", { x: 360 + i * 28, y: 76, width: 25, height: 30, rx: 3, fill: "var(--panel-2)", stroke: "var(--line)" }); const t = K.svg(svg, "text", { x: 372 + i * 28, y: 96, "text-anchor": "middle", "font-size": 12, "font-family": "var(--mono)" }, "0"); return { r, t }; });
+        CLASSES.forEach((c, i) => K.svg(svg, "text", { x: 372 + i * 28, y: 120, "text-anchor": "end", "font-size": 9, transform: `rotate(-60 ${372 + i * 28} 120)` }, c.length > 12 ? c.slice(0, 11) + "…" : c));
+        K.svg(svg, "text", { x: 20, y: 240, "font-size": 14, "font-weight": 700 }, "各类图片数不一样多（第 15 格；柱子高低为示意，不是真实张数）");
+        const hs = [0.55, 0.75, 0.55, 1, 0.42, 0.9, 1, 0.42, 0.8, 0.45, 0.85, 0.7];
+        const bars = hs.map((h, i) => K.svg(svg, "rect", { x: 30 + i * 56, y: 320, width: 40, height: 0, rx: 3, fill: i === 4 || i === 7 || i === 11 ? "var(--good)" : "var(--c1)" }));
+        K.svg(svg, "text", { x: 700, y: 262, "text-anchor": "end", "font-size": 12, fill: "var(--good)" }, "■ 作物");
+        K.svg(svg, "text", { x: 640, y: 262, "text-anchor": "end", "font-size": 12, fill: "var(--c1)" }, "■ 杂草");
+        ctx.wait(400).then((ok) => ok && ctx.tween(900, (t) => ts.forEach((e, i) => (e.textContent = t < 0.5 ? String(vals[i]) : (vals[i] / 255).toFixed(2)))))
+          .then((ok) => ok && ctx.tween(700, (t) => { const b = boxes[1]; b.r.style.fill = (`color-mix(in srgb, var(--accent) ${Math.round(t * 70)}%, var(--panel-2))`); if (t > 0.5) b.t.textContent = "1"; }))
+          .then((ok) => ok && ctx.tween(1000, (t) => bars.forEach((b, i) => { b.setAttribute("height", hs[i] * 60 * t); b.setAttribute("y", 320 - hs[i] * 60 * t); })));
+      },
+    },
+    {
+      title: "分层抽出 10% 做验证集", kicker: "第 16–17 格 · 划分", cells: [17], highlight: ["test_size=0.1", "stratify = clearTrainLabel"],
+      html: `<p>作者从训练图里拿出 <b>10%</b> 当验证集（模型训练时看不到，用来检查学得好不好）。因为各类数量不均衡，他加了 <code>stratify</code>：<b>每一类都按 10% 抽</b>，这样验证集里各类的比例和整体一样，评估才公平。</p>`,
+      draw(svg, ctx) {
+        K.node(svg, 540, 60, 160, 240, "", { fill: "color-mix(in srgb, var(--c3) 12%, var(--panel))", stroke: "var(--c3)" });
+        K.svg(svg, "text", { x: 620, y: 84, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "验证集 10%");
+        const hs = [10, 14, 10, 16, 8, 15, 16, 8, 14, 9, 15, 12], dots = [];
+        hs.forEach((h, c) => { for (let k = 0; k < h; k++) dots.push({ c, k, val: k < Math.max(1, Math.round(h * 0.1)), e: K.svg(svg, "circle", { cx: 40 + c * 40, cy: 300 - k * 15, r: 5.5, fill: K.colors[c % 6], opacity: 0.8 }) }); });
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, class: "muted" }, "每一列是一个物种，每个点代表一批图（数量为示意）");
+        ctx.wait(600).then((ok) => ok && ctx.tween(1600, (t) => dots.forEach((d) => {
+          if (!d.val) return;
+                    const tx = 562 + (d.c % 6) * 23, ty = 120 + Math.floor(d.c / 6) * 50 + d.k * 16;
+          d.e.setAttribute("cx", K.lerp(40 + d.c * 40, tx, t)); d.e.setAttribute("cy", K.lerp(300 - d.k * 15, ty, t));
+        }))).then((ok) => ok && K.svg(svg, "text", { x: 620, y: 260, "text-anchor": "middle", "font-size": 12 }, "每类都有代表"));
+      },
+    },
+    {
+      title: "数据增强：转、缩、移、翻", kicker: "第 18–19 格 · ImageDataGenerator", cells: [19], highlight: ["rotation_range=180", "horizontal_flip=True", "vertical_flip=True"],
+      html: `<p>为了防止<b>过拟合</b>（模型把训练图“背下来”，换张新图就不会了），作者让生成器在训练时随机改动每张图：旋转 0–180°、缩放 10%、上下左右平移 10%、水平和垂直翻转。</p><p>这些改动对俯拍的幼苗特别合理：从天上往下看，苗怎么转、怎么翻都还是同一种苗。动画是浏览器现场对一张示意苗做的变换。</p>`,
+      draw(svg, ctx) {
+        const c = CLEAN(56, "grass", 52).clear;
+        PX.draw(svg, 20, 70, 200, 200, c);
+        K.svg(svg, "text", { x: 120, y: 60, "text-anchor": "middle", "font-size": 13 }, "去背景后的一张图");
+        const r = K.rng(5), slots = [];
+        for (let i = 0; i < 8; i++) {
+          const p = { rot: r() * 180, zoom: 1 + (r() - 0.5) * 0.2, tx: (r() - 0.5) * 0.2, ty: (r() - 0.5) * 0.2, flip: r() < 0.5, vflip: r() < 0.5 };
+          const e = PX.draw(svg, 260 + (i % 4) * 112, 50 + Math.floor(i / 4) * 130, 100, 100, affineRGB(c, p)); e.style.opacity = 0;
+          const t = K.svg(svg, "text", { x: 310 + (i % 4) * 112, y: 166 + Math.floor(i / 4) * 130, "text-anchor": "middle", "font-size": 10, class: "muted" }, `转${Math.round(p.rot)}°${p.flip ? " 左右翻" : ""}${p.vflip ? " 上下翻" : ""}`); t.style.opacity = 0;
+          slots.push([e, t]);
+        }
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 12, class: "muted" }, "每一轮训练，模型看到的都是同一批苗的“新姿势”，相当于白得了很多张图");
+        (async () => { for (const [e, t] of slots) if (!(await ctx.tween(260, (k) => { e.style.opacity = k; t.style.opacity = k; }))) return; })();
+      },
+    },
+    {
+      title: "模型结构：6 层卷积 + 3 层全连接", kicker: "第 20 格 · 作者的设计", cells: [20],
+      html: `<p>作者搭了一个 Keras <code>Sequential</code>（一层接一层）网络：卷积层两两成对，滤波器数 64 → 128 → 256；每对后面接一次 2×2 最大池化；每层之间加 BatchNorm；卷积之间 Dropout 10%，全连接之间 50%；最后 3 层全连接，输出 12 类的概率。</p><p>动画是<b>按第 21 格代码推算</b>的每层输出大小：卷积核 5×5、不补边，每过一层边长少 4；池化让边长减半。到最后只剩 <b>1×1×256</b>。</p>`,
+      draw(svg, ctx) {
+        const L = [["输入", 70, 3], ["卷积64", 66, 64], ["卷积64", 62, 64], ["池化", 31, 64], ["卷积128", 27, 128], ["卷积128", 23, 128], ["池化", 11, 128], ["卷积256", 7, 256], ["卷积256", 3, 256], ["池化", 1, 256]];
+        const els = [];
+        L.forEach((d, i) => {
+          const x = 14 + i * 52, h = 24 + d[1] * 2.6, w = 12 + Math.log2(d[2]) * 2.5, y = 160 - h / 2;
+          const g = K.svg(svg, "g"); g.style.opacity = 0;
+          K.svg(g, "rect", { x, y, width: w, height: h, rx: 3, fill: d[0] === "池化" ? "color-mix(in srgb, var(--c3) 30%, var(--panel))" : d[0] === "输入" ? "var(--panel-2)" : "color-mix(in srgb, var(--c1) 30%, var(--panel))", stroke: "var(--ink-3)" });
+          const ly = i % 2 ? 300 : 272;
+          K.svg(g, "line", { x1: x + w / 2, x2: x + w / 2, y1: y + h, y2: ly - 12, stroke: "var(--line)" });
+          K.svg(g, "text", { x: x + w / 2, y: ly, "text-anchor": "middle", "font-size": 10 }, d[0]);
+          K.svg(g, "text", { x: x + w / 2, y: ly + 13, "text-anchor": "middle", "font-size": 10, "font-family": "var(--mono)" }, `${d[1]}×${d[1]}×${d[2]}`);
+          els.push(g);
+        });
+        const D = [["全连接 256", 570], ["全连接 256", 626], ["softmax 12", 684]];
+        D.forEach((d) => { const g = K.svg(svg, "g"); g.style.opacity = 0; K.svg(g, "rect", { x: d[1] - 13, y: 60 + (d[0].includes("12") ? 60 : 0), width: 26, height: d[0].includes("12") ? 80 : 200, rx: 3, fill: "color-mix(in srgb, var(--c2) 30%, var(--panel))", stroke: "var(--ink-3)" }); K.svg(g, "text", { x: d[1], y: 286, "text-anchor": "middle", "font-size": 10 }, d[0]); els.push(g); });
+        K.svg(svg, "text", { x: 18, y: 26, "font-size": 12, class: "muted" }, "方块高度 ∝ 边长，宽度 ∝ 通道数（对数）；尺寸由代码推算，不是运行输出");
+        (async () => { for (const g of els) if (!(await ctx.tween(220, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "卷积、池化、BatchNorm、Dropout 各管什么", kicker: "第 21 格 · Conv2D / MaxPooling2D", cells: [21], highlight: ["Conv2D(filters=64, kernel_size=(5, 5)", "MaxPooling2D((2, 2))", "BatchNormalization", "Dropout(0.5)", "softmax"],
+      html: `<p><b>卷积</b>：拿一个 5×5 的小窗口（卷积核）在图上一格一格滑，每到一处就把窗口里的像素和核里的数字对应相乘再相加，得到一个新数字。核里的数字是训练学出来的，有的核专找叶片边缘，有的找叶脉、叶尖。</p><p><b>最大池化</b>：每 2×2 只留最大的那个数，图变成一半大，留下“最显眼”的特征。<b>BatchNorm</b> 把每层输出拉回差不多的尺度，训练更稳；<b>Dropout</b> 训练时随机让一部分神经元休息，逼模型别只靠少数几个特征。最后 <b>softmax</b> 把 12 个分数变成加起来等于 1 的概率。</p>`,
+      draw(svg, ctx) {
+        const c = CLEAN(24, "broad", 9).clear, n = 14;
+        const g = PX.grid(n, n, (x, y) => c.rgb[1][(y + 5) * 24 + x + 5]);
+        const k = [[-1, -1, 0, 1, 1], [-1, -1, 0, 1, 1], [-1, -1, 0, 1, 1], [-1, -1, 0, 1, 1], [-1, -1, 0, 1, 1]].map((r) => r.map((v) => v / 5));
+        const out = PX.relu(PX.convValid(g, k)), pl = PX.pool(out), [lo, hi] = PX.range(out);
+        const cs = 15;
+        PX.draw(svg, 20, 50, n * cs, n * cs, g);
+        K.svg(svg, "text", { x: 20 + (n * cs) / 2, y: 40, "text-anchor": "middle", "font-size": 13 }, "输入 14×14（示意，取绿色通道）");
+        const win = K.svg(svg, "rect", { x: 20, y: 50, width: 5 * cs, height: 5 * cs, fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        const oc = [], m = out.W;
+        for (let y = 0; y < m; y++) for (let x = 0; x < m; x++) oc.push(K.svg(svg, "rect", { x: 290 + x * cs, y: 80 + y * cs, width: cs - 1, height: cs - 1, fill: "var(--panel-2)" }));
+        K.svg(svg, "text", { x: 290 + (m * cs) / 2, y: 70, "text-anchor": "middle", "font-size": 13 }, `卷积 + ReLU → ${m}×${m}`);
+        K.svg(svg, "text", { x: 290, y: 260, "font-size": 11, class: "muted" }, "核：左负右正，专找“左暗右亮”的竖边");
+        const pc = [];
+        for (let y = 0; y < pl.W; y++) for (let x = 0; x < pl.W; x++) { const e = K.svg(svg, "rect", { x: 520 + x * 30, y: 95 + y * 30, width: 28, height: 28, fill: K.heat((pl.a[y * pl.W + x] - lo) / (hi - lo || 1)) }); e.style.opacity = 0; pc.push(e); }
+        K.svg(svg, "text", { x: 520 + pl.W * 15, y: 80, "text-anchor": "middle", "font-size": 13 }, `2×2 最大池化 → ${pl.W}×${pl.W}`);
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 12, class: "muted" }, "浏览器现场计算：5×5 卷积不补边（14 − 4 = 10），池化后 5×5。作者网络里每层有 64–256 个这样的核。");
+        ctx.tween(3200, (t) => {
+          const k2 = Math.min(m * m - 1, Math.floor(t * m * m)), x = k2 % m, y = Math.floor(k2 / m);
+          win.setAttribute("x", 20 + x * cs); win.setAttribute("y", 50 + y * cs);
+          for (let i = 0; i <= k2; i++) oc[i].style.fill = K.heat((out.a[i] - lo) / (hi - lo || 1));
+        }).then((ok) => ok && ctx.tween(800, (t) => pc.forEach((e) => (e.style.opacity = t))));
+      },
+    },
+    {
+      title: "训练设置：学习率衰减 + 保存最好的权重", kicker: "第 22–23 格 · 回调函数", cells: [23], highlight: ["ReduceLROnPlateau", "patience=3", "factor=0.4", "save_best_only=True", "steps_per_epoch=trainX.shape[0]"],
+      html: `<p>作者设了三个“回调”（训练过程中自动执行的小助手）：</p><ul class="tight"><li><b>ReduceLROnPlateau</b>：验证准确率连续 3 轮没提高，就把学习率乘 0.4（步子迈小一点，慢慢找最低点）</li><li><b>ModelCheckpoint（只存最好）</b>：验证准确率创新高时存一份权重，文件名里带轮数和准确率</li><li><b>ModelCheckpoint（每轮都存）</b>：保存最近一轮</li></ul><p>训练代码（35 轮，每批 75 张）被作者<b>注释掉了</b>，因为在 Kaggle 上训练太慢。注意 <code>steps_per_epoch=trainX.shape[0]</code>：每轮走“图片张数”那么多批，而每批 75 张，相当于每轮把数据过了约 75 遍，通常应写成 <code>trainX.shape[0] // 75</code>。</p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 180 }, [0, 35], [0.3, 1], { xlabel: "轮次（示意曲线）", yfmt: (v) => v.toFixed(1) });
+        const acc = [], lr = [];
+        let best = 0, wait = 0, cur = 1e-3, a = 0.35;
+        const r = K.rng(4);
+        for (let e = 0; e <= 35; e++) {
+          a += (0.97 - a) * (cur > 5e-4 ? 0.16 : cur > 2e-4 ? 0.22 : 0.3) * (0.5 + r()) ; const v = Math.min(0.98, a - (cur > 5e-4 ? r() * 0.06 : r() * 0.02));
+          acc.push(v); lr.push(cur);
+          if (v > best + 0.002) { best = v; wait = 0; } else if (++wait >= 3) { cur = Math.max(1e-5, cur * 0.4); wait = 0; }
+        }
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const ax2 = K.axes(svg, { x: 60, y: 250, w: 600, h: 60 }, [0, 35], [0, 1e-3], { xticks: 0, yticks: 0 });
+        const p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--warn)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 66, y: 262, "font-size": 12, fill: "var(--warn)" }, "学习率：没进步 3 轮就 × 0.4");
+        K.svg(svg, "text", { x: 66, y: 46, "font-size": 12, fill: "var(--c1)" }, "验证准确率   ★ = 创新高，存一份权重");
+        let b2 = 0;
+        const stars = acc.map((v, e) => { const isBest = v > b2 + 0.002; if (isBest) b2 = v; const s = K.svg(svg, "text", { x: ax.sx(e), y: ax.sy(v) - 6, "text-anchor": "middle", "font-size": 12, fill: "var(--good)" }, isBest ? "★" : ""); s.style.opacity = 0; return s; });
+        ctx.tween(3000, (t) => {
+          const n = Math.max(1, Math.round(t * 35));
+          path.setAttribute("d", acc.slice(0, n + 1).map((v, e) => (e ? "L" : "M") + ax.sx(e) + "," + ax.sy(v)).join(""));
+          p2.setAttribute("d", lr.slice(0, n + 1).map((v, e) => (e ? "L" : "M") + ax2.sx(e) + "," + ax2.sy(v)).join(""));
+          stars.forEach((s, e) => (s.style.opacity = e <= n ? 1 : 0));
+        });
+      },
+    },
+    {
+      title: "加载事先训好的权重，看混淆矩阵", kicker: "第 24–27 格 · 评估", cells: [25, 27], highlight: ["weights.best_17-0.96.hdf5", "model.evaluate", "confusion_matrix"],
+      html: `<p>作者把自己在别处训练好的权重上传成 Kaggle 数据集，这里直接 <code>load_weights</code>。文件名 <code>weights.best_17-0.96.hdf5</code> 按第 23 格的命名模板，表示<b>第 17 轮、验证准确率 0.96</b>。同时从 <code>Data.npz</code> 读回当时用的训练 / 验证集，用 <code>evaluate</code> 算两者的准确率。</p><p>然后画 <b>12×12 的混淆矩阵</b>：行是真实物种，列是模型猜的物种。对角线上的格子是猜对的，其他格子告诉你“谁被错认成了谁”。动画演示矩阵是怎么一格一格累加出来的，数字是示意，作者的真实矩阵在运行输出里。</p>`,
+      draw(svg, ctx) {
+        const n = 12, cs = 22, x0 = 200, y0 = 40, M = Array.from({ length: n }, () => new Array(n).fill(0));
+        const rects = [];
+        for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) rects.push(K.svg(svg, "rect", { x: x0 + j * cs, y: y0 + i * cs, width: cs - 1, height: cs - 1, fill: "var(--panel-2)" }));
+        CLASSES.forEach((c, i) => K.svg(svg, "text", { x: x0 - 4, y: y0 + i * cs + 15, "text-anchor": "end", "font-size": 10 }, c));
+        K.svg(svg, "text", { x: x0 + (n * cs) / 2, y: y0 + n * cs + 16, "text-anchor": "middle", "font-size": 12 }, "模型猜的物种 →");
+        K.svg(svg, "text", { x: 500, y: 70, "font-size": 13, "font-weight": 700 }, "每来一张验证图：");
+        K.svg(svg, "text", { x: 500, y: 92, "font-size": 12 }, "真实是第 i 类、猜成第 j 类");
+        K.svg(svg, "text", { x: 500, y: 110, "font-size": 12 }, "→ 第 i 行第 j 列 +1");
+        const msg = K.svg(svg, "text", { x: 500, y: 150, "font-size": 13, "font-family": "var(--mono)", fill: "var(--accent)" }, "");
+        K.svg(svg, "text", { x: 500, y: 200, "font-size": 12, class: "muted" }, "对角线越深 = 猜对越多");
+        K.svg(svg, "text", { x: 500, y: 220, "font-size": 12, class: "muted" }, "（示意数据，不是作者结果）");
+        const r = K.rng(8);
+        (async () => {
+          for (let k = 0; k < 160; k++) {
+            const i = Math.floor(r() * n), j = r() < 0.85 ? i : Math.floor(r() * n);
+            M[i][j]++;
+            const mx = Math.max(...M.map((row) => Math.max(...row)));
+            rects.forEach((e, q) => (e.style.fill = M[Math.floor(q / n)][q % n] ? K.heat(M[Math.floor(q / n)][q % n] / mx) : "var(--panel-2)"));
+            if (k < 12) msg.textContent = `真 ${i} → 猜 ${j}`;
+            if (!(await ctx.wait(k < 12 ? 260 : 25))) return;
+          }
+          msg.textContent = "";
+        })();
+      },
+    },
+    {
+      title: "测试图走同一条流水线，写出提交文件", kicker: "第 28–34 格 · 预测与提交", cells: [29, 30, 34], highlight: ["test/*.png", "lower_green = (25, 40, 50)", "np.argmax(pred, axis=1)", "to_csv"],
+      html: `<p>测试图（没有答案）按<b>完全相同</b>的步骤处理：读图并缩到 70×70 → 高斯模糊 → HSV 绿色掩膜 → 闭运算 → 套回原图 → 除以 255。作者把第 7 格的代码几乎原样复制到了第 30 格。</p><p>模型对每张图输出 12 个概率，<code>argmax</code> 取最大那个的编号，再用 <code>le.classes_</code> 翻译回物种名，写成 <code>file, species</code> 两列的 CSV 提交。</p>`,
+      draw(svg, ctx) {
+        const c = CLEAN(48, "grass", 77);
+        PX.draw(svg, 20, 60, 110, 110, c.im);
+        const st = ["模糊", "HSV 掩膜", "闭运算", "÷255"];
+        const ns = st.map((s, i) => { const g = K.node(svg, 150 + i * 72, 95, 64, 40, s, { fs: 11 }); g.style.opacity = 0.25; return g; });
+        const cl = PX.draw(svg, 446, 60, 110, 110, c.clear); cl.style.opacity = 0;
+        const probs = [0.03, 0.01, 0.02, 0.01, 0.12, 0.01, 0.71, 0.02, 0.01, 0.02, 0.01, 0.03];
+        const bars = probs.map((p, i) => { K.svg(svg, "text", { x: 196, y: 214 + i * 9.5, "text-anchor": "end", "font-size": 8 }, CLASSES[i]); return K.svg(svg, "rect", { x: 200, y: 206 + i * 9.5, width: 0, height: 8, fill: i === 6 ? "var(--accent)" : "var(--c1)" }); });
+        K.svg(svg, "text", { x: 200, y: 198, "font-size": 12 }, "softmax 12 个概率（示意）");
+        const csv = K.svg(svg, "text", { x: 470, y: 260, "font-size": 14, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 470, y: 236, "font-size": 12, class: "muted" }, "res.csv");
+        (async () => {
+          for (const g of ns) if (!(await ctx.tween(280, (t) => (g.style.opacity = 0.25 + 0.75 * t)))) return;
+          if (!(await ctx.tween(400, (t) => (cl.style.opacity = t)))) return;
+          if (!(await ctx.tween(900, (t) => bars.forEach((b, i) => b.setAttribute("width", probs[i] * 300 * t))))) return;
+          csv.textContent = "0021e90e4.png, Loose Silky-bent";
+        })();
+      },
+    },
+  ];
+  /* 自查开关：网址带 #fast 时动画直接跳到最后一帧（无界面截图时 requestAnimationFrame 几乎不走） */
+  if (/fast/.test(location.hash)) steps.forEach((s) => {
+    const d = s.draw;
+    if (d) s.draw = (svg, ctx) => { ctx.tween = (ms, fn) => { if (ctx.alive()) fn(1, 1); return Promise.resolve(ctx.alive()); }; ctx.wait = () => Promise.resolve(ctx.alive()); return d(svg, ctx); };
+  });
+  K.pipeline(document.getElementById("pipe"), steps);
+  if (/fold/.test(location.hash)) document.getElementById("pipe").classList.add("folded");
+
+  /* ---------- 实验 A：HSV 绿色掩膜 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "hlo", label: "H 下限（色相，作者 25）", min: 0, max: 90, step: 1, value: 25 },
+      { id: "hhi", label: "H 上限（作者 75）", min: 30, max: 179, step: 1, value: 75 },
+      { id: "slo", label: "S 下限（饱和度，作者 40）", min: 0, max: 200, step: 1, value: 40 },
+      { id: "vlo", label: "V 下限（明度，作者 50）", min: 0, max: 200, step: 1, value: 50 },
+      { id: "k", label: "闭运算核大小（0 = 不做）", min: 0, max: 11, step: 2, value: 5, fmt: (v) => (v < 2 ? "不做" : v + "×" + v) },
+      { id: "blur", label: "先做 5×5 高斯模糊", value: "1", options: [["1", "做（作者的做法）"], ["0", "不做"]] },
+      { id: "kind", label: "幼苗类型", value: "broad", options: [["broad", "宽叶（像甜菜、野芥）"], ["grass", "细长叶（像小麦、看麦娘）"]] },
+      { id: "seed", label: "换一张图", button: true },
+    ],
+    note: "图片是用代码生成的 56×56 示意苗：一片叶在阴影里（暗）、一片叶尖发黄，背景有泥土、灰石子和一小块绿色苔藓。中间图：白 = 保留且正确，红 = 误留的背景，橙 = 漏掉的叶子。指标按生成时已知的“真植物像素”现场计算。",
+    render(svg, v) {
+      const N = 56, im = seedling(N, v.kind, 60 + v.seed * 13), src = v.blur === "1" ? blurRGB(im) : im;
+      let m = greenMask(src, [v.hlo, v.slo, v.vlo], [v.hhi, 255, 255]);
+      if (v.k > 1) m = closeM(m, N, N, v.k);
+      let TP = 0, FP = 0, FN = 0;
+      for (let i = 0; i < N * N; i++) { if (m[i] && im.truth[i]) TP++; else if (m[i]) FP++; else if (im.truth[i]) FN++; }
+      const S = 196;
+      PX.draw(svg, 10, 30, S, S, im);
+      PX.img(svg, 222, 30, S, S, PX.customURL(N, N, (i) => (m[i] && im.truth[i] ? [245, 245, 245] : m[i] ? [220, 60, 80] : im.truth[i] ? [240, 150, 30] : [25, 25, 25])));
+      PX.draw(svg, 434, 30, S, S, applyMask(im, m));
+      [["原图（示意）", 108], ["掩膜（对错着色）", 320], ["去背景结果", 532]].forEach(([t, x]) => K.svg(svg, "text", { x, y: 20, "text-anchor": "middle", "font-size": 13 }, t));
+      K.svg(svg, "text", { x: 10, y: 256, "font-size": 12, class: "muted" }, `当前范围：H ${v.hlo}–${v.hhi}，S ≥ ${v.slo}，V ≥ ${v.vlo}${v.hlo > v.hhi ? "（下限大于上限，什么都留不下）" : ""}`);
+      K.svg(svg, "text", { x: 10, y: 276, "font-size": 12, class: "muted" }, "试试：把 S 下限拉到 100 左右能去掉苔藓；把 V 下限拉高，阴影里的叶子就丢了；H 下限拉到 35，黄叶尖被切掉。");
+      const rec = TP / (TP + FN || 1), pre = TP / (TP + FP || 1);
+      return { readout: [
+        { k: "叶子保住了几成", v: (rec * 100).toFixed(1) + "%", color: rec < 0.85 ? "var(--bad)" : "var(--good)" },
+        { k: "留下的里面真是叶子", v: (pre * 100).toFixed(1) + "%", color: pre < 0.85 ? "var(--bad)" : "var(--good)" },
+        { k: "误留背景像素", v: String(FP) },
+        { k: "漏掉叶子像素", v: String(FN) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：数据增强 ---------- */
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "rot", label: "旋转角度（作者范围 0–180°）", min: 0, max: 180, step: 1, value: 40, fmt: (v) => v + "°" },
+      { id: "zoom", label: "缩放（作者 ±10%）", min: 0.9, max: 1.1, step: 0.01, value: 1, fmt: (v) => (v >= 1 ? "缩小 " : "放大 ") + Math.round(Math.abs(1 - v) * 100) + "%" },
+      { id: "tx", label: "左右平移（作者 ±10%）", min: -0.1, max: 0.1, step: 0.01, value: 0, fmt: (v) => Math.round(v * 100) + "%" },
+      { id: "flip", label: "翻转", value: "none", options: [["none", "不翻"], ["h", "水平翻转"], ["v", "垂直翻转"], ["hv", "都翻"]] },
+      { id: "seed", label: "随机再来 6 张", button: true },
+    ],
+    note: "左边按滑块现场变换；右边按作者第 19 格的范围随机抽参数，看同一株苗能变出多少“新图”。图片是代码生成的示意苗（已去背景）。边界外按 Keras 默认 fill_mode='nearest' 用最近的像素填。",
+    render(svg, v) {
+      const c = CLEAN(56, "broad", 91).clear;
+      const p = { rot: v.rot, zoom: v.zoom, tx: v.tx, flip: v.flip.includes("h"), vflip: v.flip.includes("v") };
+      PX.draw(svg, 10, 40, 220, 220, affineRGB(c, p));
+      K.svg(svg, "text", { x: 120, y: 28, "text-anchor": "middle", "font-size": 13 }, "按滑块变换");
+      K.svg(svg, "text", { x: 450, y: 28, "text-anchor": "middle", "font-size": 13 }, "随机增强（作者的参数范围）");
+      const r = K.rng(7 + v.seed * 31);
+      for (let i = 0; i < 6; i++) {
+        const q = { rot: r() * 180, zoom: 1 + (r() - 0.5) * 0.2, tx: (r() - 0.5) * 0.2, ty: (r() - 0.5) * 0.2, flip: r() < 0.5, vflip: r() < 0.5 };
+        PX.draw(svg, 270 + (i % 3) * 124, 40 + Math.floor(i / 3) * 128, 110, 110, affineRGB(c, q));
+      }
+      return { readout: [
+        { k: "旋转", v: v.rot + "°" },
+        { k: "是否还是同一种苗", v: "是", color: "var(--good)" },
+        { k: "像素有没有变", v: "全变了", color: "var(--warn)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：卷积 + ReLU + 池化 ---------- */
+  const KERNELS = {
+    v: [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+    h: [[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+    d: [[0, 1, 2], [-1, 0, 1], [-2, -1, 0]],
+    sharp: [[0, -1, 0], [-1, 5, -1], [0, -1, 0]],
+    blur5: Array.from({ length: 5 }, () => new Array(5).fill(1 / 25)),
+    spot: [[-1, -1, -1, -1, -1], [-1, 1, 2, 1, -1], [-1, 2, 4, 2, -1], [-1, 1, 2, 1, -1], [-1, -1, -1, -1, -1]].map((r) => r.map((x) => x / 4)),
+  };
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "kind", label: "输入的苗", value: "grass", options: [["grass", "细长叶（禾本科）"], ["broad", "宽叶（双子叶）"]] },
+      { id: "ker", label: "卷积核", value: "v", options: [["v", "3×3 竖边（左暗右亮）"], ["h", "3×3 横边（上暗下亮）"], ["d", "3×3 斜边"], ["sharp", "3×3 锐化"], ["blur5", "5×5 平均（模糊）"], ["spot", "5×5 “亮斑”探测"]] },
+      { id: "relu", label: "ReLU（负数归零）", value: "1", options: [["1", "做（作者每层都用 relu）"], ["0", "不做，看原始正负"]] },
+      { id: "seed", label: "换一株", button: true },
+    ],
+    note: "输入是去背景后示意苗的绿色通道（36×36）。卷积按 Keras 默认不补边（valid），池化 2×2 取最大。蓝色 = 负，红色 = 正（不做 ReLU 时）；做了 ReLU 只剩正数。全部在浏览器里现场计算。",
+    render(svg, v) {
+      const N = 36, c = CLEAN(N, v.kind, 120 + v.seed * 7).clear;
+      const g = PX.grid(N, N, (x, y) => c.rgb[1][y * N + x]);
+      const k = KERNELS[v.ker];
+      let o = PX.convValid(g, k);
+      if (v.relu === "1") o = PX.relu(o);
+      const p = PX.pool(o), mode = v.relu === "1" ? "heat" : "div";
+      PX.draw(svg, 10, 40, 180, 180, g);
+      PX.draw(svg, 230, 40, 180, 180, o, mode);
+      PX.draw(svg, 450, 40, 180, 180, p, mode);
+      K.svg(svg, "text", { x: 100, y: 28, "text-anchor": "middle", "font-size": 13 }, `输入 ${N}×${N}`);
+      K.svg(svg, "text", { x: 320, y: 28, "text-anchor": "middle", "font-size": 13 }, `卷积${v.relu === "1" ? " + ReLU" : ""} → ${o.W}×${o.W}`);
+      K.svg(svg, "text", { x: 540, y: 28, "text-anchor": "middle", "font-size": 13 }, `2×2 最大池化 → ${p.W}×${p.W}`);
+      const n = k.length;
+      for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+        const val = k[j][i], s = 18;
+        K.svg(svg, "rect", { x: 10 + i * s, y: 236 + j * (n === 5 ? 12 : 18), width: s - 1, height: (n === 5 ? 12 : 18) - 1, fill: K.heat(val / 2.5, true), stroke: "var(--line)" });
+      }
+      K.svg(svg, "text", { x: 120, y: 256, "font-size": 12, class: "muted" }, "← 当前卷积核（红正蓝负）");
+      let pos = 0; for (const x of o.a) if (x > 0.05) pos++;
+      K.svg(svg, "text", { x: 230, y: 280, "font-size": 12, class: "muted" }, "对比看看：竖边核亮在叶片竖直的边上，横边核亮在水平的边上，亮斑核亮在成团的叶片中间。");
+      return { readout: [
+        { k: "尺寸变化", v: `${N} → ${o.W} → ${p.W}` },
+        { k: "被激活的位置", v: ((pos / o.a.length) * 100).toFixed(0) + "%" },
+        { k: "池化后保留像素", v: `${p.W * p.W} / ${o.W * o.W}` },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

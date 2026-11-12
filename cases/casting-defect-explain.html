@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>铸件缺陷检测</title>
+<meta name="description" content="Kaggle 案例拆解：潜水泵叶轮铸件外观质检。数据增强、简单三层 CNN、混淆矩阵里的漏检与误检，以及用 SHAP 解释模型“看哪里”。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">工业图像 · 二分类 · 可解释性</div>
+  <h1>铸件外观质检：让 CNN 判合格，还要说出“为什么不合格”</h1>
+  <p class="en">Model Explainability in Industrial Image Detection</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">数据增强</span><span class="tag method">卷积神经网络 CNN</span><span class="tag method">早停 EarlyStopping</span>
+    <span class="tag method">混淆矩阵 · 漏检/误检</span><span class="tag method">SHAP DeepExplainer</span><span class="tag method">错判分析</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>kohei-mu</b></span>
+    <span>Kaggle 点赞 <b>315</b>（2026-11 抓取）</span>
+    <span>数据集 <b>ravirajsinh45/real-life-industrial-dataset-of-casting-product</b></span>
+    <span><a href="https://www.kaggle.com/code/koheimuramatsu/model-explainability-in-industrial-image-detection" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">潜水泵叶轮铸件的俯视照片</div><p>300×300 灰度图，在专门的稳定光照下拍摄，事先分好“合格 ok”和“缺陷 def”两类。<span data-cell="1">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这个铸件合格还是有缺陷</div><p>铸造缺陷包括气孔、针孔、毛刺、缩孔等。人工目检精度因人而异、人工成本高，作者想验证能不能交给机器。<span data-cell="1">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">轻度数据增强 + 三层卷积的小 CNN + SHAP</div><p>作者明确说不追求精度，只用简单 CNN 学基础；重点放在用 SHAP 解释模型把哪些区域当作缺陷证据。<span data-cell="21">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">715 张测试图里错了 3 张</div><p>1 张合格品被判缺陷（误检），2 张缺陷品被判合格（漏检）。<span data-cell="39">出处</span> 作者建议先作为辅助质检员的工具，而不是完全自动化。<span data-cell="54">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>casting product image data for quality inspection</b>，由印度一家铸造厂协助采集。以下数字来自 Kaggle 数据集说明，测试集总数和作者第 39 格的 715 张一致。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况（作者用的 300×300 版本）</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">训练集 缺陷 / 合格</div><div class="v">3,758 / 2,875</div></div>
+        <div class="stat-tile"><div class="k">测试集 缺陷 / 合格</div><div class="v">453 / 262</div></div>
+        <div class="stat-tile"><div class="k">图片总数</div><div class="v">7,348</div></div>
+        <div class="stat-tile"><div class="k">尺寸 / 颜色</div><div class="v">300×300 灰度</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">数据集说明写明这 7,348 张图<b>已经做过增强</b>；另有一套 512×512、未增强的版本（519 张合格、781 张缺陷），作者没有用。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">目录与标签</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>位置</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>train/def_front</code>、<code>test/def_front</code></td><td>有缺陷的叶轮正面照片</td><td>图像</td></tr>
+        <tr><td><code>train/ok_front</code>、<code>test/ok_front</code></td><td>合格的叶轮正面照片</td><td>图像</td></tr>
+        <tr><td>标签（由文件夹决定）</td><td><b>要预测的答案</b>：0 = 缺陷，1 = 合格 <span data-cell="19">出处</span></td><td>二分类</td></tr>
+        <tr><td>文件名 <code>cast_def_0_1059.jpeg</code></td><td>作者在第 44、50 格用到的具体样例图名</td><td>文本</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">注意：模型输出的是“合格”的概率，小于 0.5 判为缺陷 <span data-cell="40">出处</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="23">
+    <h3>动手试试 A · 卷积核扫过铸件：哪种核能把气孔“点亮” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="50">
+    <h3>动手试试 B · 遮挡法解释：盖住哪块，“缺陷分”掉得最多 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>训练与验证的损失稳定下降、准确率稳定上升，训练基本成功</td><td><span data-cell="36">第 36 格</span></td></tr>
+        <tr><td>715 张测试图中，1 张误检（合格判缺陷）、2 张漏检（缺陷判合格）</td><td><span data-cell="39">第 39 格</span></td></tr>
+        <tr><td>漏检会流到后道工序甚至成品；误检会造成不必要的停线和返工</td><td><span data-cell="39">第 39 格</span></td></tr>
+        <tr><td>SHAP 显示：模型把表面的划痕/孔洞和边缘的不平整当作缺陷特征</td><td><span data-cell="48">第 48 格</span></td></tr>
+        <tr><td>错判的图是阴影、划痕、孔洞被“看漏”了</td><td><span data-cell="51">第 51 格</span></td></tr>
+        <tr><td>增强不要过度；模型可以先作为辅助质检员的工具，并考虑人在回路（Human-in-the-Loop）</td><td><span data-cell="54">第 54 格</span></td></tr>
+      </table></div>
+      <p class="callout">由第 39 格的数字可以算出：测试集准确率 = (715 − 3) / 715 ≈ 99.6%。分类报告的精确率、召回率在运行输出里，这里不列。</p>
+      <p class="callout warn">读代码发现的问题（原文未改）：①测试集同时被当作训练时的 <code>validation_data</code>，早停和“保存最好的模型”都看它的损失，等于用考卷挑模型，测试分数偏乐观 <span data-cell="29">第 29 格</span>；②测试集用的也是带随机缩放和亮度变化的 <code>image_gen</code>，每次评估看到的图不完全一样 <span data-cell="17">第 17 格</span>；③SHAP 抽了 3000 张训练图，却只把第 1 张当背景参照 <code>train_sample[0]</code> <span data-cell="49">第 49 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>产线相机拍下的每个铸件，自动给出“合格/缺陷”和置信度，可疑件再交给人复检。</li>
+        <li><b>同类问题：</b>压铸件、注塑件、焊缝、药片、瓶盖、电子元件的外观检测；凡是“正面拍一张照片就能看出好坏”的产品。</li>
+        <li><b>可迁移的套路：</b>稳定光照拍照 → 轻度增强 → 小 CNN 或迁移学习 → <b>单独留出不参与选模型的测试集</b> → 按漏检/误检代价调阈值 → 用 SHAP、Grad-CAM、遮挡法检查模型是不是看对了地方。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>数据增强演示：旋转、缩放、亮度、上下/左右平移 <span data-cell="13">第 13 格</span>；实际训练只用轻度缩放 0.1、亮度 0.9–1.0 <span data-cell="16">第 16 格</span></li>
+        <li>CNN：Conv(16, 7×7, 步长 2) → 池化 → Conv(32, 3×3) → 池化 → Conv(64, 3×3) → 池化 → Dense(224) → Dropout(0.2) → sigmoid <span data-cell="23">第 23 格</span></li>
+        <li>训练：Adam + 二元交叉熵，最多 20 轮，EarlyStopping(patience=2)，ModelCheckpoint <span data-cell="28">第 28 格</span></li>
+        <li>评估：混淆矩阵、classification_report <span data-cell="40">第 40 格</span></li>
+        <li>解释：SHAP DeepExplainer + image_plot <span data-cell="50">第 50 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者用测试集来决定什么时候停止训练、保存哪一轮的模型。这样得到的“715 张错 3 张”还算是公平的考试成绩吗？应该怎么改？</li>
+      <li>对铸造厂来说，2 张漏检和 1 张误检，哪个更要命？如果要让漏检归零，你会怎么调阈值，代价是什么？</li>
+      <li>SHAP 显示模型在看“孔洞和边缘不平整”。如果它看的是背景上的灰尘或光照变化，你能从 SHAP 图上发现吗？这对上线有什么意义？</li>
+      <li>数据集说明里图片“已经做过增强”，作者又做了一次增强。重复增强可能带来什么问题？</li>
+      <li>作者结论说“先做辅助工具，不要完全替代人工”。你同意吗？什么条件下才敢完全交给机器？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 kohei-mu，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的铸件图像是程序生成的示意，不是数据集原图。数据集：ravirajsinh45, casting product image data for quality inspection（PILOT TECHNOCAST 协助采集）。
+</footer>
+</main>
+
+<script src="nb/casting-defect-explain.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* 程序生成一个 N×N 的“叶轮铸件”灰度图（0–1）：圆盘 + 中心孔 + 6 条叶片纹理；defect: none/hole/edge/scratch */
+  function casting(N, defect, seed, dx, dy) {
+    const r = K.rng(seed), img = new Array(N * N), c = (N - 1) / 2;
+    const hx = c + (dx == null ? 0.42 : dx) * c, hy = c + (dy == null ? -0.2 : dy) * c;
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      const ux = x - c, uy = y - c, d = Math.hypot(ux, uy) / c, a = Math.atan2(uy, ux);
+      let v = 0.12;
+      if (d < 0.95) v = 0.55 + 0.12 * Math.cos(6 * a + d * 3) * (d > 0.35 ? 1 : 0) - 0.15 * d;
+      if (d < 0.22) v = 0.25;
+      if (d < 0.12) v = 0.08;
+      if (defect === "hole" && Math.hypot(x - hx, y - hy) < N * 0.045) v = 0.1;
+      if (defect === "edge" && d > 0.82 && d < 0.97 && Math.abs(a - 2.4) < 0.18) v = 0.12;
+      if (defect === "scratch" && d < 0.9 && Math.abs((y - c) - 0.6 * (x - c) + N * 0.15) < 0.7 && x > c * 0.6 && x < c * 1.6) v = 0.18;
+      img[y * N + x] = K.clamp(v + 0.03 * K.randn(r), 0, 1);
+    }
+    return img;
+  }
+  function drawImg(svg, img, N, x0, y0, size, map) {
+    const s = size / N;
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      const v = img[y * N + x]; let fill;
+      if (map) fill = map(v); else { const g = Math.round(v * 255); fill = `rgb(${g},${g},${g})`; }
+      K.svg(svg, "rect", { x: x0 + x * s, y: y0 + y * s, width: s + 0.4, height: s + 0.4, fill });
+    }
+  }
+  function conv(img, N, k) {
+    const out = new Array(N * N).fill(0), h = (Math.sqrt(k.length) - 1) / 2, ks = 2 * h + 1;
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      let s = 0; for (let j = -h; j <= h; j++) for (let i = -h; i <= h; i++) { const yy = K.clamp(y + j, 0, N - 1), xx = K.clamp(x + i, 0, N - 1); s += img[yy * N + xx] * k[(j + h) * ks + (i + h)]; }
+      out[y * N + x] = s;
+    }
+    return out;
+  }
+  const KERNELS = {
+    spot: [-1, -1, -1, -1, 8, -1, -1, -1, -1].map((v) => -v / 8),   // 暗点检测（反向拉普拉斯）
+    edgeh: [-1, -2, -1, 0, 0, 0, 1, 2, 1].map((v) => v / 4),
+    edgev: [-1, 0, 1, -2, 0, 2, -1, 0, 1].map((v) => v / 4),
+    blur: new Array(9).fill(1 / 9),
+    sharp: [0, -1, 0, -1, 5, -1, 0, -1, 0],
+  };
+
+  const steps = [
+    {
+      title: "铸造与外观质检：为什么想交给机器", kicker: "第 0–2 格 · 背景", at: 0, cells: [1], highlight: ["blow holes", "shrinkage defects", "uneven accuracy"],
+      html: `<p><b>铸造</b>：把熔化的金属倒进模具，冷却后得到想要的形状。冷却时如果气体没排干净会留下<b>气孔</b>，收缩不均会形成<b>缩孔</b>，模具没封好会挤出<b>毛刺</b>。</p><p>工厂一般靠质检员目检，但作者指出两个问题：<b>精度因人而异</b>，<b>人工成本高</b>。这份 notebook 就是要验证：能不能用机器学习自动完成目检。数据是潜水泵<b>叶轮</b>（水泵里转动、把水甩出去的那个带叶片的轮子）的俯视照片。</p>`,
+      draw(svg, ctx) {
+        const N = 48, imgs = [["合格", casting(N, "none", 1)], ["气孔", casting(N, "hole", 2)], ["边缘缺口", casting(N, "edge", 3)], ["划痕", casting(N, "scratch", 4)]];
+        const gs = imgs.map((d, i) => { const g = K.svg(svg, "g"); drawImg(g, d[1], N, 20 + i * 175, 40, 160); K.svg(g, "text", { x: 100 + i * 175, y: 225, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: i ? "var(--bad)" : "var(--good)" }, d[0]); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 12, class: "muted" }, "程序生成的叶轮示意图（不是数据集原图）");
+        K.svg(svg, "text", { x: 20, y: 270, "font-size": 13 }, "人工目检：看久了会累、不同人标准不同、成本高");
+        K.svg(svg, "text", { x: 20, y: 296, "font-size": 13, fill: "var(--accent)" }, "目标：相机 + 模型自动判断，并说出判断依据");
+        (async () => { for (const g of gs) if (!(await ctx.tween(400, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "导入工具、找到图片、看一眼合格与缺陷", kicker: "第 3–10 格 · 读数据", cells: [3, 4, 8, 9], highlight: ["train_path", "cast_ok_0_1.jpeg", "cast_def_0_1001.jpeg"],
+      html: `<p>作者导入 Keras（搭神经网络）、OpenCV（读图）、SHAP（解释模型）等工具，设好训练、测试两个目录，然后各取一张合格品和缺陷品并排显示。</p><p>文件夹名就是标签：<code>ok_front</code> 是合格，<code>def_front</code> 是缺陷。这种“按文件夹分类放图”的组织方式在图像分类里非常常见。</p>`,
+      draw(svg, ctx) {
+        const tree = [["casting_data/", 0], ["train/", 1], ["def_front/  3758 张", 2], ["ok_front/   2875 张", 2], ["test/", 1], ["def_front/  453 张", 2], ["ok_front/   262 张", 2]];
+        tree.forEach((t, i) => { const e = K.svg(svg, "text", { x: 30 + t[1] * 26, y: 50 + i * 36, "font-size": 14, "font-family": "var(--mono)", fill: /def/.test(t[0]) ? "var(--bad)" : /ok/.test(t[0]) ? "var(--good)" : "var(--ink)" }, "📁 " + t[0]); e.style.opacity = 0; ctx.wait(i * 220).then((ok) => ok && (e.style.opacity = 1)); });
+        const N = 44; drawImg(svg, casting(N, "none", 5), N, 380, 40, 140); drawImg(svg, casting(N, "hole", 6, 0.3, 0.35), N, 540, 40, 140);
+        K.svg(svg, "text", { x: 450, y: 205, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--good)" }, "ok");
+        K.svg(svg, "text", { x: 610, y: 205, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--bad)" }, "def");
+        K.svg(svg, "text", { x: 380, y: 240, "font-size": 12, class: "muted" }, "张数来自数据集说明；右侧为示意图");
+      },
+    },
+    {
+      title: "数据增强：同一张图变出很多张", kicker: "第 11–14 格 · 增强演示", cells: [11, 12, 13], highlight: ["rotation_range=180", "zoom_range=0.7", "brightness_range", "height_shift_range"],
+      html: `<p><b>数据增强</b>：训练时对图片随机做一点旋转、缩放、调亮度、平移，让模型见识更多“样子”，不至于只认得某个角度、某种光线下的铸件。</p><p>作者用一张合格图演示了五种变换：旋转（最多 ±180°）、缩放（±70%）、亮度（0.2–1.0 倍）、上下平移、左右平移。这里故意把幅度调得很大，好让人看清每种变换的效果。</p>`,
+      draw(svg, ctx) {
+        const N = 30, base = casting(N, "none", 8), names = ["原图", "旋转", "缩放", "变暗", "平移"];
+        const tf = [(x, y) => [x, y], null, null, null, null];
+        const make = (k, t) => { const c = (N - 1) / 2, out = new Array(N * N); for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+          let sx = x, sy = y, mul = 1;
+          if (k === 1) { const a = 1.2 * t, ux = x - c, uy = y - c; sx = c + ux * Math.cos(a) - uy * Math.sin(a); sy = c + ux * Math.sin(a) + uy * Math.cos(a); }
+          if (k === 2) { const z = 1 + 0.5 * t; sx = c + (x - c) / z; sy = c + (y - c) / z; }
+          if (k === 3) mul = 1 - 0.6 * t;
+          if (k === 4) { sx = x - 10 * t; sy = y - 6 * t; }
+          const xi = Math.round(sx), yi = Math.round(sy);
+          out[y * N + x] = xi >= 0 && xi < N && yi >= 0 && yi < N ? base[yi * N + xi] * mul : 0.1; } return out; };
+        const boxes = names.map((n, k) => { K.svg(svg, "text", { x: 75 + k * 135, y: 230, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, n); return K.svg(svg, "g"); });
+        drawImg(boxes[0], base, N, 10, 70, 130);
+        ctx.tween(1800, (t) => { for (let k = 1; k < 5; k++) { boxes[k].innerHTML = ""; drawImg(boxes[k], make(k, t), N, 10 + k * 135, 70, 130); } });
+      },
+    },
+    {
+      title: "只做轻度增强，按文件夹读成批次", kicker: "第 15–20 格 · 预处理", cells: [15, 16, 17, 19], highlight: ["zoom_range=0.1", "brightness_range=[0.9,1.0]", "color_mode=\"grayscale\"", "'def_front': 0, 'ok_front': 1"],
+      html: `<p>作者的经验：增强幅度太大，图会被改得面目全非，训练反而学不好。所以实际训练只用<b>轻微缩放（±10%）</b>和<b>轻微变暗（0.9–1.0 倍）</b>，再把像素值除以 255 缩到 0–1。</p><p><code>flow_from_directory</code> 按文件夹自动读图、打标签：<b>缺陷 = 0，合格 = 1</b>；300×300 灰度，每批 32 张。</p><p class="callout">测试集用的也是同一个带随机增强的 <code>image_gen</code>，评估时最好只做除以 255。</p>`,
+      draw(svg, ctx) {
+        const N = 36;
+        for (let k = 0; k < 8; k++) { const g = K.svg(svg, "g"); drawImg(g, casting(N, k % 3 ? "none" : "hole", 20 + k), N, 30 + (k % 4) * 90, 40 + Math.floor(k / 4) * 100, 80); g.style.opacity = 0; ctx.wait(k * 150).then((ok) => ok && (g.style.opacity = 1)); K.svg(svg, "text", { x: 70 + (k % 4) * 90, y: 136 + Math.floor(k / 4) * 100, "text-anchor": "middle", "font-size": 12, fill: k % 3 ? "var(--good)" : "var(--bad)" }, k % 3 ? "1 合格" : "0 缺陷"); }
+        K.svg(svg, "text", { x: 420, y: 70, "font-size": 14, "font-weight": 700 }, "一个批次 (batch)");
+        K.svg(svg, "text", { x: 420, y: 100, "font-size": 13 }, "X：32 × 300 × 300 × 1");
+        K.svg(svg, "text", { x: 420, y: 126, "font-size": 13 }, "y：32 个 0/1 标签");
+        K.svg(svg, "text", { x: 420, y: 170, "font-size": 13 }, "缩放 ±10%、亮度 0.9–1.0");
+        K.svg(svg, "text", { x: 420, y: 196, "font-size": 13 }, "像素 ÷ 255 → 0–1");
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12, class: "muted" }, "示意：只画了 8 张，真实每批 32 张");
+      },
+    },
+    {
+      title: "一个简单的三层 CNN", kicker: "第 21–26 格 · 模型结构", cells: [21, 23, 25], highlight: ["kernel_size=(7,7), strides=2", "MaxPooling2D", "Dense(units=224", "Dropout(rate=0.2)", "activation='sigmoid'"],
+      html: `<p>作者说明：目的是学习图像分析的基础，所以用一个简单 CNN，<b>不追求精度</b>。<span data-cell="21">出处</span></p><ul class="tight"><li><b>卷积层</b>：用小方格（卷积核）在图上滑动，找局部花纹：第一层 16 个 7×7 的核、步长 2；后两层 32、64 个 3×3 的核</li><li><b>最大池化</b>：每 2×2 只留最大的那个，图缩小一半，保留最显眼的信号</li><li><b>全连接 224 + Dropout 0.2</b>：汇总所有线索；训练时随机关掉 20% 的神经元，防止死记硬背</li><li><b>sigmoid</b>：输出 0–1，表示“合格”的概率</li></ul>`,
+      draw(svg, ctx) {
+        const L = [["300×300×1", 90, 1], ["150×150×16", 76, 3], ["75×75×16", 60, 3], ["75×75×32", 60, 5], ["37×37×32", 44, 5], ["37×37×64", 44, 7], ["18×18×64", 30, 7]];
+        const gs = L.map((l, i) => { const g = K.svg(svg, "g"); for (let k = 0; k < l[2]; k++) K.svg(g, "rect", { x: 20 + i * 82 + k * 3, y: 150 - l[1] / 2 - k * 3, width: l[1] * 0.55, height: l[1], fill: i % 2 ? "var(--c2)" : "var(--c1)", opacity: 0.35, stroke: "var(--line)" }); K.svg(g, "text", { x: 40 + i * 82, y: 240, "text-anchor": "middle", "font-size": 10, "font-family": "var(--mono)" }, l[0]); g.style.opacity = 0; return g; });
+        const fc = K.node(svg, 600, 90, 100, 40, "Dense 224", {}), out = K.node(svg, 600, 160, 100, 40, "sigmoid → P(合格)", { bold: true });
+        fc.style.opacity = out.style.opacity = 0;
+        K.svg(svg, "text", { x: 20, y: 290, "font-size": 12, class: "muted" }, "依次为：输入 → 卷积 → 池化 → 卷积 → 池化 → 卷积 → 池化（尺寸按代码推算）");
+        (async () => { for (const g of gs) if (!(await ctx.tween(260, (t) => (g.style.opacity = t)))) return; await ctx.tween(300, (t) => (fc.style.opacity = t)); await ctx.tween(300, (t) => (out.style.opacity = t)); })();
+      },
+    },
+    {
+      title: "训练：早停 + 保存最好的那一轮", kicker: "第 27–33 格 · 训练", cells: [27, 28, 29], highlight: ["EarlyStopping(monitor='val_loss',patience=2)", "save_best_only=True", "validation_data=test_set"],
+      html: `<p>最多训练 20 轮，加两个“回调”：</p><ul class="tight"><li><b>EarlyStopping</b>：验证损失连续 2 轮没变好就停</li><li><b>ModelCheckpoint</b>：只保存验证损失最低的那一轮模型</li></ul><p class="callout">这里 <code>validation_data=test_set</code>：用来决定“何时停、留哪一轮”的正是后面要考试的测试集。挑模型和考试用了同一套卷子，后面的测试成绩会偏乐观。更稳妥的做法是从训练集再切一份验证集。</p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [1, 12], [0, 0.7], { xlabel: "轮次", ylabel: "验证损失" });
+        const v = [0.62, 0.45, 0.33, 0.24, 0.19, 0.15, 0.12, 0.11, 0.115, 0.118, 0.13, 0.14];
+        const dots = v.map((y, i) => { const c = K.svg(svg, "circle", { cx: ax.sx(i + 1), cy: ax.sy(y), r: 0, fill: "var(--c1)" }); return c; });
+        const best = K.svg(svg, "text", { x: 0, y: 0, "font-size": 12, fill: "var(--good)" }, ""), stop = K.svg(svg, "text", { x: 0, y: 0, "font-size": 12, fill: "var(--bad)" }, "");
+        (async () => {
+          let b = 0;
+          for (let i = 0; i < 10; i++) {
+            if (!(await ctx.tween(220, (t) => dots[i].setAttribute("r", 5 * t)))) return;
+            if (v[i] < v[b]) b = i;
+            best.setAttribute("x", ax.sx(b + 1) - 20); best.setAttribute("y", ax.sy(v[b]) + 24); best.textContent = "💾 保存";
+            if (i - b >= 2) { stop.setAttribute("x", ax.sx(i + 1) - 10); stop.setAttribute("y", ax.sy(v[i]) - 14); stop.textContent = "⏹ 连续 2 轮没进步，停"; return; }
+          }
+        })();
+        K.svg(svg, "text", { x: 360, y: 60, "font-size": 12, class: "muted" }, "曲线为示意，不是作者的运行结果");
+      },
+    },
+    {
+      title: "训练曲线：损失降、准确率升", kicker: "第 34–38 格 · 训练过程", cells: [34, 35, 36, 37], highlight: ["generally successful"],
+      html: `<p>作者把每轮的训练/验证损失和准确率存成 JSON，再用 holoviews 画成交互曲线。</p><p>作者的判断：两条损失都稳步下降、两条准确率都稳步上升，说明训练“总体成功”。<span data-cell="36">出处</span> 如果训练损失一直降、验证损失却开始上升，那就是过拟合的信号。</p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [1, 10], [0, 1], { xlabel: "轮次", ylabel: "损失 / 准确率" });
+        const f = { tl: (e) => 0.6 * Math.exp(-e / 2.5) + 0.03, vl: (e) => 0.55 * Math.exp(-e / 2.8) + 0.05, ta: (e) => 1 - 0.4 * Math.exp(-e / 2.2), va: (e) => 0.98 - 0.4 * Math.exp(-e / 2.4) };
+        const cols = { tl: "var(--c1)", vl: "var(--c6)", ta: "var(--c3)", va: "var(--c4)" }, nm = { tl: "训练损失", vl: "验证损失", ta: "训练准确率", va: "验证准确率" };
+        const ps = Object.keys(f).map((k, i) => { K.svg(svg, "text", { x: 420, y: 130 + i * 20, "font-size": 12, fill: cols[k] }, "— " + nm[k]); return [k, K.svg(svg, "path", { d: "", fill: "none", stroke: cols[k], "stroke-width": 2.2 })]; });
+        K.svg(svg, "text", { x: 420, y: 230, "font-size": 11, class: "muted" }, "示意曲线");
+        ctx.tween(2000, (t) => ps.forEach(([k, p]) => { let d = ""; for (let e = 1; e <= 1 + 9 * t; e += 0.1) d += (d ? "L" : "M") + ax.sx(e) + "," + ax.sy(f[k](e)); p.setAttribute("d", d); }));
+      },
+    },
+    {
+      title: "混淆矩阵：715 张里错了 3 张", kicker: "第 39–42 格 · 评估", cells: [39, 40, 41], highlight: ["pred_probability > 0.5", "confusion_matrix"],
+      html: `<p>在 715 张测试图上：<b>1 张合格品被判成缺陷（误检）</b>，<b>2 张缺陷品被判成合格（漏检）</b>。<span data-cell="39">出处</span></p><ul class="tight"><li><b>漏检</b>（False Negative）：坏件流到后道工序，甚至变成次品出厂</li><li><b>误检</b>（False Positive）：好件被扔掉或返工，产线白白停顿</li></ul><p>作者提醒：更在乎哪种错，就决定看<b>召回率</b>还是<b>精确率</b>；两个都在乎就看 <b>F1</b>。矩阵里的数由第 39 格文字和数据集张数（缺陷 453、合格 262）推出。</p>`,
+      draw(svg, ctx) {
+        const M = [[451, 2], [1, 261]], L = ["缺陷", "合格"];
+        K.svg(svg, "text", { x: 215, y: 26, "text-anchor": "middle", "font-size": 13 }, "预测 →");
+        L.forEach((l, i) => { K.svg(svg, "text", { x: 160 + i * 120, y: 50, "text-anchor": "middle", "font-size": 13 }, "判" + l); K.svg(svg, "text", { x: 90, y: 120 + i * 120, "text-anchor": "end", "font-size": 13 }, "真" + l); });
+        const cells = [];
+        M.forEach((row, i) => row.forEach((v, j) => { const g = K.node(svg, 100 + j * 120, 60 + i * 120, 114, 114, "", { fill: i === j ? "color-mix(in srgb, var(--good) 22%, var(--panel))" : "color-mix(in srgb, var(--bad) 22%, var(--panel))", stroke: i === j ? "var(--good)" : "var(--bad)" }); const t = K.svg(svg, "text", { x: 157 + j * 120, y: 124 + i * 120, "text-anchor": "middle", "font-size": 24, "font-weight": 700 }, "0"); cells.push({ t, v }); }));
+        K.svg(svg, "text", { x: 400, y: 100, "font-size": 14, "font-weight": 700, fill: "var(--bad)" }, "右上 2：漏检，坏件流出去");
+        K.svg(svg, "text", { x: 400, y: 220, "font-size": 14, "font-weight": 700, fill: "var(--warn)" }, "左下 1：误检，好件被拦下");
+        K.svg(svg, "text", { x: 400, y: 290, "font-size": 13 }, "准确率 = 712 / 715 ≈ 99.6%");
+        ctx.tween(1200, (t) => cells.forEach((c) => (c.t.textContent = Math.round(c.v * t))));
+      },
+    },
+    {
+      title: "看看单张预测，以及错判的图", kicker: "第 43–47 格 · 逐图检查", cells: [43, 44, 45, 46], highlight: ["Predicted Label", "misclassified"],
+      html: `<p>作者挑了 5 张合格、5 张缺陷图，逐张预测，把“预测标签 + 概率”写在图上。注意概率怎么换算：模型输出的是合格概率 p，判缺陷时显示 1 − p。</p><p>然后遍历整个测试集，找出错判的图画出来。作者坦言：<b>人眼也看不出这些图为什么会被判错</b>。<span data-cell="45">出处</span> 这正是下一步要用解释工具的原因。</p>`,
+      draw(svg, ctx) {
+        const N = 32, items = [["ok", "none", 0.98], ["ok", "none", 0.95], ["def", "hole", 0.03], ["def", "scratch", 0.08], ["def", "edge", 0.71]];
+        items.forEach((d, i) => {
+          const g = K.svg(svg, "g"); drawImg(g, casting(N, d[1], 40 + i), N, 20 + i * 138, 40, 124); g.style.opacity = 0;
+          const pred = d[2] >= 0.5 ? "ok" : "def", prob = pred === "ok" ? d[2] : 1 - d[2], wrong = pred !== d[0];
+          K.svg(g, "text", { x: 82 + i * 138, y: 190, "text-anchor": "middle", "font-size": 12 }, "实际 " + d[0]);
+          K.svg(g, "text", { x: 82 + i * 138, y: 210, "text-anchor": "middle", "font-size": 12, "font-weight": 700, fill: wrong ? "var(--bad)" : "var(--good)" }, `预测 ${pred} ${(prob * 100).toFixed(0)}%`);
+          if (wrong) K.svg(g, "rect", { x: 18 + i * 138, y: 38, width: 128, height: 180, fill: "none", stroke: "var(--bad)", "stroke-width": 3 });
+          ctx.wait(i * 300).then((ok) => ok && ctx.tween(300, (t) => (g.style.opacity = t)));
+        });
+        K.svg(svg, "text", { x: 20, y: 270, "font-size": 13 }, "红框 = 漏检：边缘的小缺口太细，被当成合格（示意）");
+        K.svg(svg, "text", { x: 20, y: 296, "font-size": 12, class: "muted" }, "图片和概率都是示意，不是作者的运行结果");
+      },
+    },
+    {
+      title: "SHAP：模型盯着哪里下结论", kicker: "第 48–50 格 · 模型解释", cells: [48, 49, 50], highlight: ["shap.DeepExplainer", "train_sample[0]", "shap.image_plot"],
+      html: `<p><b>SHAP</b> 给图上每个像素算一个“贡献分”：这个像素把结论往“合格”推了多少（红色），还是往“缺陷”推了多少（蓝色）。</p><p>作者对 5 张缺陷图做了解释，发现<b>蓝色集中在表面的划痕、孔洞，以及叶轮边缘不平整的地方</b>。<span data-cell="48">出处</span> 说明模型确实在看缺陷本身，而不是背景、光照这些无关的东西。</p><p class="callout">第 49 格随机抽了 3000 张训练图，但只把第 1 张 <code>train_sample[0]</code> 交给 DeepExplainer 当参照背景。参照只有一张，解释结果会依赖这张图长什么样。</p>`,
+      draw(svg, ctx) {
+        const N = 44, img = casting(N, "hole", 77, 0.35, 0.3), c = (N - 1) / 2, hx = c + 0.35 * c, hy = c + 0.3 * c;
+        drawImg(svg, img, N, 30, 40, 220);
+        K.svg(svg, "text", { x: 140, y: 280, "text-anchor": "middle", "font-size": 13 }, "缺陷图（示意）");
+        const sh = []; for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) { const d = Math.hypot(x - hx, y - hy), dd = Math.hypot(x - c, y - c) / c; let v = -Math.exp(-(d * d) / 10) + 0.18 * Math.exp(-((dd - 0.6) ** 2) / 0.02) * Math.cos(6 * Math.atan2(y - c, x - c)); sh.push(v); }
+        const g = K.svg(svg, "g");
+        drawImg(g, img, N, 300, 40, 220);
+        const ov = []; const s = 220 / N; for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) { const v = sh[y * N + x]; if (Math.abs(v) > 0.08) ov.push(K.svg(svg, "rect", { x: 300 + x * s, y: 40 + y * s, width: s + 0.4, height: s + 0.4, fill: v < 0 ? "#2f7bff" : "#ff3b5c", opacity: 0 })); }
+        const vals = ov.map((e, i) => i);
+        K.svg(svg, "text", { x: 410, y: 280, "text-anchor": "middle", "font-size": 13 }, "SHAP 叠加");
+        K.svg(svg, "text", { x: 545, y: 90, "font-size": 13, fill: "#2f7bff", "font-weight": 700 }, "蓝：推向“缺陷”");
+        K.svg(svg, "text", { x: 545, y: 114, "font-size": 13, fill: "#ff3b5c", "font-weight": 700 }, "红：推向“合格”");
+        K.svg(svg, "text", { x: 545, y: 160, "font-size": 12, class: "muted" }, "蓝色集中在气孔上：");
+        K.svg(svg, "text", { x: 545, y: 180, "font-size": 12, class: "muted" }, "模型看对了地方");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1200, (t) => ov.forEach((e) => (e.style.opacity = 0.75 * t))));
+      },
+    },
+    {
+      title: "为什么会错判：阴影、划痕被看漏了", kicker: "第 51–53 格 · 错判解释", cells: [51, 52], highlight: ["misclassified"],
+      html: `<p>作者对之前找出的错判图也画了 SHAP。结论是：这些图上的<b>阴影、划痕、孔洞被模型忽略了</b>，蓝色没有落在它们身上，所以判成了合格。<span data-cell="51">出处</span></p><p>这就是可解释性的价值：知道模型“为什么错”，才能有针对性地补数据（多拍这类缺陷）、改光照（减少阴影）或调阈值。</p>`,
+      draw(svg, ctx) {
+        const N = 44, img = casting(N, "edge", 88);
+        drawImg(svg, img, N, 30, 40, 220);
+        K.svg(svg, "text", { x: 140, y: 280, "text-anchor": "middle", "font-size": 13, fill: "var(--bad)" }, "实际：缺陷　预测：合格");
+        const c = (N - 1) / 2, s = 220 / N; const ring = K.svg(svg, "circle", { cx: 30 + (c + 0.9 * c * Math.cos(2.4)) * s, cy: 40 + (c + 0.9 * c * Math.sin(2.4)) * s, r: 0, fill: "none", stroke: "var(--warn)", "stroke-width": 3 });
+        drawImg(svg, img, N, 300, 40, 220);
+        for (let k = 0; k < 40; k++) { const a = k / 40 * Math.PI * 2, rr = 0.6 * c; K.svg(svg, "rect", { x: 300 + (c + rr * Math.cos(a)) * s, y: 40 + (c + rr * Math.sin(a)) * s, width: s * 2, height: s * 2, fill: "#ff3b5c", opacity: 0.45 }); }
+        K.svg(svg, "text", { x: 410, y: 280, "text-anchor": "middle", "font-size": 13 }, "SHAP：缺口处几乎没有蓝色");
+        K.svg(svg, "text", { x: 545, y: 120, "font-size": 12 }, "橙圈：被忽略的边缘缺口");
+        K.svg(svg, "text", { x: 545, y: 144, "font-size": 12 }, "红色在叶片纹理上：");
+        K.svg(svg, "text", { x: 545, y: 164, "font-size": 12 }, "模型被“正常纹理”说服了");
+        K.svg(svg, "text", { x: 545, y: 200, "font-size": 11, class: "muted" }, "（示意）");
+        ctx.tween(900, (t) => ring.setAttribute("r", 18 * t));
+      },
+    },
+    {
+      title: "结论：先当质检员的助手", kicker: "第 54–57 格 · 总结", cells: [54], highlight: ["Human-in-the-Loop", "support inspection workers"],
+      html: `<p>作者的结论：</p><ul class="tight"><li>ImageDataGenerator 让增强很方便，但不要过度</li><li>模型确实把表面划痕/孔洞和边缘不平整当作缺陷依据</li><li>精度较高，可以考虑装到检测线的相机上</li><li>但漏检的代价大，光照等拍摄条件也有难度，所以<b>先作为辅助工具</b>，并考虑“人在回路”：机器初筛，拿不准的交给人，人的判断再反馈给模型</li></ul>`,
+      draw(svg, ctx) {
+        const nodes = [[20, 130, "相机拍照"], [170, 130, "CNN 打分"], [330, 50, "很像合格 → 放行"], [330, 210, "很像缺陷 → 剔除"], [330, 130, "拿不准 → 人工复检"], [540, 130, "人工结果回流\n补充训练数据"]];
+        const gs = nodes.map((n, i) => { const g = K.node(svg, n[0], n[1], i >= 2 && i <= 4 ? 180 : 130, 54, n[2], { bold: i === 4, fill: i === 4 ? "var(--accent-soft)" : undefined, stroke: i === 4 ? "var(--accent)" : undefined }); g.style.opacity = 0; return g; });
+        const ar = [[150, 157, 168, 157], [300, 157, 328, 77], [300, 157, 328, 237], [300, 157, 328, 157], [510, 157, 538, 157]].map((a) => { const e = K.arrow(svg, ...a); e.style.opacity = 0; return e; });
+        const back = K.svg(svg, "path", { d: "M605,184 C605,300 235,300 235,186", fill: "none", stroke: "var(--accent)", "stroke-dasharray": "5 4", "stroke-width": 2 }); back.style.opacity = 0;
+        K.svg(svg, "text", { x: 330, y: 318, "font-size": 12, fill: "var(--accent)" }, "人在回路：越用越准");
+        (async () => { const order = [0, 1, 2, 3, 4, 5]; for (const i of order) { if (!(await ctx.tween(260, (t) => { gs[i].style.opacity = t; if (i) ar[Math.min(i - 1, 4)].style.opacity = t; }))) return; } await ctx.tween(500, (t) => (back.style.opacity = t)); })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：卷积核 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 265,
+    controls: [
+      { id: "defect", label: "铸件", value: "hole", options: [["hole", "有气孔"], ["scratch", "有划痕"], ["edge", "边缘缺口"], ["none", "合格品"]] },
+      { id: "k", label: "卷积核", value: "spot", options: [["spot", "暗点检测（反拉普拉斯）"], ["edgeh", "横向边缘（Sobel）"], ["edgev", "纵向边缘（Sobel）"], ["blur", "均值模糊"], ["sharp", "锐化"]] },
+      { id: "relu", label: "卷积后接 ReLU（负数归零）", value: "1", options: [["1", "是（和作者模型一样）"], ["0", "否"]] },
+    ],
+    note: "现场对 60×60 的示意铸件图做 3×3 卷积，再做 2×2 最大池化（CNN 里卷积 → 池化的一步）。读数卡比较“缺陷位置附近”和“其他位置”的最大响应：比值越大，说明这个卷积核越能把缺陷挑出来。",
+    render(svg, v) {
+      const N = 60, img = casting(N, v.defect, 123), out = conv(img, N, KERNELS[v.k]).map((x) => (v.relu === "1" ? Math.max(0, x) : x));
+      drawImg(svg, img, N, 10, 30, 190);
+      const mx = Math.max(1e-6, ...out.map(Math.abs));
+      drawImg(svg, out, N, 225, 30, 190, (x) => (x >= 0 ? `rgb(${Math.round(255 * Math.min(1, x / mx))},${Math.round(200 * Math.min(1, x / mx))},40)` : `rgb(40,${Math.round(120 * Math.min(1, -x / mx))},${Math.round(255 * Math.min(1, -x / mx))})`));
+      const P = N / 2, pool = new Array(P * P); for (let y = 0; y < P; y++) for (let x = 0; x < P; x++) pool[y * P + x] = Math.max(out[2 * y * N + 2 * x], out[2 * y * N + 2 * x + 1], out[(2 * y + 1) * N + 2 * x], out[(2 * y + 1) * N + 2 * x + 1]);
+      const pm = Math.max(1e-6, ...pool.map(Math.abs));
+      drawImg(svg, pool, P, 440, 30, 190, (x) => { const t = Math.max(0, x) / pm; return `rgb(${Math.round(255 * t)},${Math.round(200 * t)},40)`; });
+      K.svg(svg, "text", { x: 105, y: 20, "text-anchor": "middle", "font-size": 12 }, "输入 60×60");
+      K.svg(svg, "text", { x: 320, y: 20, "text-anchor": "middle", "font-size": 12 }, "卷积后特征图");
+      K.svg(svg, "text", { x: 535, y: 20, "text-anchor": "middle", "font-size": 12 }, "2×2 最大池化 → 30×30");
+      // 缺陷区域掩码
+      const c = (N - 1) / 2, near = (x, y) => v.defect === "hole" ? Math.hypot(x - (c + 0.42 * c), y - (c - 0.2 * c)) < 6 : v.defect === "edge" ? (() => { const d = Math.hypot(x - c, y - c) / c, a = Math.atan2(y - c, x - c); return d > 0.75 && d < 1.0 && Math.abs(a - 2.4) < 0.3; })() : v.defect === "scratch" ? Math.abs((y - c) - 0.6 * (x - c) + N * 0.15) < 3 && x > c * 0.6 && x < c * 1.6 : false;
+      let a = 0, b = 0; for (let y = 2; y < N - 2; y++) for (let x = 2; x < N - 2; x++) { const val = out[y * N + x]; if (near(x, y)) a = Math.max(a, val); else b = Math.max(b, val); }
+      K.svg(svg, "text", { x: 10, y: 250, "font-size": 12, class: "muted" }, "特征图配色：黄 = 正响应强，蓝 = 负响应强；池化后只剩正值（ReLU 之后）");
+      return { readout: [
+        { k: "缺陷附近最大响应", v: v.defect === "none" ? "—" : a.toFixed(3) },
+        { k: "其他位置最大响应", v: b.toFixed(3) },
+        { k: "缺陷 / 其他", v: v.defect === "none" ? "—" : (a / Math.max(1e-6, b)).toFixed(2), color: a / Math.max(1e-6, b) > 1 ? "var(--good)" : "var(--bad)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：遮挡法 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "defect", label: "铸件", value: "hole", options: [["hole", "有气孔"], ["scratch", "有划痕"], ["edge", "边缘缺口"], ["none", "合格品"]] },
+      { id: "hx", label: "气孔位置（左右）", min: -0.6, max: 0.6, step: 0.05, value: 0.42, fmt: (v) => v.toFixed(2) },
+      { id: "sz", label: "遮挡方块大小（像素）", min: 4, max: 16, step: 2, value: 8 },
+    ],
+    note: "这里的“模型”是一个手写的示意打分器：缺陷分 = 暗点检测核在铸件区域里的最大响应，超过 0.14 判缺陷（不是作者训练的 CNN）。遮挡法：用灰色方块依次盖住图的每一块，看缺陷分掉了多少，掉得越多（越红）说明那块对判断越重要。SHAP、Grad-CAM 的目的相同：回答“模型凭什么这样判”。",
+    render(svg, v) {
+      const N = 48, base = casting(N, v.defect, 321, v.hx, -0.2), c = (N - 1) / 2;
+      const score = (im) => { const o = conv(im, N, KERNELS.spot); let m = 0; for (let y = 2; y < N - 2; y++) for (let x = 2; x < N - 2; x++) { const d = Math.hypot(x - c, y - c) / c; if (d > 0.25 && d < 0.9) m = Math.max(m, o[y * N + x]); } return m; };
+      const s0 = score(base), st = v.sz / 2, heat = [], G = Math.ceil(N / st);
+      let best = { d: -1, x: 0, y: 0 };
+      for (let gy = 0; gy < G; gy++) for (let gx = 0; gx < G; gx++) {
+        const im = base.slice(); const x0 = gx * st - st / 2, y0 = gy * st - st / 2;
+        for (let y = Math.max(0, y0); y < Math.min(N, y0 + v.sz); y++) for (let x = Math.max(0, x0); x < Math.min(N, x0 + v.sz); x++) im[y * N + x] = 0.5;
+        const d = s0 - score(im); heat.push({ gx, gy, d }); if (d > best.d) best = { d, x: gx, y: gy };
+      }
+      drawImg(svg, base, N, 10, 30, 240);
+      const mx = Math.max(1e-6, ...heat.map((h) => h.d)), cs = 240 / N * st;
+      drawImg(svg, base, N, 300, 30, 240);
+      heat.forEach((h) => { const t = Math.max(0, h.d) / mx; if (t > 0.05) K.svg(svg, "rect", { x: 300 + h.gx * cs - cs / 2, y: 30 + h.gy * cs - cs / 2, width: cs, height: cs, fill: "#ff3b5c", opacity: 0.75 * t }); });
+      K.svg(svg, "rect", { x: 300, y: 30, width: 240, height: 240, fill: "none", stroke: "var(--line)" });
+      K.svg(svg, "text", { x: 130, y: 20, "text-anchor": "middle", "font-size": 12 }, "原图（示意）");
+      K.svg(svg, "text", { x: 420, y: 20, "text-anchor": "middle", "font-size": 12 }, "遮挡重要性：越红越重要");
+      K.svg(svg, "text", { x: 10, y: 300, "font-size": 12, class: "muted" }, `共试了 ${heat.length} 个遮挡位置，每个位置都重新打一次分`);
+      return { readout: [
+        { k: "原图缺陷分", v: s0.toFixed(3), color: s0 > 0.14 ? "var(--bad)" : "var(--good)" },
+        { k: "最大掉分", v: Math.max(0, best.d).toFixed(3) },
+        { k: "判断", v: s0 > 0.14 ? "缺陷" : "合格" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

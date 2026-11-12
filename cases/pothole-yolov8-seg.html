@@ -1,0 +1,515 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>坑洼分割测损</title>
+<meta name="description" content="Kaggle 案例拆解：用 YOLOv8n-seg 实例分割把路面坑洼一个个圈出轮廓，算出每个坑的面积和整帧路面的损坏百分比，再推广到逐帧视频。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">道路照片与视频 · 实例分割 · 损坏面积估算</div>
+  <h1>把路上的坑一个个“描边”：YOLOv8 实例分割评估路面损坏</h1>
+  <p class="en">Pothole Segmentation for Road Damage Assessment</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">实例分割</span><span class="tag method">YOLOv8n-seg</span><span class="tag method">迁移学习微调</span>
+    <span class="tag method">多边形标注</span><span class="tag method">mAP50 / mAP50-95</span><span class="tag method">置信度阈值</span>
+    <span class="tag method">轮廓与面积</span><span class="tag method">滑动平均</span><span class="tag method">ONNX 导出</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Farzad Nekouei</b></span>
+    <span>Kaggle 点赞 <b>976</b>（2026-11 抓取）</span>
+    <span>数据集 <b>farzadnekouei/pothole-image-segmentation-dataset</b></span>
+    <span><a href="https://www.kaggle.com/code/farzadnekouei/pothole-segmentation-for-road-damage-assessment" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">780 张带坑洼轮廓的路面照片</div><p>720 张训练、60 张验证，都缩放到 640×640；每个坑都用多边形描出了轮廓。另有一段测试视频。<span data-cell="20">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">每个坑在哪、轮廓是什么形状</div><p>这是<b>实例分割</b>：不仅框出每个坑，还要给出每个坑自己的像素掩码，进而算出面积和损坏比例。<span data-cell="1">出处</span> <span data-cell="75">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">在 COCO 上预训练的 YOLOv8n-seg 上微调</div><p>选最快的 nano 版本，学习率 1e-4、最多 150 轮、耐心 15 轮早停；再用 OpenCV 找轮廓、算面积，视频里对最近 10 帧取平均。<span data-cell="31">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">验证集 mAP50 ≈ 0.72</div><p>框和掩码的 mAP50 都约 0.72；精确率 0.75 / 0.71，召回率 0.61 / 0.66；归一化混淆矩阵里约 30% 的坑被漏掉。<span data-cell="61">出处</span> <span data-cell="56">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集由作者本人整理（在 Roboflow 上标注并导出为 YOLOv8-seg 格式），以下数字来自作者第 20、21、26 格的说明。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">图片总数</div><div class="v">780</div></div>
+        <div class="stat-tile"><div class="k">训练 / 验证</div><div class="v">720 / 60</div></div>
+        <div class="stat-tile"><div class="k">尺寸</div><div class="v">640×640</div></div>
+        <div class="stat-tile"><div class="k">类别数</div><div class="v">1（Pothole）</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">规模见第 20 格 <span data-cell="20">出处</span>，并由第 25 格代码核对、第 26 格总结 <span data-cell="26">出处</span>；类别见 <code>data.yaml</code> 的说明 <span data-cell="23">出处</span>。训练图事先做过翻转、裁剪、旋转、错切、亮度和曝光增强 <span data-cell="20">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每个标注文件里是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>字段</th><th>白话含义</th><th>类型</th></tr>
+        <tr><td><code>class-index</code></td><td>类别编号，这里只有 0 = 坑洼</td><td>整数</td></tr>
+        <tr><td><code>x1 y1 x2 y2 … xn yn</code></td><td><b>答案</b>：沿坑的边缘取 n 个点连成多边形，坐标都除以图宽、图高变成 0–1</td><td>小数，成对出现</td></tr>
+        <tr><td><code>data.yaml</code></td><td>训练 / 验证图片的路径、类别数 <code>nc: 1</code>、类别名</td><td>配置文件</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">每张图对应一个同名 <code>.txt</code>，一行描述一个坑 <span data-cell="21">出处</span>。</p>
+      <p class="callout">本页的“路面照片”和“坑洼”都是代码画的示意图，不是数据集里的真实照片。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="61">
+    <h3>动手试试 A · 预测的坑和真实的坑重合多少才算对：IoU 与 mAP50 / mAP50-95 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="81">
+    <h3>动手试试 B · 逐帧算损坏比例：置信度阈值与 10 帧平均 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结果</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结果（验证集 60 张）</th><th>出处</th></tr>
+        <tr><td>框、掩码的 PR 曲线 mAP 均约 0.72</td><td><span data-cell="52">第 52 格</span></td></tr>
+        <tr><td>精确率：框 0.75、掩码 0.71；召回率：框 0.61、掩码 0.66</td><td><span data-cell="61">第 61 格</span></td></tr>
+        <tr><td>mAP50 框和掩码都约 0.72；mAP50-95 还有提升空间</td><td><span data-cell="61">第 61 格</span></td></tr>
+        <tr><td>归一化混淆矩阵：约 70% 的坑被正确找到，约 30% 被漏掉</td><td><span data-cell="56">第 56 格</span></td></tr>
+        <tr><td>学习曲线：训练与验证损失接近，框损失和分割损失有一定过拟合迹象</td><td><span data-cell="44">第 44 格</span></td></tr>
+        <tr><td>参考：COCO 上最大的 YOLOv8x-seg 掩码 mAP 为 43.4</td><td><span data-cell="2">第 2 格</span></td></tr>
+      </table></div>
+      <h3>读代码和文字时发现的问题</h3>
+      <ul class="tight">
+        <li><b>视频里的损坏比例单位不一致</b>：第 81 格用 <code>frame.shape</code>（原视频分辨率）当分母，而分子是模型输出掩码（推理分辨率）上的面积。两者分辨率不同，算出的百分比会偏小或偏大；第 79 格用的是掩码自身尺寸，是一致的 <span data-cell="81">第 81 格</span>。</li>
+        <li>每个掩码只取第一个轮廓 <code>contour[0]</code>，一个坑被分成几块时面积会少算 <span data-cell="79">第 79 格</span>。分母是整帧，包含天空、车辆，严格说是“占画面比例”而非“占路面比例”。</li>
+        <li>第 48 格说精确率曲线“在所有置信度上都接近完美”，和第 61 格精确率 0.75 / 0.71 不太一致 <span data-cell="48">第 48 格</span>。</li>
+        <li>第 61 格的“fitness 0.92”不是百分比，它是框和掩码两部分加权分数（0.1×mAP50 + 0.9×mAP50-95）之和，不能读成“92 分”。第 61 格还把 nano 版写成了 “tiny”。</li>
+        <li>第 2 格说 YOLOv8-seg “2023 年 11 月发布”；YOLOv8 实际在 2023 年 1 月就已发布。第 69、83 格的注释还留着“车辆检测”“车流密度”，是从作者另一份 notebook 复制过来的。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>行车记录仪或巡检车视频里每一帧的坑洼位置、轮廓、面积，以及整帧的损坏比例，可用于排定修补优先级、向司机实时预警。</li>
+        <li><b>同类问题：</b>路面裂缝 / 车辙分割、屋顶破损、农田积水、钢材锈斑面积、伤口面积测量，都是“先分割、再量面积”。</li>
+        <li><b>可迁移的套路：</b>选一个预训练的分割模型 → 准备多边形标注 → 小学习率微调 + 早停 → 看 mAP50 和 mAP50-95 → 掩码转轮廓算面积 → 视频里做时间平滑。</li>
+        <li><b>要做成真正的测量：</b>像素面积还要换算成平方米，需要相机标定或已知参照物；还要考虑透视（远处的坑看起来更小）。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>加载预训练 YOLOv8n-seg：<span data-cell="17">第 17 格</span></li>
+        <li>读 data.yaml、核对数量和尺寸：<span data-cell="22">第 22 格</span> <span data-cell="25">第 25 格</span></li>
+        <li>微调训练：<span data-cell="31">第 31 格</span></li>
+        <li>学习曲线：<span data-cell="43">第 43 格</span></li>
+        <li>置信度曲线、PR 曲线、混淆矩阵：<span data-cell="47">第 47 格</span> <span data-cell="51">第 51 格</span> <span data-cell="55">第 55 格</span></li>
+        <li>验证集指标：<span data-cell="59">第 59 格</span></li>
+        <li>图片 / 视频推理与 ONNX 导出：<span data-cell="66">第 66 格</span> <span data-cell="69">第 69 格</span> <span data-cell="73">第 73 格</span></li>
+        <li>轮廓、面积、损坏比例、10 帧平均：<span data-cell="79">第 79 格</span> <span data-cell="81">第 81 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>目标检测只画方框，实例分割要描出轮廓。对于“估算补坑要多少沥青”这件事，为什么方框不够用？</li>
+      <li>mAP50 是 0.72，mAP50-95 更低。这说明模型“找得到坑”还是“描得准边”更弱？对修路部门哪个更重要？</li>
+      <li>约 30% 的坑被漏掉。如果系统用来给司机实时预警，漏检和误报哪个更危险？置信度阈值该怎么选？</li>
+      <li>第 81 格用原视频分辨率当分母、用掩码分辨率算分子。请你设计一个小实验验证这个单位不一致会带来多大误差。</li>
+      <li>画面里远处的坑看起来很小、近处的坑很大。“占画面百分比”能代表路面真实损坏程度吗？你会怎么改进？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Farzad Nekouei，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的路面、坑洼、掩码与视频帧均为模拟示意。数据集：Farzad Nekouei, Pothole Image Segmentation Dataset（Kaggle / Roboflow）。
+</footer>
+</main>
+
+<script src="nb/pothole-yolov8-seg.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 示意：路面 + 坑洼多边形 ---------- */
+  function blob(seed, cx, cy, rx, ry, n) {
+    const r = K.rng(seed), pts = [];
+    n = n || 14;
+    for (let i = 0; i < n; i++) { const a = (i / n) * Math.PI * 2, k = 0.7 + r() * 0.45; pts.push([cx + Math.cos(a) * rx * k, cy + Math.sin(a) * ry * k]); }
+    return pts;
+  }
+  const pstr = (pts) => pts.map((p) => p.join(",")).join(" ");
+  function road(svg, x, y, w, h, seed) {
+    const g = K.svg(svg, "g"), r = K.rng(seed);
+    K.svg(g, "rect", { x, y, width: w, height: h, fill: "#6b6b6b" });
+    for (let i = 0; i < w * h / 180; i++) K.svg(g, "rect", { x: x + r() * w, y: y + r() * h, width: 2, height: 2, fill: r() < 0.5 ? "#5a5a5a" : "#7a7a7a" });
+    K.svg(g, "rect", { x: x + w / 2 - 3, y, width: 6, height: h, fill: "#d9c55a", opacity: 0.8 });
+    return g;
+  }
+  function pothole(svg, pts, opt) {
+    opt = opt || {};
+    return K.svg(svg, "polygon", { points: pstr(pts), fill: opt.fill || "#2b2622", stroke: opt.stroke || "#1c1916", "stroke-width": opt.sw || 1, opacity: opt.opacity == null ? 1 : opt.opacity });
+  }
+  function polyArea(pts) { let s = 0; for (let i = 0; i < pts.length; i++) { const a = pts[i], b = pts[(i + 1) % pts.length]; s += a[0] * b[1] - b[0] * a[1]; } return Math.abs(s) / 2; }
+  function inPoly(x, y, pts) { let c = false; for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) { const a = pts[i], b = pts[j]; if ((a[1] > y) !== (b[1] > y) && x < ((b[0] - a[0]) * (y - a[1])) / (b[1] - a[1]) + a[0]) c = !c; } return c; }
+
+  const steps = [
+    {
+      at: 0, title: "实例分割：不仅框住，还要描出轮廓", kicker: "第 0–2 格 · 背景",
+      html: `<p>作者先区分几种任务：<b>目标检测</b>只画方框；<b>实例分割</b>更进一步，给每一个物体单独描出精确轮廓（掩码），同时给出类别和置信度。常见的分割模型有 U-Net、SegNet、DeepLabv3 和 YOLOv8-seg。</p><p>YOLOv8-seg 是 Ultralytics 出品、在 COCO（80 类常见物体）上预训练的分割模型，从小到大有 n、s、m、l、x 五个尺寸；作者提到最大的 x 版在 COCO 上的掩码 mAP 为 43.4。</p>`,
+      cells: [1, 2],
+      draw(svg, ctx) {
+        const labs = ["目标检测：画方框", "语义分割：只分“是不是坑”", "实例分割：每个坑单独描边"];
+        const pits = [[0.3, 0.45, 34, 20, 1], [0.62, 0.65, 42, 24, 2], [0.45, 0.82, 26, 14, 3]];
+        const cols = ["#e05a47", "#4aa3df", "#57c27a"];
+        labs.forEach((t, k) => {
+          const ox = 15 + k * 235, w = 220, h = 270;
+          road(svg, ox, 40, w, h, 5);
+          const P = pits.map(([fx, fy, rx, ry, s]) => blob(s, ox + fx * w, 40 + fy * h, rx, ry));
+          P.forEach((p) => pothole(svg, p));
+          K.svg(svg, "text", { x: ox + w / 2, y: 28, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, t);
+          const over = K.svg(svg, "g"); over.style.opacity = 0;
+          P.forEach((p, i) => {
+            if (k === 0) { const xs = p.map((q) => q[0]), ys = p.map((q) => q[1]); K.svg(over, "rect", { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys), fill: "none", stroke: "#e05a47", "stroke-width": 2.5 }); }
+            else pothole(over, p, { fill: k === 1 ? "#e05a47" : cols[i], opacity: 0.65, stroke: k === 1 ? "#e05a47" : cols[i], sw: 2 });
+          });
+          ctx.wait(500 + k * 700).then((ok) => ok && ctx.tween(600, (t2) => (over.style.opacity = t2)));
+        });
+      },
+    },
+    {
+      at: 3, title: "项目目标：找到坑，再算出损坏多少", kicker: "第 3–6 格 · 项目概览",
+      html: `<p>作者的目标分六步：选速度最快的 <b>YOLOv8n-seg</b>；准备坑洼数据集；用迁移学习微调；全面评估；在验证图和新视频上推理；最后做<b>实时路面损坏评估</b>：在视频的每一帧里持续算出坑洼的面积和占比。</p><p>这样的结果可以帮道路部门安排维修，也可以给司机实时预警。</p>`,
+      cells: [3, 4],
+      draw(svg, ctx) {
+        const st = ["选模型\nYOLOv8n-seg", "准备数据\n780 张", "微调训练", "评估\nmAP / 混淆矩阵", "推理\n图片 + 视频", "损坏评估\n面积 / 百分比"];
+        st.forEach((t, i) => { const x = 20 + (i % 3) * 235, y = 50 + Math.floor(i / 3) * 140; const n = K.node(svg, x, y, 200, 70, t, { fs: 13, fill: i === 5 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 5 ? "var(--accent)" : "var(--line)" }); n.style.opacity = 0; ctx.wait(i * 350).then((ok) => ok && (n.style.opacity = 1)); if (i % 3) { const a = K.arrow(svg, x - 35, y + 35, x, y + 35); a.style.opacity = 0; ctx.wait(i * 350).then((ok) => ok && (a.style.opacity = 1)); } });
+        const a2 = K.arrow(svg, 590, 120, 120, 190, { dash: "5 4" }); a2.style.opacity = 0; ctx.wait(1000).then((ok) => ok && (a2.style.opacity = 1));
+      },
+    },
+    {
+      at: 7, title: "安装并加载 YOLOv8n-seg", kicker: "第 7–18 格 · 准备模型",
+      html: `<p><code>pip install ultralytics</code> 后，一行 <code>YOLO('yolov8n-seg.pt')</code> 就载入了预训练好的 nano 分割模型。作者选 n 版的理由是：最快，适合实时处理；更大的版本更准，但更慢。</p><p>作者特别提醒：COCO 的 80 类里<b>没有“坑洼”</b>，所以直接用这个模型找不到坑，必须在坑洼数据上继续训练（微调）。</p>`,
+      cells: [9, 17, 18], highlight: ["YOLO('yolov8n-seg.pt')"],
+      draw(svg, ctx) {
+        const sizes = [["n", 1], ["s", 2.2], ["m", 4], ["l", 6], ["x", 9]];
+        const ax = K.axes(svg, { x: 60, y: 30, w: 330, h: 230 }, [0, 10], [0, 10], { xlabel: "速度慢 →", ylabel: "精度高 →", xticks: 0, yticks: 0 });
+        sizes.forEach(([n, v], i) => { const c = K.svg(svg, "circle", { cx: ax.sx(v), cy: ax.sy(3 + Math.sqrt(v) * 2.2), r: 0, fill: n === "n" ? "var(--accent)" : "var(--c1)" }); K.svg(svg, "text", { x: ax.sx(v) + 12, y: ax.sy(3 + Math.sqrt(v) * 2.2) + 4, "font-size": 13, "font-weight": 700 }, "v8" + n + "-seg"); ctx.wait(i * 200).then((ok) => ok && ctx.tween(300, (t) => c.setAttribute("r", (8 + i * 2) * t))); });
+        K.svg(svg, "text", { x: 70, y: 325, "font-size": 12, class: "muted" }, "位置为示意：越大越准、越慢；作者选最左边的 n");
+        K.svg(svg, "text", { x: 460, y: 60, "font-size": 13, "font-weight": 700 }, "COCO 的 80 类里有……");
+        const items = ["person 人", "car 汽车", "bus 公交车", "dog 狗", "…", "pothole 坑洼？"];
+        items.forEach((t, i) => { const e = K.svg(svg, "text", { x: 470, y: 92 + i * 30, "font-size": 14, fill: i === 5 ? "var(--bad)" : "var(--ink)" }, (i === 5 ? "✗ " : "✓ ") + t); e.style.opacity = 0; ctx.wait(1000 + i * 250).then((ok) => ok && (e.style.opacity = 1)); });
+      },
+    },
+    {
+      at: 19, title: "数据集：多边形描出每个坑", kicker: "第 19–23 格 · 数据格式",
+      html: `<p>作者自己整理了数据集：780 张图（720 训练、60 验证），全部 640×640，训练图做过翻转、裁剪、旋转、错切、亮度和曝光等增强。数据在 Roboflow 上标注，导出成 YOLOv8-seg 格式：</p><ul class="tight"><li><code>train/</code>、<code>valid/</code> 里各有 <code>images</code> 和 <code>labels</code>；</li><li>每个标注文件一行一个坑：<code>类别 x1 y1 x2 y2 … xn yn</code>，坐标除以图宽高归一化到 0–1；</li><li><code>data.yaml</code> 写明路径、类别数 <code>nc: 1</code> 和类别名 Pothole。</li></ul>`,
+      cells: [22], highlight: ["data.yaml"],
+      draw(svg, ctx) {
+        road(svg, 20, 30, 280, 280, 9);
+        const P = blob(4, 160, 170, 80, 48, 10);
+        pothole(svg, P);
+        const dots = P.map((p) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 0, fill: "#57c27a", stroke: "#fff", "stroke-width": 1 }));
+        const edge = K.svg(svg, "polyline", { points: "", fill: "none", stroke: "#57c27a", "stroke-width": 2.5 });
+        const txt = K.svg(svg, "text", { x: 330, y: 60, "font-size": 13, "font-weight": 700 }, "标注文件（一行一个坑）：");
+        const line = K.svg(svg, "text", { x: 330, y: 92, "font-size": 13, "font-family": "var(--mono)" }, "0");
+        const line2 = K.svg(svg, "text", { x: 330, y: 116, "font-size": 13, "font-family": "var(--mono)" }, ""), line3 = K.svg(svg, "text", { x: 330, y: 140, "font-size": 13, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 330, y: 180, "font-size": 12, class: "muted" }, "0 = 类别（坑洼）");
+        K.svg(svg, "text", { x: 330, y: 202, "font-size": 12, class: "muted" }, "后面每两个数 = 一个顶点的 (x, y)，已除以 640");
+        (async () => {
+          let s = "0", s2 = "", s3 = "";
+          for (let i = 0; i < P.length; i++) {
+            if (!(await ctx.tween(200, (t) => dots[i].setAttribute("r", 5 * t)))) return;
+            edge.setAttribute("points", pstr(P.slice(0, i + 1)));
+            const c = ` ${((P[i][0] - 20) / 280).toFixed(2)} ${((P[i][1] - 30) / 280).toFixed(2)}`;
+            if (i < 4) s += c; else if (i < 7) s2 += c; else s3 += c;
+            line.textContent = s; line2.textContent = s2; line3.textContent = s3;
+          }
+          edge.setAttribute("points", pstr(P.concat([P[0]])));
+        })();
+      },
+    },
+    {
+      at: 24, title: "数一数、看一看", kicker: "第 24–28 格 · 数据检查",
+      html: `<p>第 25 格逐个打开训练和验证文件夹里的 jpg，数出数量，并把每张图的尺寸放进集合：如果集合里只有一个元素，说明所有图一样大。结论（第 26 格）：训练 720 张、验证 60 张，全部 640×640，正好是 YOLOv8-seg 的输入尺寸。</p><p>第 28 格固定随机种子，随机抽 15 张训练图排成 3×5 看看样子。</p>`,
+      cells: [25, 28], highlight: ["train_image_sizes.add(img.size)", "random.sample(image_files, 15)"],
+      draw(svg, ctx) {
+        const tiles = [];
+        for (let i = 0; i < 15; i++) {
+          const x = 20 + (i % 5) * 92, y = 30 + Math.floor(i / 5) * 92, g = K.svg(svg, "g");
+          road(g, x, y, 84, 84, 20 + i);
+          const r = K.rng(30 + i), n = 1 + Math.floor(r() * 3);
+          for (let k = 0; k < n; k++) pothole(g, blob(40 + i * 5 + k, x + 15 + r() * 54, y + 15 + r() * 54, 8 + r() * 14, 5 + r() * 8));
+          g.style.opacity = 0; tiles.push(g);
+        }
+        const c1 = K.svg(svg, "text", { x: 500, y: 80, "font-size": 15 }, ""), c2 = K.svg(svg, "text", { x: 500, y: 110, "font-size": 15 }, ""), c3 = K.svg(svg, "text", { x: 500, y: 150, "font-size": 14, fill: "var(--good)", "font-weight": 700 }, "");
+        ctx.tween(1500, (t) => { tiles.forEach((g, i) => (g.style.opacity = K.clamp(t * 15 - i, 0, 1))); c1.textContent = `训练图：${Math.round(720 * t)}`; c2.textContent = `验证图：${Math.round(60 * t)}`; })
+          .then((ok) => ok && (c3.textContent = "尺寸集合 = {(640, 640)} ✓"));
+      },
+    },
+    {
+      at: 29, title: "迁移学习：从会认 80 类的模型开始", kicker: "第 29–31 格 · 微调训练",
+      html: `<p>作者不从零训练，而是从 COCO 预训练权重出发做<b>迁移学习</b>：模型已经会找边缘、纹理、物体轮廓，只需学会“坑洼长什么样”。<code>model.train</code> 的关键参数：</p><ul class="tight"><li><code>epochs=150</code>、<code>patience=15</code>：最多 150 轮，验证指标连续 15 轮不提升就提前停；</li><li><code>lr0=0.0001</code>：很小的初始学习率，免得把预训练学到的东西冲掉；<code>lrf=0.01</code> 表示最终学习率为初始的 1%；</li><li><code>batch=16</code>、<code>imgsz=640</code>、<code>dropout=0.25</code>、<code>seed=42</code>。</li></ul>`,
+      cells: [31], highlight: ["epochs=150", "patience=15", "lr0=0.0001", "dropout=0.25"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 220 }, [0, 150], [0, 1], { xlabel: "训练轮次", ylabel: "验证指标（示意）", yticks: 0 });
+        const r = K.rng(4), vals = [];
+        for (let e = 0; e <= 150; e++) vals.push(Math.min(0.9, 0.2 + 0.6 * (1 - Math.exp(-e / 25))) + (r() - 0.5) * 0.04 - (e > 80 ? (e - 80) * 0.0015 : 0));
+        let best = 0, bi = 0, stop = 150;
+        for (let e = 0; e <= 150; e++) { if (vals[e] > best) { best = vals[e]; bi = e; } if (e - bi >= 15) { stop = e; break; } }
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const mk = K.svg(svg, "line", { x1: 0, x2: 0, y1: 30, y2: 250, stroke: "var(--warn)", "stroke-dasharray": "5 3", "stroke-width": 2 }); mk.style.opacity = 0;
+        const lab = K.svg(svg, "text", { x: 70, y: 300, "font-size": 13 }, "");
+        ctx.tween(2500, (t) => {
+          const e = Math.round(t * stop); let d = "";
+          for (let k = 0; k <= e; k++) d += (k ? "L" : "M") + ax.sx(k) + "," + ax.sy(vals[k]);
+          path.setAttribute("d", d);
+          lab.textContent = `第 ${e} 轮；目前最好在第 ${Math.min(bi, e)} 轮`;
+        }).then((ok) => { if (!ok) return; K.set(mk, { x1: ax.sx(stop), x2: ax.sx(stop) }); mk.style.opacity = 1; lab.textContent = `连续 15 轮没提升 → 第 ${stop} 轮提前停止，保留第 ${bi} 轮的权重（best.pt）`; });
+      },
+    },
+    {
+      at: 32, title: "训练产物和学习曲线", kicker: "第 32–44 格 · 学习曲线分析",
+      html: `<p>训练结束后，Ultralytics 在 <code>runs/segment/train</code> 下自动生成一堆文件：各种曲线图、混淆矩阵、<code>results.csv</code>（每轮的指标）和最好、最后的权重。作者逐一解释了这些文件。</p><p>第 43 格读入 <code>results.csv</code>，把训练和验证的四种损失画在一起：<b>框损失</b>（框画得准不准）、<b>分类损失</b>、<b>DFL 损失</b>（框边界的细致程度）、<b>分割损失</b>（掩码描得准不准）。作者的判断（第 44 格）：两条线总体接近，泛化不错；但框损失和分割损失有一定差距，有过拟合迹象。</p>`,
+      cells: [42, 43, 44], highlight: ["df.columns.str.strip()", "train/seg_loss"],
+      draw(svg, ctx) {
+        const names = ["框损失", "分类损失", "DFL 损失", "分割损失"], r = K.rng(8);
+        names.forEach((n, k) => {
+          const ox = 20 + (k % 2) * 350, oy = 20 + Math.floor(k / 2) * 160;
+          const ax = K.axes(svg, { x: ox + 30, y: oy + 18, w: 290, h: 110 }, [0, 60], [0, 2], { xticks: 0, yticks: 0 });
+          K.svg(svg, "text", { x: ox + 30, y: oy + 12, "font-size": 12, "font-weight": 700 }, n);
+          let d1 = "", d2 = ""; const gap = [0.25, 0.12, 0.08, 0.3][k];
+          for (let e = 0; e <= 60; e++) { const a = 0.5 + 1.3 * Math.exp(-e / 12), b = a + gap * (e / 60) + (r() - 0.5) * 0.08 + 0.05; d1 += (e ? "L" : "M") + ax.sx(e) + "," + ax.sy(a); d2 += (e ? "L" : "M") + ax.sx(e) + "," + ax.sy(b); }
+          const p1 = K.svg(svg, "path", { d: d1, fill: "none", stroke: "var(--c1)", "stroke-width": 2 }), p2 = K.svg(svg, "path", { d: d2, fill: "none", stroke: "var(--c6)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+          [p1, p2].forEach((p) => { const L = p.getTotalLength ? p.getTotalLength() : 500; p.style.strokeDasharray = p === p2 ? "5 3" : L; if (p === p1) { p.style.strokeDashoffset = L; ctx.tween(1500, (t) => (p.style.strokeDashoffset = L * (1 - t))); } else { p.style.opacity = 0; ctx.wait(1200).then((ok) => ok && (p.style.opacity = 1)); } });
+        });
+        K.svg(svg, "text", { x: 400, y: 336, "font-size": 11, fill: "var(--c1)" }, "— 训练"); K.svg(svg, "text", { x: 460, y: 336, "font-size": 11, fill: "var(--c6)" }, "- - 验证（曲线形状为示意）");
+      },
+    },
+    {
+      at: 45, title: "置信度阈值：精确率、召回率、F1", kicker: "第 45–48 格 · 置信度曲线",
+      html: `<p>模型给每个预测的坑一个<b>置信度</b>（0–1）。只保留置信度高于阈值的预测时：阈值越高，留下的越可靠（精确率高），但漏掉的越多（召回率低）。<b>F1</b> 是两者的调和平均，常用来挑一个折中的阈值。</p><p>第 47 格把框和掩码各自的“精确率 / 召回率 / F1 随置信度变化”六张图排在一起。作者在第 48 格说精确率“在所有置信度上都接近完美”，但第 61 格的验证精确率只有 0.75 / 0.71，两处说法不太一致。</p>`,
+      cells: [47], highlight: ["BoxF1_curve.png", "MaskF1_curve.png"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 420, h: 230 }, [0, 1], [0, 1], { xlabel: "置信度阈值", yticks: 4 });
+        const P = (c) => 0.55 + 0.4 * c, R = (c) => 0.85 * (1 - c ** 2.2), F = (c) => (2 * P(c) * R(c)) / (P(c) + R(c));
+        const curves = [[P, "var(--c1)", "精确率"], [R, "var(--c6)", "召回率"], [F, "var(--c3)", "F1"]];
+        curves.forEach(([f, c, n], i) => { let d = ""; for (let k = 0; k <= 50; k++) d += (k ? "L" : "M") + ax.sx(k / 50) + "," + ax.sy(f(k / 50)); K.svg(svg, "path", { d, fill: "none", stroke: c, "stroke-width": 2.5 }); K.svg(svg, "text", { x: 510, y: 60 + i * 26, "font-size": 13, fill: c, "font-weight": 700 }, "— " + n); });
+        const th = K.svg(svg, "line", { x1: 0, x2: 0, y1: 30, y2: 260, stroke: "var(--ink)", "stroke-dasharray": "4 3", "stroke-width": 2 });
+        const lab = K.svg(svg, "text", { x: 510, y: 160, "font-size": 13 }, ""), lab2 = K.svg(svg, "text", { x: 510, y: 184, "font-size": 13 }, ""), lab3 = K.svg(svg, "text", { x: 510, y: 208, "font-size": 13, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 60, y: 310, "font-size": 12, class: "muted" }, "曲线形状为示意，不是作者的结果图");
+        ctx.tween(3000, (t) => { const c = 0.05 + 0.9 * t; K.set(th, { x1: ax.sx(c), x2: ax.sx(c) }); lab.textContent = `阈值 ${c.toFixed(2)}`; lab2.textContent = `精确率 ${P(c).toFixed(2)} · 召回率 ${R(c).toFixed(2)}`; lab3.textContent = `F1 ${F(c).toFixed(2)}`; });
+      },
+    },
+    {
+      at: 49, title: "PR 曲线和混淆矩阵：约三成的坑被漏掉", kicker: "第 49–56 格 · 评估",
+      html: `<p>第 51 格显示框和掩码的精确率-召回率曲线。作者读出两者的 mAP 都约 <b>0.72</b>（第 52 格）。PR 曲线下的面积就是 AP，曲线越靠右上角越好。</p><p>第 55 格显示混淆矩阵。作者解读（第 56 格）：归一化后，真实的坑里约 <b>70%</b> 被正确找到，约 <b>30%</b> 被漏判成背景。考虑到坑洼形状多变、边界模糊，作者认为这个表现值得肯定。</p>`,
+      cells: [51, 52, 55, 56], highlight: ["MaskPR_curve.png", "confusion_matrix_normalized.png"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 280, h: 230 }, [0, 1], [0, 1], { xlabel: "召回率", ylabel: "精确率" });
+        let d = "", area = `M${ax.sx(0)},${ax.sy(0)}`;
+        for (let k = 0; k <= 50; k++) { const rc = k / 50, p = Math.min(1, 0.98 - 0.15 * rc - 0.7 * Math.pow(rc, 6)); d += (k ? "L" : "M") + ax.sx(rc) + "," + ax.sy(p); area += `L${ax.sx(rc)},${ax.sy(p)}`; }
+        area += `L${ax.sx(1)},${ax.sy(0)}Z`;
+        const A = K.svg(svg, "path", { d: area, fill: "var(--c1)", "fill-opacity": 0.2 }); A.style.opacity = 0;
+        K.svg(svg, "path", { d, fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const t1 = K.svg(svg, "text", { x: 140, y: 200, "font-size": 15, "font-weight": 700, fill: "var(--c1)" }, "");
+        K.svg(svg, "text", { x: 60, y: 325, "font-size": 11, class: "muted" }, "曲线形状为示意；0.72 来自作者第 52 格");
+        const M = [[0.7, null], [0.3, null]];
+        K.svg(svg, "text", { x: 540, y: 40, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "归一化混淆矩阵（列 = 真实）");
+        K.svg(svg, "text", { x: 490, y: 64, "text-anchor": "middle", "font-size": 12 }, "真·坑洼"); K.svg(svg, "text", { x: 600, y: 64, "text-anchor": "middle", "font-size": 12 }, "真·背景");
+        K.svg(svg, "text", { x: 420, y: 120, "text-anchor": "end", "font-size": 12 }, "判·坑洼"); K.svg(svg, "text", { x: 420, y: 220, "text-anchor": "end", "font-size": 12 }, "判·背景");
+        const cells = [[0, 0, "0.70", "var(--good)"], [1, 0, "0.30", "var(--bad)"]];
+        cells.forEach(([i, j, v, c]) => { const e = K.svg(svg, "rect", { x: 435 + j * 110, y: 75 + i * 100, width: 104, height: 94, fill: c, opacity: 0 }); const tt = K.svg(svg, "text", { x: 487 + j * 110, y: 128 + i * 100, "text-anchor": "middle", "font-size": 20, "font-weight": 700, fill: "#fff" }, v); tt.style.opacity = 0; ctx.wait(1200 + i * 400).then((ok) => { if (ok) { e.style.opacity = 0.75; tt.style.opacity = 1; } }); });
+        K.svg(svg, "rect", { x: 545, y: 75, width: 104, height: 194, fill: "var(--panel-2)", stroke: "var(--line)" });
+        K.svg(svg, "text", { x: 597, y: 175, "text-anchor": "middle", "font-size": 11, class: "muted" }, "（背景无法计数）");
+        K.svg(svg, "text", { x: 435, y: 300, "font-size": 12 }, "约三成的真实坑被漏掉");
+        ctx.wait(500).then((ok) => ok && ctx.tween(700, (t) => (A.style.opacity = t))).then((ok) => ok && (t1.textContent = "mAP ≈ 0.72"));
+      },
+    },
+    {
+      at: 57, title: "验证集指标：mAP50 与 mAP50-95", kicker: "第 57–61 格 · 最终评估",
+      html: `<p>第 59 格加载 <code>best.pt</code>，在验证集上运行 <code>val</code>，第 60 格把结果字典做成表。作者在第 61 格写出的数字：</p><ul class="tight"><li>精确率：框 <b>0.75</b>、掩码 <b>0.71</b>；召回率：框 <b>0.61</b>、掩码 <b>0.66</b>；</li><li><b>mAP50</b>：框和掩码都约 <b>0.72</b>；<b>mAP50-95</b> 更低，作者认为在更严格的重合标准下还有提升空间；</li><li>“fitness 0.92”：这是框和掩码两部分加权分数之和，不是百分比。</li></ul><p><b>mAP50</b> 是“预测与真实的重合度（IoU）≥ 0.5 就算对”时的平均精度；<b>mAP50-95</b> 把 IoU 门槛从 0.5 一路提高到 0.95，再取平均，要求描边更精确。下面的实验让你亲手体会两者的区别。</p>`,
+      cells: [59, 60, 61], highlight: ["best_model.val(split='val')", "metrics.results_dict"],
+      draw(svg, ctx) {
+        const v = [["精确率", 0.75, 0.71], ["召回率", 0.61, 0.66], ["mAP50", 0.72, 0.72]];
+        const ax = K.axes(svg, { x: 80, y: 30, w: 560, h: 230 }, [0, 3], [0, 1], { xticks: 0, yticks: 4 });
+        const bars = [];
+        v.forEach(([n, b, m], i) => {
+          K.svg(svg, "text", { x: ax.sx(i + 0.5), y: 280, "text-anchor": "middle", "font-size": 13 }, n);
+          [[b, "var(--c1)", -1], [m, "var(--c3)", 1]].forEach(([val, c, s]) => { const x = ax.sx(i + 0.5) + s * 34 - 30; const r = K.svg(svg, "rect", { x, y: ax.sy(0), width: 60, height: 0, fill: c, opacity: 0.85 }); const t = K.svg(svg, "text", { x: x + 30, y: ax.sy(val) - 6, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, val.toFixed(2)); t.style.opacity = 0; bars.push({ r, t, val }); });
+        });
+        K.svg(svg, "text", { x: 90, y: 310, "font-size": 12, fill: "var(--c1)" }, "■ 框（B）"); K.svg(svg, "text", { x: 170, y: 310, "font-size": 12, fill: "var(--c3)" }, "■ 掩码（M）"); K.svg(svg, "text", { x: 270, y: 310, "font-size": 12, class: "muted" }, "数字全部来自作者第 61 格");
+        ctx.tween(1200, (t) => bars.forEach((b) => { const h = ax.sy(0) - ax.sy(b.val * t); K.set(b.r, { y: ax.sy(0) - h, height: h }); })).then((ok) => ok && bars.forEach((b) => (b.t.style.opacity = 1)));
+      },
+    },
+    {
+      at: 62, title: "在验证图和新视频上推理，再导出 ONNX", kicker: "第 62–73 格 · 推理",
+      html: `<p>第 66 格从验证集里每隔几张取 1 张，共 9 张，用最佳模型预测并画出结果（框 + 半透明掩码）。第 69 格对数据集附带的<b>新视频</b>逐帧推理，第 71 格用 ffmpeg 把输出的 avi 转成 mp4 嵌入 notebook。</p><p>最后第 73 格把模型导出成 <b>ONNX</b> 格式：这是一种通用的模型格式，可以脱离 PyTorch，在手机、车载设备或浏览器里运行。</p><p class="callout">第 69 格的注释写着“车辆检测”，是从作者另一份车流密度 notebook 复制来的，没改。</p>`,
+      cells: [66, 69, 73], highlight: ["best_model.predict(source=video_path, save=True)", "export(format='onnx')"],
+      draw(svg, ctx) {
+        const W = 200, H = 140, r = K.rng(3);
+        const frameG = K.svg(svg, "g");
+        K.svg(svg, "text", { x: 140, y: 24, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "视频逐帧推理（示意）");
+        const pits = Array.from({ length: 6 }, (_, i) => ({ x: 30 + r() * 140, y: -60 - i * 80, rx: 10 + r() * 14, ry: 6 + r() * 6, s: 70 + i }));
+        const lab = K.svg(svg, "text", { x: 140, y: 210, "text-anchor": "middle", "font-size": 12, "font-family": "var(--mono)" }, "");
+        K.node(svg, 320, 70, 150, 56, "best.pt", { fs: 14, bold: true });
+        K.arrow(svg, 470, 98, 520, 98);
+        K.node(svg, 520, 70, 170, 56, "best.onnx\n手机 / 车载 / 浏览器", { fs: 12, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        ctx.tween(5000, (t) => {
+          frameG.innerHTML = "";
+          road(frameG, 40, 40, W, H, 1);
+          const off = t * 560;
+          pits.forEach((p) => { const y = 40 + p.y + off; if (y > 40 && y < 40 + H) { const P = blob(p.s, 40 + p.x, y, p.rx * (0.6 + (y - 40) / H), p.ry * (0.6 + (y - 40) / H)); pothole(frameG, P); pothole(frameG, P, { fill: "#4aa3df", opacity: 0.55, stroke: "#4aa3df", sw: 1.5 }); } });
+          lab.textContent = `frame ${Math.round(t * 250)}`;
+        });
+      },
+    },
+    {
+      at: 74, title: "掩码 → 轮廓 → 面积", kicker: "第 74–79 格 · 单张图的损坏评估",
+      html: `<p>作者先在一张验证图上演示：用置信度 0.5 预测，把每个坑的掩码二值化（大于 0 设为 255），用 OpenCV 的 <code>findContours</code> 找出外轮廓画成绿色，再用 <code>contourArea</code> 算面积。所有坑面积相加，除以图像像素总数，就是“损坏比例”。</p><p class="callout">代码只取每个掩码的第一个轮廓 <code>contours[0]</code>。如果一个坑的掩码断成了几块，其余几块的面积就没算进去。</p>`,
+      cells: [77, 79], highlight: ["cv2.findContours", "cv2.contourArea(contour)", "contours[0]"],
+      draw(svg, ctx) {
+        road(svg, 20, 30, 280, 280, 11);
+        const P = [blob(5, 110, 120, 50, 28, 16), blob(6, 200, 230, 60, 32, 16)];
+        P.forEach((p) => pothole(svg, p));
+        const ms = P.map((p) => { const e = pothole(svg, p, { fill: "#fff", opacity: 0, stroke: "#fff" }); return e; });
+        const cs = P.map((p) => { const e = K.svg(svg, "polygon", { points: pstr(p), fill: "none", stroke: "#57c27a", "stroke-width": 3 }); e.style.opacity = 0; return e; });
+        const tot = 280 * 280, areas = P.map(polyArea);
+        const t1 = K.svg(svg, "text", { x: 340, y: 70, "font-size": 14 }, ""), t2 = K.svg(svg, "text", { x: 340, y: 100, "font-size": 14 }, ""), t3 = K.svg(svg, "text", { x: 340, y: 150, "font-size": 14 }, ""), t4 = K.svg(svg, "text", { x: 340, y: 190, "font-size": 18, "font-weight": 700, fill: "var(--accent)" }, "");
+        K.svg(svg, "text", { x: 340, y: 250, "font-size": 12, class: "muted" }, "示意图 280×280 像素；面积为多边形真实计算");
+        (async () => {
+          if (!(await ctx.tween(600, (t) => ms.forEach((m) => (m.style.opacity = t))))) return;
+          if (!(await ctx.wait(400))) return;
+          if (!(await ctx.tween(600, (t) => { ms.forEach((m) => (m.style.opacity = 1 - t)); cs.forEach((c) => (c.style.opacity = t)); }))) return;
+          t1.textContent = `坑 1 面积：${Math.round(areas[0])} 像素`;
+          if (!(await ctx.wait(400))) return;
+          t2.textContent = `坑 2 面积：${Math.round(areas[1])} 像素`;
+          if (!(await ctx.wait(400))) return;
+          t3.textContent = `合计 ${Math.round(areas[0] + areas[1])} ÷ ${tot}`;
+          t4.textContent = `损坏比例 ≈ ${(((areas[0] + areas[1]) / tot) * 100).toFixed(1)}%`;
+        })();
+      },
+    },
+    {
+      at: 80, title: "视频里逐帧评估，最近 10 帧取平均", kicker: "第 80–83 格 · 实时路面损坏评估",
+      html: `<p>第 81 格把上一章的做法套到视频的每一帧上：置信度阈值 0.25，算出这一帧的坑洼总面积和占比，放进一个最多装 10 个数的队列 <code>deque(maxlen=10)</code>，显示的是<b>最近 10 帧的平均值</b>，这样数字不会一帧一跳。最后在画面左上角用红底白字写上 “Road Damage: xx%”，写入新视频。</p><p class="callout warn">这里有个单位问题：分母 <code>image_area = frame.shape[0] * frame.shape[1]</code> 是<b>原视频</b>的像素数，分子却是在模型输出的<b>掩码</b>（推理分辨率）上算的面积。两者分辨率不同时，百分比会系统性地偏小或偏大。上一章第 79 格用的是掩码自身的尺寸，才是一致的。</p>`,
+      cells: [81, 83], highlight: ["deque(maxlen=10)", "image_area = frame.shape[0] * frame.shape[1]", "conf=0.25"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 220 }, [0, 100], [0, 12], { xlabel: "帧", ylabel: "损坏 %（示意）", yticks: 4 });
+        const r = K.rng(6), raw = [];
+        for (let f = 0; f <= 100; f++) { const base = 4 + 3 * Math.sin(f / 12) + (f > 50 && f < 65 ? 4 : 0); raw.push(Math.max(0, base + (r() < 0.12 ? -base : 0) + (r() - 0.5) * 2.5)); }
+        const sm = raw.map((_, i) => { const s = raw.slice(Math.max(0, i - 9), i + 1); return s.reduce((a, b) => a + b, 0) / s.length; });
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--ink-3)", "stroke-width": 1.5 }), p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 3 });
+        K.svg(svg, "text", { x: 70, y: 300, "font-size": 12, fill: "var(--ink-3)" }, "— 每帧原始值（会因漏检突然掉到 0）"); K.svg(svg, "text", { x: 330, y: 300, "font-size": 12, fill: "var(--c6)" }, "— 最近 10 帧平均（画面上显示的数）");
+        const badge = K.svg(svg, "text", { x: 470, y: 60, "font-size": 15, "font-weight": 700, fill: "var(--c6)" }, "");
+        ctx.tween(3500, (t) => { const n = Math.round(t * 100); let a = "", b = ""; for (let i = 0; i <= n; i++) { a += (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(raw[i]); b += (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(sm[i]); } p1.setAttribute("d", a); p2.setAttribute("d", b); badge.textContent = `Road Damage: ${sm[n].toFixed(2)}%`; });
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：IoU 与 mAP 门槛 ---------- */
+  const GT = blob(21, 0, 0, 70, 42, 18);
+  function rasterIoU(A, B, box) {
+    let I = 0, U = 0;
+    for (let y = box.y0; y <= box.y1; y += 2) for (let x = box.x0; x <= box.x1; x += 2) { const a = inPoly(x, y, A), b = inPoly(x, y, B); if (a && b) I++; if (a || b) U++; }
+    return U ? I / U : 0;
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "dx", label: "预测掩码左右偏移（像素）", min: -60, max: 60, step: 2, value: 10 },
+      { id: "sc", label: "预测掩码大小（相对真实）", min: 0.5, max: 1.6, step: 0.02, value: 1.1, fmt: (v) => v.toFixed(2) },
+      { id: "rough", label: "边缘描得多粗糙", min: 0, max: 1, step: 0.05, value: 0.3, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "白色轮廓 = 真实坑洼，蓝色 = 模型预测。现场按像素算掩码 IoU（交集 ÷ 并集）。右侧 10 个格子对应 mAP50-95 用的 10 个 IoU 门槛（0.50, 0.55, …, 0.95）：IoU 达到门槛就算“找对了”（绿），否则算错（红）。",
+    render(svg, v) {
+      const cx = 200, cy = 150, r = K.rng(Math.round(v.rough * 100) + 7);
+      const G = GT.map(([x, y]) => [cx + x, cy + y]);
+      const Pp = GT.map(([x, y], i) => { const j = 1 + (r() - 0.5) * v.rough * 0.6; return [cx + v.dx + x * v.sc * j, cy + y * v.sc * j]; });
+      road(svg, 20, 20, 360, 260, 4);
+      pothole(svg, G);
+      pothole(svg, Pp, { fill: "#4aa3df", opacity: 0.45, stroke: "#4aa3df", sw: 2 });
+      K.svg(svg, "polygon", { points: pstr(G), fill: "none", stroke: "#fff", "stroke-width": 2, "stroke-dasharray": "5 3" });
+      const iou = rasterIoU(G, Pp, { x0: 20, y0: 20, x1: 380, y1: 280 });
+      K.svg(svg, "text", { x: 410, y: 40, "font-size": 13, "font-weight": 700 }, "10 个 IoU 门槛下算不算对");
+      let hits = 0;
+      for (let k = 0; k < 10; k++) {
+        const th = 0.5 + 0.05 * k, ok = iou >= th; if (ok) hits++;
+        K.svg(svg, "rect", { x: 410 + (k % 5) * 44, y: 56 + Math.floor(k / 5) * 54, width: 40, height: 40, rx: 5, fill: ok ? "var(--good)" : "var(--bad)", opacity: 0.8 });
+        K.svg(svg, "text", { x: 430 + (k % 5) * 44, y: 81 + Math.floor(k / 5) * 54, "text-anchor": "middle", "font-size": 11, fill: "#fff" }, th.toFixed(2));
+      }
+      K.svg(svg, "text", { x: 410, y: 190, "font-size": 12 }, "mAP50 只看第一格（0.50）；");
+      K.svg(svg, "text", { x: 410, y: 210, "font-size": 12 }, "mAP50-95 看全部 10 格的平均。");
+      K.svg(svg, "text", { x: 410, y: 240, "font-size": 12, class: "muted" }, "（真实 mAP 还要在许多坑、");
+      K.svg(svg, "text", { x: 410, y: 258, "font-size": 12, class: "muted" }, "许多置信度上平均）");
+      return { readout: [
+        { k: "掩码 IoU", v: iou.toFixed(2), color: iou >= 0.75 ? "var(--good)" : iou >= 0.5 ? "var(--warn)" : "var(--bad)" },
+        { k: "按 mAP50 规则", v: iou >= 0.5 ? "算找对" : "算找错", color: iou >= 0.5 ? "var(--good)" : "var(--bad)" },
+        { k: "10 个门槛里算对的比例", v: `${hits} / 10` },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：逐帧损坏比例 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "conf", label: "置信度阈值 conf（作者用 0.25）", min: 0.05, max: 0.9, step: 0.05, value: 0.25, fmt: (v) => v.toFixed(2) },
+      { id: "win", label: "平均的帧数（作者用 10）", min: 1, max: 30, step: 1, value: 10 },
+      { id: "res", label: "分母用的分辨率", value: "mask", options: [["mask", "掩码自身的尺寸（一致，第 79 格的做法）"], ["frame", "原视频 1280×720，掩码是 640×384（第 81 格的做法）"]] },
+    ],
+    note: "模拟 200 帧行车视频：每帧有若干个坑，每个坑有真实面积和一个模型置信度（真实坑多在 0.2–0.9，偶尔有误报的“阴影”在 0.05–0.4）。只统计置信度 ≥ 阈值的坑，再按选定的分母算百分比、做滑动平均。黑线是真实损坏比例。",
+    render(svg, v) {
+      const r = K.rng(42), N = 200, truth = [], raw = [];
+      for (let f = 0; f < N; f++) {
+        const nP = Math.max(0, Math.round(2 + 1.8 * Math.sin(f / 18) + (r() - 0.5) * 2));
+        let tA = 0, dA = 0;
+        for (let k = 0; k < nP; k++) { const a = 0.6 + r() * 2.2, c = 0.2 + r() * 0.7; tA += a; if (c >= v.conf) dA += a * (0.85 + r() * 0.3); }
+        if (r() < 0.3) { const c = 0.05 + r() * 0.35; if (c >= v.conf) dA += 0.3 + r() * 0.8; }
+        truth.push(tA);
+        raw.push(v.res === "frame" ? dA * (640 * 384) / (1280 * 720) : dA);
+      }
+      const sm = raw.map((_, i) => { const s = raw.slice(Math.max(0, i - v.win + 1), i + 1); return s.reduce((a, b) => a + b, 0) / s.length; });
+      const ax = K.axes(svg, { x: 50, y: 20, w: 570, h: 220 }, [0, N], [0, 10], { xlabel: "帧", ylabel: "损坏 %", yticks: 5 });
+      const line = (arr, c, w) => { let d = ""; arr.forEach((y, i) => (d += (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(Math.min(10, y)))); K.svg(svg, "path", { d, fill: "none", stroke: c, "stroke-width": w }); };
+      line(raw, "var(--ink-3)", 1); line(truth, "var(--ink)", 1.8); line(sm, "var(--c6)", 2.8);
+      K.svg(svg, "text", { x: 60, y: 290, "font-size": 11, fill: "var(--ink)" }, "— 真实"); K.svg(svg, "text", { x: 120, y: 290, "font-size": 11, fill: "var(--ink-3)" }, "— 每帧原始"); K.svg(svg, "text", { x: 210, y: 290, "font-size": 11, fill: "var(--c6)" }, `— 最近 ${v.win} 帧平均（显示值）`);
+      const mae = sm.reduce((s, x, i) => s + Math.abs(x - truth[i]), 0) / N, bias = sm.reduce((s, x, i) => s + (x - truth[i]), 0) / N;
+      let jump = 0; for (let i = 1; i < N; i++) jump += Math.abs(sm[i] - sm[i - 1]); jump /= N - 1;
+      return { readout: [
+        { k: "显示值与真实的平均误差", v: mae.toFixed(2) + " 个百分点", color: mae < 0.6 ? "var(--good)" : "var(--warn)" },
+        { k: "系统性偏差（正 = 高估）", v: (bias >= 0 ? "+" : "") + bias.toFixed(2), color: Math.abs(bias) < 0.4 ? "var(--good)" : "var(--bad)" },
+        { k: "相邻帧平均跳动", v: jump.toFixed(2) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>输电线故障检测</title>
+<meta name="description" content="Kaggle 案例拆解：从 80 万个电压采样点里发现输电线的局部放电——分段统计特征、双向 LSTM、注意力层、MCC 评分与阈值搜索。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">信号时间序列 · 二分类 · 电网故障检测</div>
+  <h1>听电线“咳嗽”：从 80 万个电压点里找出局部放电</h1>
+  <p class="en">5-fold LSTM Attention (fully commented) [0.694]</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span><span class="tag dl">深度学习</span>
+    <span class="tag method">分段统计特征</span><span class="tag method">双向 LSTM</span><span class="tag method">注意力层</span>
+    <span class="tag method">马修斯相关系数 MCC</span><span class="tag method">5 折交叉验证</span><span class="tag method">阈值搜索</span><span class="tag method">模型平均</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Bruno Aquino</b>（代码改编自 Khoi Nguyen 的 kernel）</span>
+    <span>Kaggle 点赞 <b>1,179</b>（2026-11 抓取）</span>
+    <span>数据 <b>VSB Power Line Fault Detection（比赛）</b></span>
+    <span><a href="https://www.kaggle.com/code/braquino/5-fold-lstm-attention-fully-commented-0-694" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">架空输电线三相电压的高速采样</div><p>每一相、每次测量有 <b>800,000</b> 个采样点，取值在 −128 到 127 之间；三相（phase 0/1/2）合起来算一次测量。<span data-cell="2">出处</span> <span data-cell="6">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这根线有没有“局部放电”故障</div><p>局部放电是绝缘层出了小毛病时发出的微小火花。比赛的答案列 <code>target</code>：1 = 有故障，0 = 正常。评分用马修斯相关系数（MCC）。<span data-cell="3">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">先压缩，再让 LSTM + 注意力去读</div><p>把 80 万点切成 160 段，每段算 19 个统计量；三相拼成 160×57 的“表”。交给两层双向 LSTM + 注意力层，5 折训练，搜索最佳阈值，5 个模型取平均。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">标题写的排行榜分数 0.694（MCC）</div><p>这是作者在 notebook 标题里给出的分数。notebook 正文没有写各折的验证分数（在运行输出里，源码不带）。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛 <b>VSB Power Line Fault Detection</b>（捷克俄斯特拉发技术大学 VSB 与合作方举办）。数据分两部分：一张小小的“目录表” metadata，和一个巨大的 parquet 文件，每一列是一条信号。下面的规模来自 notebook 的代码和注释。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">每条信号采样点</div><div class="v">800,000</div></div>
+        <div class="stat-tile"><div class="k">每次测量的相数</div><div class="v">3</div></div>
+        <div class="stat-tile"><div class="k">原始取值范围</div><div class="v">−128 ~ 127</div></div>
+        <div class="stat-tile"><div class="k">压缩后每次测量</div><div class="v">160 × 57</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">800,000 见 <span data-cell="2">第 2 格</span>，三相见 <span data-cell="8">第 8 格</span> 注释，取值范围见 <span data-cell="6">第 6 格</span>（作者在别的 notebook 里统计得到），160×57 见 <span data-cell="18">第 18 格</span> 注释。训练 / 测试各有多少次测量、故障占多少，notebook 没有写，这里不列。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么（metadata 表）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>signal_id</code></td><td>信号编号，也是 parquet 大文件里那一列的列名</td><td>整数</td></tr>
+        <tr><td><code>id_measurement</code></td><td>测量编号：同一次测量的三条信号共用一个编号</td><td>整数</td></tr>
+        <tr><td><code>phase</code></td><td>哪一相：0、1、2</td><td>类别</td></tr>
+        <tr><td><code>target</code></td><td><b>要预测的答案</b>：1 = 有局部放电，0 = 正常（只在训练集里有）</td><td>类别</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">列名见 <span data-cell="9">第 9 格</span>（读出 <code>signal_id, target</code>）和 <span data-cell="18">第 18 格</span>（读出 <code>id_measurement, phase</code>）。parquet 文件里每一列就是一条 80 万点的电压信号。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="4">
+    <h3>动手试试 A · 注意力层把目光放在哪 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labAtt"></div>
+  </div>
+  <div data-at="8">
+    <h3>动手试试 B · 把一条长信号压成 n 段统计量 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labBin"></div>
+  </div>
+  <div data-at="15">
+    <h3>动手试试 C · 阈值怎么定：MCC 和准确率的较量 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labThr"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的信息</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>排行榜分数 0.694（比赛指标 MCC）</td><td>原 notebook 标题</td></tr>
+        <tr><td>把 80 万点压成 160 段、每段算统计量是“整个 kernel 最重要的代码之一”</td><td><span data-cell="8">第 8 格</span></td></tr>
+        <tr><td>双向 LSTM 比单向效果好（作者自己试过）</td><td><span data-cell="12">第 12 格</span></td></tr>
+        <tr><td>把 MCC 加进训练指标、按它保存最好权重是“成功的关键因素”</td><td><span data-cell="12">第 12 格</span></td></tr>
+        <tr><td>输出是 0~1 的小数，找到最好的阈值“至关重要”</td><td><span data-cell="14">第 14 格</span></td></tr>
+        <tr><td>缩放到 −1~1“理论上有帮助”，但作者没试过不缩放的效果</td><td><span data-cell="7">第 7 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">各折的验证 MCC、最佳阈值的具体数值都在运行输出里，Kaggle 下载的源码不带输出，作者文字里也没写，所以这里只列标题里的 0.694。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一次三相电压测量，输出“这条线正在局部放电”的概率，超过阈值就派人巡检，在线路真正烧断之前修好。</li>
+        <li><b>同类问题：</b>电机、轴承的振动监测，心电图里找异常心跳，地震波里找事件，网络流量里找攻击，都是“超长信号里找短暂的异常”。</li>
+        <li><b>可迁移的套路：</b>超长序列先分段算统计量压缩 → 用 RNN / LSTM 读段与段的先后关系 → 注意力层自动找出关键段 → 用适合不平衡数据的指标（MCC）选模型和阈值 → 多折模型平均。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>评分：马修斯相关系数 <span data-cell="3">第 3 格</span></li>
+        <li>注意力层（自定义 Keras Layer） <span data-cell="4">第 4 格</span></li>
+        <li>缩放：min-max 到 −1~1 <span data-cell="7">第 7 格</span></li>
+        <li>特征：每段均值、标准差、振幅、7 个分位数及其相对值 <span data-cell="8">第 8 格</span></li>
+        <li>模型：BiLSTM(128) → BiLSTM(64) → Attention → Dense(64) → Dense(1, sigmoid) <span data-cell="12">第 12 格</span></li>
+        <li>验证：分层 5 折 + ModelCheckpoint <span data-cell="13">第 13 格</span>；阈值搜索 <span data-cell="14">第 14 格</span></li>
+        <li>集成：5 个折模型的预测取平均 <span data-cell="21">第 21 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者把每段 5000 个点压成 19 个统计数。哪些信息会在压缩中丢掉？如果一次放电只持续几个采样点，它还能被看见吗？</li>
+      <li>为什么这个比赛不用“准确率”而用 MCC？如果故障很少，一个永远说“正常”的模型 MCC 是多少？</li>
+      <li>最佳阈值是在 5 折的验证预测上搜出来的，再直接用到测试集。这样选出来的阈值会不会偏乐观？</li>
+      <li>训练时一次测量（三相）只有一个标签，预测时作者把同一个结果复制给三相（<span data-cell="21">第 21 格</span>）。如果实际上只有一相有故障，这种做法会带来什么问题？</li>
+      <li>代码里的 MCC 是在每个小批次（batch）里算再取平均的，它和在整个验证集上算一次的 MCC 一样吗？为什么作者还要在第 14 格用整体数据再算一遍？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Bruno Aquino（代码改编自 Khoi Nguyen 的 kernel，注意力层出自 suicaokhoailang 的 baseline），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Kaggle 比赛 VSB Power Line Fault Detection。
+</footer>
+</main>
+
+<script src="nb/vsb-power-line-lstm-attention.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const FAST = location.hash === "#fast";
+
+  /* 示意信号：正弦 + 噪声 + 可选的放电尖峰 */
+  function signal(seed, n, opt) {
+    opt = opt || {};
+    const r = K.rng(seed), out = new Float64Array(n);
+    const spikes = [];
+    if (opt.pd) for (let k = 0; k < (opt.nSpikes || 6); k++) spikes.push([Math.floor(n * (opt.at || 0.25) + K.randn(r) * n * 0.03), (r() < 0.5 ? -1 : 1) * (0.35 + r() * 0.4)]);
+    for (let i = 0; i < n; i++) out[i] = 0.62 * Math.sin((2 * Math.PI * i) / n) + K.randn(r) * (opt.noise || 0.03);
+    spikes.forEach(([p, a]) => { for (let d = 0; d < 3; d++) if (p + d >= 0 && p + d < n) out[p + d] += a * Math.exp(-d); });
+    return out;
+  }
+  function pathOf(ax, arr, x0, x1) {
+    let d = "";
+    const n = arr.length, step = Math.max(1, Math.floor(n / 600));
+    for (let i = 0; i < n; i += step) {
+      let lo = arr[i], hi = arr[i], li = i, hiI = i;
+      for (let j = i; j < Math.min(n, i + step); j++) { if (arr[j] < lo) { lo = arr[j]; li = j; } if (arr[j] > hi) { hi = arr[j]; hiI = j; } }
+      const pts = li < hiI ? [[li, lo], [hiI, hi]] : [[hiI, hi], [li, lo]];
+      pts.forEach(([j, v]) => (d += (d ? "L" : "M") + ax.sx(x0 + ((x1 - x0) * j) / Math.max(1, n - 1)).toFixed(1) + "," + ax.sy(v).toFixed(1)));
+    }
+    return d;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "开场：一份“逐行加注释”的作业", kicker: "第 0–1 格 · 导入",
+      html: `<p>作者应别人请求，把 Khoi Nguyen 的 kernel 逐行加上注释，讲清楚整段代码怎么运作。开头导入 pandas、读 parquet 的 pyarrow、Keras 的各种层。</p><p>动画是一次测量的样子：三根电线（三相）各有一条电压曲线，彼此错开三分之一个周期。局部放电是叠在曲线上的细小尖刺。</p>`,
+      cells: [0, 1],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 40, y: 24, w: 650, h: 250 }, [0, 1], [-1.2, 1.2], { xticks: 0, yticks: 0, xlabel: "时间（一条信号 80 万个点，示意）" });
+        const cols = ["var(--c1)", "var(--c2)", "var(--c3)"], N = 800;
+        const paths = [0, 1, 2].map((ph) => {
+          const r = K.rng(ph + 3), arr = [];
+          for (let i = 0; i < N; i++) { let v = 0.8 * Math.sin(2 * Math.PI * (i / N + ph / 3)) + K.randn(r) * 0.02; if (ph === 1 && i % 97 === 13 && i > 100 && i < 420) v += (r() < 0.5 ? -1 : 1) * 0.35; arr.push(v); }
+          return { arr, el: K.svg(svg, "path", { d: "", fill: "none", stroke: cols[ph], "stroke-width": 1.6 }) };
+        });
+        [0, 1, 2].forEach((ph) => K.svg(svg, "text", { x: 440 + ph * 80, y: 334, "font-size": 12, fill: cols[ph] }, "■ phase " + ph));
+        const tip = K.svg(svg, "text", { x: 44, y: 16, "font-size": 12, fill: "var(--c2)" }, "phase 1 上的小尖刺 = 局部放电（示意）");
+        tip.style.opacity = 0;
+        ctx.tween(FAST ? 10 : 1800, (t) => paths.forEach((p) => p.el.setAttribute("d", pathOf(ax, p.arr.slice(0, Math.max(2, Math.round(N * t))), 0, t))))
+          .then((ok) => ok && ctx.tween(500, (t) => (tip.style.opacity = t)));
+      },
+    },
+    {
+      title: "比赛的尺子：马修斯相关系数", kicker: "第 2–3 格 · 评分指标",
+      html: `<p>先定两个常数：5 折、每条信号 800,000 点。然后写比赛的官方指标 <b>MCC（马修斯相关系数）</b>：用混淆矩阵的四个格子 TP、TN、FP、FN 一起算，范围 −1 到 1，0 表示“和瞎猜一样”。</p><p>故障是少数，所以“全猜正常”准确率会很高，但 MCC 等于 0，骗不了人。作者用 Keras 后端函数写它，好在训练时当指标看。</p>`,
+      cells: [2, 3], highlight: ["numerator = (tp * tn - fp * fn)", "denominator"],
+      draw(svg, ctx) {
+        const L = [["TN", "真正常 判正常", "var(--c3)"], ["FP", "真正常 判故障", "var(--warn)"], ["FN", "真故障 判正常", "var(--bad)"], ["TP", "真故障 判故障", "var(--c3)"]];
+        L.forEach((d, i) => {
+          const g = K.node(svg, 40 + (i % 2) * 130, 40 + Math.floor(i / 2) * 120, 120, 110, d[0] + "\n" + d[1], { fill: `color-mix(in srgb, ${d[2]} 16%, var(--panel))`, stroke: d[2] });
+          g.style.opacity = 0;
+          ctx.wait(200 + i * 250).then((ok) => ok && ctx.tween(350, (t) => (g.style.opacity = t)));
+        });
+        K.svg(svg, "text", { x: 330, y: 70, "font-size": 15, "font-weight": 700 }, "MCC = (TP·TN − FP·FN) / √(…四个和的乘积)");
+        K.svg(svg, "text", { x: 330, y: 110, "font-size": 13 }, "例：100 次测量里 6 次故障（示意）");
+        const rows = [["全猜“正常”", 94, 0, 6, 0], ["抓到 5 个、误报 2 个", 92, 2, 1, 5]];
+        rows.forEach((r, k) => {
+          const [name, tn, fp, fn, tp] = r, acc = (tp + tn) / 100;
+          const den = Math.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn));
+          const mcc = den ? (tp * tn - fp * fn) / den : 0;
+          const y = 150 + k * 70;
+          const g = K.svg(svg, "g");
+          K.svg(g, "text", { x: 330, y, "font-size": 13, "font-weight": 700 }, name);
+          K.svg(g, "text", { x: 330, y: y + 22, "font-size": 13 }, `准确率 ${(acc * 100).toFixed(0)}%`);
+          K.svg(g, "text", { x: 470, y: y + 22, "font-size": 13, fill: mcc > 0.3 ? "var(--good)" : "var(--bad)", "font-weight": 700 }, `MCC ${mcc.toFixed(2)}`);
+          g.style.opacity = 0;
+          ctx.wait(1400 + k * 700).then((ok) => ok && ctx.tween(400, (t) => (g.style.opacity = t)));
+        });
+      },
+    },
+    {
+      title: "注意力层：让模型自己挑重点", kicker: "第 4 格 · 自定义层",
+      html: `<p>这一格从另一个 kernel 借来一个 <b>Attention 层</b>。LSTM 读完 160 段后，每一段都留下一份“读后感”（隐藏状态）。注意力层给每段打一个分 <code>eij = tanh(x·W + b)</code>，取指数再归一化成权重 <code>a</code>，最后把各段读后感按权重加起来。</p><p>动画里的条形就是 160 段的权重：放电集中的那几段权重高，平静的段几乎被忽略。普通 RNN 要把所有信息挤到最后一步，注意力层让中间出现的信号也能被直接“看到”。</p>`,
+      cells: [4], highlight: ["eij = K.tanh(eij)", "a = K.exp(eij)", "weighted_input = x * a"],
+      draw(svg, ctx) {
+        const n = 160, sig = signal(5, 1600, { pd: true, at: 0.62, nSpikes: 8 });
+        const ax = K.axes(svg, { x: 40, y: 20, w: 650, h: 110 }, [0, 1], [-1.2, 1.2], { xticks: 0, yticks: 0 });
+        K.svg(svg, "path", { d: pathOf(ax, sig, 0, 1), fill: "none", stroke: "var(--c1)", "stroke-width": 1.2 });
+        K.svg(svg, "text", { x: 44, y: 16, "font-size": 12, class: "muted" }, "输入信号（示意）");
+        const amp = [];
+        for (let k = 0; k < n; k++) { let mx = -9, mn = 9; for (let i = k * 10; i < k * 10 + 10; i++) { mx = Math.max(mx, sig[i] - 0.62 * Math.sin(2 * Math.PI * i / 1600)); mn = Math.min(mn, sig[i] - 0.62 * Math.sin(2 * Math.PI * i / 1600)); } amp.push(mx - mn); }
+        const e = amp.map((a) => Math.tanh(6 * a - 0.9)), ex = e.map((v) => Math.exp(3 * v)), s = ex.reduce((a, b) => a + b, 0), w = ex.map((v) => v / s);
+        const wmax = Math.max(...w);
+        const bw = 650 / n, bars = w.map((v, k) => K.svg(svg, "rect", { x: 40 + k * bw, y: 300, width: bw - 0.6, height: 0, fill: "var(--accent)" }));
+        K.svg(svg, "text", { x: 44, y: 170, "font-size": 12, class: "muted" }, "注意力权重 a（160 段，加起来等于 1）");
+        K.svg(svg, "line", { x1: 40, x2: 690, y1: 300, y2: 300, stroke: "var(--ink-3)" });
+        ctx.wait(500).then((ok) => ok && ctx.tween(FAST ? 10 : 1500, (t) => bars.forEach((b, k) => { const h = (110 * w[k] / wmax) * t; b.setAttribute("y", 300 - h); b.setAttribute("height", h); })));
+      },
+    },
+    {
+      title: "读目录表，把电压缩放到 −1~1", kicker: "第 5–7 格 · 预处理",
+      html: `<p>先读 <code>metadata_train.csv</code>，用（测量编号, 相）做索引，查起来更快。作者在另一个 notebook 里统计过：电压最小 −128、最大 127（8 位整数的范围）。</p><p><code>min_max_transf</code> 把它线性地挪到 −1 到 1。作者很坦诚：“理论上对神经网络训练有帮助，但我没试过不做会怎样。”</p>`,
+      cells: [5, 6, 7], highlight: ["max_num = 127", "min_num = -128"],
+      draw(svg, ctx) {
+        const ax1 = K.axes(svg, { x: 60, y: 70, w: 600, h: 10 }, [-128, 127], [0, 1], { yticks: 0, xticks: 5 });
+        const ax2 = K.axes(svg, { x: 60, y: 230, w: 600, h: 10 }, [-1, 1], [0, 1], { yticks: 0, xticks: 4 });
+        K.svg(svg, "text", { x: 60, y: 50, "font-size": 13, class: "muted" }, "原始采样值（8 位整数）");
+        K.svg(svg, "text", { x: 60, y: 210, "font-size": 13, class: "muted" }, "缩放后：(x + 128) / 255 × 2 − 1");
+        const vals = [-128, -90, -40, 0, 35, 80, 127];
+        const dots = vals.map((v, i) => ({ v, el: K.svg(svg, "circle", { cx: ax1.sx(v), cy: 70, r: 6, fill: K.colors[i % 6] }) }));
+        const labs = vals.map((v) => K.svg(svg, "text", { x: ax1.sx(v), y: 62, "text-anchor": "middle", "font-size": 11 }, String(v)));
+        ctx.wait(600).then((ok) => ok && ctx.tween(FAST ? 10 : 1600, (t) => dots.forEach((d, i) => {
+          const z = ((d.v + 128) / 255) * 2 - 1;
+          d.el.setAttribute("cx", K.lerp(ax1.sx(d.v), ax2.sx(z), t)); d.el.setAttribute("cy", K.lerp(70, 230, t));
+          labs[i].setAttribute("x", K.lerp(ax1.sx(d.v), ax2.sx(z), t)); labs[i].setAttribute("y", K.lerp(62, 222, t));
+          if (t > 0.98) labs[i].textContent = z.toFixed(2);
+        })));
+      },
+    },
+    {
+      title: "最关键的一步：80 万点压成 160 段", kicker: "第 8 格 · 特征提取",
+      html: `<p>一次测量 3 相 × 80 万点 = 240 万个数，直接喂给神经网络几乎不可能。作者把每条信号切成 <b>160 段，每段 5000 点</b>，每段只算 19 个数：均值、标准差、均值 ± 标准差、振幅（最大 − 最小）、7 个分位数（0、1、25、50、75、99、100%）、以及这 7 个分位数减去均值。</p><p>于是一条信号变成 160 行 × 19 列的小表。作者自己说这是“整个 kernel 最重要的代码之一”。</p>`,
+      cells: [8], highlight: ["bucket_size = int(sample_size / n_dim)", "np.percentile(ts_range, [0, 1, 25, 50, 75, 99, 100])", "max_range"],
+      draw(svg, ctx) {
+        const sig = signal(8, 1600, { pd: true, at: 0.3, nSpikes: 6 });
+        const ax = K.axes(svg, { x: 90, y: 20, w: 600, h: 120 }, [0, 1], [-1.2, 1.2], { xticks: 0, yticks: 0 });
+        K.svg(svg, "path", { d: pathOf(ax, sig, 0, 1), fill: "none", stroke: "var(--c1)", "stroke-width": 1.1 });
+        const nb = 16, bw = 600 / nb;
+        const cuts = [];
+        for (let k = 1; k < nb; k++) cuts.push(K.svg(svg, "line", { x1: 90 + k * bw, x2: 90 + k * bw, y1: 20, y2: 20, stroke: "var(--ink-3)", "stroke-dasharray": "3 3" }));
+        K.svg(svg, "text", { x: 44, y: 166, "font-size": 12, class: "muted" }, "每段算统计量（示意画 16 段；作者用 160 段）：");
+        const feats = ["均值", "标准差", "振幅", "1% 分位", "99% 分位"];
+        feats.forEach((f, j) => K.svg(svg, "text", { x: 84, y: 196 + j * 26, "text-anchor": "end", "font-size": 11 }, f));
+        const cells = [];
+        for (let k = 0; k < nb; k++) {
+          const seg = Array.from(sig.slice(k * 100, k * 100 + 100)).sort((a, b) => a - b);
+          const mean = seg.reduce((a, b) => a + b, 0) / seg.length, sd = Math.sqrt(seg.reduce((a, b) => a + (b - mean) ** 2, 0) / seg.length);
+          const v = [mean, sd * 3, (seg[99] - seg[0]) / 1.5, seg[1], seg[98]];
+          v.forEach((x, j) => { const c = K.svg(svg, "rect", { x: 90 + k * bw + 2, y: 182 + j * 26, width: bw - 4, height: 22, rx: 3, fill: K.heat(x, j === 0 || j > 2), opacity: 0 }); cells.push({ c, k }); });
+        }
+        ctx.tween(FAST ? 10 : 800, (t) => cuts.forEach((l) => l.setAttribute("y2", 20 + 120 * t)))
+          .then((ok) => ok && ctx.tween(FAST ? 10 : 2000, (t) => cells.forEach((o) => (o.c.style.opacity = t * nb > o.k ? 1 : 0))));
+        K.svg(svg, "text", { x: 470, y: 330, "font-size": 12, fill: "var(--c2)" }, "放电段：振幅、分位数明显不同");
+      },
+    },
+    {
+      title: "三相拼起来：每次测量 = 160 × 57", kicker: "第 9–11 格 · 组装训练数据",
+      html: `<p><code>prep_data</code> 每次只读一部分 parquet 列（一次全读会撑爆内存），对每个测量编号，把 0、1、2 三相各自压成 160×19，再<b>横着拼</b>成 160×57。标签每个测量只记一次。</p><p><code>load_all</code> 把训练集分两半处理，最后得到形状为（测量数, 160, 57）的三维数组，存成 <code>X.npy</code>。第 11 格的注释解释了这个形状：160 段按顺序依次送进 LSTM。</p>`,
+      cells: [9, 10, 11], highlight: ["np.concatenate(X_signal, axis=1)", "if phase == 0:"],
+      notes: { 11: "注释里写的 X.shape[3] 应为 X.shape[2]（数组只有三维），是作者的笔误。" },
+      draw(svg, ctx) {
+        const cols = ["var(--c1)", "var(--c2)", "var(--c3)"];
+        const blocks = [0, 1, 2].map((p) => {
+          const g = K.svg(svg, "g");
+          K.svg(g, "rect", { x: 0, y: 0, width: 90, height: 200, rx: 4, fill: `color-mix(in srgb, ${cols[p]} 25%, var(--panel))`, stroke: cols[p] });
+          for (let j = 1; j < 10; j++) K.svg(g, "line", { x1: 0, x2: 90, y1: j * 20, y2: j * 20, stroke: cols[p], "stroke-opacity": 0.3 });
+          K.svg(g, "text", { x: 45, y: 104, "text-anchor": "middle", "font-size": 12 }, "phase " + p);
+          K.svg(g, "text", { x: 45, y: 122, "text-anchor": "middle", "font-size": 11 }, "160 × 19");
+          return g;
+        });
+        const start = [[40, 40], [160, 80], [280, 120]], end = [[380, 60], [470, 60], [560, 60]];
+        K.svg(svg, "text", { x: 470, y: 290, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "拼成 160 行 × 57 列");
+        K.svg(svg, "text", { x: 470, y: 312, "text-anchor": "middle", "font-size": 12, class: "muted" }, "一次测量 = 一个样本，标签 target 只记一次");
+        const tag = K.node(svg, 40, 280, 200, 44, "target（来自 phase 0）", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        blocks.forEach((g, i) => g.setAttribute("transform", `translate(${start[i][0]},${start[i][1]})`));
+        ctx.wait(500).then((ok) => ok && ctx.tween(FAST ? 10 : 1600, (t) => blocks.forEach((g, i) => g.setAttribute("transform", `translate(${K.lerp(start[i][0], end[i][0], t)},${K.lerp(start[i][1], end[i][1], t)})`))));
+        tag.style.opacity = 1;
+      },
+    },
+    {
+      title: "模型：两层双向 LSTM + 注意力", kicker: "第 12 格 · 搭网络",
+      html: `<p>输入 160×57。第一层双向 LSTM（128 个单元）从前往后、从后往前各读一遍，第二层双向 LSTM（64 单元）再读一遍，然后注意力层把 160 段的读后感加权汇总成一个向量，经过 Dense(64, relu)，最后 Dense(1, sigmoid) 输出“有故障”的概率。</p><p>作者注释里说：双向看上去没必要（时间只往一个方向走），但他试过，双向更好。编译时把 MCC 加进指标，作者称这是“成功的关键因素”。</p>`,
+      cells: [12], highlight: ["Bidirectional(CuDNNLSTM(128, return_sequences=True))", "Attention(input_shape[1])", "metrics=[matthews_correlation]"],
+      draw(svg, ctx) {
+        const n = 8, xs = Array.from({ length: n }, (_, i) => 70 + i * 78);
+        xs.forEach((x, i) => K.node(svg, x - 26, 280, 52, 32, "段" + (i === n - 1 ? "160" : i + 1), { fs: 11 }));
+        const fw = xs.map((x) => K.svg(svg, "circle", { cx: x, cy: 220, r: 13, fill: "var(--panel-2)", stroke: "var(--c1)" }));
+        const bw = xs.map((x) => K.svg(svg, "circle", { cx: x, cy: 175, r: 13, fill: "var(--panel-2)", stroke: "var(--c2)" }));
+        K.svg(svg, "text", { x: 10, y: 224, "font-size": 11, fill: "var(--c1)" }, "→读");
+        K.svg(svg, "text", { x: 10, y: 179, "font-size": 11, fill: "var(--c2)" }, "←读");
+        for (let i = 0; i < n - 1; i++) { K.arrow(svg, xs[i] + 14, 220, xs[i + 1] - 14, 220, { color: "var(--c1)" }); K.arrow(svg, xs[i + 1] - 14, 175, xs[i] + 14, 175, { color: "var(--c2)" }); }
+        const att = K.node(svg, 250, 70, 220, 40, "注意力：加权求和", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const lines = xs.map((x) => K.svg(svg, "line", { x1: x, y1: 162, x2: 360, y2: 110, stroke: "var(--accent)", "stroke-width": 0.5, opacity: 0 }));
+        K.node(svg, 520, 70, 90, 40, "Dense 64", {}); K.node(svg, 630, 70, 80, 40, "sigmoid", {});
+        K.arrow(svg, 470, 90, 518, 90); K.arrow(svg, 610, 90, 628, 90);
+        K.svg(svg, "text", { x: 670, y: 50, "text-anchor": "middle", "font-size": 12 }, "故障概率");
+        (async () => {
+          for (let i = 0; i < n; i++) { if (!(await ctx.tween(FAST ? 1 : 140, (t) => (fw[i].style.fill = `color-mix(in srgb, var(--c1) ${Math.round(t * 60)}%, var(--panel-2))`)))) return; }
+          for (let i = n - 1; i >= 0; i--) { if (!(await ctx.tween(FAST ? 1 : 140, (t) => (bw[i].style.fill = `color-mix(in srgb, var(--c2) ${Math.round(t * 60)}%, var(--panel-2))`)))) return; }
+          const ww = [0.2, 0.3, 0.9, 1, 0.5, 0.2, 0.15, 0.2];
+          await ctx.tween(FAST ? 1 : 700, (t) => lines.forEach((l, i) => { l.style.opacity = t; l.style.strokeWidth = 0.5 + ww[i] * 4 * t; }));
+        })();
+        att.style.opacity = 1;
+      },
+    },
+    {
+      title: "5 折交叉验证，只留最好的那一轮", kicker: "第 13 格 · 训练",
+      html: `<p>用分层 5 折（StratifiedKFold，保证每折故障比例相同）：每次 4 折训练、1 折验证，共训练 5 个模型，每个最多 50 轮。</p><p><code>ModelCheckpoint</code> 盯着验证集 MCC，只在它创新高时保存权重；训练完再把“最好那一轮”的权重读回来，对验证折预测。5 折的验证预测拼起来，正好覆盖整个训练集，后面用来选阈值。</p>`,
+      cells: [13], highlight: ["StratifiedKFold(n_splits=N_SPLITS", "save_best_only=True", "monitor='val_matthews_correlation'"],
+      draw(svg, ctx) {
+        const folds = [];
+        for (let f = 0; f < 5; f++) {
+          const row = [];
+          for (let k = 0; k < 5; k++) row.push(K.svg(svg, "rect", { x: 30 + k * 54, y: 30 + f * 34, width: 50, height: 26, rx: 4, fill: k === f ? "color-mix(in srgb, var(--c3) 30%, var(--panel))" : "color-mix(in srgb, var(--c1) 15%, var(--panel))", stroke: k === f ? "var(--c3)" : "var(--c1)", opacity: 0 }));
+          K.svg(svg, "text", { x: 26, y: 48 + f * 34, "text-anchor": "end", "font-size": 11 }, "折" + (f + 1));
+          folds.push(row);
+        }
+        K.svg(svg, "text", { x: 30, y: 216, "font-size": 12, class: "muted" }, "蓝=训练  绿=验证");
+        const ax = K.axes(svg, { x: 360, y: 30, w: 330, h: 230 }, [0, 50], [0, 0.8], { xlabel: "训练轮数 epoch", yfmt: (v) => v.toFixed(1) });
+        K.svg(svg, "text", { x: 364, y: 24, "font-size": 12, class: "muted" }, "验证 MCC（示意曲线）");
+        const r = K.rng(4), pts = [];
+        for (let e = 0; e <= 50; e++) pts.push(0.65 * (1 - Math.exp(-e / 9)) - Math.max(0, e - 28) * 0.004 + K.randn(r) * 0.03);
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c3)", "stroke-width": 2 });
+        const star = K.svg(svg, "circle", { cx: 0, cy: 0, r: 0, fill: "var(--good)" });
+        const lab = K.svg(svg, "text", { x: 370, y: 290, "font-size": 12, fill: "var(--good)" }, "");
+        (async () => {
+          for (let f = 0; f < 5; f++) if (!(await ctx.tween(FAST ? 1 : 200, (t) => folds[f].forEach((c) => (c.style.opacity = t))))) return;
+          let best = -1, bi = 0;
+          await ctx.tween(FAST ? 1 : 2200, (t) => {
+            const m = Math.round(50 * t);
+            let d = "";
+            for (let e = 0; e <= m; e++) { d += (d ? "L" : "M") + ax.sx(e) + "," + ax.sy(pts[e]); if (pts[e] > best) { best = pts[e]; bi = e; } }
+            path.setAttribute("d", d);
+            star.setAttribute("cx", ax.sx(bi)); star.setAttribute("cy", ax.sy(best)); star.setAttribute("r", 6);
+            lab.textContent = `checkpoint 保存的是第 ${bi} 轮（验证 MCC 最高）`;
+          });
+        })();
+      },
+    },
+    {
+      title: "阈值搜索：0.5 不一定最好", kicker: "第 14–15 格 · 后处理",
+      html: `<p>网络输出 0 到 1 之间的小数，比赛要提交 0 或 1。作者从 0.00 试到 0.99（步长 0.01），每个阈值都在全部验证预测上算一遍 MCC，挑最高的那个。</p><p>故障是少数时，最佳阈值常常不在 0.5。具体选到了多少，在运行输出里，源码看不到。</p>`,
+      cells: [14, 15], highlight: ["for threshold in tqdm([i * 0.01 for i in range(100)])"],
+      draw(svg, ctx) {
+        const r = K.rng(12), neg = [], pos = [];
+        for (let i = 0; i < 300; i++) neg.push(K.clamp(K.sigmoid(-2.4 + K.randn(r) * 1.2), 0, 1));
+        for (let i = 0; i < 30; i++) pos.push(K.clamp(K.sigmoid(1.0 + K.randn(r) * 1.5), 0, 1));
+        const ax = K.axes(svg, { x: 50, y: 20, w: 620, h: 140 }, [0, 1], [0, 1], { yticks: 0 });
+        neg.forEach((p, i) => K.svg(svg, "circle", { cx: ax.sx(p), cy: 40 + (i % 12) * 9, r: 2.4, fill: "var(--c1)", opacity: 0.5 }));
+        pos.forEach((p, i) => K.svg(svg, "circle", { cx: ax.sx(p), cy: 50 + (i % 9) * 11, r: 3.6, fill: "var(--c6)" }));
+        K.svg(svg, "text", { x: 54, y: 16, "font-size": 12, class: "muted" }, "验证预测（示意）：蓝=正常 红=故障");
+        const ax2 = K.axes(svg, { x: 50, y: 200, w: 620, h: 110 }, [0, 1], [0, 1], { yticks: 2, yfmt: (v) => v.toFixed(1) });
+        K.svg(svg, "text", { x: 54, y: 196, "font-size": 12, class: "muted" }, "每个阈值的 MCC");
+        const mcc = (t) => { let tp = 0, fp = 0, fn = 0, tn = 0; neg.forEach((p) => (p > t ? fp++ : tn++)); pos.forEach((p) => (p > t ? tp++ : fn++)); const d = Math.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn)); return d ? (tp * tn - fp * fn) / d : 0; };
+        const line = K.svg(svg, "line", { x1: 0, x2: 0, y1: 20, y2: 310, stroke: "var(--ink)", "stroke-dasharray": "4 3" });
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c3)", "stroke-width": 2 });
+        const lab = K.svg(svg, "text", { x: 420, y: 196, "font-size": 12, fill: "var(--good)", "font-weight": 700 }, "");
+        let best = -1, bt = 0;
+        ctx.tween(FAST ? 10 : 2600, (t) => {
+          const m = Math.round(99 * t);
+          let d = "";
+          for (let i = 0; i <= m; i++) { const v = mcc(i / 100); d += (d ? "L" : "M") + ax2.sx(i / 100) + "," + ax2.sy(Math.max(0, v)); if (v > best) { best = v; bt = i / 100; } }
+          path.setAttribute("d", d);
+          line.setAttribute("x1", ax.sx(m / 100)); line.setAttribute("x2", ax.sx(m / 100));
+          lab.textContent = `目前最好：阈值 ${bt.toFixed(2)}，MCC ${best.toFixed(2)}`;
+        });
+      },
+    },
+    {
+      title: "测试集太大：分 10 块读、逐列转换", kicker: "第 16–19 格 · 处理测试数据",
+      html: `<p>测试数据同样巨大，作者把测试集的信号列分成 10 份（外加一份零头），每次只读一份进内存，逐列调用同一个 <code>transform_ts</code> 压成 160×19。</p><p>第 19 格再每 3 条（同一测量的三相）拼成一个 160×57 的样本，和训练数据格式完全一致。</p>`,
+      cells: [16, 18, 19], highlight: ["n_parts = 10", "X_test_input = np.asarray"],
+      draw(svg, ctx) {
+        const parts = [];
+        for (let k = 0; k < 11; k++) {
+          const w = k < 10 ? 56 : 18;
+          const x = 30 + k * 60;
+          K.svg(svg, "rect", { x, y: 60, width: w, height: 40, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" });
+          parts.push(K.svg(svg, "rect", { x, y: 60, width: 0, height: 40, rx: 4, fill: "color-mix(in srgb, var(--c1) 40%, var(--panel))" }));
+          parts[k].w = w;
+        }
+        K.svg(svg, "text", { x: 30, y: 46, "font-size": 12, class: "muted" }, "test.parquet 的列（10 份 + 零头）");
+        const mem = K.node(svg, 250, 150, 220, 60, "内存里同一时间只有一份", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const out = K.node(svg, 250, 250, 220, 50, "转成 160×19，三相拼 160×57", {});
+        K.arrow(svg, 360, 210, 360, 248);
+        mem.style.opacity = out.style.opacity = 1;
+        (async () => {
+          for (let k = 0; k < 11; k++) {
+            if (!(await ctx.tween(FAST ? 1 : 220, (t) => parts[k].setAttribute("width", parts[k].w * t)))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "5 个模型取平均，再用阈值切成 0/1", kicker: "第 20–23 格 · 预测与提交",
+      html: `<p>依次载入 5 折各自最好的权重，对测试集预测。因为模型是按“一次测量”预测的，而提交要求每条信号（每一相）一行，作者把每个预测<b>复制三份</b>给三相。</p><p>5 个模型的概率取平均，再和前面搜出的最佳阈值比较，得到 0/1，写进 <code>submission.csv</code>。</p>`,
+      cells: [21, 22], highlight: ["for i in range(3):", "np.mean(preds_test, axis=0)) > best_threshold"],
+      notes: { 21: "内层循环也用了变量名 i，和外层的 i 重名。Python 下外层循环仍按 0~4 正常进行，但读代码时容易混淆。" },
+      draw(svg, ctx) {
+        const ps = [0.62, 0.71, 0.55, 0.68, 0.6];
+        const bars = ps.map((p, i) => {
+          K.svg(svg, "text", { x: 40, y: 54 + i * 40, "font-size": 12 }, "折" + (i + 1) + " 模型");
+          return K.svg(svg, "rect", { x: 110, y: 40 + i * 40, width: 0, height: 22, rx: 3, fill: "var(--c1)" });
+        });
+        const avg = ps.reduce((a, b) => a + b, 0) / 5;
+        K.svg(svg, "text", { x: 40, y: 270, "font-size": 13, "font-weight": 700 }, "平均");
+        const ab = K.svg(svg, "rect", { x: 110, y: 254, width: 0, height: 24, rx: 3, fill: "var(--accent)" });
+        const thr = 0.45;
+        K.svg(svg, "line", { x1: 110 + 300 * thr, x2: 110 + 300 * thr, y1: 30, y2: 290, stroke: "var(--warn)", "stroke-dasharray": "4 3", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 110 + 300 * thr, y: 24, "text-anchor": "middle", "font-size": 11, fill: "var(--warn)" }, "最佳阈值（示意）");
+        const res = ["phase 0", "phase 1", "phase 2"].map((p, i) => { const g = K.node(svg, 520, 120 + i * 50, 170, 40, p + " → 1（故障）", { fill: "color-mix(in srgb, var(--c6) 15%, var(--panel))", stroke: "var(--c6)" }); g.style.opacity = 0; return g; });
+        (async () => {
+          for (let i = 0; i < 5; i++) if (!(await ctx.tween(FAST ? 1 : 300, (t) => bars[i].setAttribute("width", 300 * ps[i] * t)))) return;
+          if (!(await ctx.tween(FAST ? 1 : 500, (t) => ab.setAttribute("width", 300 * avg * t)))) return;
+          for (let i = 0; i < 3; i++) if (!(await ctx.tween(FAST ? 1 : 250, (t) => (res[i].style.opacity = t)))) return;
+        })();
+        K.svg(svg, "text", { x: 520, y: 100, "font-size": 12, class: "muted" }, "同一结果复制给三相");
+      },
+    },
+  ];
+  if (FAST) steps.forEach((s) => { const d = s.draw; if (d) s.draw = (svg, ctx) => d(svg, Object.assign({}, ctx, { wait: () => Promise.resolve(ctx.alive()), tween: (ms, fn) => { fn(1, 1); return Promise.resolve(ctx.alive()); } })); });
+  K.pipeline(document.getElementById("pipe"), steps);
+  if (FAST) document.querySelectorAll('.ch-cells .cell').forEach((e) => (e.style.display = 'none'));
+
+  /* ---------- 实验 A：注意力权重 ---------- */
+  K.lab(document.getElementById("labAtt"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "pos", label: "放电出现在第几段（共 40 段）", min: 2, max: 37, step: 1, value: 25 },
+      { id: "w", label: "打分权重 W（越大越“挑剔”）", min: 0, max: 6, step: 0.1, value: 3 },
+      { id: "noise", label: "背景噪声", min: 0.01, max: 0.3, step: 0.01, value: 0.05 },
+    ],
+    note: "按第 4 格的公式现场计算：每段的“读后感”这里简化成一个数（这一段的振幅），eij = tanh(W·x + b)，a = exp(eij) / Σexp。W = 0 时每段权重相同，等于把所有段平均；W 越大，越集中在放电段。",
+    render(svg, v) {
+      const n = 40, r = K.rng(77 + Math.round(v.noise * 100)), x = [];
+      for (let k = 0; k < n; k++) x.push(Math.abs(K.randn(r)) * v.noise + (Math.abs(k - v.pos) <= 1 ? (k === v.pos ? 0.6 : 0.3) : 0));
+      const b = -0.3, e = x.map((xi) => Math.tanh(v.w * xi + b)), ex = e.map(Math.exp), s = ex.reduce((p, q) => p + q, 0), a = ex.map((q) => q / s);
+      const ax = K.axes(svg, { x: 50, y: 20, w: 560, h: 110 }, [0, n], [0, 0.8], { xticks: 0, yticks: 2, yfmt: (q) => q.toFixed(1) });
+      const bw = 560 / n;
+      x.forEach((xi, k) => K.svg(svg, "rect", { x: ax.sx(k) + 1, y: ax.sy(Math.min(xi, 0.8)), width: bw - 2, height: ax.sy(0) - ax.sy(Math.min(xi, 0.8)), fill: "var(--c1)" }));
+      K.svg(svg, "text", { x: 54, y: 16, "font-size": 12, class: "muted" }, "每段的振幅 x（LSTM 读后感的简化）");
+      const amax = Math.max(0.1, ...a);
+      const ax2 = K.axes(svg, { x: 50, y: 175, w: 560, h: 110 }, [0, n], [0, amax], { xticks: 4, yticks: 2, yfmt: (q) => q.toFixed(2), xlabel: "段号" });
+      a.forEach((ai, k) => K.svg(svg, "rect", { x: ax2.sx(k) + 1, y: ax2.sy(ai), width: bw - 2, height: ax2.sy(0) - ax2.sy(ai), fill: "var(--accent)" }));
+      K.svg(svg, "text", { x: 54, y: 170, "font-size": 12, class: "muted" }, "注意力权重 a（40 个加起来 = 1）");
+      const share = a[v.pos] + (a[v.pos - 1] || 0) + (a[v.pos + 1] || 0);
+      const pooled = a.reduce((p, ai, k) => p + ai * x[k], 0), avg = x.reduce((p, q) => p + q, 0) / n;
+      return { readout: [
+        { k: "放电 3 段分到的权重", v: (share * 100).toFixed(1) + "%", color: share > 0.3 ? "var(--good)" : "var(--ink)" },
+        { k: "平均分到 3 段应得", v: (300 / n).toFixed(1) + "%", color: "var(--ink-3)" },
+        { k: "加权汇总值", v: pooled.toFixed(3) },
+        { k: "简单平均值", v: avg.toFixed(3), color: "var(--ink-3)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：分段统计 ---------- */
+  K.lab(document.getElementById("labBin"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "nd", label: "切成几段 n_dim", min: 4, max: 80, step: 1, value: 16 },
+      { id: "pd", label: "信号里有没有局部放电", value: "yes", options: [["yes", "有（一串尖刺）"], ["no", "没有（只有噪声）"]] },
+      { id: "feat", label: "看哪个统计量", value: "range", options: [["range", "振幅 max_range"], ["std", "标准差 std"], ["mean", "均值 mean"], ["p99", "99% 分位数减均值"]] },
+      { id: "seed", label: "换一条信号", button: true },
+    ],
+    note: "现场生成 8000 点的示意信号（作者是 80 万点、160 段），按第 8 格的做法每段算统计量。段太少，尖刺被淹没在一大段里；段太多，输入又变长。看看“振幅”在放电段是不是最显眼，“均值”又几乎看不出来。",
+    render(svg, v) {
+      const N = 8000, sig = signal(31 + v.seed * 7, N, { pd: v.pd === "yes", at: 0.2 + ((v.seed * 0.17) % 0.6), nSpikes: 10, noise: 0.03 });
+      const ax = K.axes(svg, { x: 50, y: 16, w: 560, h: 130 }, [0, 1], [-1.3, 1.3], { xticks: 0, yticks: 2, yfmt: (q) => q.toFixed(1) });
+      K.svg(svg, "path", { d: pathOf(ax, sig, 0, 1), fill: "none", stroke: "var(--c1)", "stroke-width": 1 });
+      const bs = Math.floor(N / v.nd), feats = [];
+      for (let k = 0; k < v.nd; k++) {
+        const seg = Array.from(sig.slice(k * bs, (k + 1) * bs)).sort((a, b) => a - b);
+        const m = seg.reduce((a, b) => a + b, 0) / seg.length, sd = Math.sqrt(seg.reduce((a, b) => a + (b - m) ** 2, 0) / seg.length);
+        const f = { range: seg[seg.length - 1] - seg[0], std: sd, mean: m, p99: seg[Math.floor(0.99 * (seg.length - 1))] - m }[v.feat];
+        feats.push(f);
+        if (k) K.svg(svg, "line", { x1: ax.sx(k / v.nd), x2: ax.sx(k / v.nd), y1: 16, y2: 146, stroke: "var(--ink-3)", "stroke-opacity": 0.35 });
+      }
+      const lo = Math.min(0, ...feats), hi = Math.max(...feats, 0.01);
+      const ax2 = K.axes(svg, { x: 50, y: 190, w: 560, h: 130 }, [0, v.nd], [lo, hi], { xticks: 4, yticks: 2, yfmt: (q) => q.toFixed(2), xlabel: "段号" });
+      const bw = 560 / v.nd;
+      feats.forEach((f, k) => K.svg(svg, "rect", { x: ax2.sx(k) + 0.5, y: ax2.sy(Math.max(f, 0)), width: Math.max(0.5, bw - 1), height: Math.abs(ax2.sy(f) - ax2.sy(0)), fill: "var(--accent)" }));
+      K.svg(svg, "text", { x: 54, y: 186, "font-size": 12, class: "muted" }, "每段一个数（这一个统计量）");
+      const sorted = feats.slice().sort((a, b) => a - b), med = sorted[Math.floor(sorted.length / 2)];
+      const ratio = Math.max(...feats) / (Math.abs(med) + 1e-6);
+      return { readout: [
+        { k: "每段点数", v: bs.toLocaleString() },
+        { k: "压缩后长度", v: v.nd + " 段 × 19 个数" },
+        { k: "最大段 / 中位段", v: ratio.toFixed(1) + " 倍", color: ratio > 2 ? "var(--good)" : "var(--ink-3)" },
+        { k: "压缩倍数（每相）", v: Math.round(N / (v.nd * 19)) + " 倍" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：阈值与 MCC ---------- */
+  K.lab(document.getElementById("labThr"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "rate", label: "故障占比", min: 1, max: 30, step: 1, value: 6, fmt: (q) => q + "%" },
+      { id: "sep", label: "模型区分能力", min: 0.5, max: 4, step: 0.1, value: 2.2, fmt: (q) => q.toFixed(1) },
+      { id: "t", label: "阈值", min: 0.01, max: 0.99, step: 0.01, value: 0.5, fmt: (q) => q.toFixed(2) },
+    ],
+    note: "现场生成 2000 个模拟预测概率，用第 3 格的公式算 MCC。绿线是第 14 格那样从 0.00 扫到 0.99 找到的最佳阈值。把故障占比调小，看准确率怎么“虚高”，最佳阈值又往哪边跑。",
+    render(svg, v) {
+      const n = 2000, r = K.rng(5 + v.rate * 3), P = [];
+      for (let i = 0; i < n; i++) { const y = i < n * v.rate / 100 ? 1 : 0; P.push([K.sigmoid((y ? v.sep / 2 : -v.sep / 2) - 1.2 + K.randn(r) * 1.2), y]); }
+      const stat = (t) => { let tp = 0, fp = 0, fn = 0, tn = 0; P.forEach(([p, y]) => { if (p > t) y ? tp++ : fp++; else y ? fn++ : tn++; }); const d = Math.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn)); return { mcc: d ? (tp * tn - fp * fn) / d : 0, acc: (tp + tn) / n, tp, fp, fn }; };
+      let best = { t: 0, mcc: -1 };
+      const curve = [];
+      for (let i = 0; i < 100; i++) { const s = stat(i / 100); curve.push(s); if (s.mcc > best.mcc) best = { t: i / 100, mcc: s.mcc }; }
+      const ax = K.axes(svg, { x: 50, y: 20, w: 560, h: 250 }, [0, 1], [0, 1], { xlabel: "阈值", yfmt: (q) => q.toFixed(1) });
+      let d1 = "", d2 = "";
+      curve.forEach((s, i) => { d1 += (d1 ? "L" : "M") + ax.sx(i / 100) + "," + ax.sy(Math.max(0, s.mcc)); d2 += (d2 ? "L" : "M") + ax.sx(i / 100) + "," + ax.sy(s.acc); });
+      K.svg(svg, "path", { d: d2, fill: "none", stroke: "var(--ink-3)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+      K.svg(svg, "path", { d: d1, fill: "none", stroke: "var(--c3)", "stroke-width": 2.5 });
+      K.svg(svg, "line", { x1: ax.sx(best.t), x2: ax.sx(best.t), y1: 20, y2: 270, stroke: "var(--good)", "stroke-width": 2 });
+      K.svg(svg, "line", { x1: ax.sx(v.t), x2: ax.sx(v.t), y1: 20, y2: 270, stroke: "var(--ink)", "stroke-dasharray": "4 3" });
+      K.svg(svg, "text", { x: 60, y: 318, "font-size": 12, fill: "var(--c3)" }, "— MCC");
+      K.svg(svg, "text", { x: 130, y: 318, "font-size": 12, class: "muted" }, "- - 准确率");
+      K.svg(svg, "text", { x: 220, y: 318, "font-size": 12, fill: "var(--good)" }, "| 最佳阈值");
+      const s = stat(v.t);
+      return { readout: [
+        { k: "当前阈值的 MCC", v: s.mcc.toFixed(3), color: s.mcc < 0.3 ? "var(--bad)" : "var(--good)" },
+        { k: "当前阈值的准确率", v: (s.acc * 100).toFixed(1) + "%" },
+        { k: "扫出来的最佳阈值", v: best.t.toFixed(2), color: "var(--good)" },
+        { k: "抓到 / 漏掉 / 误报", v: `${s.tp} / ${s.fn} / ${s.fp}` },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

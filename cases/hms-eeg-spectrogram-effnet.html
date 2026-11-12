@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>脑电有害活动识别</title>
+<meta name="description" content="Kaggle 案例拆解：把重症监护室病人的脑电波变成频谱图，拼成一张大图交给 EfficientNet，按多位专家的投票比例来学，用 KL 散度打分。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">脑电信号 · 6 类概率分布 · 频谱图 + 迁移学习</div>
+  <h1>把脑电波画成图：让图像模型帮医生看脑电</h1>
+  <p class="en">EfficientNetB0 Starter - [LB 0.43]（HMS - Harmful Brain Activity Classification）</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">频谱图</span><span class="tag method">梅尔频谱</span><span class="tag method">EfficientNetB0</span>
+    <span class="tag method">迁移学习</span><span class="tag method">KL 散度损失</span><span class="tag method">GroupKFold</span>
+    <span class="tag method">阶梯学习率</span><span class="tag method">混合精度</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Chris Deotte</b></span>
+    <span>Kaggle 点赞 <b>1,568</b>（2026-11 抓取）</span>
+    <span>比赛 <b>hms-harmful-brain-activity-classification</b></span>
+    <span><a href="https://www.kaggle.com/code/cdeotte/efficientnetb0-starter-lb-0-43" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">重症病人的脑电记录 + 专家投票</div><p>每段脑电有 50 秒的原始波形，还有一张覆盖 10 分钟的频谱图（中间 50 秒是同一件事）。<span data-cell="1">出处</span> 每段都有多位专家投票判断它属于哪一类。</p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">6 类脑电活动各占几成</div><p>癫痫发作（Seizure）、LPD、GPD、LRDA、GRDA、其他（Other）。<span data-cell="14">出处</span> 答案不是“一个类别”，而是专家意见的<b>比例</b>，所以模型要输出 6 个加起来等于 1 的概率。</p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">把信号变成图，交给图像模型</div><p>4 张 Kaggle 频谱图 + 4 张作者自己从脑电算出的频谱图，拼成一张 512×512 的大图，送进在 ImageNet 上预训练过的 EfficientNetB0，用 KL 散度当损失，按病人分 5 折。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">CV 0.59，LB 0.44（越低越好）</div><p>作者第 0 格的版本记录：只用 Kaggle 频谱图 CV 0.73 / LB 0.57；两种频谱图一起用 CV 0.59 / LB 0.44。<span data-cell="0">出处</span> 标题里写的是 LB 0.43。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛 <b>HMS - Harmful Brain Activity Classification</b>（哈佛医学院主办）：重症监护室里病人头皮上贴着电极，连续记录脑电。医生要从中找出癫痫发作和几种“看起来危险”的放电模式。下面的规模信息来自作者 notebook 的文字和代码。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">Kaggle 频谱图文件</div><div class="v">11,138</div></div>
+        <div class="stat-tile"><div class="k">要分的类别</div><div class="v">6</div></div>
+        <div class="stat-tile"><div class="k">每段脑电波形</div><div class="v">50 秒</div></div>
+        <div class="stat-tile"><div class="k">采样频率</div><div class="v">200 次/秒</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">11,138 个频谱图文件见第 0 格 <span data-cell="0">出处</span>；波形 50 秒、频谱图 10 分钟见第 1 格 <span data-cell="1">出处</span>；6 个类别见第 14 格 <span data-cell="14">出处</span>；采样率 200（10,000 个点 = 50 秒）见第 30 格代码 <span data-cell="30">出处</span>。训练集总行数在作者的运行输出里，源码不带输出，这里不写。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">train.csv 里用到的列</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>eeg_id</code></td><td>一段脑电记录的编号，一段里可能切出好几个被标注的片段</td><td>编号</td></tr>
+        <tr><td><code>spectrogram_id</code></td><td>对应的 Kaggle 频谱图文件编号</td><td>编号</td></tr>
+        <tr><td><code>spectrogram_label_offset_seconds</code></td><td>被标注的片段从频谱图第几秒开始</td><td>数值（秒）</td></tr>
+        <tr><td><code>patient_id</code></td><td>病人编号，同一个病人可能有多段记录</td><td>编号</td></tr>
+        <tr><td><code>expert_consensus</code></td><td>专家投票最多的那一类</td><td>类别</td></tr>
+        <tr><td>最后 6 列</td><td><b>要预测的答案</b>：6 类各得了几票（代码用 <code>df.columns[-6:]</code> 取出，再换算成比例）</td><td>整数 → 比例</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">脑电文件里每一列是一个电极（如 Fp1、F7、T3、T5、O1……），见第 30 格 <span data-cell="30">出处</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="26">
+    <h3>动手试试 A · KL 散度：预测分布和专家投票差多远 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="30">
+    <h3>动手试试 B · 把一段“脑电波”变成频谱图 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的成绩（KL 散度，越低越好）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>版本 / 输入</th><th>5 折 CV</th><th>LB</th><th>出处</th></tr>
+        <tr><td>版本 1–2：只用 Kaggle 频谱图，交叉熵损失，EfficientNetB2</td><td style="white-space:nowrap">0.73</td><td style="white-space:nowrap">0.57</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>版本 3–4：只用 EEG 频谱图，KL 损失</td><td style="white-space:nowrap">0.63</td><td style="white-space:nowrap">—</td><td><span data-cell="1">第 1 格</span></td></tr>
+        <tr><td>版本 3–4：只用 Kaggle 频谱图，KL 损失</td><td style="white-space:nowrap">0.65 / 0.66</td><td style="white-space:nowrap">—</td><td><span data-cell="0">第 0 格</span> <span data-cell="1">第 1 格</span></td></tr>
+        <tr><td><b>版本 5–6：两种频谱图一起，KL 损失，EfficientNetB0</b></td><td style="white-space:nowrap"><b>0.59</b></td><td style="white-space:nowrap"><b>0.44</b></td><td><span data-cell="1">第 1 格</span></td></tr>
+        <tr><td>作者的 CatBoost 入门版（对照）</td><td style="white-space:nowrap">0.82</td><td style="white-space:nowrap">0.67</td><td><span data-cell="0">第 0 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">“只用 Kaggle 频谱图 + KL 损失”的 CV，作者在第 0 格写 0.65，在第 1 格的表里写 0.66，两处不一致，这里照录。标题写 LB 0.43，正文写 LB 0.44，可能是不同版本的提交。第 26 格打印的文字写着 “EfficientNetB2”，但这一版实际用的是 B0（第 22 格），是没改的旧文字。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一段 50 秒的脑电，输出 6 类活动各自的可能性，帮神经科医生优先查看最可疑的片段。</li>
+        <li><b>同类问题：</b>心电图心律失常、睡眠分期、机器振动故障、鸟叫声识别、语音情绪：凡是“一维波形”，都可以先变成频谱图再用图像模型。</li>
+        <li><b>可迁移的套路：</b>信号 → 频谱图 → 预训练 CNN；标签是多人投票时用“分布”当答案、KL 散度当损失；同一个人的数据不能同时出现在训练和验证里（GroupKFold）。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>每段脑电只取一个样本，投票合并后归一化 <span data-cell="8">第 8 格</span></li>
+        <li>频谱图取对数、逐图标准化、裁剪 <span data-cell="14">第 14 格</span></li>
+        <li>阶梯学习率 1e-3 → 1e-4 → 1e-5 <span data-cell="19">第 19 格</span></li>
+        <li>8 张图拼成 512×512，EfficientNetB0 + 全局平均池化 + 6 类 softmax，KL 散度损失 <span data-cell="22">第 22 格</span></li>
+        <li>按病人分组的 5 折交叉验证 <span data-cell="24">第 24 格</span></li>
+        <li>脑电 → 双极导联差值 → 梅尔频谱（0–20 Hz）<span data-cell="30">第 30 格</span></li>
+        <li>5 个折模型的预测取平均 <span data-cell="32">第 32 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>标签是“几位专家各投了什么票”。为什么作者不直接用票数最多的那一类当答案，而要用比例？专家意见分歧大的样本，说明了什么？</li>
+      <li>如果不用 GroupKFold，而是随机切分，同一个病人的脑电会同时出现在训练和验证里。验证分数会偏高还是偏低？为什么？</li>
+      <li>EfficientNet 是在猫、狗、汽车这类照片上预训练的。频谱图和照片完全不像，为什么“借用”它还是有用？</li>
+      <li>作者自己从原始脑电算出的频谱图，比官方提供的频谱图效果更好（0.63 对 0.65/0.66）。你觉得可能是哪些处理步骤起了作用？</li>
+      <li>KL 散度 0.44 是什么水平，单看这个数很难说。你会怎样向医生解释这个模型“靠不靠谱”？还需要补什么评估？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Chris Deotte，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。比赛数据：HMS - Harmful Brain Activity Classification（Kaggle）。
+</footer>
+</main>
+
+<script src="nb/hms-eeg-spectrogram-effnet.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* 自查开关：网址带 ?fast 时动画直接跳到最后一帧（无界面截图用） */
+  if (/[?&]fast/.test(location.search)) { K.tween = (ms, fn, c) => { fn(1, 1); return Promise.resolve(!c || c.alive()); }; K.wait = (ms, c) => Promise.resolve(!c || c.alive()); }
+  const CLS = ["Seizure", "LPD", "GPD", "LRDA", "GRDA", "Other"];
+  const CC = ["var(--c6)", "var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--ink-3)"];
+  /* 频谱图配色：低 → 面板色，中 → c1，高 → warn */
+  const specColor = (t) => { t = K.clamp(t, 0, 1); return t < 0.55 ? `color-mix(in srgb, var(--c1) ${Math.round(t / 0.55 * 100)}%, var(--panel))` : `color-mix(in srgb, var(--warn) ${Math.round((t - 0.55) / 0.45 * 100)}%, var(--c1))`; };
+  /* 生成一张示意频谱图（rows 频率 × cols 时间） */
+  function fakeSpec(seed, rows, cols, kind) {
+    const r = K.rng(seed), M = [];
+    for (let i = 0; i < rows; i++) { M.push([]); for (let j = 0; j < cols; j++) {
+      const f = i / rows; let v = 0.55 * Math.exp(-f * 3) + 0.08 * r();
+      if (kind === 1 && j > cols * 0.35 && j < cols * 0.75) v += 0.45 * Math.exp(-Math.pow((f - 0.18) / 0.08, 2));
+      if (kind === 2 && j % 9 < 2) v += 0.35 * (1 - f);
+      if (kind === 3) v += 0.3 * Math.exp(-Math.pow((f - 0.08) / 0.06, 2));
+      M[i].push(K.clamp(v, 0, 1)); } }
+    return M;
+  }
+  function drawSpec(svg, M, x, y, w, h) {
+    const rows = M.length, cols = M[0].length, cw = w / cols, rh = h / rows, out = [];
+    for (let i = 0; i < rows; i++) for (let j = 0; j < cols; j++) out.push(K.svg(svg, "rect", { x: x + j * cw, y: y + h - (i + 1) * rh, width: cw + 0.4, height: rh + 0.4, fill: specColor(M[i][j]) }));
+    return out;
+  }
+  function wave(svg, x, y, w, amp, seed, color, spike) {
+    const r = K.rng(seed); let d = "";
+    for (let i = 0; i <= 160; i++) { const t = i / 160; let v = Math.sin(t * 40 + seed) * 0.4 + Math.sin(t * 95 + seed * 2) * 0.25 + (r() - 0.5) * 0.5; if (spike && i % 32 > 27) v += (i % 32 === 29 ? -2 : 0.8); d += (i ? "L" : "M") + (x + t * w).toFixed(1) + "," + (y + v * amp).toFixed(1); }
+    return K.svg(svg, "path", { d, fill: "none", stroke: color, "stroke-width": 1.4 });
+  }
+  const fade = (els, ctx, ms) => ctx.tween(ms || 500, (t) => els.forEach((e) => (e.style.opacity = t)));
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+
+  const steps = [
+    {
+      at: 0, title: "这场比赛要做什么", kicker: "第 0–2 格 · 任务与版本记录",
+      html: `<p>作者开篇先交代成绩和版本：只用官方的 <b>Kaggle 频谱图</b>时 CV 0.73、LB 0.57；后来又加上自己从原始<b>脑电波形</b>算出来的频谱图，换成 KL 散度损失，做到 <b>CV 0.59、LB 0.44</b>（这个比赛的分数越低越好）。</p><p>第 1 格解释两种输入的关系：脑电波形 50 秒，Kaggle 频谱图 10 分钟，中间那 50 秒记录的是同一件事，只是“画法”不同。</p><p>动画：4 条脑电波 → 多位专家投票 → 模型要输出 6 类各占几成。票数是示意。</p>`,
+      cells: [0, 1],
+      draw(svg, ctx) {
+        const ws = [0, 1, 2, 3].map((k) => wave(svg, 20, 70 + k * 60, 220, 12, k + 3, "var(--c1)", k === 1));
+        ["LL", "LP", "RP", "RR"].forEach((n, k) => K.svg(svg, "text", { x: 20, y: 52 + k * 60, "font-size": 11, class: "muted" }, n + " 区"));
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 13, "font-weight": 700 }, "50 秒脑电（示意）");
+        const a1 = K.arrow(svg, 250, 170, 300, 170);
+        const votes = [0, 3, 0, 1, 0, 0];
+        K.svg(svg, "text", { x: 310, y: 24, "font-size": 13, "font-weight": 700 }, "专家投票（示意）");
+        const vb = votes.map((v, i) => { K.svg(svg, "text", { x: 310, y: 62 + i * 42, "font-size": 12 }, CLS[i]); return K.svg(svg, "rect", { x: 370, y: 48 + i * 42, width: 0, height: 20, rx: 3, fill: CC[i] }); });
+        const vt = votes.map((v, i) => K.svg(svg, "text", { x: 376, y: 63 + i * 42, "font-size": 12, class: "muted" }, ""));
+        const a2 = K.arrow(svg, 480, 170, 520, 170);
+        K.svg(svg, "text", { x: 530, y: 24, "font-size": 13, "font-weight": 700 }, "要学的答案");
+        const pb = votes.map((v, i) => { K.svg(svg, "text", { x: 530, y: 62 + i * 42, "font-size": 12 }, CLS[i]); return K.svg(svg, "rect", { x: 590, y: 48 + i * 42, width: 0, height: 20, rx: 3, fill: CC[i] }); });
+        const pt = votes.map((v, i) => K.svg(svg, "text", { x: 596, y: 63 + i * 42, "font-size": 12, class: "muted" }, ""));
+        hide([a1, a2, ...ws]);
+        (async () => {
+          for (const w of ws) { if (!(await ctx.tween(250, (t) => (w.style.opacity = t)))) return; }
+          if (!(await fade([a1], ctx, 300))) return;
+          if (!(await ctx.tween(900, (t) => votes.forEach((v, i) => { vb[i].setAttribute("width", v * 22 * t); vt[i].setAttribute("x", 376 + v * 22 * t); vt[i].textContent = v ? v + " 票" : "0"; })))) return;
+          if (!(await fade([a2], ctx, 300))) return;
+          ctx.tween(900, (t) => votes.forEach((v, i) => { const p = v / 4; pb[i].setAttribute("width", p * 100 * t); pt[i].setAttribute("x", 596 + p * 100 * t); pt[i].textContent = Math.round(p * 100) + "%"; }));
+        })();
+      },
+    },
+    {
+      title: "两块 GPU + 混合精度", kicker: "第 2–4 格 · 准备算力",
+      html: `<p>作者用 Kaggle 免费提供的两块 T4 显卡：<code>MirroredStrategy</code> 把每一批图片平分给两块卡同时算，算完再把结果合起来。</p><p>还打开了<b>混合精度</b>：大部分计算用 16 位小数，速度更快、更省显存；关键的累加仍用 32 位，保证不出错。</p><p>第 3 格还有两个开关：<code>LOAD_MODELS_FROM</code> 指向作者已经训练好的模型（这一版直接加载，不重新训练），<code>USE_KAGGLE_SPECTROGRAMS</code> / <code>USE_EEG_SPECTROGRAMS</code> 决定用哪种频谱图。</p>`,
+      cells: [3, 4], highlight: ["MirroredStrategy", "auto_mixed_precision", "LOAD_MODELS_FROM"],
+      draw(svg, ctx) {
+        const g0 = K.node(svg, 470, 40, 200, 110, "GPU 0（T4）", { fill: "color-mix(in srgb, var(--c1) 12%, var(--panel))", stroke: "var(--c1)" });
+        const g1 = K.node(svg, 470, 190, 200, 110, "GPU 1（T4）", { fill: "color-mix(in srgb, var(--c2) 12%, var(--panel))", stroke: "var(--c2)" });
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "一批 32 张图");
+        const sq = [];
+        for (let i = 0; i < 32; i++) sq.push(K.svg(svg, "rect", { x: 30 + (i % 8) * 34, y: 50 + Math.floor(i / 8) * 34, width: 28, height: 28, rx: 3, fill: specColor(0.3 + (i % 5) * 0.12) }));
+        const tx = K.svg(svg, "text", { x: 30, y: 230, "font-size": 13 }, "");
+        const tx2 = K.svg(svg, "text", { x: 30, y: 256, "font-size": 12, class: "muted" }, "");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1600, (t) => sq.forEach((s, i) => {
+          const gpu = i < 16 ? 0 : 1, k = i % 16;
+          s.setAttribute("x", K.lerp(30 + (i % 8) * 34, 490 + (k % 8) * 21, t));
+          s.setAttribute("y", K.lerp(50 + Math.floor(i / 8) * 34, (gpu ? 240 : 90) + Math.floor(k / 8) * 22, t));
+          s.setAttribute("width", K.lerp(28, 18, t)); s.setAttribute("height", K.lerp(28, 18, t));
+        }))).then((ok) => { if (!ok) return; tx.textContent = "每块卡各算 16 张，同时进行"; tx2.textContent = "混合精度：多数运算用 16 位小数，省显存、更快"; });
+      },
+    },
+    {
+      title: "读入标签：专家的投票", kicker: "第 5–6 格 · 读数据",
+      html: `<p>读入 <code>train.csv</code>，把最后 6 列取出来当作目标 <code>TARGETS</code>：每一列是某一类得到的专家票数。</p><p>这和一般分类题不一样：同一段脑电，可能 3 位专家说是 LPD，1 位说是 LRDA。作者后面不会只取“多数票”，而是把票数变成比例，让模型学会“有几成把握”。</p>`,
+      cells: [6], highlight: ["TARGETS = df.columns[-6:]"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 28, "font-size": 13, "font-weight": 700 }, "train.csv 的一行（结构示意，不是真实数据）");
+        const cols = ["eeg_id", "spectrogram_id", "offset", "patient_id", "consensus", ...CLS];
+        const cells = cols.map((c, i) => {
+          const x = 20 + i * 62, isT = i >= 5;
+          const g = K.node(svg, x, 50, 58, 40, c.length > 9 ? c.slice(0, 8) + "…" : c, { fill: isT ? `color-mix(in srgb, ${CC[i - 5]} 20%, var(--panel))` : "var(--panel-2)", stroke: isT ? CC[i - 5] : "var(--line)" });
+          g.style.opacity = 0; return g;
+        });
+        const brace = K.svg(svg, "path", { d: "M330,100 Q330,112 350,112 L500,112 Q520,112 520,124 Q520,112 540,112 L690,112 Q710,112 710,100", fill: "none", stroke: "var(--accent)", "stroke-width": 2 });
+        const bl = K.svg(svg, "text", { x: 520, y: 146, "text-anchor": "middle", "font-size": 13, fill: "var(--accent)", "font-weight": 700 }, "TARGETS：最后 6 列 = 6 类各自的票数");
+        hide([brace, bl]);
+        const votes = [0, 3, 0, 1, 0, 0];
+        const bars = votes.map((v, i) => K.svg(svg, "rect", { x: 335 + i * 62, y: 300, width: 40, height: 0, fill: CC[i] }));
+        votes.forEach((v, i) => K.svg(svg, "text", { x: 355 + i * 62, y: 318, "text-anchor": "middle", "font-size": 11 }, CLS[i]));
+        const note = K.svg(svg, "text", { x: 30, y: 230, "font-size": 13 }, "");
+        (async () => {
+          for (const c of cells) { if (!(await ctx.tween(120, (t) => (c.style.opacity = t)))) return; }
+          if (!(await fade([brace, bl], ctx, 500))) return;
+          if (!(await ctx.tween(800, (t) => votes.forEach((v, i) => { bars[i].setAttribute("height", v * 35 * t); bars[i].setAttribute("y", 300 - v * 35 * t); })))) return;
+          note.textContent = "例：3 票 LPD、1 票 LRDA";
+        })();
+      },
+    },
+    {
+      title: "每段脑电只留一个样本", kicker: "第 7–8 格 · 去掉重叠",
+      html: `<p>同一段脑电（同一个 <code>eeg_id</code>）在训练集里被切成了很多个有重叠的片段，每个片段都单独有一组投票。比赛说明写明测试集里<b>每个 eeg_id 只有一个片段</b>，所以作者训练时也每个 eeg_id 只保留一条：</p><ul class="tight"><li>记下最早和最晚的片段起点 <code>min</code>、<code>max</code>，后面取中间位置；</li><li>把所有片段的票数<b>加起来</b>，再除以总票数，变成比例；</li><li>同时记下病人编号 <code>patient_id</code>，后面分折要用。</li></ul>`,
+      cells: [8], highlight: ["groupby('eeg_id')", "y_data / y_data.sum(axis=1,keepdims=True)"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 13, "font-weight": 700 }, "同一个 eeg_id 的多个片段（示意）");
+        K.svg(svg, "rect", { x: 30, y: 46, width: 660, height: 26, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" });
+        const segs = [0, 1, 2, 3].map((k) => K.svg(svg, "rect", { x: 60 + k * 70, y: 84 + k * 18, width: 260, height: 14, rx: 3, fill: "var(--c1)", opacity: 0.55 }));
+        const vs = [[0, 3, 0, 1, 0, 0], [0, 2, 0, 2, 0, 0], [0, 3, 0, 1, 0, 0], [0, 4, 0, 0, 0, 0]];
+        const sum = [0, 12, 0, 4, 0, 0];
+        const lbl = K.svg(svg, "text", { x: 30, y: 196, "font-size": 13 }, "");
+        const bars = sum.map((v, i) => { K.svg(svg, "text", { x: 300 + i * 66, y: 330, "text-anchor": "middle", "font-size": 11 }, CLS[i]); return K.svg(svg, "rect", { x: 280 + i * 66, y: 310, width: 40, height: 0, fill: CC[i] }); });
+        const bt = sum.map((v, i) => K.svg(svg, "text", { x: 300 + i * 66, y: 300, "text-anchor": "middle", "font-size": 12, class: "muted" }, ""));
+        (async () => {
+          for (let k = 0; k < 4; k++) { if (!(await ctx.tween(350, (t) => (segs[k].style.opacity = 0.2 + t * 0.6)))) return; }
+          lbl.textContent = "① 每个片段各有一组票：" + vs.map((v) => `[${v[1]} LPD, ${v[3]} LRDA]`).join(" ");
+          if (!(await ctx.wait(700))) return;
+          if (!(await ctx.tween(900, (t) => segs.forEach((s, k) => { s.setAttribute("y", K.lerp(84 + k * 18, 120, t)); s.setAttribute("x", K.lerp(60 + k * 70, 165, t)); })))) return;
+          lbl.textContent = "② 票数加起来：LPD 12 票、LRDA 4 票，共 16 票";
+          if (!(await ctx.tween(700, (t) => sum.forEach((v, i) => { bars[i].setAttribute("height", v * 7 * t); bars[i].setAttribute("y", 310 - v * 7 * t); bt[i].textContent = v ? v + " 票" : ""; })))) return;
+          if (!(await ctx.wait(700))) return;
+          lbl.textContent = "③ 除以总票数 → 比例：LPD 75%、LRDA 25%（这就是模型要学的答案）";
+          ctx.tween(700, (t) => sum.forEach((v, i) => { const h = K.lerp(v * 7, (v / 16) * 120, t); bars[i].setAttribute("height", h); bars[i].setAttribute("y", 310 - h); bt[i].setAttribute("y", 300 - h); bt[i].textContent = v ? (t > 0.5 ? Math.round((v / 16) * 100) + "%" : v + " 票") : ""; }));
+        })();
+      },
+    },
+    {
+      title: "一次读入 1.1 万张频谱图", kicker: "第 9–10 格 · 加速读文件",
+      html: `<p>官方给的频谱图是 11,138 个小文件。作者说用 pandas 一个个读要 11 分钟，所以他把它们预先合并成<b>一个文件</b>上传成 Kaggle 数据集，读一次不到 1 分钟。</p><p>每张 Kaggle 频谱图有 400 列：左外侧、左内侧、右内侧、右外侧 4 个脑区，各 100 个频率。这一点从第 14 格按 <code>k*100:(k+1)*100</code> 切 4 段可以看出来。</p>`,
+      cells: [10], highlight: ["READ_SPEC_FILES = False", "specs.npy"],
+      draw(svg, ctx) {
+        const icons = [];
+        for (let i = 0; i < 120; i++) icons.push(K.svg(svg, "rect", { x: 30 + (i % 15) * 18, y: 50 + Math.floor(i / 15) * 22, width: 13, height: 16, rx: 2, fill: "var(--panel-2)", stroke: "var(--ink-3)" }));
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "11,138 个小文件（图中 120 个代表）");
+        const big = K.node(svg, 470, 90, 180, 130, "specs.npy\n一个大文件", { fill: "color-mix(in srgb, var(--c3) 16%, var(--panel))", stroke: "var(--c3)", bold: true });
+        big.style.opacity = 0;
+        const t1 = K.svg(svg, "text", { x: 30, y: 260, "font-size": 14, fill: "var(--bad)" }, "一个个读：约 11 分钟（作者原话）");
+        const t2 = K.svg(svg, "text", { x: 420, y: 260, "font-size": 14, fill: "var(--good)" }, "读一个合并文件：不到 1 分钟");
+        hide([t1, t2]);
+        (async () => {
+          if (!(await fade([t1], ctx, 400))) return;
+          if (!(await ctx.tween(1600, (t) => icons.forEach((e, i) => { const tt = K.clamp(t * 1.6 - i / 200, 0, 1); e.setAttribute("x", K.lerp(30 + (i % 15) * 18, 550, tt)); e.setAttribute("y", K.lerp(50 + Math.floor(i / 15) * 22, 150, tt)); e.style.opacity = 1 - tt; })))) return;
+          await fade([big, t2], ctx, 500);
+        })();
+      },
+    },
+    {
+      title: "电极、导联和自制频谱图", kicker: "第 11–12 格 · EEG 频谱图",
+      html: `<p>除了官方频谱图，作者还读入了自己做的 <b>EEG 频谱图</b>（另一个 notebook 里用原始波形算的，算法和第 30 格相同）。</p><p>做法：头皮上的电极按左外侧（LL）、左内侧（LP）、右内侧（RP）、右外侧（RR）分成 4 条链，每条链上<b>相邻两个电极的电压相减</b>（医生看脑电的标准方式，叫“双极导联”），减出来的 4 条波各做一张频谱图，再平均成这个脑区的一张图。</p><p>动画演示 LL 链：Fp1 → F7 → T3 → T5 → O1，相邻相减得到 4 条差值波。电极位置是示意。</p>`,
+      cells: [12], highlight: ["eeg_specs.npy"],
+      draw(svg, ctx) {
+        const cx = 170, cy = 175, R = 135;
+        K.svg(svg, "ellipse", { cx, cy, rx: R * 0.85, ry: R, fill: "var(--panel-2)", stroke: "var(--ink-3)", "stroke-width": 1.5 });
+        K.svg(svg, "path", { d: `M${cx - 14},${cy - R + 2} L${cx},${cy - R - 16} L${cx + 14},${cy - R + 2}`, fill: "none", stroke: "var(--ink-3)", "stroke-width": 1.5 });
+        K.svg(svg, "text", { x: cx, y: cy - R - 22, "text-anchor": "middle", "font-size": 11, class: "muted" }, "鼻子（前）");
+        const E = { Fp1: [-30, -112], F7: [-88, -62], T3: [-108, 0], T5: [-88, 62], O1: [-30, 112], F3: [-46, -56], C3: [-54, 0], P3: [-46, 56], Fp2: [30, -112], F8: [88, -62], T4: [108, 0], T6: [88, 62], O2: [30, 112], F4: [46, -56], C4: [54, 0], P4: [46, 56] };
+        Object.entries(E).forEach(([n, p]) => { K.svg(svg, "circle", { cx: cx + p[0], cy: cy + p[1], r: 9, fill: "var(--panel)", stroke: "var(--ink-3)" }); K.svg(svg, "text", { x: cx + p[0], y: cy + p[1] + 3.5, "text-anchor": "middle", "font-size": 8 }, n); });
+        const chains = [["Fp1", "F7", "T3", "T5", "O1"], ["Fp1", "F3", "C3", "P3", "O1"], ["Fp2", "F8", "T4", "T6", "O2"], ["Fp2", "F4", "C4", "P4", "O2"]];
+        const nm = ["LL", "LP", "RP", "RR"], col = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)"];
+        const links = chains.map((ch, k) => ch.slice(0, 4).map((a, j) => { const p = E[a], q = E[ch[j + 1]]; const l = K.svg(svg, "line", { x1: cx + p[0], y1: cy + p[1], x2: cx + q[0], y2: cy + q[1], stroke: col[k], "stroke-width": 4, opacity: 0 }); return l; }));
+        const lab = K.svg(svg, "text", { x: 360, y: 30, "font-size": 13, "font-weight": 700 }, "");
+        const diffs = [0, 1, 2, 3].map((j) => { const p = wave(svg, 360, 80 + j * 52, 320, 9, 20 + j, "var(--c1)", j === 1); p.style.opacity = 0; return p; });
+        const dl = [0, 1, 2, 3].map((j) => K.svg(svg, "text", { x: 360, y: 64 + j * 52, "font-size": 11, class: "muted" }, ""));
+        (async () => {
+          for (let k = 0; k < 4; k++) {
+            lab.textContent = nm[k] + " 链：" + chains[k].join(" → ");
+            for (let j = 0; j < 4; j++) {
+              if (!(await ctx.tween(260, (t) => (links[k][j].style.opacity = t)))) return;
+              if (k === 0) { dl[j].textContent = `${chains[0][j]} − ${chains[0][j + 1]}`; if (!(await ctx.tween(260, (t) => (diffs[j].style.opacity = t)))) return; }
+            }
+            if (!(await ctx.wait(300))) return;
+          }
+          lab.textContent = "4 条链 × 每条 4 个差值 → 每条链平均成一张频谱图";
+        })();
+      },
+    },
+    {
+      title: "数据加载器：一次拼 8 张图", kicker: "第 13–14 格 · 预处理",
+      html: `<p><code>DataGenerator</code> 每次拿一批样本，给每个样本拼出一个 128×256×8 的“8 通道图”：</p><ul class="tight"><li>前 4 通道：Kaggle 频谱图，在片段中间截 300 个时间步；4 个脑区各 100 个频率；</li><li><b>取对数</b>：先把数值夹在 e<sup>−4</sup> 到 e<sup>8</sup> 之间再取 log，让特别亮的地方不至于把其他细节压没；</li><li><b>逐张标准化</b>：减平均值、除以标准差，缺失值填 0；裁到 256 个时间步放进 128 行的中间；</li><li>后 4 通道：直接放入自制的 EEG 频谱图。</li></ul><p>数据增强（左右翻转）的代码写好了但这一版没打开（<code>augment=False</code>）。</p>`,
+      cells: [14], highlight: ["np.log(img)", "(img-m)/(s+ep)", "X[j,:,:,4:] = img"],
+      draw(svg, ctx) {
+        const M = fakeSpec(4, 14, 30, 1);
+        const raw = M.map((r) => r.map((v) => Math.pow(v, 4)));
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 13, "font-weight": 700 }, "一张频谱图的处理（示意）");
+        const rects = drawSpec(svg, raw, 20, 40, 240, 120);
+        const st = K.svg(svg, "text", { x: 20, y: 180, "font-size": 13 }, "原始能量：少数格子特别亮，其余几乎看不见");
+        const chs = [];
+        for (let k = 0; k < 8; k++) {
+          const g = K.svg(svg, "g", {}); g.style.opacity = 0;
+          const S = fakeSpec(30 + k, 8, 16, k % 4);
+          drawSpec(g, S, 330 + k * 14, 50 + k * 22, 200, 70);
+          K.svg(g, "rect", { x: 330 + k * 14, y: 50 + k * 22, width: 200, height: 70, fill: "none", stroke: k < 4 ? "var(--c1)" : "var(--c3)", "stroke-width": 1.5 });
+          chs.push(g);
+        }
+        const l1 = K.svg(svg, "text", { x: 560, y: 90, "font-size": 12, fill: "var(--c1)" }, "通道 1–4：Kaggle 频谱图");
+        const l2 = K.svg(svg, "text", { x: 560, y: 230, "font-size": 12, fill: "var(--c3)" }, "通道 5–8：EEG 频谱图");
+        hide([l1, l2]);
+        (async () => {
+          if (!(await ctx.wait(900))) return;
+          st.textContent = "取 log + 标准化后：暗处的纹路也显出来了";
+          if (!(await ctx.tween(1200, (t) => rects.forEach((r, i) => { const v = raw[Math.floor(i / 30)][i % 30]; r.style.fill = specColor(K.lerp(v, M[Math.floor(i / 30)][i % 30], t)); })))) return;
+          for (let k = 0; k < 8; k++) { if (!(await ctx.tween(220, (t) => (chs[k].style.opacity = t)))) return; if (k === 3) await fade([l1], ctx, 200); }
+          fade([l2], ctx, 300);
+        })();
+      },
+    },
+    {
+      title: "看看喂给模型的图", kicker: "第 15–16 格 · 检查数据",
+      html: `<p>作者把加载器输出的前两批画出来，每张图标题写着 eeg_id 和 6 类的目标比例，确认图片和标签对得上。纵轴是频率（从低到高），横轴是时间。</p><p>这是个好习惯：训练前<b>亲眼看看</b>模型到底收到了什么，很多 bug（图被翻转、标签错位）都是这样发现的。</p><p>下面的 6 张小图是示意：有的在某一段时间低频特别亮，有的有规律的竖条纹（周期性放电在频谱图上常见的样子）。</p>`,
+      cells: [16], highlight: ["plt.imshow(img)", "Target = "],
+      draw(svg, ctx) {
+        const kinds = [1, 2, 3, 0, 2, 1], tg = ["[0, .75, 0, .25, 0, 0]", "[0, 0, 1, 0, 0, 0]", "[0, 0, 0, 0, .67, .33]", "[0, 0, 0, 0, 0, 1]", "[0, .5, .5, 0, 0, 0]", "[1, 0, 0, 0, 0, 0]"];
+        const gs = kinds.map((k, i) => {
+          const g = K.svg(svg, "g", {}); g.style.opacity = 0;
+          const x = 20 + (i % 3) * 235, y = 30 + Math.floor(i / 3) * 160;
+          drawSpec(g, fakeSpec(50 + i, 12, 26, k), x, y + 26, 210, 110);
+          K.svg(g, "text", { x, y: y + 18, "font-size": 11, "font-family": "var(--mono)" }, "Target = " + tg[i]);
+          return g;
+        });
+        K.svg(svg, "text", { x: 20, y: 334, "font-size": 11, class: "muted" }, "示意图，比例为虚构，仅说明标题格式");
+        (async () => { for (const g of gs) { if (!(await ctx.tween(300, (t) => (g.style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      at: 17, title: "学习率：先大步走，再小步挪", kicker: "第 17–19 格 · 训练计划",
+      html: `<p>学习率就是模型每次改参数时“步子迈多大”。作者用<b>阶梯式</b>计划，一共 4 轮：前 2 轮 1e-3，第 3 轮 1e-4，第 4 轮 1e-5。</p><p>第 18 格还写了一个余弦式计划（虚线，10 轮平滑下降）供大家试，这一版没有用。</p><p>动画里的曲线是按第 18、19 格的公式在浏览器里算出来的。</p>`,
+      cells: [18, 19], highlight: ["LR_STEP_DECAY = 0.1", "EPOCHS = 4"],
+      draw(svg, ctx) {
+        const step = (e) => (e < 1 ? 1e-3 : 1e-3 * Math.pow(0.1, Math.floor(e - 1)));
+        const cos = (e) => (1e-3 - 1e-6) * 0.5 * (1 + Math.cos((Math.PI * e) / 9)) + 1e-6;
+        const ax = K.axes(svg, { x: 70, y: 30, w: 600, h: 250 }, [0, 9], [-6, -2.5], { xticks: 9, yticks: 0, xfmt: (v) => String(Math.round(v)), xlabel: "第几轮（epoch，从 0 开始）" });
+        [-3, -4, -5, -6].forEach((p) => { K.svg(svg, "text", { x: 64, y: ax.sy(p) + 4, "text-anchor": "end", "font-size": 11 }, "1e" + p); K.svg(svg, "line", { x1: 70, x2: 670, y1: ax.sy(p), y2: ax.sy(p), stroke: "var(--line)", "stroke-dasharray": "2 3" }); });
+        let dc = ""; for (let e = 0; e <= 9; e += 0.1) dc += (dc ? "L" : "M") + ax.sx(e) + "," + ax.sy(Math.log10(cos(e)));
+        K.svg(svg, "path", { d: dc, fill: "none", stroke: "var(--ink-3)", "stroke-dasharray": "5 4", "stroke-width": 1.5 });
+        K.svg(svg, "text", { x: ax.sx(6), y: ax.sy(Math.log10(cos(6))) - 8, "font-size": 11, class: "muted" }, "余弦计划（未使用）");
+        const pts = [0, 1, 2, 3].map((e) => [ax.sx(e), ax.sy(Math.log10(step(e)))]);
+        const dots = pts.map((p) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 0, fill: "var(--accent)" }));
+        const lb = pts.map((p, e) => K.svg(svg, "text", { x: p[0] + 8, y: p[1] - 8, "font-size": 12, fill: "var(--accent)" }, ""));
+        const ball = K.svg(svg, "circle", { cx: pts[0][0], cy: pts[0][1], r: 8, fill: "var(--warn)", opacity: 0.8 });
+        (async () => {
+          for (let e = 0; e < 4; e++) {
+            if (e > 0 && !(await ctx.tween(500, (t) => { ball.setAttribute("cx", K.lerp(pts[e - 1][0], pts[e][0], t)); ball.setAttribute("cy", K.lerp(pts[e - 1][1], pts[e][1], t)); }))) return;
+            dots[e].setAttribute("r", 6); lb[e].textContent = step(e).toExponential(0);
+            if (!(await ctx.wait(250))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 20, title: "EfficientNet：8 张小图拼成一张大图", kicker: "第 20–22 格 · 建模",
+      html: `<p>EfficientNet 是一种为普通照片设计的卷积神经网络，作者加载了它在 ImageNet（上百万张照片）上训练好的权重，这叫<b>迁移学习</b>。</p><p>但照片是 3 通道（红绿蓝），这里有 8 通道。作者的办法很巧：把 4 张 Kaggle 频谱图<b>竖着摞</b>成 512×256，4 张 EEG 频谱图也摞起来，两块<b>左右并排</b>成 512×512，再复制 3 份当成“红绿蓝”。</p><p>后面接全局平均池化和一个 6 个输出的 softmax 层，损失函数是 KL 散度。</p>`,
+      cells: [22], highlight: ["Concatenate(axis=1)", "Concatenate(axis=2)", "Concatenate(axis=3)([x,x,x])", "KLDivergence"],
+      draw(svg, ctx) {
+        const tiles = [];
+        for (let k = 0; k < 8; k++) {
+          const g = K.svg(svg, "g", {});
+          const S = fakeSpec(70 + k, 6, 12, k % 4);
+          drawSpec(g, S, 0, 0, 64, 32);
+          K.svg(g, "rect", { x: 0, y: 0, width: 64, height: 32, fill: "none", stroke: k < 4 ? "var(--c1)" : "var(--c3)", "stroke-width": 1.5 });
+          tiles.push(g);
+        }
+        const start = (k) => [20 + k * 8, 40 + k * 26];
+        const end = (k) => [180 + (k < 4 ? 0 : 64), 60 + (k % 4) * 32];
+        tiles.forEach((g, k) => g.setAttribute("transform", `translate(${start(k)[0]},${start(k)[1]})`));
+        K.svg(svg, "text", { x: 20, y: 26, "font-size": 12, class: "muted" }, "输入 128×256×8");
+        const lab = K.svg(svg, "text", { x: 160, y: 220, "font-size": 12 }, "");
+        const net = [K.node(svg, 360, 90, 120, 70, "EfficientNetB0\n（ImageNet 预训练）", { fill: "var(--accent-soft)", stroke: "var(--accent)" }), K.node(svg, 500, 100, 80, 50, "全局平均\n池化"), K.node(svg, 600, 100, 100, 50, "Dense 6\nsoftmax")];
+        const ar = [K.arrow(svg, 310, 125, 358, 125), K.arrow(svg, 480, 125, 498, 125), K.arrow(svg, 580, 125, 598, 125)];
+        hide([...net, ...ar]);
+        const outs = CLS.map((c, i) => { K.svg(svg, "text", { x: 600, y: 190 + i * 24, "font-size": 11 }, c); return K.svg(svg, "rect", { x: 650, y: 179 + i * 24, width: 0, height: 14, fill: CC[i] }); });
+        const pr = [0.05, 0.6, 0.05, 0.2, 0.05, 0.05];
+        (async () => {
+          if (!(await ctx.wait(500))) return;
+          if (!(await ctx.tween(1500, (t) => tiles.forEach((g, k) => { const a = start(k), b = end(k); g.setAttribute("transform", `translate(${K.lerp(a[0], b[0], t)},${K.lerp(a[1], b[1], t)})`); })))) return;
+          lab.textContent = "左：Kaggle 4 张竖摞　右：EEG 4 张竖摞 → 512×512（缩小示意）";
+          if (!(await ctx.wait(500))) return;
+          for (let i = 0; i < 3; i++) { if (!(await fade([ar[i], net[i]], ctx, 350))) return; }
+          ctx.tween(700, (t) => outs.forEach((o, i) => o.setAttribute("width", pr[i] * 80 * t)));
+        })();
+      },
+    },
+    {
+      at: 23, title: "按病人分组的 5 折交叉验证", kicker: "第 23–24 格 · 训练",
+      html: `<p>作者用 <code>GroupKFold</code>，以 <code>patient_id</code> 为组分成 5 折：<b>同一个病人的所有脑电只会落在同一折</b>。每次用 4 折训练、1 折验证，轮 5 次，收集每折的“折外预测”（OOF）。</p><p>为什么要按病人分？同一个人的脑电很像。如果他的一段在训练里、另一段在验证里，模型等于“见过这个人”，验证分数会虚高，到了新病人身上就不灵了。</p><p>这一版设置了 <code>LOAD_MODELS_FROM</code>，所以不重新训练，直接加载作者之前训练好的 5 个模型来做验证预测。</p>`,
+      cells: [24], highlight: ["GroupKFold(n_splits=5)", "train.patient_id", "LOAD_MODELS_FROM is None"],
+      draw(svg, ctx) {
+        const r = K.rng(8), pts = [];
+        for (let p = 0; p < 10; p++) { const n = 2 + Math.floor(r() * 4); for (let j = 0; j < n; j++) pts.push({ p }); }
+        const fold = (p) => p % 5;
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 13, "font-weight": 700 }, "10 个病人的脑电片段（同色 = 同一个病人，示意）");
+        const boxes = [0, 1, 2, 3, 4].map((f) => { const b = K.svg(svg, "rect", { x: 20 + f * 138, y: 150, width: 128, height: 170, rx: 8, fill: "var(--panel-2)", stroke: "var(--line)" }); K.svg(svg, "text", { x: 84 + f * 138, y: 170, "text-anchor": "middle", "font-size": 12 }, "第 " + (f + 1) + " 折"); return b; });
+        const els = pts.map((d, i) => K.svg(svg, "circle", { cx: 40 + (i % 20) * 32, cy: 60 + Math.floor(i / 20) * 30, r: 9, fill: K.colors[d.p % 6], opacity: d.p >= 6 ? 0.55 : 0.95, stroke: d.p >= 6 ? "var(--ink)" : "none" }));
+        const cnt = [0, 0, 0, 0, 0], tgt = pts.map((d) => { const f = fold(d.p), k = cnt[f]++; return [38 + f * 138 + (k % 5) * 23, 196 + Math.floor(k / 5) * 26]; });
+        const msg = K.svg(svg, "text", { x: 20, y: 140, "font-size": 12, fill: "var(--good)" }, "");
+        (async () => {
+          if (!(await ctx.wait(600))) return;
+          if (!(await ctx.tween(1600, (t) => els.forEach((e, i) => { e.setAttribute("cx", K.lerp(40 + (i % 20) * 32, tgt[i][0], t)); e.setAttribute("cy", K.lerp(60 + Math.floor(i / 20) * 30, tgt[i][1], t)); })))) return;
+          msg.textContent = "每个病人的点都只出现在一折里 → 验证时面对的永远是“没见过的病人”";
+          for (let f = 0; f < 5; f++) {
+            boxes.forEach((b, k) => { b.style.stroke = k === f ? "var(--warn)" : "var(--line)"; b.style.strokeWidth = k === f ? 3 : 1; });
+            if (!(await ctx.wait(600))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 25, title: "KL 散度：和专家意见比分布", kicker: "第 25–26 格 · 评分",
+      html: `<p>比赛的评分标准是 <b>KL 散度</b>：拿专家投票的比例 p 和模型预测的比例 q 比，算 Σ p·log(p/q)。两个分布一模一样时是 0，差得越远越大。</p><p>它对“专家很确定、模型却给了很低概率”的情况罚得特别重：q 接近 0 时 log(p/q) 会变得很大。作者把 5 折的折外预测拼起来，用比赛官方的打分函数算出 CV。</p><p>下面的实验 A 可以亲手调预测，看 KL 散度怎么变。</p>`,
+      cells: [26], highlight: ["score(solution=true, submission=oof"],
+      draw(svg, ctx) {
+        const p = [0, 0.75, 0, 0.25, 0, 0];
+        const qs = [[1 / 6, 1 / 6, 1 / 6, 1 / 6, 1 / 6, 1 / 6], [0.05, 0.5, 0.05, 0.3, 0.05, 0.05], [0.02, 0.72, 0.02, 0.2, 0.02, 0.02]];
+        const kl = (q) => p.reduce((s, pi, i) => s + (pi > 0 ? pi * Math.log(pi / q[i]) : 0), 0);
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 13, "font-weight": 700 }, "专家比例 p（实心）vs 模型预测 q（空心框）");
+        const ax = { x: 40, y: 50, w: 460, h: 230 };
+        const bw = 60;
+        p.forEach((v, i) => { K.svg(svg, "rect", { x: ax.x + i * 76, y: ax.y + ax.h - v * ax.h, width: bw * 0.5, height: v * ax.h, fill: CC[i] }); K.svg(svg, "text", { x: ax.x + i * 76 + 28, y: ax.y + ax.h + 18, "text-anchor": "middle", "font-size": 11 }, CLS[i]); });
+        const qb = p.map((v, i) => K.svg(svg, "rect", { x: ax.x + i * 76 + bw * 0.5, y: ax.y + ax.h, width: bw * 0.5, height: 0, fill: "none", stroke: CC[i], "stroke-width": 2 }));
+        const big = K.svg(svg, "text", { x: 530, y: 140, "font-size": 26, "font-weight": 700, fill: "var(--accent)" }, "");
+        const sub = K.svg(svg, "text", { x: 530, y: 110, "font-size": 13 }, "");
+        const tips = ["平均猜：每类 1/6", "大致猜对方向", "很接近专家意见"];
+        (async () => {
+          let prev = [0, 0, 0, 0, 0, 0];
+          for (let k = 0; k < 3; k++) {
+            const q = qs[k], from = prev.slice();
+            sub.textContent = tips[k];
+            if (!(await ctx.tween(800, (t) => qb.forEach((b, i) => { const h = K.lerp(from[i], q[i], t) * ax.h; b.setAttribute("height", h); b.setAttribute("y", ax.y + ax.h - h); })))) return;
+            big.textContent = "KL = " + kl(q).toFixed(3);
+            prev = q;
+            if (!(await ctx.wait(1100))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 27, title: "测试集：现场把脑电变成频谱图", kicker: "第 27–31 格 · 推理准备",
+      html: `<p>提交时要处理没见过的测试数据：读入测试集的 Kaggle 频谱图，再用第 30 格的 <code>spectrogram_from_eeg</code> 现场把测试脑电变成 EEG 频谱图。步骤：</p><ul class="tight"><li>取脑电正中间的 10,000 个点（采样 200 次/秒，正好 50 秒）；</li><li>4 条链，每条链相邻电极相减，缺失值用平均值补；</li><li>每条差值波做<b>梅尔频谱</b>（128 个频带，0–20 Hz），转成分贝，缩放到大约 −1 到 1；</li><li>同一条链的 4 张图取平均 → 128×256×4。</li></ul><p>代码里还准备了小波去噪，但 <code>USE_WAVELET = None</code>，没有启用。实验 B 可以在浏览器里体验“波形 → 频谱图”。</p>`,
+      cells: [30, 31], highlight: ["middle = (len(eeg)-10_000)//2", "melspectrogram", "fmax=20", "img[:,:,k] /= 4.0"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 13, "font-weight": 700 }, "一段测试脑电（示意）");
+        const w = wave(svg, 20, 70, 680, 14, 11, "var(--ink-3)", true);
+        const win = K.svg(svg, "rect", { x: 20, y: 40, width: 680, height: 60, fill: "var(--accent)", "fill-opacity": 0.12, stroke: "var(--accent)" });
+        const wl = K.svg(svg, "text", { x: 360, y: 118, "text-anchor": "middle", "font-size": 12, fill: "var(--accent)" }, "");
+        const stages = ["相邻电极相减", "梅尔频谱 0–20 Hz", "转分贝、缩放", "4 张取平均"];
+        const nodes = stages.map((s, i) => { const n = K.node(svg, 20 + i * 140, 150, 120, 50, s); n.style.opacity = 0; return n; });
+        const ars = stages.slice(1).map((s, i) => { const a = K.arrow(svg, 140 + i * 140, 175, 158 + i * 140, 175); a.style.opacity = 0; return a; });
+        const sg = K.svg(svg, "g", {}); sg.style.opacity = 0;
+        drawSpec(sg, fakeSpec(91, 14, 40, 2), 580, 140, 120, 80);
+        K.svg(sg, "text", { x: 640, y: 236, "text-anchor": "middle", "font-size": 11 }, "128×256 的一张");
+        const out = K.svg(svg, "text", { x: 20, y: 280, "font-size": 13 }, "");
+        (async () => {
+          if (!(await ctx.wait(500))) return;
+          if (!(await ctx.tween(1200, (t) => { win.setAttribute("x", K.lerp(20, 290, t)); win.setAttribute("width", K.lerp(680, 140, t)); }))) return;
+          wl.textContent = "只取正中间 10,000 个点 = 50 秒";
+          for (let i = 0; i < 4; i++) { if (i) await fade([ars[i - 1]], ctx, 150); if (!(await fade([nodes[i]], ctx, 350))) return; }
+          await fade([sg], ctx, 500);
+          out.textContent = "LL、LP、RP、RR 四条链各得一张 → 叠成 128×256×4，与训练时的自制 EEG 频谱图格式相同";
+        })();
+      },
+    },
+    {
+      at: 32, title: "5 个模型投票，再交卷", kicker: "第 32–34 格 · 集成与提交",
+      html: `<p>5 折训练出了 5 个模型，每个都对测试集预测一遍，<b>取平均</b>当最终答案。这样能抵消单个模型的偶然误差。</p><p>最后写出 <code>submission.csv</code>：每个 eeg_id 一行，6 列概率。第 34 格做了一个“合理性检查”：每行 6 个概率加起来应该等于 1（softmax 保证了这一点）。</p>`,
+      cells: [32, 33, 34], highlight: ["np.mean(preds,axis=0)", "sum(axis=1)"],
+      draw(svg, ctx) {
+        const r = K.rng(12), base = [0.08, 0.5, 0.06, 0.24, 0.06, 0.06];
+        const preds = [0, 1, 2, 3, 4].map(() => { const q = base.map((b) => Math.max(0.01, b + (r() - 0.5) * 0.18)); const s = q.reduce((a, b) => a + b, 0); return q.map((x) => x / s); });
+        const avg = base.map((_, i) => preds.reduce((s, q) => s + q[i], 0) / 5);
+        const groups = preds.map((q, f) => {
+          const g = K.svg(svg, "g", {}); g.style.opacity = 0;
+          K.svg(g, "text", { x: 20 + f * 100, y: 30, "font-size": 12 }, "第 " + (f + 1) + " 折模型");
+          q.forEach((v, i) => K.svg(g, "rect", { x: 20 + f * 100 + i * 13, y: 150 - v * 200, width: 11, height: v * 200, fill: CC[i] }));
+          return g;
+        });
+        const ag = K.svg(svg, "g", {}); ag.style.opacity = 0;
+        K.svg(ag, "text", { x: 540, y: 30, "font-size": 13, "font-weight": 700 }, "平均后");
+        avg.forEach((v, i) => { K.svg(ag, "rect", { x: 540 + i * 26, y: 150 - v * 200, width: 22, height: v * 200, fill: CC[i] }); });
+        K.svg(svg, "text", { x: 20, y: 196, "font-size": 11, class: "muted" }, "柱子颜色从左到右：Seizure、LPD、GPD、LRDA、GRDA、Other");
+        const chk = K.svg(svg, "text", { x: 20, y: 230, "font-size": 14 }, "");
+        const row = K.svg(svg, "text", { x: 20, y: 262, "font-size": 12, "font-family": "var(--mono)" }, "");
+        (async () => {
+          for (const g of groups) { if (!(await ctx.tween(300, (t) => (g.style.opacity = t)))) return; }
+          if (!(await fade([ag], ctx, 600))) return;
+          row.textContent = "submission.csv 一行：eeg_id, " + avg.map((v) => v.toFixed(2)).join(", ") + "（示意）";
+          chk.textContent = "检查：6 个概率之和 = " + avg.reduce((a, b) => a + b, 0).toFixed(3) + " ✓";
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+  if (/[?&]fold/.test(location.search)) { const st = document.createElement("style"); st.textContent = "#pipe .ch-cells > .cell, #pipe .ch-cells > .cell-note { display: none; }"; document.head.appendChild(st); }
+
+  /* ---------- 实验 A：KL 散度 ---------- */
+  const PRESETS = {
+    agree: [0, 0, 0, 0, 0, 3],
+    lpd: [0, 3, 0, 1, 0, 0],
+    split: [0, 0, 5, 0, 4, 1],
+    seizure: [12, 0, 1, 0, 0, 2],
+  };
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "truth", label: "专家投票（示意）", value: "lpd", options: [["agree", "3 位专家都说 Other"], ["lpd", "3 票 LPD、1 票 LRDA"], ["split", "意见分歧：GPD 5、GRDA 4、Other 1"], ["seizure", "12 票 Seizure、1 票 GPD、2 票 Other"]] },
+      { id: "guess", label: "模型最看好的类别", value: "1", options: CLS.map((c, i) => [String(i), c]) },
+      { id: "conf", label: "模型给它的概率（其余平分）", min: 0.17, max: 0.99, step: 0.01, value: 0.6, fmt: (v) => (v * 100).toFixed(0) + "%" },
+    ],
+    note: "KL = Σ p·ln(p/q)，p 是专家比例，q 是模型预测，p = 0 的类别不计分。试试：选对类别时把概率拉到 99%，再选错类别拉到 99%，看罚分差多少。",
+    render(svg, v) {
+      const votes = PRESETS[v.truth], tot = votes.reduce((a, b) => a + b, 0), p = votes.map((x) => x / tot);
+      const g = +v.guess, q = CLS.map((_, i) => (i === g ? v.conf : (1 - v.conf) / 5));
+      let kl = 0; const terms = p.map((pi, i) => { const t = pi > 0 ? pi * Math.log(pi / q[i]) : 0; kl += t; return t; });
+      const ce = -Math.log(q[p.indexOf(Math.max(...p))]);
+      const ax = { x: 50, y: 20, w: 560, h: 220 };
+      for (let k = 0; k <= 4; k++) { const y = ax.y + ax.h - (k / 4) * ax.h; K.svg(svg, "line", { x1: ax.x, x2: ax.x + ax.w, y1: y, y2: y, stroke: "var(--line)", "stroke-dasharray": "2 3" }); K.svg(svg, "text", { x: ax.x - 6, y: y + 4, "text-anchor": "end", "font-size": 11 }, k * 25 + "%"); }
+      CLS.forEach((c, i) => {
+        const x = ax.x + 14 + i * 92;
+        K.svg(svg, "rect", { x, y: ax.y + ax.h - p[i] * ax.h, width: 30, height: p[i] * ax.h, fill: CC[i] });
+        K.svg(svg, "rect", { x: x + 32, y: ax.y + ax.h - q[i] * ax.h, width: 30, height: q[i] * ax.h, fill: "none", stroke: CC[i], "stroke-width": 2, "stroke-dasharray": "4 2" });
+        K.svg(svg, "text", { x: x + 31, y: ax.y + ax.h + 16, "text-anchor": "middle", "font-size": 12 }, c);
+        K.svg(svg, "text", { x: x + 31, y: ax.y + ax.h + 32, "text-anchor": "middle", "font-size": 11, class: "muted" }, p[i] > 0 ? "+" + terms[i].toFixed(2) : "不计");
+      });
+      K.svg(svg, "text", { x: 50, y: 300, "font-size": 12 }, "实心 = 专家比例 p　虚线框 = 模型预测 q　柱下数字 = 这一类贡献的 KL");
+      K.svg(svg, "text", { x: 50, y: 320, "font-size": 12, class: "muted" }, "只看多数票的交叉熵 = −ln q(多数类)，它不在乎专家的其余意见");
+      return { readout: [
+        { k: "KL 散度（越低越好）", v: kl.toFixed(3), color: kl < 0.5 ? "var(--good)" : kl < 1.2 ? "var(--warn)" : "var(--bad)" },
+        { k: "只看多数票的交叉熵", v: ce.toFixed(3), color: "var(--ink-3)" },
+        { k: "专家最多票的类别", v: CLS[p.indexOf(Math.max(...p))] },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：波形 → 频谱图（短时傅里叶） ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 400,
+    controls: [
+      { id: "alpha", label: "10 Hz 背景节律的强度", min: 0, max: 1, step: 0.05, value: 0.5, fmt: (v) => v.toFixed(2) },
+      { id: "burst", label: "中间一段出现的慢波（2 Hz）强度", min: 0, max: 2, step: 0.05, value: 1.2, fmt: (v) => v.toFixed(2) },
+      { id: "spike", label: "每秒一次的尖波（周期性放电）", min: 0, max: 3, step: 0.1, value: 0, fmt: (v) => v.toFixed(1) },
+      { id: "noise", label: "噪声", min: 0, max: 1.5, step: 0.05, value: 0.3, fmt: (v) => v.toFixed(2) },
+      { id: "win", label: "每个窗口多长（秒）", min: 0.5, max: 4, step: 0.25, value: 2, fmt: (v) => v + " 秒" },
+    ],
+    note: "浏览器里现场生成 20 秒、每秒 100 个点的模拟脑电，把它切成一个个窗口，每个窗口做一次傅里叶变换，算 0–20 Hz 各频率的能量，取对数后上色。窗口长：频率看得细、时间看得粗；窗口短则反过来。",
+    render(svg, v) {
+      const fs = 100, T = 20, N = fs * T, r = K.rng(5), x = new Float64Array(N);
+      for (let i = 0; i < N; i++) {
+        const t = i / fs;
+        let s = v.alpha * Math.sin(2 * Math.PI * 10 * t);
+        if (t > 7 && t < 14) s += v.burst * Math.sin(2 * Math.PI * 2 * t) * Math.sin(Math.PI * (t - 7) / 7);
+        const ph = t % 1; if (ph < 0.06) s += v.spike * Math.sin(Math.PI * ph / 0.06) * (ph < 0.03 ? 1 : -0.6);
+        s += v.noise * K.randn(r) * 0.5;
+        x[i] = s;
+      }
+      // 波形
+      const wy = 60, wh = 46;
+      K.svg(svg, "text", { x: 40, y: 14, "font-size": 12, "font-weight": 700 }, "模拟脑电（20 秒）");
+      let d = ""; for (let i = 0; i < N; i += 2) d += (i ? "L" : "M") + (40 + (i / N) * 580).toFixed(1) + "," + (wy - K.clamp(x[i], -3, 3) * (wh / 3)).toFixed(1);
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--c1)", "stroke-width": 1 });
+      // STFT
+      const W = Math.round(v.win * fs), hop = Math.max(5, Math.round(W / 4)), F = 20;
+      const frames = [];
+      for (let s0 = 0; s0 + W <= N; s0 += hop) {
+        const col = [];
+        for (let f = 0.5; f <= F; f += 0.5) {
+          let re = 0, im = 0;
+          for (let n = 0; n < W; n++) { const wv = 0.5 - 0.5 * Math.cos((2 * Math.PI * n) / (W - 1)); const a = (2 * Math.PI * f * n) / fs; re += x[s0 + n] * wv * Math.cos(a); im -= x[s0 + n] * wv * Math.sin(a); }
+          col.push(Math.log10(1e-3 + (re * re + im * im) / W));
+        }
+        frames.push({ t: (s0 + W / 2) / fs, col });
+      }
+      let lo = Infinity, hi = -Infinity; frames.forEach((fr) => fr.col.forEach((z) => { lo = Math.min(lo, z); hi = Math.max(hi, z); }));
+      const sy = 130, sh = 220, sx = 40, sw = 580, nF = frames[0].col.length;
+      K.svg(svg, "text", { x: 40, y: sy - 6, "font-size": 12, "font-weight": 700 }, "频谱图：横轴时间，纵轴频率（0–20 Hz），越亮能量越大");
+      frames.forEach((fr, k) => {
+        const x0 = sx + ((fr.t - (hop / fs) / 2) / T) * sw, cw = ((hop / fs) / T) * sw + 0.6;
+        fr.col.forEach((z, j) => K.svg(svg, "rect", { x: x0, y: sy + sh - ((j + 1) / nF) * sh, width: cw, height: sh / nF + 0.6, fill: specColor((z - lo) / (hi - lo || 1)) }));
+      });
+      [0, 5, 10, 15, 20].forEach((f) => K.svg(svg, "text", { x: sx - 4, y: sy + sh - (f / F) * sh + 4, "text-anchor": "end", "font-size": 10 }, f + ""));
+      K.svg(svg, "text", { x: 14, y: sy + sh / 2, "font-size": 10, class: "muted" }, "Hz");
+      [0, 5, 10, 15, 20].forEach((s) => K.svg(svg, "text", { x: sx + (s / T) * sw, y: sy + sh + 14, "text-anchor": "middle", "font-size": 10 }, s + "s"));
+      return { readout: [
+        { k: "窗口数（时间格）", v: String(frames.length) },
+        { k: "频率格（0.5 Hz 一格）", v: String(nF) },
+        { k: "每格时间宽度", v: (hop / fs).toFixed(2) + " 秒" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>

@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>美国山火起因</title>
+<meta name="description" content="Kaggle 案例拆解：用 188 万条美国山火记录的位置、日期、州和面积，以随机森林判断起火原因；13 类准确率约 58%，合并成 4 类约 70%，以及“90% 准确率”背后的陷阱。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">经纬度 + 日期 · 多分类 · 灾害成因</div>
+  <h1>美国山火：只看在哪、在哪天，能猜出起火原因吗</h1>
+  <p class="en">Predict the causes of wildfires using Python</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">SQLite 读数据</span><span class="tag method">儒略日转换</span><span class="tag method">分组柱状图</span>
+    <span class="tag method">经纬度散点</span><span class="tag method">LabelEncoder</span><span class="tag method">随机森林</span><span class="tag method">类别合并</span><span class="tag method">混淆矩阵</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>edhirif</b></span>
+    <span>Kaggle 点赞 <b>149</b>（2026-11 抓取）</span>
+    <span>数据集 <b>rtatman/188-million-us-wildfires</b></span>
+    <span><a href="https://www.kaggle.com/code/edhirif/predict-the-causes-of-wildfires-using-python" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">1992–2015 年美国 188 万起山火</div><p>每起火的发现日期、经纬度、所在州、最终过火面积和官方认定的起火原因。（数据集说明）</p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">起火原因（13 类）</div><p>雷击、烧垃圾、纵火、篝火、吸烟、设备……<span data-cell="12">出处</span> 作者还试了合并成 4 类，以及只在加州判断“是不是纵火”。</p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">位置和时间当特征，随机森林分类</div><p>年份、发现日期、月份、星期几、经度、纬度、州、面积，全部编码成数字，交给 50 棵树的随机森林。<span data-cell="39">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">13 类约 58%，4 类约 70%</div><p>决策树约 46%，随机森林约 58% <span data-cell="38">出处</span>；合并成 4 类后约 70% <span data-cell="44">出处</span>；加州纵火二分类达到作者 90% 的目标 <span data-cell="57">出处</span>（但要看下文的提醒）。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>1.88 Million US Wildfires</b>：美国林务局整理的 FPA FOD 山火数据库，汇总联邦、州和地方的火情报告。以下规模来自数据集说明；数据是 SQLite 数据库文件，不是 csv。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">山火记录</div><div class="v">188 万</div></div>
+        <div class="stat-tile"><div class="k">时间跨度</div><div class="v">1992–2015</div></div>
+        <div class="stat-tile"><div class="k">总过火面积</div><div class="v" style="font-size:20px">1.4 亿英亩</div></div>
+        <div class="stat-tile"><div class="k">起火原因类别</div><div class="v">13</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">位置精度至少到美国公共土地测量系统的“一平方英里格子”（数据集说明）。13 类原因见作者第 12 格 <span data-cell="12">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者取出的列（Fires 表）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th></tr>
+        <tr><td><code>FIRE_YEAR</code></td><td>年份</td></tr>
+        <tr><td><code>DISCOVERY_DATE</code></td><td>发现日期（儒略日，一个大数字）</td></tr>
+        <tr><td><code>LATITUDE</code> / <code>LONGITUDE</code></td><td>起火点纬度、经度</td></tr>
+        <tr><td><code>STATE</code></td><td>州（缩写，如 CA）</td></tr>
+        <tr><td><code>FIRE_SIZE</code></td><td>最终过火面积（英亩）</td></tr>
+        <tr><td><code>STAT_CAUSE_DESCR</code></td><td><b>要预测的答案</b>：起火原因</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">作者另外造了 <code>MONTH</code>（月份）和 <code>DAY_OF_WEEK</code>（星期几）。<span data-cell="9">出处</span></p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="39">
+    <h3>动手试试 A · 只看经纬度的“近邻投票”，和随机切分的陷阱 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="56">
+    <h3>动手试试 B · 90% 准确率到底好不好 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>周末发现的山火略多；雷击火周末反而少；纵火周末比工作日平均多约 30%</td><td><span data-cell="18">第 18 格</span></td></tr>
+        <tr><td>山火最多的三个州里有 CA、TX，还有出人意料的 GA</td><td><span data-cell="20">第 20 格</span></td></tr>
+        <tr><td>月份和纬度有关联；目标和各特征都没有很强的线性相关</td><td><span data-cell="31">第 31 格</span></td></tr>
+        <tr><td>13 类：决策树约 46%，随机森林约 58%</td><td><span data-cell="38">第 38 格</span></td></tr>
+        <tr><td>合并成 4 类后，随机森林约 70%</td><td><span data-cell="44">第 44 格</span></td></tr>
+        <tr><td>自然、意外两类识别率 80% 以上；“纵火”常被误判为“意外”</td><td><span data-cell="48">第 48 格</span></td></tr>
+        <tr><td>加州“是否纵火”二分类达到 90% 以上的目标</td><td><span data-cell="57">第 57 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">百分比都来自作者文字；第 57 格只说“达到 90% 的目标”，没有写具体数字。注意：加州纵火只占少数，全猜“不是纵火”本身就可能接近 90%，所以这个准确率不能说明模型真的会认纵火（见实验 B）。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>一起新山火刚被发现时，根据位置和日期估计最可能的原因，帮调查人员排优先级。</li>
+        <li><b>同类问题：</b>交通事故原因、报警类型、疾病暴发来源，都是“地点 + 时间 → 类别”。</li>
+        <li><b>要注意：</b>位置相近、日期相近的记录往往是同一场火或同一批纵火，随机切分会让测试集“认识”训练集里的邻居，分数偏高。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>sqlite3 + <code>pd.read_sql_query</code> 读库 <span data-cell="6">第 6 格</span></li>
+        <li>儒略日 → 公历日期 <span data-cell="8">第 8 格</span></li>
+        <li>按类别、星期、州分组计数 <span data-cell="17">第 17 格</span></li>
+        <li>LabelEncoder 把文字变数字 <span data-cell="29">第 29 格</span></li>
+        <li>随机森林（50 棵树） <span data-cell="39">第 39 格</span></li>
+        <li>13 类合并为 4 类 <span data-cell="41">第 41 格</span></li>
+        <li>归一化混淆矩阵 <span data-cell="47">第 47 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者把州名用 LabelEncoder 变成 0、1、2……模型会不会以为“编号相邻的州更相似”？对随机森林影响大吗？</li>
+      <li>第 3 部分的特征里有 <code>FIRE_SIZE</code>（最终过火面积）。火刚发现时就知道最终面积吗？这算不算“偷看答案”？作者在第 4 部分为什么把它删了？</li>
+      <li>加州纵火的准确率超过 90%。如果全猜“不是纵火”能得多少分？你会用什么指标代替准确率？</li>
+      <li>同一个纵火者常在相邻地点、相近日期连续放火。随机切分训练集和测试集，会让分数偏高还是偏低？怎样切分更公平？</li>
+      <li>如果把这个模型用来“锁定纵火嫌疑地区”，会不会让某些地区被过度怀疑？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 edhirif，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意；美国轮廓为手绘近似。数据集：Short, K.C. Spatial wildfire occurrence data for the United States, 1992–2015 [FPA_FOD_20170508]（Kaggle：rtatman/188-million-us-wildfires）。
+</footer>
+</main>
+
+<script src="nb/us-wildfire-causes.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 手绘美国本土轮廓（经度, 纬度，近似） ---------- */
+  const US = [[-124.7,48.4],[-123.8,46],[-124.2,42],[-124.4,40.4],[-122.5,37.5],[-120.6,34.5],[-117.1,32.5],[-114.7,32.7],[-111,31.3],[-108.2,31.3],[-106.5,31.8],[-104.5,29.6],[-103,29],[-101.4,29.8],[-99.5,27.5],[-97.4,25.9],[-97.4,27.8],[-94.5,29.5],[-90,29.1],[-89,30.2],[-85,29.7],[-83,29],[-82.6,27.5],[-81.2,25.2],[-80.1,25.8],[-80.6,28.5],[-81.4,30.7],[-79.2,33.2],[-75.5,35.2],[-76,37],[-74,40.5],[-70,41.6],[-70.7,43],[-67,44.8],[-68,47.4],[-69.2,47.4],[-71.5,45],[-75,45],[-76.8,43.6],[-79,43.3],[-79,42.8],[-83,42],[-82.5,45.3],[-84.6,46.5],[-88,48.2],[-95,49],[-123,49]];
+  const BB = [-125.5, -66.5, 24.5, 49.5];
+  function proj(box, B) {
+    B = B || BB;
+    const k = Math.cos(((B[2] + B[3]) / 2) * Math.PI / 180);
+    const wD = (B[1] - B[0]) * k, hD = B[3] - B[2], s = Math.min(box.w / wD, box.h / hD);
+    const ox = box.x + (box.w - wD * s) / 2, oy = box.y + (box.h - hD * s) / 2;
+    return { x: (lon) => ox + (lon - B[0]) * k * s, y: (lat) => oy + (B[3] - lat) * s, ox, oy, w: wD * s, h: hD * s };
+  }
+  function inPoly(pt, poly) { let c = false; for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) { const a = poly[i], b = poly[j]; if ((a[1] > pt[1]) !== (b[1] > pt[1]) && pt[0] < ((b[0] - a[0]) * (pt[1] - a[1])) / (b[1] - a[1]) + a[0]) c = !c; } return c; }
+  function drawUS(svg, P) { return K.svg(svg, "path", { d: US.map((p, i) => (i ? "L" : "M") + P.x(p[0]).toFixed(1) + "," + P.y(p[1]).toFixed(1)).join("") + "Z", fill: "var(--panel-2)", stroke: "var(--ink-3)", "stroke-width": 1 }); }
+  // 4 大类：0 自然（雷击） 1 意外 2 纵火 3 其他
+  const CAT = ["自然（雷击）", "意外", "纵火", "其他"], COL = ["var(--c1)", "var(--warn)", "var(--c6)", "var(--ink-3)"];
+  // 模拟山火：西部多雷击，东南部多意外和纵火；同一“事件”会在附近连发多起（模拟真实数据里的成串记录）
+  function simFires(seed, nEvents, perEvent) {
+    const r = K.rng(seed), F = [];
+    let ev = 0;
+    while (ev < nEvents) {
+      const lon = -124 + r() * 57, lat = 25 + r() * 24;
+      if (!inPoly([lon, lat], US)) continue;
+      const west = K.clamp((-lon - 100) / 20, 0, 1), se = K.clamp((-lon < 92 ? 1 : 0) * (lat < 37 ? 1 : 0.4), 0, 1);
+      const w = [0.12 + 0.55 * west, 0.45 + 0.1 * (1 - west), 0.06 + 0.22 * se, 0.15];
+      let u = r() * w.reduce((a, b) => a + b, 0), c = 0; while (u > w[c]) { u -= w[c]; c++; }
+      const k = 1 + Math.floor(r() * perEvent * 2);
+      for (let i = 0; i < k; i++) F.push({ lon: lon + K.randn(r) * 0.35, lat: lat + K.randn(r) * 0.3, c: r() < 0.85 ? c : Math.floor(r() * 4), ev });
+      ev++;
+    }
+    return F;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "开场：从 SQLite 里取数据，换算日期", kicker: "第 0–9 格 · 读库与儒略日",
+      html: `<p>这份数据不是常见的 csv，而是一个 <b>SQLite 数据库</b>文件。作者先用 sqlite3 建立连接，再写一句 SQL：只从 <code>Fires</code> 表里取需要的 7 列。<span data-cell="6">第 6 格</span></p><p>发现日期是<b>儒略日</b>：从公元前 4713 年 1 月 1 日起算的天数，是天文学家常用的连续计日法。作者减去 1970-01-01 对应的儒略日，就得到普通日期，再派生出月份和星期几。</p><p class="note"><code>dt.weekday_name</code> 在新版 pandas 里已经删除，现在要写 <code>dt.day_name()</code>。</p>`,
+      cells: [6, 8, 9], highlight: ["SELECT FIRE_YEAR", "to_julian_date()"],
+      draw(svg, ctx) {
+        K.node(svg, 30, 120, 150, 90, "FPA_FOD\n.sqlite", { bold: true });
+        const sql = K.svg(svg, "text", { x: 200, y: 110, "font-size": 12, "font-family": "var(--mono)" }, "");
+        const a = K.arrow(svg, 182, 165, 300, 165); a.style.opacity = 0;
+        const t1 = K.node(svg, 310, 135, 160, 60, "DISCOVERY_DATE\n2453403.5", { fs: 12 }); t1.style.opacity = 0;
+        const a2 = K.arrow(svg, 472, 165, 520, 165); a2.style.opacity = 0;
+        const t2 = K.node(svg, 530, 135, 170, 60, "2005-02-02\n周三 · 2 月", { fs: 12, fill: "color-mix(in srgb, var(--c3) 15%, var(--panel))", stroke: "var(--c3)" }); t2.style.opacity = 0;
+        K.svg(svg, "text", { x: 310, y: 230, "font-size": 12, class: "muted" }, "儒略日 − 2440587.5（1970-01-01）= 距 1970 年的天数");
+        K.svg(svg, "text", { x: 310, y: 250, "font-size": 11, class: "muted" }, "（示例日期为浏览器现算）");
+        const full = "SELECT FIRE_YEAR, …, FIRE_SIZE FROM 'Fires'";
+        ctx.tween(1200, (t) => (sql.textContent = full.slice(0, Math.round(full.length * t))))
+          .then((ok) => ok && ctx.tween(400, (t) => { a.style.opacity = t; t1.style.opacity = t; }))
+          .then((ok) => ok && ctx.tween(500, (t) => { a2.style.opacity = t; t2.style.opacity = t; }));
+      },
+    },
+    {
+      title: "13 种起火原因", kicker: "第 10–12 格 · 目标分布",
+      html: `<p>先看要预测的答案：起火原因的数量分布。作者数出 <b>13 类</b>，并提出一个问题：类别这么多，<b>合并成少几类会不会更准、准多少？</b>后面会验证。<span data-cell="12">第 12 格</span></p><p>13 类里有雷击、烧垃圾、纵火、设备使用、篝火、儿童玩火、吸烟、铁路、电线、烟花、建筑物、杂项、缺失/未定义。</p>`,
+      cells: [11],
+      draw(svg, ctx) {
+        const items = [["烧垃圾", 0.23], ["杂项", 0.17], ["纵火", 0.15], ["雷击", 0.15], ["缺失/未定义", 0.09], ["设备使用", 0.08], ["篝火", 0.04], ["儿童", 0.03], ["吸烟", 0.03], ["铁路", 0.02], ["电线", 0.007], ["烟花", 0.006], ["建筑物", 0.002]];
+        const els = K.bars(svg, { x: 20, y: 20, w: 660, h: 290 }, items.map(([l, v]) => ({ label: l, value: v, color: l === "纵火" ? "var(--c6)" : l === "雷击" ? "var(--c1)" : "var(--warn)" })), { horizontal: true, labelWidth: 100, fmt: () => "", gap: 4 });
+        els.forEach((e) => { e.w = +e.rect.getAttribute("width"); e.rect.setAttribute("width", 0); });
+        K.svg(svg, "text", { x: 470, y: 330, "font-size": 11, class: "muted" }, "条的长短为示意，不是原数据比例");
+        ctx.tween(1200, (t) => els.forEach((e) => e.rect.setAttribute("width", e.w * K.ease(t))));
+      },
+    },
+    {
+      title: "星期几：雷击不挑日子，纵火爱挑周末", kicker: "第 13–18 格 · 分组对比",
+      html: `<p>总体看，周末发现的山火略多。作者推测是人带来的：篝火、吸烟或者故意放火。为了验证，他分别看<b>雷击</b>和<b>纵火</b>：</p><ul class="tight"><li>雷击火：各天差不多，周末反而略少（天气不会看日历）；</li><li>纵火：周末明显更多，比工作日平均多约 30%。<span data-cell="18">第 18 格</span></li></ul><p>所以“星期几”对区分原因有用，值得放进模型。</p>`,
+      cells: [13, 15, 17],
+      draw(svg, ctx) {
+        const days = ["一", "二", "三", "四", "五", "六", "日"];
+        const L = [1, 1.02, 0.99, 1.01, 1, 0.95, 0.94], A = [0.92, 0.9, 0.91, 0.93, 1, 1.22, 1.25];
+        const mk = (ox, vals, col, title) => {
+          K.svg(svg, "text", { x: ox, y: 22, "font-size": 13, "font-weight": 700, fill: col }, title);
+          return vals.map((v, i) => { K.svg(svg, "text", { x: ox + 4 + i * 44 + 18, y: 300, "text-anchor": "middle", "font-size": 12 }, days[i]); return [K.svg(svg, "rect", { x: ox + 4 + i * 44, y: 280, width: 36, height: 0, fill: col, rx: 3 }), v]; });
+        };
+        const a = mk(20, L, "var(--c1)", "雷击（示意）"), b = mk(370, A, "var(--c6)", "纵火（示意，周末高约 30%）");
+        ctx.tween(1300, (t) => [...a, ...b].forEach(([e, v]) => { const h = v * 200 * K.ease(t); K.set(e, { y: 280 - h, height: h }); }));
+      },
+    },
+    {
+      title: "哪些州山火最多", kicker: "第 19–24 格 · 地区差异",
+      html: `<p>按州计数，前十里 CA（加州）和 TX（得州）在前三不意外：面积大、气候干。意外的是 GA（佐治亚州）也在前三。<span data-cell="20">第 20 格</span></p><p>再分别看这三个州的起火原因构成，发现差异很大，所以“州”也是有用的特征。<span data-cell="25">第 25 格</span> 这其实是“空间异质性”：不同地方，规律不一样。</p>`,
+      cells: [19, 22, 23, 24],
+      draw(svg, ctx) {
+        const P = proj({ x: 10, y: 10, w: 420, h: 310 });
+        drawUS(svg, P);
+        const st = [["CA", -119.5, 37.2], ["TX", -99, 31.3], ["GA", -83.4, 32.7]];
+        st.forEach(([n, lon, lat]) => { K.svg(svg, "circle", { cx: P.x(lon), cy: P.y(lat), r: 16, fill: "color-mix(in srgb, var(--c6) 30%, var(--panel))", stroke: "var(--c6)" }); K.svg(svg, "text", { x: P.x(lon), y: P.y(lat) + 4, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, n); });
+        const mix = { CA: [0.25, 0.4, 0.15, 0.2], TX: [0.1, 0.55, 0.12, 0.23], GA: [0.04, 0.55, 0.3, 0.11] };
+        const segs = [];
+        Object.entries(mix).forEach(([n, m], i) => {
+          const y = 50 + i * 85; let x = 470;
+          K.svg(svg, "text", { x: 470, y: y - 6, "font-size": 12, "font-weight": 700 }, n + " 的原因构成（示意）");
+          m.forEach((v, j) => { segs.push([K.svg(svg, "rect", { x, y, width: 0, height: 30, fill: COL[j] }), v * 230]); x += v * 230; });
+        });
+        CAT.forEach((c, j) => K.svg(svg, "text", { x: 470 + j * 62, y: 320, "font-size": 10, fill: COL[j] }, "■ " + c));
+        ctx.tween(1200, (t) => { let k = 0; Object.values(mix).forEach((m) => { let x = 470; m.forEach((v) => { const [e, w] = segs[k++]; K.set(e, { x, width: w * t }); x += w * t; }); }); });
+      },
+    },
+    {
+      title: "经纬度一画，就是一张美国地图", kicker: "第 25–27 格 · 位置的两种表示",
+      html: `<p>位置有两种表示：<b>州</b>（粗，一个类别）和<b>经纬度</b>（细，两个数）。作者把每起火的经纬度画成散点，几十万个点自己就拼出了美国的轮廓，所以他说“没必要再叠底图”。<span data-cell="27">第 27 格</span></p><p>颜色按原因分开看会更有意思：西部山区多雷击，东南部多烧垃圾和纵火。<b>不同原因在地图上占据不同的区域</b>，这正是经纬度能帮模型猜原因的理由。</p>`,
+      cells: [26],
+      draw(svg, ctx) {
+        const P = proj({ x: 10, y: 10, w: 700, h: 320 });
+        const F = simFires(5, 700, 2);
+        const dots = F.map((f) => K.svg(svg, "circle", { cx: P.x(f.lon), cy: P.y(f.lat), r: 0, fill: "var(--warn)", opacity: 0.55 }));
+        const lab = K.svg(svg, "text", { x: 20, y: 330, "font-size": 12, "font-weight": 700 }, "只画点（模拟）：轮廓自己出现");
+        ctx.tween(1600, (t) => dots.forEach((d, i) => d.setAttribute("r", K.clamp(t * F.length - i, 0, 1) * 2)))
+          .then((ok) => ok && ctx.wait(700))
+          .then((ok) => { if (!ok) return; lab.textContent = "按原因上色：蓝 = 雷击，黄 = 意外，红 = 纵火，灰 = 其他"; return ctx.tween(900, (t) => dots.forEach((d, i) => { if (t > 0.5) K.set(d, { fill: COL[F[i].c] }); })); });
+      },
+    },
+    {
+      title: "文字变数字，再看相关矩阵", kicker: "第 28–31 格 · 编码与相关",
+      html: `<p>模型只认数字。作者用 <code>LabelEncoder</code> 把原因、州、星期几都换成 0、1、2……再画所有列两两之间的<b>相关矩阵</b>（皮尔逊相关）。</p><p>作者的观察：<b>月份和纬度</b>有一定关联（可能和季节、天气有关）；要预测的原因和任何单个特征都没有强相关，只和月份、年份、日期有弱相关。<span data-cell="31">第 31 格</span></p><p class="note">注意：用 LabelEncoder 编出来的“州编号”和“原因编号”只是代号，没有大小意义，对它们算皮尔逊相关其实没有意义。相关系数也只能看出直线关系，看不出“西部多雷击”这种按区域划分的关系。</p>`,
+      cells: [29, 30], highlight: ["LabelEncoder()", "df.corr()"],
+      draw(svg, ctx) {
+        const names = ["年份", "原因", "纬度", "经度", "州", "日期", "面积", "月份", "星期"];
+        const n = names.length, r = K.rng(3), M = [];
+        for (let i = 0; i < n; i++) { M.push([]); for (let j = 0; j < n; j++) M[i].push(i === j ? 1 : 0); }
+        const set = (a, b, v) => { M[a][b] = M[b][a] = v; };
+        for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) set(i, j, (r() - 0.5) * 0.2);
+        set(0, 5, 0.99); set(2, 7, 0.35); set(2, 4, 0.3); set(3, 4, 0.25); set(1, 7, 0.12); set(1, 0, 0.1);
+        const cs = 30, ox = 120, oy = 20, cells = [];
+        names.forEach((nm, i) => { K.svg(svg, "text", { x: ox - 6, y: oy + i * cs + 20, "text-anchor": "end", "font-size": 12 }, nm); K.svg(svg, "text", { x: ox + i * cs + 15, y: oy + n * cs + 16, "text-anchor": "middle", "font-size": 10 }, nm); });
+        for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) cells.push([K.svg(svg, "rect", { x: ox + j * cs, y: oy + i * cs, width: cs - 2, height: cs - 2, fill: K.heat(Math.abs(M[i][j])), opacity: 0 }), i + j]);
+        K.svg(svg, "text", { x: 420, y: 60, "font-size": 13 }, "颜色越深 = 相关越强（示意）");
+        K.svg(svg, "text", { x: 420, y: 90, "font-size": 12, class: "muted" }, "· 年份和日期几乎完全相关");
+        K.svg(svg, "text", { x: 420, y: 110, "font-size": 12, class: "muted" }, "· 纬度和月份有一定关联");
+        K.svg(svg, "text", { x: 420, y: 130, "font-size": 12, class: "muted" }, "· “原因”那一行都很浅");
+        ctx.tween(1300, (t) => cells.forEach(([e, k]) => (e.style.opacity = K.clamp(t * 2.2 - k / (2 * n), 0, 1))));
+      },
+    },
+    {
+      title: "随机森林猜 13 类原因", kicker: "第 32–39 格 · 训练与评分",
+      html: `<p>删掉日期列和缺失值，把除原因以外的列都当特征，按 7:3 随机切分训练集和测试集。</p><p>作者在自己电脑上比较过：<b>决策树约 46%，随机森林约 58%</b>；梯度提升太慢，跑不动。<span data-cell="38">第 38 格</span> 这里用 50 棵树的随机森林。13 类里瞎猜只有约 8%，58% 已经是明显的规律了。</p><p class="note">特征里包括 <code>FIRE_SIZE</code>（最终过火面积），要等火灭了才知道；另外同一场火、同一批纵火的记录常常地点和日期都很接近，随机切分会让测试集里的火在训练集里有“近亲”，分数可能偏乐观。</p>`,
+      cells: [36, 37, 39], highlight: ["RandomForestClassifier(n_estimators=50)", "test_size=0.3"],
+      draw(svg, ctx) {
+        const trees = [];
+        for (let k = 0; k < 7; k++) {
+          const x = 40 + k * 95, g = K.svg(svg, "g"); g.style.opacity = 0; trees.push(g);
+          K.svg(g, "circle", { cx: x + 30, cy: 60, r: 9, fill: "var(--c3)" });
+          [[x + 10, 110], [x + 50, 110]].forEach(([a, b]) => { K.svg(g, "line", { x1: x + 30, y1: 60, x2: a, y2: b, stroke: "var(--ink-3)" }); K.svg(g, "circle", { cx: a, cy: b, r: 7, fill: "var(--c3)" }); });
+          const vote = ["雷击", "烧垃圾", "纵火", "烧垃圾", "烧垃圾", "雷击", "烧垃圾"][k];
+          K.svg(g, "text", { x: x + 30, y: 150, "text-anchor": "middle", "font-size": 12 }, vote);
+        }
+        K.svg(svg, "text", { x: 40, y: 30, "font-size": 13, "font-weight": 700 }, "每棵树看随机抽的一部分数据和特征，各自投票（示意 7 棵，原文 50 棵）");
+        const res = K.node(svg, 250, 190, 220, 50, "多数票：烧垃圾", { bold: true, fill: "color-mix(in srgb, var(--warn) 18%, var(--panel))", stroke: "var(--warn)" }); res.style.opacity = 0;
+        const ax = { x: 120, y: 275 };
+        const bars = [["决策树", 46, "var(--ink-3)"], ["随机森林", 58, "var(--c3)"]].map(([l, v, c], i) => { K.svg(svg, "text", { x: ax.x - 8, y: ax.y + i * 26 + 14, "text-anchor": "end", "font-size": 12 }, l); const b = K.svg(svg, "rect", { x: ax.x, y: ax.y + i * 26, width: 0, height: 20, fill: c, rx: 3 }); const t = K.svg(svg, "text", { x: ax.x + 6, y: ax.y + i * 26 + 15, "font-size": 12 }, ""); return [b, t, v]; });
+        K.svg(svg, "text", { x: 470, y: 300, "font-size": 11, class: "muted" }, "准确率为作者第 38 格文字");
+        (async () => {
+          for (const g of trees) if (!(await ctx.tween(220, (t) => (g.style.opacity = t)))) return;
+          if (!(await ctx.tween(400, (t) => (res.style.opacity = t)))) return;
+          await ctx.tween(900, (t) => bars.forEach(([b, tx, v]) => { b.setAttribute("width", v * 5 * t); tx.setAttribute("x", 126 + v * 5 * t); tx.textContent = Math.round(v * t) + "%"; }));
+        })();
+      },
+    },
+    {
+      title: "13 类合并成 4 类", kicker: "第 40–44 格 · 类别合并",
+      html: `<p>作者把 13 类合并成 4 大类：</p><ul class="tight"><li><b>自然</b>：雷击</li><li><b>意外</b>：建筑物、烟花、电线、铁路、吸烟、儿童、篝火、设备使用、烧垃圾</li><li><b>纵火</b>：纵火</li><li><b>其他</b>：缺失/未定义、杂项</li></ul><p>同样的随机森林，准确率从约 58% 升到约 70%。<span data-cell="44">第 44 格</span> 题目变简单了，分数自然上去；但也要记得，“4 类 70%”和“13 类 58%”不是同一道题，不能直接比谁更好。</p>`,
+      cells: [41, 43], highlight: ["def set_label"],
+      draw(svg, ctx) {
+        const small = ["雷击", "建筑物", "烟花", "电线", "铁路", "吸烟", "儿童", "篝火", "设备", "烧垃圾", "纵火", "缺失", "杂项"];
+        const grp = [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 3, 3];
+        const big = CAT.map((c, j) => K.node(svg, 470, 40 + j * 72, 220, 54, c, { bold: true, fill: `color-mix(in srgb, ${COL[j]} 18%, var(--panel))`, stroke: COL[j] }));
+        const chips = small.map((s, i) => { const g = K.svg(svg, "g"); K.svg(g, "rect", { x: 0, y: 0, width: 70, height: 20, rx: 10, fill: `color-mix(in srgb, ${COL[grp[i]]} 25%, var(--panel))`, stroke: COL[grp[i]] }); K.svg(g, "text", { x: 35, y: 14, "text-anchor": "middle", "font-size": 11 }, s); g.setAttribute("transform", `translate(30,${18 + i * 24})`); return g; });
+        ctx.wait(500).then((ok) => ok && ctx.tween(1800, (t) => chips.forEach((g, i) => {
+          const j = grp[i], u = K.ease(K.clamp(t * 1.5 - i * 0.04, 0, 1));
+          const sx = 30, sy = 18 + i * 24, tx = 545, ty = 57 + j * 72;
+          g.setAttribute("transform", `translate(${K.lerp(sx, tx, u)},${K.lerp(sy, ty, u)})`);
+          g.style.opacity = 1 - 0.9 * u;
+        })));
+      },
+    },
+    {
+      title: "混淆矩阵：纵火最难认", kicker: "第 45–48 格 · 逐类看错误",
+      html: `<p>准确率只是一个总数。作者画了归一化的<b>混淆矩阵</b>：每一行是真实类别，每一列是预测类别，格子里是“真实是这类的火里，被判成那类的比例”。</p><p>结论 <span data-cell="48">第 48 格</span>：自然、意外两类识别得很好（80% 以上）；“其他”一般；<b>纵火很差，很多被判成了“意外”</b>。原因之一是纵火样本少，而且它和意外火发生的地点、时间很像。</p>`,
+      cells: [45, 47], highlight: ["cm.sum(axis=1)"],
+      draw(svg, ctx) {
+        const M = [[0.84, 0.12, 0.01, 0.03], [0.05, 0.82, 0.05, 0.08], [0.03, 0.55, 0.32, 0.1], [0.06, 0.38, 0.06, 0.5]];
+        const cs = 66, ox = 180, oy = 30, cells = [];
+        CAT.forEach((c, i) => { K.svg(svg, "text", { x: ox - 8, y: oy + i * cs + 38, "text-anchor": "end", "font-size": 12 }, "真：" + c); K.svg(svg, "text", { x: ox + i * cs + 33, y: oy + 4 * cs + 18, "text-anchor": "middle", "font-size": 11 }, "判：" + c.replace("（雷击）", "")); });
+        M.forEach((row, i) => row.forEach((v, j) => { const g = K.node(svg, ox + j * cs, oy + i * cs, cs - 3, cs - 3, (v * 100).toFixed(0) + "%", { fill: K.heat(v), stroke: i === 2 && j === 1 ? "var(--bad)" : "var(--line)", sw: i === 2 && j === 1 ? 3 : 1 }); g.style.opacity = 0; cells.push(g); }));
+        K.svg(svg, "text", { x: 470, y: 60, "font-size": 13, "font-weight": 700 }, "对角线 = 判对的比例");
+        K.svg(svg, "text", { x: 470, y: 86, "font-size": 12, fill: "var(--bad)" }, "红框：真纵火被判成“意外”");
+        K.svg(svg, "text", { x: 470, y: 300, "font-size": 11, class: "muted" }, "数字为示意，原文只写了趋势");
+        ctx.tween(1400, (t) => cells.forEach((g, k) => (g.style.opacity = K.clamp(t * 16 - k, 0, 1))));
+      },
+    },
+    {
+      title: "加州：刚发现火情时，能判断是不是纵火吗", kicker: "第 49–58 格 · 二分类",
+      html: `<p>最后作者设想一个实用系统：火刚被发现时，只用<b>年份、月份、星期几、日期、经纬度</b>判断是不是纵火。所以特意删掉了面积 <code>FIRE_SIZE</code>，因为火刚烧起来时还不知道最终面积。<span data-cell="49">第 49 格</span></p><p>只看加州，标签变成“纵火 = 1，其他 = 0”，用 200 棵树的随机森林，作者说达到了 90% 以上的目标。<span data-cell="57">第 57 格</span></p><p><b>但要小心</b>：纵火在加州只占少数。如果纵火只占一成，模型全猜“不是纵火”就有九成准确率，却一个纵火也抓不到。作者没有给出召回率或混淆矩阵，所以 90% 并不能说明模型真的会认纵火。</p>`,
+      cells: [52, 54, 56], highlight: ["drop('FIRE_SIZE',axis=1)", "n_estimators=200"],
+      draw(svg, ctx) {
+        const P = proj({ x: 10, y: 10, w: 300, h: 320 }, [-124.6, -114, 32.4, 42.1]);
+        const CA = [[-124.2,42],[-120,42],[-120,39],[-114.6,35],[-114.6,34.3],[-114.4,32.7],[-117.1,32.5],[-118.4,33.8],[-120.6,34.55],[-121.9,36.6],[-122.5,37.8],[-123.8,39],[-124.4,40.4]];
+        K.svg(svg, "path", { d: CA.map((p, i) => (i ? "L" : "M") + P.x(p[0]) + "," + P.y(p[1])).join("") + "Z", fill: "var(--panel-2)", stroke: "var(--ink-3)" });
+        const r = K.rng(8), pts = [];
+        while (pts.length < 260) { const lon = -124.4 + r() * 10, lat = 32.5 + r() * 9.5; if (inPoly([lon, lat], CA)) pts.push([lon, lat, r() < 0.1 ? 1 : 0]); }
+        const dots = pts.map((p) => K.svg(svg, "circle", { cx: P.x(p[0]), cy: P.y(p[1]), r: 0, fill: p[2] ? "var(--c6)" : "var(--ink-3)", opacity: 0.8 }));
+        K.svg(svg, "text", { x: 340, y: 50, "font-size": 13, "font-weight": 700 }, "加州（模拟）：红 = 纵火，约占 1 成");
+        const b1 = K.node(svg, 340, 80, 360, 60, "模型 A：全猜“不是纵火”\n准确率 ≈ 90%，抓到纵火 0 起", { fill: "color-mix(in srgb, var(--bad) 12%, var(--panel))", stroke: "var(--bad)" });
+        const b2 = K.node(svg, 340, 160, 360, 60, "要看的不只是准确率：\n召回率（纵火抓到几成）、精确率", { fill: "color-mix(in srgb, var(--good) 12%, var(--panel))", stroke: "var(--good)" });
+        [b1, b2].forEach((b) => (b.style.opacity = 0));
+        ctx.tween(1200, (t) => dots.forEach((d, i) => d.setAttribute("r", K.clamp(t * pts.length - i, 0, 1) * 3)))
+          .then((ok) => ok && ctx.tween(500, (t) => (b1.style.opacity = t)))
+          .then((ok) => ok && ctx.wait(500))
+          .then((ok) => ok && ctx.tween(500, (t) => (b2.style.opacity = t)));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：经纬度 KNN + 随机切分 vs 按区域切分 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 400,
+    controls: [
+      { id: "k", label: "近邻个数 k（看最近的几起火）", min: 1, max: 41, step: 2, value: 7 },
+      { id: "split", label: "怎么切训练 / 测试", value: "random", options: [["random", "随机切 7:3（作者的做法）"], ["block", "按区域切：东经网格的一半当测试"], ["event", "按“事件”切：同一场火不拆开"]] },
+      { id: "seed", label: "重新生成", button: true },
+    ],
+    note: "模拟 900 个“事件”，每个事件在附近留下 1–4 条记录（同一场火或同一个人连续放火），原因受地区影响：西部多雷击，东南部多纵火。浏览器只用经度、纬度，按 k 近邻投票预测 4 大类。随机切分时，测试点身边常常有同一事件的“兄弟”在训练集里，分数会偏高；按区域或按事件切更接近真实情况。",
+    render(svg, v) {
+      const F = simFires(31 + v.seed * 7, 900, 2);
+      const r = K.rng(5 + v.seed);
+      let isTest;
+      if (v.split === "random") isTest = F.map(() => r() < 0.3);
+      else if (v.split === "event") { const t = {}; isTest = F.map((f) => (t[f.ev] == null ? (t[f.ev] = r() < 0.3) : t[f.ev])); }
+      else isTest = F.map((f) => (Math.floor((f.lon + 125) / 4) + Math.floor((f.lat - 24) / 4)) % 3 === 0);
+      const tr = F.filter((_, i) => !isTest[i]), te = F.filter((_, i) => isTest[i]);
+      const kx = Math.cos((37 * Math.PI) / 180);
+      const pred = (p) => { const d = tr.map((q) => [((q.lon - p.lon) * kx) ** 2 + (q.lat - p.lat) ** 2, q.c]).sort((a, b) => a[0] - b[0]).slice(0, v.k); const cnt = [0, 0, 0, 0]; d.forEach(([, c]) => cnt[c]++); return cnt.indexOf(Math.max(...cnt)); };
+      const P = proj({ x: 0, y: 0, w: 640, h: 370 });
+      const step = 1.1;
+      for (let lon = -125; lon < -66; lon += step) for (let lat = 24.5; lat < 49.5; lat += step) {
+        const c = [lon + step / 2, lat + step / 2]; if (!inPoly(c, US)) continue;
+        K.svg(svg, "rect", { x: P.x(lon), y: P.y(lat + step), width: P.x(lon + step) - P.x(lon) + 0.5, height: P.y(lat) - P.y(lat + step) + 0.5, fill: COL[pred({ lon: c[0], lat: c[1] })], opacity: 0.22 });
+      }
+      drawUS(svg, P).style.fill = "none";
+      let ok = 0, okA = 0, nA = 0;
+      te.forEach((f) => { const p = pred(f); if (p === f.c) ok++; if (f.c === 2) { nA++; if (p === 2) okA++; } });
+      F.forEach((f, i) => K.svg(svg, "circle", { cx: P.x(f.lon), cy: P.y(f.lat), r: isTest[i] ? 2.6 : 1.6, fill: isTest[i] ? "none" : COL[f.c], stroke: isTest[i] ? COL[f.c] : "none", opacity: 0.85 }));
+      CAT.forEach((c, j) => K.svg(svg, "text", { x: 10 + j * 110, y: 392, "font-size": 11, fill: COL[j], "font-weight": 700 }, "■ " + c));
+      K.svg(svg, "text", { x: 450, y: 392, "font-size": 11, class: "muted" }, "实心 = 训练，空心 = 测试");
+      return { readout: [
+        { k: "测试集准确率", v: ((ok / te.length) * 100).toFixed(1) + "%", color: "var(--c6)" },
+        { k: "纵火召回率", v: nA ? ((okA / nA) * 100).toFixed(1) + "%" : "—" },
+        { k: "测试 / 训练条数", v: te.length + " / " + tr.length },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：准确率悖论 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "p", label: "纵火在加州山火里的占比（假设）", min: 1, max: 50, step: 1, value: 10, fmt: (v) => v + "%" },
+      { id: "sep", label: "模型区分能力（两类得分相距几个标准差）", min: 0, max: 4, step: 0.1, value: 1.2, fmt: (v) => v.toFixed(1) },
+      { id: "t", label: "判为纵火的阈值", min: -2, max: 5, step: 0.05, value: 1.8, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "纵火占比是可调的假设（作者没有写加州纵火的比例）。非纵火的模型得分 ~ N(0,1)，纵火 ~ N(区分能力,1)，按每 1 万起火计算期望结果。把阈值拉到最右，模型几乎全判“不是纵火”，准确率依然很高，召回率却接近 0。",
+    render(svg, v) {
+      const erf = (x) => { const s = Math.sign(x); x = Math.abs(x); const t = 1 / (1 + 0.3275911 * x); return s * (1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x)); };
+      const Phi = (x) => 0.5 * (1 + erf(x / Math.SQRT2));
+      const N = 10000, pos = (N * v.p) / 100, neg = N - pos;
+      const TP = pos * (1 - Phi(v.t - v.sep)), FP = neg * (1 - Phi(v.t)), FN = pos - TP, TN = neg - FP;
+      const acc = (TP + TN) / N, rec = TP / pos, pre = TP + FP > 0 ? TP / (TP + FP) : 0, base = neg / N;
+      const ax = K.axes(svg, { x: 50, y: 20, w: 560, h: 220 }, [-4, 7], [0, 0.42], { yticks: 0, xlabel: "模型给出的“纵火”得分" });
+      const pdf = (x, m) => Math.exp(-0.5 * (x - m) ** 2) / Math.sqrt(2 * Math.PI);
+      [[0, "var(--ink-3)"], [v.sep, "var(--c6)"]].forEach(([m, c]) => { let d = ""; for (let x = -4; x <= 7; x += 0.05) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(pdf(x, m)); K.svg(svg, "path", { d, fill: "none", stroke: c, "stroke-width": 2 }); });
+      K.svg(svg, "line", { x1: ax.sx(v.t), x2: ax.sx(v.t), y1: 20, y2: 240, stroke: "var(--ink)", "stroke-dasharray": "5 3" });
+      K.svg(svg, "text", { x: ax.sx(v.t) + 5, y: 34, "font-size": 12 }, "右边判为纵火");
+      K.svg(svg, "text", { x: 60, y: 290, "font-size": 12, class: "muted" }, `每 1 万起：纵火 ${Math.round(pos)}，抓到 ${Math.round(TP)}，漏掉 ${Math.round(FN)}，冤枉 ${Math.round(FP)}`);
+      return { readout: [
+        { k: "准确率", v: (acc * 100).toFixed(1) + "%" },
+        { k: "全猜“不是纵火”", v: (base * 100).toFixed(1) + "%", color: "var(--ink-3)" },
+        { k: "召回率（纵火抓到几成）", v: (rec * 100).toFixed(1) + "%", color: rec < 0.5 ? "var(--bad)" : "var(--good)" },
+        { k: "精确率", v: (pre * 100).toFixed(1) + "%" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

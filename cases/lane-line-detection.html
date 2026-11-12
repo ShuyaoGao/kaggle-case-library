@@ -1,0 +1,768 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>车道线检测</title>
+<meta name="description" content="Kaggle 案例拆解：不用机器学习，只靠 OpenCV 的颜色筛选、区域掩膜、Canny 边缘和霍夫变换，在行车画面里画出两条车道线。">
+<link rel="stylesheet" href="../assets/case.css">
+<style>
+  .px { image-rendering: pixelated; image-rendering: crisp-edges; }
+  .vs { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .vs th, .vs td { border-bottom: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; }
+  body.fast .ch-cells > :not(.inline-lab) { display: none; }
+</style>
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">图像 / 视频 · 车道线检测 · 自动驾驶入门</div>
+  <h1>车道线检测：不训练模型，一步步“算”出两条线</h1>
+  <p class="en">Lane Line Detection</p>
+  <div class="tags">
+    <span class="tag method">传统计算机视觉（非机器学习）</span>
+    <span class="tag method">RGB 颜色阈值</span><span class="tag method">区域掩膜</span><span class="tag method">灰度化</span>
+    <span class="tag method">高斯模糊</span><span class="tag method">Canny 边缘检测</span><span class="tag method">霍夫变换</span>
+    <span class="tag method">斜率分组 + 平均外推</span><span class="tag method">逐帧视频处理</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Soumya Ranjan Behera</b></span>
+    <span>Kaggle 点赞 <b>940</b>（2026-11 抓取）</span>
+    <span>素材 <b>Udacity CarND-LaneLines-P1 测试图片与视频</b></span>
+    <span><a href="https://www.kaggle.com/code/soumya044/lane-line-detection" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">车头摄像头拍的高速公路画面</div><p>几张测试照片和两段视频，来自 Udacity 自动驾驶课程的公开仓库（第 3 格用 git 下载）。另外还试了一张德里高速的照片。<span data-cell="3">出处</span></p></div>
+    <div class="card panel"><h3>要做什么</h3><div class="big">在画面上标出本车道的左右两条线</div><p>这是自动驾驶最早要解决的问题之一：知道车道在哪，才能决定往哪打方向。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">一串人写的图像处理规则，没有训练</div><p>颜色筛选和区域掩膜先试水；正式流水线是：灰度 → 高斯模糊 → Canny 边缘 → 四边形掩膜 → 霍夫变换找线段 → 按斜率分左右、求平均、外推成两条长线。<span data-cell="18">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">直道上能画出车道，弯道和无标线道路不行</div><p>作者用测试图和两段视频检查效果，没有算任何分数；最后自己写明了两条局限：霍夫变换只能找直线，没有标线的路会失败。<span data-cell="38">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">这个案例没有“表格”，也没有“答案列”。原料是一张张彩色照片和视频帧；每张照片就是一个三维数组：高 × 宽 × 3 个颜色通道。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">用到的素材</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>素材</th><th>说明</th><th>出处</th></tr>
+        <tr><td><code>test_images/</code></td><td>Udacity 仓库自带的高速公路测试照片，代码里点名用到 <code>solidWhiteRight.jpg</code>（白色实线）和 <code>solidYellowLeft.jpg</code>（左侧黄线）</td><td><span data-cell="4">第 4 格</span> <span data-cell="6">第 6 格</span></td></tr>
+        <tr><td><code>test_videos/</code></td><td>同一仓库的测试视频，代码处理了 <code>solidWhiteRight.mp4</code> 和 <code>solidYellowLeft.mp4</code> 两段</td><td><span data-cell="31">第 31 格</span> <span data-cell="35">第 35 格</span></td></tr>
+        <tr><td><code>Eastern Delhi Expressway.png</code></td><td>作者另外上传的一张印度德里高速照片，用来测试“换一条路还灵不灵”</td><td><span data-cell="24">第 24 格</span></td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">图片张数、视频时长在 notebook 文字里没有写，这里不列。代码里的掩膜坐标用到 <code>[100, 539]</code>、<code>[950, 539]</code> <span data-cell="9">第 9 格</span>，可以推断测试照片大约宽 960、高 540 像素（推断，不是作者原话）。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">一个像素里有什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>量</th><th>白话含义</th><th>取值</th></tr>
+        <tr><td><code>image[y, x, 0]</code></td><td>红色（R）有多亮</td><td>0–255 的整数</td></tr>
+        <tr><td><code>image[y, x, 1]</code></td><td>绿色（G）有多亮</td><td>0–255</td></tr>
+        <tr><td><code>image[y, x, 2]</code></td><td>蓝色（B）有多亮</td><td>0–255</td></tr>
+        <tr><td><code>y, x</code></td><td>行号和列号。<b>原点在左上角</b>，y 往下变大（第 9 格注释特意提醒）</td><td>整数坐标</td></tr>
+        <tr><td>答案？</td><td><b>没有标注</b>：没人事先画好“正确的车道线”，所以作者只能用眼睛看结果对不对</td><td>—</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">白色 = (255,255,255)，黑色 = (0,0,0)。作者在第 5 格就是从“白线的三个通道都很亮”这一点出发的。<span data-cell="5">出处</span></p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="11">
+    <h3>动手试试 A · 颜色阈值和三角形掩膜：黄线为什么丢了 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labA"></div>
+  </div>
+  <div data-at="14">
+    <h3>动手试试 B · Canny 的高低阈值与高斯模糊 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labB"></div>
+  </div>
+  <div data-at="16">
+    <h3>动手试试 C · 霍夫变换：边缘点给直线投票 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labC"></div>
+  </div>
+  <div data-at="19">
+    <h3>动手试试 D · 一堆线段怎样合成左右两条车道线 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labD"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>只用 RGB 阈值 200，白色车道线就能清楚地挑出来</td><td><span data-cell="7">第 7 格</span></td></tr>
+        <tr><td>换成有黄线的图，同样的阈值把黄线漏掉了</td><td><span data-cell="12">第 12 格</span></td></tr>
+        <tr><td>改用 Canny 边缘 + 霍夫变换后，在不同图片上都找到了车道线，“没用深度学习”</td><td><span data-cell="17">第 17 格</span></td></tr>
+        <tr><td>把六步串成 <code>lane_finding_pipeline</code>，在测试图、德里高速照片和两段视频上运行</td><td><span data-cell="20">第 20 格</span> <span data-cell="22">第 22 格</span> <span data-cell="31">第 31 格</span></td></tr>
+        <tr><td>局限 1：霍夫变换只适合直线，遇到弯道会失败</td><td><span data-cell="38">第 38 格</span></td></tr>
+        <tr><td>局限 2：很多道路没有车道标线，这时也会失败</td><td><span data-cell="38">第 38 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">这份 notebook <b>没有任何数字指标</b>：数据没有标注“正确的车道线”，作者靠看输出图片和视频判断好坏。输出图片和视频只在 Kaggle 网页上，下载的源码不带输出，所以这里既不列分数，也不描述作者的输出画面长什么样。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做：</b>在光线正常、标线清楚的直道上，实时标出本车道左右边界，可以作为车道偏离提醒的雏形。</li>
+        <li><b>同类问题：</b>工业流水线上找零件边缘、读仪表指针、文档扫描找纸张四条边、球场找边线。共同点是“目标是规则的直线或边缘”。</li>
+        <li><b>可迁移的套路：</b>先缩小范围（掩膜）→ 把颜色变成亮度变化（灰度 + 边缘）→ 用投票找规则形状（霍夫）→ 按先验知识分组、求平均。</li>
+        <li><b>和深度学习的分工：</b>今天量产车上的车道识别多用神经网络做逐像素分割，能处理弯道、阴影和磨损的标线，但需要大量标注好的图片来训练；本案例不需要任何训练数据，每一步都能解释，适合入门和作为基线。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>RGB 颜色阈值 <span data-cell="6">第 6 格</span></li>
+        <li>三角形区域掩膜（三条边各用 <code>np.polyfit</code> 拟合成直线） <span data-cell="9">第 9 格</span></li>
+        <li>灰度化 + 5×5 高斯模糊 + Canny（低 180 / 高 240） <span data-cell="14">第 14 格</span></li>
+        <li>四边形掩膜 <code>cv2.fillPoly</code> + 概率霍夫变换 <code>cv2.HoughLinesP</code> <span data-cell="16">第 16 格</span></li>
+        <li>按斜率正负分左右、求平均、外推到 60% 高度 <span data-cell="19">第 19 格</span></li>
+        <li>整条流水线与逐帧视频处理 <span data-cell="20">第 20 格</span> <span data-cell="31">第 31 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者第 6 格用“R、G、B 都 ≥ 200”挑白线，结果黄线丢了。黄色的哪个通道不够亮？如果改成 HSV 颜色空间按“色相”挑，会更好吗？</li>
+      <li>第 13 格引用 Canny 的建议“低阈值 : 高阈值 = 1:2 到 1:3”，可代码用的是 180 : 240（约 1:1.3）。阈值定这么高，在阴天、隧道口这类低对比画面里会出什么问题？</li>
+      <li>第 15 格用“斜率 m – 截距 b”空间解释霍夫变换，而 OpenCV 实际用的是“距离 ρ – 角度 θ”（代码里的 <code>rho</code>、<code>theta</code> 参数）。为什么竖直的线逼着我们换成 ρ–θ？</li>
+      <li>第 19 格的 <code>slope_lines</code> 把所有 m &lt; 0 的线段都算作左线、直接求平均。如果画面里有一条接近水平的阴影边缘、或者某一帧右边一条线段都没找到，会发生什么？你会怎么改？</li>
+      <li>第 24 格读 PNG 用的是 matplotlib（通道顺序 RGBA），却用 <code>cv2.COLOR_BGRA2RGB</code> 转换，这会把红、蓝通道对调。这对后面的灰度和边缘有多大影响？对颜色筛选呢？</li>
+      <li>视频是一帧一帧独立处理的，帧与帧之间没有任何“记忆”。如果你是工程师，怎样让画出的车道线不抖？这和第一批“共享单车”“出租车”案例里的时间序列思路有什么相通之处？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Soumya Ranjan Behera，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。测试素材来自 Udacity CarND-LaneLines-P1 仓库。
+</footer>
+</main>
+
+<script src="nb/lane-line-detection.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const FAST = /fast/.test(location.search + location.hash);
+  if (FAST) document.body.classList.add("fast");
+
+  const W = 160, H = 90, HZ = 50;
+  function rngF(seed){let a=seed|0;return function(){a|=0;a=(a+0x6d2b79f5)|0;let t=Math.imul(a^(a>>>15),1|a);t=(t+Math.imul(t^(t>>>7),61|t))^t;return((t^(t>>>14))>>>0)/4294967296;};}
+  // 车道线：左黄实线 (22,89)->(76,HZ+2)，右白虚线 (146,89)->(86,HZ+2)
+  const LL = [30, 89, 79, HZ], RL = [150, 89, 83, HZ];
+  function xAt(L, y) { return L[0] + (L[2] - L[0]) * (y - L[1]) / (L[3] - L[1]); }
+  function makeRoad(opt) {
+    opt = opt || {};
+    const noise = opt.noise == null ? 10 : opt.noise, r = rngF(opt.seed || 7);
+    const R = new Float32Array(W * H), G = new Float32Array(W * H), B = new Float32Array(W * H), T = new Uint8Array(W * H); // T: 0 背景 1 黄线 2 白线 3 天空 4 路面 5 草
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x; let c, t;
+      if (y < HZ) { const cl = (Math.sin(x * 0.12 + 1) + Math.sin(x * 0.05 + y * 0.3)) > 1.1 && y < 30; c = cl ? [228, 232, 240] : [150 + y, 185 + y * 0.5, 230]; t = 3; }
+      else {
+        const half = (y - HZ + 3) * 1.95, cx = 81;
+        if (Math.abs(x - cx) < half) { c = [92, 92, 98]; t = 4;
+          const lw = 0.4 + 2.2 * (y - HZ) / (H - HZ);
+          if (Math.abs(x - xAt(LL, y)) < lw) { c = [222, 182, 38]; t = 1; }
+          const dash = Math.floor(60 / (y - HZ + 4)) % 2 === 0;
+          if (dash && Math.abs(x - xAt(RL, y)) < lw) { c = [236, 236, 236]; t = 2; }
+        } else { c = [74, 112, 52]; t = 5; }
+      }
+      const n = (r() - 0.5) * 2 * noise;
+      R[i] = clamp255(c[0] + n); G[i] = clamp255(c[1] + n); B[i] = clamp255(c[2] + n); T[i] = t;
+    }
+    return { R, G, B, T };
+  }
+  function clamp255(v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
+  function gray(img) { const g = new Float32Array(W * H); for (let i = 0; i < W * H; i++) g[i] = 0.299 * img.R[i] + 0.587 * img.G[i] + 0.114 * img.B[i]; return g; }
+  function gauss(g, k) {
+    if (k <= 1) return g.slice();
+    const s = 0.3 * ((k - 1) * 0.5 - 1) + 0.8, h = (k - 1) / 2, w = [];
+    let sum = 0; for (let i = -h; i <= h; i++) { const v = Math.exp(-i * i / (2 * s * s)); w.push(v); sum += v; }
+    for (let i = 0; i < w.length; i++) w[i] /= sum;
+    const tmp = new Float32Array(W * H), out = new Float32Array(W * H);
+    const cx = (x) => x < 0 ? -x : x >= W ? 2 * W - 2 - x : x, cy = (y) => y < 0 ? -y : y >= H ? 2 * H - 2 - y : y;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { let a = 0; for (let j = -h; j <= h; j++) a += w[j + h] * g[y * W + cx(x + j)]; tmp[y * W + x] = a; }
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { let a = 0; for (let j = -h; j <= h; j++) a += w[j + h] * tmp[cy(y + j) * W + x]; out[y * W + x] = a; }
+    return out;
+  }
+  function canny(g, lo, hi) {
+    const mag = new Float32Array(W * H), dir = new Uint8Array(W * H);
+    for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+      const p = (dx, dy) => g[(y + dy) * W + x + dx];
+      const gx = -p(-1, -1) - 2 * p(-1, 0) - p(-1, 1) + p(1, -1) + 2 * p(1, 0) + p(1, 1);
+      const gy = -p(-1, -1) - 2 * p(0, -1) - p(1, -1) + p(-1, 1) + 2 * p(0, 1) + p(1, 1);
+      const i = y * W + x; mag[i] = Math.abs(gx) + Math.abs(gy);   // OpenCV 默认 L1 梯度
+      let a = Math.atan2(gy, gx) * 180 / Math.PI; if (a < 0) a += 180;
+      dir[i] = a < 22.5 || a >= 157.5 ? 0 : a < 67.5 ? 1 : a < 112.5 ? 2 : 3;
+    }
+    const nms = new Float32Array(W * H);
+    const off = [[1, 0], [1, 1], [0, 1], [-1, 1]];
+    for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+      const i = y * W + x, m = mag[i]; if (!m) continue;
+      const [dx, dy] = off[dir[i]];
+      if (m >= mag[i + dy * W + dx] && m > mag[i - dy * W - dx]) nms[i] = m;
+    }
+    const E = new Uint8Array(W * H), st = [];
+    for (let i = 0; i < W * H; i++) if (nms[i] > hi) { E[i] = 2; st.push(i); }
+    while (st.length) { const i = st.pop(), x = i % W, y = (i / W) | 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const j = (y + dy) * W + x + dx; if (j >= 0 && j < W * H && !E[j] && nms[j] > lo) { E[j] = 1; st.push(j); } } }
+    return { E, mag, nms };
+  }
+  function inQuad(x, y) { // 作者 get_vertices 的比例：底 15%–95%，顶 45%–55%，顶高 60%
+    const yt = H * 0.6; if (y < yt || y > H) return false;
+    const t = (y - yt) / (H - yt);
+    const xl = W * (0.45 + (0.15 - 0.45) * t), xr = W * (0.55 + (0.95 - 0.55) * t);
+    return x >= xl && x <= xr;
+  }
+  function hough(E, mask, dTheta, thr) {
+    const nT = Math.round(180 / dTheta), D = Math.ceil(Math.hypot(W, H)), nR = 2 * D + 1;
+    const acc = new Uint16Array(nT * nR), cs = [], sn = [];
+    for (let t = 0; t < nT; t++) { const a = t * dTheta * Math.PI / 180; cs.push(Math.cos(a)); sn.push(Math.sin(a)); }
+    let pts = 0;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = y * W + x; if (!E[i] || (mask && !inQuad(x, y))) continue; pts++;
+      for (let t = 0; t < nT; t++) acc[t * nR + Math.round(x * cs[t] + y * sn[t]) + D]++; }
+    const lines = []; let mx = 0; const NT = Math.max(1, Math.round(6 / dTheta)), NR = 6;
+    for (let t = 0; t < nT; t++) for (let r = 0; r < nR; r++) { const v = acc[t * nR + r]; if (v > mx) mx = v; if (v < thr) continue;
+      let peak = true;
+      for (let dt = -NT; dt <= NT && peak; dt++) for (let dr = -NR; dr <= NR; dr++) { if (!dt && !dr) continue; const tt = (t + dt + nT) % nT, rr = r + dr; if (rr < 0 || rr >= nR) continue; const u = acc[tt * nR + rr]; if (u > v || (u === v && (dt < 0 || (dt === 0 && dr < 0)))) { peak = false; break; } }
+      if (peak) lines.push({ theta: t * dTheta, rho: r - D, votes: v }); }
+    lines.sort((a, b) => b.votes - a.votes);
+    return { acc, nT, nR, D, lines: lines.slice(0, 40), max: mx, pts };
+  }
+  // rho = x cos + y sin → 斜率形式 y = m x + c
+  function lineToMC(L) { const a = L.theta * Math.PI / 180, s = Math.sin(a), c = Math.cos(a); if (Math.abs(s) < 1e-6) return null; return { m: -c / s, c: L.rho / s }; }
+
+  /* ---------- 像素图 → SVG image ---------- */
+  function toURL(w, h, fn) {
+    const c = document.createElement("canvas"); c.width = w; c.height = h;
+    const g = c.getContext("2d"), d = g.createImageData(w, h);
+    for (let i = 0; i < w * h; i++) { const p = fn(i); d.data[i * 4] = p[0]; d.data[i * 4 + 1] = p[1]; d.data[i * 4 + 2] = p[2]; d.data[i * 4 + 3] = 255; }
+    g.putImageData(d, 0, 0);
+    return c.toDataURL();
+  }
+  function pic(svg, url, x, y, w, h) { return K.svg(svg, "image", { href: url, x, y, width: w, height: h, preserveAspectRatio: "none", class: "px" }); }
+  const ROAD = makeRoad({ noise: 10, seed: 7 });
+  const roadURL = toURL(W, H, (i) => [ROAD.R[i], ROAD.G[i], ROAD.B[i]]);
+  // 示意道路（矢量）：给动画用
+  function roadSketch(svg, x0, y0, s, opt) {
+    opt = opt || {};
+    const P = (x, y) => (x0 + x * s) + "," + (y0 + y * s);
+    K.svg(svg, "rect", { x: x0, y: y0, width: W * s, height: HZ * s, fill: "var(--c1)", opacity: 0.18 });
+    K.svg(svg, "rect", { x: x0, y: y0 + HZ * s, width: W * s, height: (H - HZ) * s, fill: "var(--c3)", opacity: 0.22 });
+    K.svg(svg, "polygon", { points: [P(81 - 3 * 1.95, HZ), P(81 + 3 * 1.95, HZ), P(81 + 42 * 1.95, H), P(81 - 42 * 1.95, H)].join(" "), fill: "var(--ink-3)", opacity: 0.55 });
+    const l = K.svg(svg, "line", { x1: x0 + LL[0] * s, y1: y0 + LL[1] * s, x2: x0 + LL[2] * s, y2: y0 + LL[3] * s, stroke: "var(--warn)", "stroke-width": 3 * s / 2 });
+    const r = K.svg(svg, "line", { x1: x0 + RL[0] * s, y1: y0 + RL[1] * s, x2: x0 + RL[2] * s, y2: y0 + RL[3] * s, stroke: "#ececec", "stroke-width": 3 * s / 2, "stroke-dasharray": `${8 * s} ${6 * s}` });
+    return { l, r, P };
+  }
+
+  const steps = [
+    {
+      at: 0, title: "目标：从车头画面里找出车道线", kicker: "第 0–4 格 · 任务与素材",
+      html: `<p>作者开篇说：人开车靠眼睛看路面上的线来决定方向，自动驾驶第一件事也是让程序自动找出车道线。<span data-cell="0">第 0 格</span></p><p>这份 notebook <b>不训练任何模型</b>，全部是人写的图像处理规则（OpenCV 是一个开源的图像处理工具箱）。动画里是整条流水线：前两步是试水，后面六步组成最终方案。素材从 Udacity 课程仓库下载 <span data-cell="3">第 3 格</span>。</p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        roadSketch(svg, 20, 40, 1.6);
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, class: "muted" }, "车头摄像头画面（示意）");
+        const names = ["灰度", "高斯模糊", "Canny 边缘", "四边形掩膜", "霍夫找线段", "分左右·平均·外推"];
+        const nodes = names.map((n, i) => { const g = K.node(svg, 300 + (i % 2) * 210, 40 + Math.floor(i / 2) * 82, 190, 54, (i + 1) + ". " + n, { fill: "color-mix(in srgb, var(--c2) 12%, var(--panel))", stroke: "var(--c2)" }); g.style.opacity = 0; return g; });
+        const pre = K.svg(svg, "text", { x: 20, y: 250, "font-size": 13, fill: "var(--ink-3)" }, "先试水：颜色筛选 + 三角形区域（第 6–11 格）");
+        const tip = K.svg(svg, "text", { x: 300, y: 300, "font-size": 14, "font-weight": 700, fill: "var(--accent)" }, "每一步都是人定的规则，没有“学习”");
+        pre.style.opacity = 0; tip.style.opacity = 0;
+        (async () => {
+          if (!(await ctx.tween(400, (t) => (pre.style.opacity = t)))) return;
+          for (const n of nodes) if (!(await ctx.tween(320, (t) => (n.style.opacity = t)))) return;
+          await ctx.tween(500, (t) => (tip.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "第一招：按颜色挑出“很白”的像素", kicker: "第 5–7 格 · 颜色阈值",
+      html: `<p>白色是 (255,255,255)。作者规定：<b>R、G、B 三个通道都 ≥ 200</b> 的像素才保留，只要有一个通道低于 200 就涂成黑色。代码里用 <code>|</code>（或）把三个“低于阈值”的条件拼起来。<span data-cell="6">第 6 格</span></p><p>动画逐个检查几种典型颜色：白线、路面、草地、蓝天、白云、黄线。作者在白线图上的结论是“能清楚看到车道线”。<span data-cell="7">第 7 格</span></p>`,
+      cells: [6], highlight: ["rgb_threshold", "color_select[thresholds] = [0,0,0]"],
+      draw(svg, ctx) {
+        const sw = [["白线", [236, 236, 236]], ["路面", [92, 92, 98]], ["草地", [74, 112, 52]], ["蓝天", [165, 205, 230]], ["白云", [228, 232, 240]], ["黄线", [222, 182, 38]]];
+        const ax = { x0: 150, w: 420 };
+        const sx = (v) => ax.x0 + (v / 255) * ax.w;
+        K.svg(svg, "line", { x1: sx(200), y1: 20, x2: sx(200), y2: 320, stroke: "var(--bad)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+        K.svg(svg, "text", { x: sx(200) + 4, y: 16, "font-size": 12, fill: "var(--bad)" }, "阈值 200");
+        const rows = sw.map((s, i) => {
+          const y = 30 + i * 49;
+          K.svg(svg, "rect", { x: 20, y, width: 36, height: 36, rx: 4, fill: `rgb(${s[1].join(",")})`, stroke: "var(--line)" });
+          K.svg(svg, "text", { x: 64, y: y + 23, "font-size": 13 }, s[0]);
+          const bars = s[1].map((v, c) => K.svg(svg, "rect", { x: ax.x0, y: y + c * 12, width: 0, height: 10, fill: ["var(--c6)", "var(--c3)", "var(--c1)"][c], opacity: 0.85 }));
+          const res = K.svg(svg, "text", { x: 600, y: y + 23, "font-size": 14, "font-weight": 700 }, "");
+          return { s, bars, res };
+        });
+        K.svg(svg, "text", { x: ax.x0, y: 336, "font-size": 11, class: "muted" }, "三根条 = R / G / B 亮度（0–255），全部越过红线才保留");
+        (async () => {
+          for (const r of rows) {
+            if (!(await ctx.tween(380, (t) => r.bars.forEach((b, c) => K.set(b, { width: (r.s[1][c] / 255) * ax.w * t }))))) return;
+            const ok = r.s[1].every((v) => v >= 200);
+            r.res.textContent = ok ? "保留" : "涂黑";
+            K.set(r.res, { fill: ok ? "var(--good)" : "var(--ink-3)" });
+          }
+        })();
+      },
+    },
+    {
+      title: "第二招：只看车前方的三角形区域", kicker: "第 8–10 格 · 区域掩膜",
+      html: `<p>白云也能通过颜色检查。作者的办法是利用一个常识：<b>摄像头固定在车上，车道线总出现在画面下方中间的那一块</b>。<span data-cell="8">第 8 格</span></p><p>他用三个顶点（左下、右下、顶点）围成三角形，再用 <code>np.polyfit</code> 把三条边各拟合成一条直线 y = Ax + B。一个像素在“两条斜边的下方、底边的上方”，就算在三角形里。最后只保留“颜色合格 <b>且</b> 在三角形里”的像素，涂成绿色。<span data-cell="9">第 9 格</span></p>`,
+      cells: [9], highlight: ["np.polyfit", "region_thresholds"],
+      draw(svg, ctx) {
+        const s = 2, x0 = 40, y0 = 40;
+        pic(svg, roadURL, x0, y0, W * s, H * s);
+        const tri = [[100 / 6, 539 / 6], [950 / 6, 539 / 6], [480 / 6, 290 / 6]];
+        const poly = K.svg(svg, "polygon", { points: tri.map((p) => (x0 + p[0] * s) + "," + (y0 + p[1] * s)).join(" "), fill: "none", stroke: "var(--bad)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        poly.style.opacity = 0;
+        K.svg(svg, "text", { x: x0, y: 30, "font-size": 13, class: "muted" }, "生成的道路小图（示意）+ 作者的三角形（按比例缩小）");
+        const fitL = (x) => tri[0][1] + (tri[2][1] - tri[0][1]) * (x - tri[0][0]) / (tri[2][0] - tri[0][0]);
+        const fitR = (x) => tri[1][1] + (tri[2][1] - tri[1][1]) * (x - tri[1][0]) / (tri[2][0] - tri[1][0]);
+        const inside = (x, y) => y > fitL(x) && y > fitR(x) && y < tri[0][1];
+        const lab = [["YY > 左斜边", 380, 80], ["YY > 右斜边", 380, 104], ["YY < 底边", 380, 128]].map((d) => K.svg(svg, "text", { x: d[1], y: d[2], "font-size": 14, "font-family": "var(--mono)" }, d[0]));
+        K.svg(svg, "text", { x: 380, y: 160, "font-size": 13 }, "三个条件同时满足 = 在三角形里");
+        const r = K.rng(4), dots = [];
+        for (let i = 0; i < 70; i++) { const x = r() * W, y = r() * H; dots.push({ x, y, e: K.svg(svg, "circle", { cx: x0 + x * s, cy: y0 + y * s, r: 0, fill: inside(x, y) ? "var(--good)" : "var(--ink-3)", stroke: "var(--panel)" }) }); }
+        const res = K.svg(svg, "text", { x: 380, y: 210, "font-size": 14, "font-weight": 700, fill: "var(--good)" }, "");
+        (async () => {
+          if (!(await ctx.tween(600, (t) => (poly.style.opacity = t)))) return;
+          if (!(await ctx.tween(1600, (t) => dots.forEach((d, i) => K.set(d.e, { r: K.clamp(t * 70 - i, 0, 1) * 4 }))))) return;
+          res.textContent = `绿点 ${dots.filter((d) => inside(d.x, d.y)).length} 个在区域内，其余不管颜色如何一律丢掉`;
+        })();
+      },
+    },
+    {
+      title: "翻车：黄线不见了", kicker: "第 11–12 格 · 方法的边界",
+      html: `<p>作者把同一段代码原样用在 <code>solidYellowLeft.jpg</code> 上，标题自嘲“真的检测成功了吗？”，结果<b>黄色车道线没被检测出来</b>。<span data-cell="10">第 10 格</span> <span data-cell="12">第 12 格</span></p><p>原因很简单：黄色 = 红 + 绿，蓝色通道很暗，过不了“B ≥ 200”这一关。颜色规则太死板，路面换个颜色、天一阴就失效。作者接下来换了思路：<b>不看是什么颜色，而看哪里的亮度突然变化</b>，也就是“边缘”。</p>`,
+      cells: [11],
+      draw(svg, ctx) {
+        const c = [222, 182, 38], names = ["R 红", "G 绿", "B 蓝"], cols = ["var(--c6)", "var(--c3)", "var(--c1)"];
+        K.svg(svg, "rect", { x: 40, y: 60, width: 120, height: 120, rx: 8, fill: `rgb(${c.join(",")})` });
+        K.svg(svg, "text", { x: 100, y: 205, "text-anchor": "middle", "font-size": 13 }, "黄色车道线（示意值）");
+        const ax = K.axes(svg, { x: 240, y: 40, w: 420, h: 200 }, [0, 3], [0, 255], { xticks: 0, yticks: 5, yfmt: (v) => Math.round(v) });
+        const bars = c.map((v, i) => { K.svg(svg, "text", { x: ax.sx(i + 0.5), y: 258, "text-anchor": "middle", "font-size": 13 }, names[i]); return K.svg(svg, "rect", { x: ax.sx(i + 0.2), y: ax.sy(0), width: ax.sx(0.6) - ax.sx(0), height: 0, fill: cols[i] }); });
+        K.svg(svg, "line", { x1: 240, x2: 660, y1: ax.sy(200), y2: ax.sy(200), stroke: "var(--bad)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+        K.svg(svg, "text", { x: 664, y: ax.sy(200) + 4, "font-size": 12, fill: "var(--bad)" }, "200");
+        const x = K.svg(svg, "text", { x: ax.sx(2.5), y: ax.sy(60), "text-anchor": "middle", "font-size": 30, "font-weight": 700, fill: "var(--bad)" }, "✗");
+        x.style.opacity = 0;
+        const msg = K.svg(svg, "text", { x: 240, y: 300, "font-size": 14, "font-weight": 700 }, "");
+        ctx.tween(1200, (t) => bars.forEach((b, i) => K.set(b, { y: ax.sy(c[i] * t), height: ax.sy(0) - ax.sy(c[i] * t) })))
+          .then((ok) => ok && ctx.tween(400, (t) => (x.style.opacity = t)))
+          .then((ok) => { if (ok) msg.textContent = "蓝色通道只有 38，远低于 200 → 整条黄线被涂黑"; });
+      },
+    },
+    {
+      title: "灰度化与高斯模糊：先把画面变简单、变平滑", kicker: "第 13–14 格 · 预处理",
+      html: `<p>找边缘之前，作者先做两件事 <span data-cell="14">第 14 格</span>：</p><ul class="tight"><li><b>灰度化</b> <code>cvtColor(..., RGB2GRAY)</code>：三个通道按权重合成一个亮度值。黄线虽然蓝色暗，但整体亮度仍明显高于灰色路面。</li><li><b>高斯模糊</b> <code>GaussianBlur</code>，核大小 5：每个像素换成它周围 5×5 邻居的加权平均，中间权重大、边上权重小，用来压掉路面上细碎的噪点。核必须是奇数。<span data-cell="13">第 13 格</span></li></ul><p>动画里一个 5×5 的窗口在带噪点的小图上滑过，右边是平均后的结果。</p>`,
+      cells: [14], highlight: ["cv2.COLOR_RGB2GRAY", "GaussianBlur"],
+      draw(svg, ctx) {
+        const n = 12, cs = 20, r = K.rng(12), A = [];
+        for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) A.push(K.clamp((x >= 5 && x <= 6 ? 210 : 80) + (r() - 0.5) * 60, 0, 255));
+        const s = 0.3 * ((5 - 1) * 0.5 - 1) + 0.8, w = []; let sum = 0;
+        for (let j = -2; j <= 2; j++) for (let i = -2; i <= 2; i++) { const v = Math.exp(-(i * i + j * j) / (2 * s * s)); w.push(v); sum += v; }
+        const at = (x, y) => A[K.clamp(y, 0, n - 1) * n + K.clamp(x, 0, n - 1)];
+        const B = A.map((_, k) => { const x = k % n, y = (k / n) | 0; let a = 0; for (let j = -2; j <= 2; j++) for (let i = -2; i <= 2; i++) a += w[(j + 2) * 5 + i + 2] * at(x + i, y + j); return a / sum; });
+        const g = (v) => `rgb(${v | 0},${v | 0},${v | 0})`;
+        const X1 = 40, X2 = 400, Y0 = 60;
+        A.forEach((v, k) => K.svg(svg, "rect", { x: X1 + (k % n) * cs, y: Y0 + ((k / n) | 0) * cs, width: cs - 1, height: cs - 1, fill: g(v) }));
+        const out = B.map((v, k) => K.svg(svg, "rect", { x: X2 + (k % n) * cs, y: Y0 + ((k / n) | 0) * cs, width: cs - 1, height: cs - 1, fill: "var(--panel-2)" }));
+        K.svg(svg, "text", { x: X1, y: 48, "font-size": 13, class: "muted" }, "灰度图（中间两列是亮的车道线，示意）");
+        K.svg(svg, "text", { x: X2, y: 48, "font-size": 13, class: "muted" }, "5×5 高斯加权平均之后");
+        const win = K.svg(svg, "rect", { x: X1, y: Y0, width: cs * 5, height: cs * 5, fill: "none", stroke: "var(--accent)", "stroke-width": 3 });
+        ctx.tween(3200, (t) => {
+          const k = Math.min(n * n - 1, Math.floor(t * n * n)), x = k % n, y = (k / n) | 0;
+          K.set(win, { x: X1 + (x - 2) * cs, y: Y0 + (y - 2) * cs });
+          for (let q = 0; q <= k; q++) K.set(out[q], { fill: g(B[q]) });
+        });
+      },
+    },
+    {
+      title: "Canny 边缘：只留下亮度“陡变”的细线", kicker: "第 13–14 格 · 边缘检测",
+      html: `<p>Canny 先算每个像素的<b>梯度</b>（和邻居相比亮度变化有多大），再用两个阈值筛选 <span data-cell="13">第 13 格</span>：</p><ul class="tight"><li>梯度 &gt; <b>高阈值</b>：强边缘，一定保留；</li><li>梯度 &lt; <b>低阈值</b>：丢掉；</li><li>夹在中间：只有和强边缘连在一起才保留（“滞后阈值”）。</li></ul><p>作者用的是低 180、高 240 <span data-cell="14">第 14 格</span>。注意他在第 13 格引用 Canny 本人的建议“低:高 = 1:2 到 1:3”，代码里却是 1:1.33，而且两个数都偏高，只会留下对比特别强的边。</p>`,
+      cells: [14], highlight: ["cv2.Canny", "low_threshold = 180", "high_threshold = 240"],
+      draw(svg, ctx) {
+        const N = 30, prof = [];
+        for (let i = 0; i < N; i++) prof.push(90 + (i >= 9 && i <= 12 ? 120 : 0) + (i >= 19 && i <= 20 ? 55 : 0) + Math.sin(i * 1.7) * 6);
+        const grad = prof.map((v, i) => (i ? Math.abs(v - prof[i - 1]) * 2 : 0));
+        const ax1 = K.axes(svg, { x: 60, y: 20, w: 600, h: 110 }, [0, N], [0, 255], { xticks: 0, yticks: 2, ylabel: "亮度" });
+        const ax2 = K.axes(svg, { x: 60, y: 170, w: 600, h: 130 }, [0, N], [0, 260], { xticks: 0, yticks: 2, ylabel: "梯度" });
+        let d = ""; prof.forEach((v, i) => (d += (i ? "L" : "M") + ax1.sx(i + 0.5) + "," + ax1.sy(v)));
+        const path = K.svg(svg, "path", { d, fill: "none", stroke: "var(--ink)", "stroke-width": 2 });
+        const len = 2000; K.set(path, { "stroke-dasharray": len + " " + len }); path.style.strokeDashoffset = len;
+        const hi = 150, lo = 70;
+        K.svg(svg, "line", { x1: 60, x2: 660, y1: ax2.sy(hi), y2: ax2.sy(hi), stroke: "var(--bad)", "stroke-dasharray": "5 3" });
+        K.svg(svg, "line", { x1: 60, x2: 660, y1: ax2.sy(lo), y2: ax2.sy(lo), stroke: "var(--warn)", "stroke-dasharray": "5 3" });
+        K.svg(svg, "text", { x: 664, y: ax2.sy(hi) + 4, "font-size": 11, fill: "var(--bad)" }, "高");
+        K.svg(svg, "text", { x: 664, y: ax2.sy(lo) + 4, "font-size": 11, fill: "var(--warn)" }, "低");
+        const bars = grad.map((g, i) => K.svg(svg, "rect", { x: ax2.sx(i + 0.15), y: ax2.sy(0), width: ax2.sx(0.7) - ax2.sx(0), height: 0, fill: "var(--ink-3)" }));
+        K.svg(svg, "text", { x: 60, y: 330, "font-size": 12, class: "muted" }, "横穿画面的一行像素（示意）：红=强边缘保留，橙=介于两阈值之间（孤立的被丢弃），灰=丢弃");
+        ctx.tween(1200, (t) => (path.style.strokeDashoffset = len * (1 - t)))
+          .then((ok) => ok && ctx.tween(1200, (t) => bars.forEach((b, i) => K.set(b, { y: ax2.sy(grad[i] * t), height: ax2.sy(0) - ax2.sy(grad[i] * t) }))))
+          .then((ok) => ok && ctx.wait(300))
+          .then((ok) => { if (ok) bars.forEach((b, i) => K.set(b, { fill: grad[i] > hi ? "var(--bad)" : grad[i] > lo ? "var(--warn)" : "var(--ink-3)" })); });
+      },
+    },
+    {
+      title: "霍夫变换：让边缘点给直线“投票”", kicker: "第 15–17 格 · 找直线",
+      html: `<p>边缘图只是一堆白点，程序还不知道哪些点连成一条线。<b>霍夫变换</b>换个角度看问题：过一个点的所有直线，在“参数空间”里是一条曲线；同一条直线上的很多点，它们的曲线会交于同一处。交点票数最多的，就是图里最“有人支持”的直线。<span data-cell="15">第 15 格</span></p><p>作者的文字用“斜率 m – 截距 b”空间来解释；OpenCV 实际用“距离 ρ – 角度 θ”（代码里 <code>rho=1</code> 像素、<code>theta=π/180</code> 即 1°），因为竖直线的斜率是无穷大，m–b 表示不了。动画画的是 ρ–θ 空间。</p><p>这一格还先用 <code>fillPoly</code> 做了四边形掩膜，再调用 <code>HoughLinesP</code>（“概率”版本，直接输出线段端点），投票阈值只设了 2、最短线段 4 像素。<span data-cell="16">第 16 格</span> 作者随后宣布：没用深度学习就找到了车道线。<span data-cell="17">第 17 格</span></p>`,
+      cells: [16], highlight: ["cv2.fillPoly", "cv2.HoughLinesP", "theta = np.pi/180"],
+      draw(svg, ctx) {
+        const pts = [[40, 230], [80, 200], [120, 170], [160, 140], [200, 110], [70, 120]];
+        K.svg(svg, "rect", { x: 20, y: 40, width: 240, height: 260, fill: "var(--panel-2)", stroke: "var(--line)" });
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, class: "muted" }, "图像空间：5 个共线点 + 1 个杂点");
+        pts.forEach((p, i) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 5, fill: i === 5 ? "var(--ink-3)" : "var(--c6)" }));
+        const ax = K.axes(svg, { x: 330, y: 40, w: 360, h: 236 }, [0, 180], [-260, 260], { xticks: 4, yticks: 4, xlabel: "角度 θ（度）", ylabel: "距离 ρ" });
+        K.svg(svg, "text", { x: 330, y: 30, "font-size": 13, class: "muted" }, "参数空间：每个点 = 一条曲线 ρ = x·cosθ + y·sinθ");
+        const curves = pts.map((p, i) => {
+          let d = "";
+          for (let t = 0; t <= 180; t += 2) { const a = (t * Math.PI) / 180, rr = (p[0] - 20) * Math.cos(a) + (p[1] - 40) * Math.sin(a); d += (t ? "L" : "M") + ax.sx(t) + "," + ax.sy(rr); }
+          const e = K.svg(svg, "path", { d, fill: "none", stroke: i === 5 ? "var(--ink-3)" : "var(--c6)", "stroke-width": 1.6, opacity: 0.85 });
+          K.set(e, { "stroke-dasharray": "1200 1200" }); e.style.strokeDashoffset = 1200; return e;
+        });
+        // 共线点所在直线：方向 (40,-30)，法线角
+        const th = Math.atan2(40, 30), rho = (40 - 20) * Math.cos(th) + (230 - 40) * Math.sin(th);
+        const star = K.svg(svg, "circle", { cx: ax.sx((th * 180) / Math.PI), cy: ax.sy(rho), r: 0, fill: "none", stroke: "var(--accent)", "stroke-width": 3 });
+        const line = K.svg(svg, "line", { x1: 25, y1: 241.25, x2: 255, y2: 68.75, stroke: "var(--accent)", "stroke-width": 2.5 });
+        line.style.opacity = 0;
+        const txt = K.svg(svg, "text", { x: 330, y: 334, "font-size": 13, "font-weight": 700, fill: "var(--accent)" }, "");
+        (async () => {
+          for (const c of curves) if (!(await ctx.tween(450, (t) => (c.style.strokeDashoffset = 1200 * (1 - t))))) return;
+          if (!(await ctx.tween(500, (t) => K.set(star, { r: 4 + t * 10 })))) return;
+          txt.textContent = "5 条曲线交于一点 → 得 5 票 → 对应左边那条直线";
+          await ctx.tween(500, (t) => (line.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "工具函数：把一堆短线段合成左右两条长线", kicker: "第 18–19 格 · 斜率分组与外推",
+      html: `<p>作者先列出最终流水线的六步 <span data-cell="18">第 18 格</span>，再写好一组工具函数 <span data-cell="19">第 19 格</span>。最关键的是 <code>slope_lines</code>：</p><ul class="tight"><li>对霍夫找到的每条线段算斜率 m 和截距 c。图像坐标 y 朝下，所以<b>左线像“/”，斜率为负；右线像“\\”，斜率为正</b>。</li><li>左右两组各自对 (m, c) 求平均，得到一条代表线；</li><li>从图片底部外推到 60% 高度处，画成红线，中间填上绿色多边形。</li></ul><p><code>get_vertices</code> 用比例定义掩膜四边形：底边从宽度 15% 到 95%，顶边在 60% 高度、宽度 45% 到 55%。</p>`,
+      cells: [18, 19], highlight: ["def slope_lines", "if m < 0:", "np.mean(left_lines, axis=0)", "y2= int(rows*0.6)", "def get_vertices"],
+      draw(svg, ctx) {
+        const s = 4, x0 = 40, y0 = -120;
+        K.svg(svg, "rect", { x: x0, y: y0 + HZ * s, width: W * s, height: (H - HZ) * s, fill: "var(--panel-2)", stroke: "var(--line)" });
+        const r = K.rng(5), segs = [];
+        const mk = (L, n, col) => { for (let i = 0; i < n; i++) { const ya = 58 + r() * 26, yb = ya + 3 + r() * 4, j = (r() - 0.5) * 5; segs.push({ x1: xAt(L, ya) + j, y1: ya, x2: xAt(L, yb) + j, y2: yb, col }); } };
+        mk(LL, 7); mk(RL, 6);
+        const lab = K.svg(svg, "text", { x: x0, y: 30, "font-size": 13, class: "muted" }, "霍夫找到的短线段（示意）");
+        const yb = H, yt = H * 0.6;
+        const fit = (L) => { const m = (L[3] - L[1]) / (L[2] - L[0]); return { m, c: L[1] - m * L[0] }; };
+        const lf = fit(LL), rf = fit(RL), X = (f, y) => (y - f.c) / f.m;
+        const poly = K.svg(svg, "polygon", { points: [[X(lf, yb), yb], [X(lf, yt), yt], [X(rf, yt), yt], [X(rf, yb), yb]].map((p) => (x0 + p[0] * s) + "," + (y0 + p[1] * s)).join(" "), fill: "var(--good)", opacity: 0 });
+        const big = [lf, rf].map((f) => K.svg(svg, "line", { x1: x0 + X(f, yb) * s, y1: y0 + yb * s, x2: x0 + X(f, yb) * s, y2: y0 + yb * s, stroke: "var(--bad)", "stroke-width": 4, opacity: 0.8 }));
+        const els = segs.map((g) => K.svg(svg, "line", { x1: x0 + g.x1 * s, y1: y0 + g.y1 * s, x2: x0 + g.x2 * s, y2: y0 + g.y2 * s, stroke: "var(--ink)", "stroke-width": 3 }));
+        K.svg(svg, "line", { x1: x0, x2: x0 + W * s, y1: y0 + yt * s, y2: y0 + yt * s, stroke: "var(--ink-3)", "stroke-dasharray": "4 4" });
+        K.svg(svg, "text", { x: x0 + W * s - 4, y: y0 + yt * s - 6, "text-anchor": "end", "font-size": 11, class: "muted" }, "60% 高度");
+        (async () => {
+          if (!(await ctx.wait(500))) return;
+          segs.forEach((g, i) => { const m = (g.y2 - g.y1) / (g.x2 - g.x1); K.set(els[i], { stroke: m < 0 ? "var(--c1)" : "var(--c4)" }); });
+          lab.textContent = "按斜率分组：蓝 = m<0（左线 /），紫 = m≥0（右线 \\）";
+          if (!(await ctx.wait(900))) return;
+          lab.textContent = "各组求平均 → 从底部外推到 60% 高度 → 填绿色";
+          if (!(await ctx.tween(1000, (t) => [lf, rf].forEach((f, i) => K.set(big[i], { x2: x0 + X(f, K.lerp(yb, yt, t)) * s, y2: y0 + K.lerp(yb, yt, t) * s }))))) return;
+          await ctx.tween(500, (t) => K.set(poly, { opacity: 0.35 * t }));
+        })();
+      },
+    },
+    {
+      title: "组装流水线：六步串成一个函数", kicker: "第 20 格 · 最终方案",
+      html: `<p><code>lane_finding_pipeline(image)</code> 把前面的工具串起来 <span data-cell="20">第 20 格</span>：灰度 → 高斯模糊（核 5）→ Canny（180 / 240）→ 四边形掩膜 → 霍夫（阈值 20、最短线段 20、最大间隙 180）→ 与原图按 0.8 : 1 叠加。</p><p>注意两点：最终方案<b>完全没用</b>第一招的颜色筛选；霍夫参数比第 16 格严格得多（阈值从 2 提到 20），而最大间隙 180 像素允许把虚线的几段连成一条。</p>`,
+      cells: [20], highlight: ["threshold = 20", "max_line_gap = 180", "low_threshold = 180"],
+      draw(svg, ctx) {
+        const g = gauss(gray(ROAD), 5), E = canny(g, 180, 240).E;
+        const s = 1.25, imgs = [
+          ["原图", roadURL],
+          ["灰度+模糊", toURL(W, H, (i) => [g[i], g[i], g[i]])],
+          ["Canny", toURL(W, H, (i) => (E[i] ? [255, 255, 255] : [0, 0, 0]))],
+          ["掩膜后", toURL(W, H, (i) => (E[i] && inQuad(i % W, (i / W) | 0) ? [255, 255, 255] : [0, 0, 0]))],
+        ];
+        const els = imgs.map((d, i) => {
+          const x = 20 + (i % 2) * 220, y = 30 + Math.floor(i / 2) * 150;
+          const gg = K.svg(svg, "g"); pic(gg, d[1], x, y, W * s, H * s);
+          K.svg(gg, "text", { x, y: y + H * s + 16, "font-size": 12 }, (i + 1) + ". " + d[0]);
+          gg.style.opacity = 0; return gg;
+        });
+        const h = hough(E, true, 1, 12);
+        const fin = K.svg(svg, "g"); fin.style.opacity = 0;
+        pic(fin, roadURL, 470, 100, W * 1.45, H * 1.45);
+        const L = [], R = [];
+        h.lines.forEach((l) => { const mc = lineToMC(l); if (mc) (mc.m < 0 ? L : R).push(mc); });
+        const avg = (A) => A.length ? { m: A.reduce((a, b) => a + b.m, 0) / A.length, c: A.reduce((a, b) => a + b.c, 0) / A.length } : null;
+        [avg(L), avg(R)].forEach((f) => { if (!f) return; const X = (y) => (y - f.c) / f.m; K.svg(fin, "line", { x1: 470 + X(H) * 1.45, y1: 100 + H * 1.45, x2: 470 + X(H * 0.6) * 1.45, y2: 100 + H * 0.6 * 1.45, stroke: "var(--bad)", "stroke-width": 4 }); });
+        K.svg(fin, "text", { x: 470, y: 90, "font-size": 12 }, "5–6. 霍夫 + 平均外推，叠回原图");
+        K.svg(svg, "text", { x: 470, y: 270, "font-size": 11, class: "muted" }, "（浏览器里真跑了一遍，图是生成的示意小图）");
+        (async () => { for (const e of els) if (!(await ctx.tween(350, (t) => (e.style.opacity = t)))) return; await ctx.tween(500, (t) => (fin.style.opacity = t)); })();
+      },
+    },
+    {
+      title: "换图测试：别的照片、别的城市", kicker: "第 21–24 格 · 泛化检查",
+      html: `<p>作者把流水线在 <code>test_images</code> 里的每一张图上跑一遍，左边原图、右边结果并排显示 <span data-cell="22">第 22 格</span>；又拿一张德里东部高速的照片来试 <span data-cell="24">第 24 格</span>。</p><p>这里的隐患在于掩膜是<b>按画面比例写死的</b>：只要摄像头装得高一点、偏一点，或者车在变道，车道线就可能跑出四边形。动画演示了这种情况（示意）。另外，第 24 格用 matplotlib 读 PNG（通道顺序是 RGBA），却按 BGRA 转换，红蓝两个通道被对调了。</p>`,
+      cells: [22, 24], highlight: ["lane_finding_pipeline(image)", "COLOR_BGRA2RGB"],
+      draw(svg, ctx) {
+        const box = (x, shift, title) => {
+          const g = K.svg(svg, "g");
+          K.svg(g, "rect", { x, y: 50, width: 300, height: 200, fill: "var(--panel-2)", stroke: "var(--line)" });
+          K.svg(g, "polygon", { points: `${x + 150 + shift - 12},110 ${x + 150 + shift + 12},110 ${x + 280 + shift},250 ${x + 20 + shift},250`, fill: "var(--ink-3)", opacity: 0.5 });
+          K.svg(g, "line", { x1: x + 60 + shift, y1: 250, x2: x + 145 + shift, y2: 112, stroke: "var(--warn)", "stroke-width": 4 });
+          K.svg(g, "line", { x1: x + 240 + shift, y1: 250, x2: x + 155 + shift, y2: 112, stroke: "#ececec", "stroke-width": 4, "stroke-dasharray": "14 10" });
+          const q = K.svg(g, "polygon", { points: `${x + 45},250 ${x + 135},170 ${x + 165},170 ${x + 285},250`, fill: "none", stroke: "var(--bad)", "stroke-width": 2.5, "stroke-dasharray": "6 4" });
+          K.svg(g, "text", { x, y: 40, "font-size": 13 }, title);
+          return q;
+        };
+        box(30, 0, "摄像头装在正中：车道线在掩膜里");
+        const q2 = box(390, 0, "摄像头偏一点 / 车在变道");
+        const t2 = K.svg(svg, "text", { x: 390, y: 285, "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "");
+        // 第二张图的道路整体平移
+        const road2 = q2.parentNode.querySelectorAll("polygon")[0], ls = q2.parentNode.querySelectorAll("line");
+        ctx.wait(600).then((ok) => ok && ctx.tween(1600, (t) => {
+          const d = 70 * t;
+          road2.setAttribute("transform", `translate(${d},0)`); ls.forEach((l) => l.setAttribute("transform", `translate(${d},0)`));
+        })).then((ok) => { if (ok) t2.textContent = "右线跑出了红色虚线框 → 霍夫找不到它"; });
+        K.svg(svg, "text", { x: 30, y: 320, "font-size": 12, class: "muted" }, "红色虚线 = get_vertices 按比例写死的掩膜（示意）");
+      },
+    },
+    {
+      title: "视频：每一帧都跑一遍流水线", kicker: "第 25–37 格 · 实时处理",
+      html: `<p>视频就是一秒几十张连续的图片。作者用 moviepy 的 <code>fl_image(lane_finding_pipeline)</code> 把每一帧交给流水线处理，再写成新视频，分别处理白线视频和黄线视频 <span data-cell="31">第 31 格</span> <span data-cell="35">第 35 格</span>，并用 <code>%time</code> 计时。</p><p>每一帧是<b>独立</b>处理的：上一帧找到的线不会帮助下一帧。所以虚线的空档、路面反光都可能让某一帧的线突然歪一下（动画示意这种抖动）。实际系统一般会对相邻几帧做平滑。</p>`,
+      at: 25, cells: [31, 35], highlight: ["fl_image(lane_finding_pipeline)"],
+      draw(svg, ctx) {
+        const r = K.rng(8), frames = [];
+        for (let i = 0; i < 6; i++) {
+          const x = 20 + i * 115, g = K.svg(svg, "g");
+          K.svg(g, "rect", { x, y: 60, width: 105, height: 70, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" });
+          K.svg(g, "text", { x: x + 4, y: 74, "font-size": 10, class: "muted" }, "帧 " + (i + 1));
+          frames.push({ x, g });
+        }
+        K.svg(svg, "text", { x: 20, y: 40, "font-size": 13, class: "muted" }, "视频 = 一串图片；每张都单独过一遍六步流水线（示意）");
+        const ax = K.axes(svg, { x: 60, y: 180, w: 600, h: 120 }, [0, 30], [-12, 12], { xticks: 0, yticks: 2, ylabel: "左线角度偏差" });
+        K.svg(svg, "text", { x: 60, y: 325, "font-size": 12, class: "muted" }, "逐帧独立估计（灰）会抖；对最近 5 帧取平均（蓝）更稳。示意数据");
+        const raw = [], sm = [];
+        for (let i = 0; i < 30; i++) raw.push((r() - 0.5) * 8 + (i % 9 === 4 ? 9 : 0));
+        for (let i = 0; i < 30; i++) { const a = raw.slice(Math.max(0, i - 4), i + 1); sm.push(a.reduce((p, q) => p + q, 0) / a.length); }
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--ink-3)", "stroke-width": 1.8 }), p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        (async () => {
+          for (const f of frames) {
+            const ang = (r() - 0.5) * 0.5;
+            const l = K.svg(f.g, "line", { x1: f.x + 25, y1: 128, x2: f.x + 25, y2: 128, stroke: "var(--bad)", "stroke-width": 3 });
+            if (!(await ctx.tween(260, (t) => K.set(l, { x2: f.x + 25 + (25 + ang * 40) * t, y2: 128 - 50 * t })))) return;
+          }
+          await ctx.tween(1600, (t) => {
+            const n = Math.max(2, Math.round(t * 30)); let a = "", b = "";
+            for (let i = 0; i < n; i++) { a += (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(raw[i]); b += (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(sm[i]); }
+            p1.setAttribute("d", a); p2.setAttribute("d", b);
+          });
+        })();
+      },
+    },
+    {
+      title: "局限：弯道、没有标线，以及深度学习怎么做", kicker: "第 38–41 格 · 作者自述的不足",
+      html: `<p>作者最后坦白了两条局限 <span data-cell="38">第 38 格</span>：①霍夫变换只适合直线，现实中有弯道；②很多道路根本没有车道标线。</p><p>动画左边是一条弯道：直线只能贴住近处一段，远处就偏了。常见的改进有两类：</p><ul class="tight"><li><b>还用传统方法</b>：先做“鸟瞰图”透视变换，再用二次曲线拟合车道像素（Udacity 课程的进阶项目就是这个思路）；</li><li><b>改用深度学习</b>：用大量人工标好车道的图片训练分割网络，逐像素判断“这里是不是车道线”，能处理弯道、阴影、磨损，但需要标注数据和算力，而且出错时更难解释。</li></ul>`,
+      cells: [38],
+      draw(svg, ctx) {
+        K.svg(svg, "rect", { x: 20, y: 30, width: 330, height: 280, fill: "var(--panel-2)", stroke: "var(--line)" });
+        const curve = (t) => [70 + 120 * t + 90 * t * t * t, 300 - 250 * t];
+        let d = ""; for (let i = 0; i <= 40; i++) { const p = curve(i / 40); d += (i ? "L" : "M") + p[0] + "," + p[1]; }
+        K.svg(svg, "path", { d, fill: "none", stroke: "var(--warn)", "stroke-width": 6 });
+        const st = K.svg(svg, "line", { x1: 70, y1: 300, x2: 70, y2: 300, stroke: "var(--bad)", "stroke-width": 3, "stroke-dasharray": "6 4" });
+        K.svg(svg, "text", { x: 30, y: 24, "font-size": 13 }, "弯道：黄=真实车道线，红虚线=直线拟合（示意）");
+        const rows = [["", "本案例（传统视觉）", "深度学习分割"], ["要不要训练数据", "不要", "要大量标注图片"], ["每一步能否解释", "能，规则都看得见", "较难"], ["弯道", "直线拟合失效", "可以处理"], ["光照、阴影、磨损", "阈值容易失灵", "相对稳健"], ["计算量", "很小", "需 GPU 等硬件"]];
+        const tb = K.svg(svg, "g"); tb.style.opacity = 0;
+        rows.forEach((r, i) => r.forEach((c, j) => K.svg(tb, "text", { x: 375 + [0, 110, 230][j], y: 60 + i * 42, "font-size": i === 0 ? 13 : 12, "font-weight": i === 0 || j === 0 ? 700 : 400, fill: j === 1 ? "var(--c2)" : j === 2 ? "var(--c4)" : "var(--ink)" }, c)));
+        ctx.tween(1000, (t) => { const p = curve(0.9); K.set(st, { x2: K.lerp(70, 70 + (p[0] - 70) * 0.45, t), y2: K.lerp(300, p[1], t) }); })
+          .then((ok) => ok && ctx.tween(700, (t) => (tb.style.opacity = t)));
+      },
+    },
+  ];
+
+  // 自查开关：网址带 ?fast 时动画直接跳到最后一帧
+  if (FAST) steps.forEach((s) => { const d = s.draw; if (d) s.draw = (svg, ctx) => { ctx.tween = (ms, fn) => { fn(1, 1); return Promise.resolve(ctx.alive()); }; ctx.wait = () => Promise.resolve(ctx.alive()); d(svg, ctx); }; });
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：颜色阈值 + 三角形 ---------- */
+  const TRI = [[100 / 6, 539 / 6], [950 / 6, 539 / 6], [480 / 6, 290 / 6]];
+  const inTri = (x, y) => { const fl = TRI[0][1] + (TRI[2][1] - TRI[0][1]) * (x - TRI[0][0]) / (TRI[2][0] - TRI[0][0]); const fr = TRI[1][1] + (TRI[2][1] - TRI[1][1]) * (x - TRI[1][0]) / (TRI[2][0] - TRI[1][0]); return y > fl && y > fr && y < TRI[0][1]; };
+  K.lab(document.getElementById("labA"), {
+    width: 660, height: 250,
+    controls: [
+      { id: "r", label: "红色阈值 red_threshold", min: 0, max: 255, step: 1, value: 200 },
+      { id: "g", label: "绿色阈值 green_threshold", min: 0, max: 255, step: 1, value: 200 },
+      { id: "b", label: "蓝色阈值 blue_threshold", min: 0, max: 255, step: 1, value: 200 },
+      { id: "m", label: "区域掩膜", value: "tri", options: [["none", "不用掩膜（第 6 格）"], ["tri", "作者的三角形（第 9、11 格）"]] },
+    ],
+    note: "左：浏览器生成的道路小图（160×90，左黄实线、右白虚线，有白云）。右：三个通道都 ≥ 阈值（且在三角形内）的像素保留原色，其余涂黑。默认值就是作者的 200/200/200。试试只把蓝色阈值往下拉。",
+    render(svg, v) {
+      let kept = 0, y1 = 0, y1n = 0, w2 = 0, w2n = 0, bad = 0;
+      const url = toURL(W, H, (i) => {
+        const x = i % W, y = (i / W) | 0, t = ROAD.T[i];
+        const ok = ROAD.R[i] >= v.r && ROAD.G[i] >= v.g && ROAD.B[i] >= v.b && (v.m === "none" || inTri(x, y));
+        if (t === 1) { y1n++; if (ok) y1++; } else if (t === 2) { w2n++; if (ok) w2++; } else if (ok) bad++;
+        if (ok) { kept++; return [ROAD.R[i], ROAD.G[i], ROAD.B[i]]; }
+        return [0, 0, 0];
+      });
+      const s = 2;
+      pic(svg, roadURL, 10, 26, W * s, H * s); pic(svg, url, 340, 26, W * s, H * s);
+      K.svg(svg, "text", { x: 10, y: 18, "font-size": 12 }, "输入图");
+      K.svg(svg, "text", { x: 340, y: 18, "font-size": 12 }, "颜色选择结果");
+      if (v.m === "tri") [10, 340].forEach((x0) => K.svg(svg, "polygon", { points: TRI.map((p) => (x0 + p[0] * s) + "," + (26 + p[1] * s)).join(" "), fill: "none", stroke: "var(--bad)", "stroke-width": 1.5, "stroke-dasharray": "5 3" }));
+      K.svg(svg, "text", { x: 10, y: 232, "font-size": 12, class: "muted" }, `保留 ${kept} 个像素；黄线 ${y1}/${y1n}，白线 ${w2}/${w2n}，其他（误选）${bad}`);
+      const py = y1n ? y1 / y1n : 0, pw = w2n ? w2 / w2n : 0;
+      return { readout: [
+        { k: "黄线保留", v: (py * 100).toFixed(0) + "%", color: py < 0.5 ? "var(--bad)" : "var(--good)" },
+        { k: "白线保留", v: (pw * 100).toFixed(0) + "%", color: pw < 0.5 ? "var(--bad)" : "var(--good)" },
+        { k: "误选像素", v: String(bad), color: bad > 200 ? "var(--bad)" : "var(--ink)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：Canny ---------- */
+  const near = new Uint8Array(W * H);
+  for (let i = 0; i < W * H; i++) if (ROAD.T[i] === 1 || ROAD.T[i] === 2) { const x = i % W, y = (i / W) | 0; for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && xx < W && yy >= 0 && yy < H) near[yy * W + xx] = 1; } }
+  K.lab(document.getElementById("labB"), {
+    width: 660, height: 250,
+    controls: [
+      { id: "lo", label: "低阈值 low_threshold", min: 0, max: 400, step: 5, value: 180 },
+      { id: "hi", label: "高阈值 high_threshold", min: 0, max: 500, step: 5, value: 240 },
+      { id: "k", label: "高斯核大小 kernel_size", value: "5", options: [["1", "1（不模糊）"], ["3", "3"], ["5", "5（作者）"], ["7", "7"], ["9", "9"]] },
+      { id: "n", label: "路面噪点强度", min: 0, max: 50, step: 1, value: 10 },
+    ],
+    note: "浏览器里现场跑了一遍 Canny：Sobel 梯度（和 OpenCV 默认一样用 |gx|+|gy|）→ 非极大值抑制（只留最陡的那一条细线）→ 双阈值 + 滞后连接。白色=强边缘，橙色=靠连接救回来的弱边缘。先把噪点拉到 35，再分别试核 1 和核 7。",
+    render(svg, v) {
+      const img = makeRoad({ noise: v.n, seed: 7 }), g = gauss(gray(img), +v.k), lo = Math.min(v.lo, v.hi);
+      const E = canny(g, lo, v.hi).E;
+      let tot = 0, onL = 0, weak = 0;
+      const css = getComputedStyle(document.documentElement);
+      const url = toURL(W, H, (i) => { if (!E[i]) return [0, 0, 0]; tot++; if (near[i]) onL++; if (E[i] === 1) { weak++; return [255, 160, 40]; } return [255, 255, 255]; });
+      const s = 2;
+      pic(svg, toURL(W, H, (i) => [g[i], g[i], g[i]]), 10, 26, W * s, H * s); pic(svg, url, 340, 26, W * s, H * s);
+      K.svg(svg, "text", { x: 10, y: 18, "font-size": 12 }, "灰度 + 高斯模糊");
+      K.svg(svg, "text", { x: 340, y: 18, "font-size": 12 }, "Canny 边缘");
+      K.svg(svg, "text", { x: 10, y: 232, "font-size": 12, class: "muted" }, `低:高 = 1 : ${(v.hi / Math.max(1, lo)).toFixed(2)}（Canny 建议 1:2 到 1:3）`);
+      const pr = tot ? onL / tot : 0;
+      return { readout: [
+        { k: "边缘像素", v: String(tot) },
+        { k: "其中弱边缘", v: String(weak) },
+        { k: "落在车道线附近", v: (pr * 100).toFixed(0) + "%", color: pr < 0.4 ? "var(--bad)" : "var(--good)" },
+        { k: "杂边（路沿、云、噪点）", v: String(tot - onL) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：霍夫投票 ---------- */
+  const EC = canny(gauss(gray(ROAD), 5), 180, 240).E;
+  K.lab(document.getElementById("labC"), {
+    width: 660, height: 300,
+    controls: [
+      { id: "thr", label: "投票阈值 threshold（至少几票才算一条线）", min: 3, max: 50, step: 1, value: 12 },
+      { id: "dt", label: "角度分辨率 theta", value: "1", options: [["1", "1°（作者 np.pi/180）"], ["2", "2°"], ["5", "5°"]] },
+      { id: "m", label: "投票前先做四边形掩膜", value: "on", options: [["on", "是（作者的 get_vertices）"], ["off", "否，全图投票"]] },
+    ],
+    note: "输入是实验 B 默认参数得到的边缘图。每个边缘点按 ρ = x·cosθ + y·sinθ 给所有经过它的直线投一票，右边是投票表（越亮票越多）。票数超过阈值、且是附近最高的格子，被画成左图里的线。这里是标准霍夫（输出整条直线），作者用的 HoughLinesP 是它的“线段”版本。",
+    render(svg, v) {
+      const h = hough(EC, v.m === "on", +v.dt, v.thr);
+      const s = 1.9;
+      const url = toURL(W, H, (i) => (EC[i] && (v.m === "off" || inQuad(i % W, (i / W) | 0)) ? [255, 255, 255] : [30, 30, 30]));
+      pic(svg, url, 10, 26, W * s, H * s);
+      K.svg(svg, "text", { x: 10, y: 18, "font-size": 12 }, "参与投票的边缘点 + 找到的直线");
+      if (v.m === "on") { const q = [[0.15, 1], [0.45, 0.6], [0.55, 0.6], [0.95, 1]]; K.svg(svg, "polygon", { points: q.map((p) => (10 + p[0] * W * s) + "," + (26 + p[1] * H * s)).join(" "), fill: "none", stroke: "var(--c1)", "stroke-width": 1.5, "stroke-dasharray": "4 3" }); }
+      const clip = K.svg(svg, "clipPath", { id: "clipC" }); K.svg(clip, "rect", { x: 10, y: 26, width: W * s, height: H * s });
+      const gl = K.svg(svg, "g", { "clip-path": "url(#clipC)" });
+      h.lines.forEach((l) => {
+        const a = (l.theta * Math.PI) / 180, c = Math.cos(a), sn = Math.sin(a), x0 = l.rho * c, y0 = l.rho * sn;
+        K.svg(gl, "line", { x1: 10 + (x0 - 300 * sn) * s, y1: 26 + (y0 + 300 * c) * s, x2: 10 + (x0 + 300 * sn) * s, y2: 26 + (y0 - 300 * c) * s, stroke: "var(--bad)", "stroke-width": 2, opacity: 0.85 });
+      });
+      // 投票表
+      const AW = 300, AH = 220, mx = Math.max(1, h.max);
+      const hurl = (function () {
+        const c = document.createElement("canvas"); c.width = h.nT; c.height = h.nR;
+        const g = c.getContext("2d"), d = g.createImageData(h.nT, h.nR);
+        for (let t = 0; t < h.nT; t++) for (let r = 0; r < h.nR; r++) { const val = Math.sqrt(h.acc[t * h.nR + r] / mx) * 255, k = ((h.nR - 1 - r) * h.nT + t) * 4; d.data[k] = val; d.data[k + 1] = val * 0.85; d.data[k + 2] = val * 0.4; d.data[k + 3] = 255; }
+        g.putImageData(d, 0, 0); return c.toDataURL();
+      })();
+      K.svg(svg, "image", { href: hurl, x: 345, y: 26, width: AW, height: AH, preserveAspectRatio: "none" });
+      K.svg(svg, "rect", { x: 345, y: 26, width: AW, height: AH, fill: "none", stroke: "var(--line)" });
+      h.lines.forEach((l) => K.svg(svg, "circle", { cx: 345 + (l.theta / 180) * AW, cy: 26 + AH - ((l.rho + h.D) / (h.nR - 1)) * AH, r: 5, fill: "none", stroke: "var(--bad)", "stroke-width": 1.5 }));
+      K.svg(svg, "text", { x: 345, y: 18, "font-size": 12 }, "投票表：横轴 θ 0°→180°，纵轴 ρ");
+      K.svg(svg, "text", { x: 345, y: 262, "font-size": 11, class: "muted" }, "红圈 = 超过阈值的局部最高票");
+      const ms = h.lines.map(lineToMC).filter(Boolean);
+      return { readout: [
+        { k: "投票的边缘点", v: String(h.pts) },
+        { k: "最高票数", v: String(h.max) },
+        { k: "找到的直线", v: String(h.lines.length), color: h.lines.length > 8 ? "var(--bad)" : h.lines.length < 2 ? "var(--warn)" : "var(--good)" },
+        { k: "其中斜率<0 / ≥0", v: ms.filter((o) => o.m < 0).length + " / " + ms.filter((o) => o.m >= 0).length },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 D：斜率分组 + 平均外推 ---------- */
+  const truth = [LL, RL].map((L) => { const m = (L[3] - L[1]) / (L[2] - L[0]); return { m, c: L[1] - m * L[0] }; });
+  K.lab(document.getElementById("labD"), {
+    width: 660, height: 260,
+    controls: [
+      { id: "rule", label: "合并规则", value: "author", options: [["author", "作者：m<0 归左、m≥0 归右，直接求平均"], ["filter", "改进：只留 0.3≤|m|≤3 的线，按票数加权平均"]] },
+      { id: "thr", label: "霍夫投票阈值", min: 3, max: 40, step: 1, value: 8 },
+      { id: "sh", label: "加一条阴影边缘（横跨路面的暗带）", value: "0", options: [["0", "没有"], ["1", "有"]] },
+    ],
+    note: "浏览器现场流程：生成道路图 →（可选）加一条斜着的阴影 → 灰度、模糊、Canny(180/240) → 四边形掩膜 → 霍夫找直线 → 按规则分左右、合并，从底部外推到 60% 高度。灰色细线是霍夫找到的所有直线，红线是最终结果，绿色虚线是生成图时用的真实车道线。默认阈值 8 时，作者的规则会把一条近乎水平的杂线算进右线；切到“改进”看看。再把阈值拉到 4 或 15 对比。",
+    render(svg, v) {
+      const img = makeRoad({ noise: 10, seed: 7 });
+      if (v.sh === "1") for (let y = HZ; y < H; y++) for (let x = 0; x < W; x++) { const d = y - (70 + (x - 80) * 0.12); if (d > 0 && d < 5 && img.T[y * W + x] >= 4) { const i = y * W + x; img.R[i] *= 0.4; img.G[i] *= 0.4; img.B[i] *= 0.4; } }
+      const E = canny(gauss(gray(img), 5), 180, 240).E, h = hough(E, true, 1, v.thr);
+      const ms = h.lines.map((l) => { const o = lineToMC(l); if (o) o.v = l.votes; return o; }).filter(Boolean);
+      const s = 2.6, X0 = 10, Y0 = 14;
+      const url = toURL(W, H, (i) => [img.R[i], img.G[i], img.B[i]]);
+      const clip = K.svg(svg, "clipPath", { id: "clipD" }); K.svg(clip, "rect", { x: X0, y: Y0, width: W * s, height: H * s });
+      const g = K.svg(svg, "g", { "clip-path": "url(#clipD)" });
+      pic(g, url, X0, Y0, W * s, H * s);
+      ms.forEach((o) => K.svg(g, "line", { x1: X0, y1: Y0 + o.c * s, x2: X0 + W * s, y2: Y0 + (o.m * W + o.c) * s, stroke: "var(--ink-3)", "stroke-width": 1 }));
+      const pick = (A) => {
+        if (!A.length) return null;
+        if (v.rule === "author") return { m: A.reduce((a, b) => a + b.m, 0) / A.length, c: A.reduce((a, b) => a + b.c, 0) / A.length };
+        const sw = A.reduce((a, b) => a + b.v, 0);
+        return { m: A.reduce((a, b) => a + b.m * b.v, 0) / sw, c: A.reduce((a, b) => a + b.c * b.v, 0) / sw };
+      };
+      const A = v.rule === "author" ? ms : ms.filter((o) => Math.abs(o.m) >= 0.3 && Math.abs(o.m) <= 3);
+      const Lf = pick(A.filter((o) => o.m < 0)), Rf = pick(A.filter((o) => o.m >= 0));
+      const yb = H, yt = H * 0.6;
+      truth.forEach((f) => K.svg(g, "line", { x1: X0 + ((yb - f.c) / f.m) * s, y1: Y0 + yb * s, x2: X0 + ((yt - f.c) / f.m) * s, y2: Y0 + yt * s, stroke: "var(--good)", "stroke-width": 2, "stroke-dasharray": "5 4" }));
+      const err = [];
+      [Lf, Rf].forEach((f, i) => {
+        if (!f || Math.abs(f.m) < 1e-3) { err.push(null); return; }
+        K.svg(g, "line", { x1: X0 + ((yb - f.c) / f.m) * s, y1: Y0 + yb * s, x2: X0 + ((yt - f.c) / f.m) * s, y2: Y0 + yt * s, stroke: "var(--bad)", "stroke-width": 3.5 });
+        err.push(Math.abs((yb - f.c) / f.m - (yb - truth[i].c) / truth[i].m));
+      });
+      const f = (e) => (e == null ? "没找到" : e > 999 ? ">999 px" : e.toFixed(1) + " px");
+      const col = (e) => (e == null || e > 6 ? "var(--bad)" : "var(--good)");
+      K.svg(svg, "text", { x: 440, y: 40, "font-size": 12 }, `霍夫直线：${ms.length} 条`);
+      K.svg(svg, "text", { x: 440, y: 60, "font-size": 12 }, `斜率<0：${ms.filter((o) => o.m < 0).length}，≥0：${ms.filter((o) => o.m >= 0).length}`);
+      K.svg(svg, "text", { x: 440, y: 90, "font-size": 12, class: "muted" }, "某一侧一条都没有时，");
+      K.svg(svg, "text", { x: 440, y: 106, "font-size": 12, class: "muted" }, "作者代码里的 np.mean 会得到 nan，");
+      K.svg(svg, "text", { x: 440, y: 122, "font-size": 12, class: "muted" }, "随后 int(nan) 报错。");
+      return { readout: [
+        { k: "左线底部偏差", v: f(err[0]), color: col(err[0]) },
+        { k: "右线底部偏差", v: f(err[1]), color: col(err[1]) },
+        { k: "左线斜率（真值 " + truth[0].m.toFixed(2) + "）", v: Lf ? Lf.m.toFixed(2) : "—" },
+        { k: "右线斜率（真值 " + truth[1].m.toFixed(2) + "）", v: Rf ? Rf.m.toFixed(2) : "—" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

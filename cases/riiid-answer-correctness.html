@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>预测学生能否答对</title>
+<meta name="description" content="Kaggle 案例拆解：Riiid 知识追踪竞赛，一亿多条在线做题记录，预测学生下一道题能否答对；EDA、用户与题目平均正确率特征、LightGBM 基线，以及作者自己承认的“用到未来信息”问题。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格 / 时序日志 · 二分类 · 在线教育（知识追踪）</div>
+  <h1>预测学生下一题能否答对：一亿条做题记录里的学习规律</h1>
+  <p class="en">Riiid: Comprehensive EDA + Baseline</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">大数据读取与内存优化</span><span class="tag method">分组统计 EDA</span><span class="tag method">目标均值特征</span>
+    <span class="tag method">LightGBM</span><span class="tag method">AUC</span><span class="tag method">早停</span><span class="tag method">时序 API 提交</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Erik Bruin</b></span>
+    <span>Kaggle 点赞 <b>1,270</b>（2026-11 抓取）</span>
+    <span>数据 <b>Kaggle 竞赛 riiid-test-answer-prediction</b>（Riiid AIEd Challenge 2020）</span>
+    <span><a href="https://www.kaggle.com/code/erikbruin/riiid-comprehensive-eda-baseline" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">韩国学习 App 上的 TOEIC 刷题记录</div><p>Riiid 的 AI 辅导应用积累的学生互动日志：做了哪道题、选了什么、对不对、用了多久、上一题是否看过解析、有没有看讲座。训练集超过 1 亿行。<span data-cell="4">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">学生下一道题能否答对</div><p>给出“答对的概率”，按 ROC 曲线下面积 AUC 打分。这类任务叫<b>知识追踪</b>：随时间追踪学生掌握了多少。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">大量 EDA + 5 个特征的 LightGBM</div><p>“这个学生平时答对多少”“这道题大家答对多少”等平均值特征，抽 1000 万行训练 LightGBM。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一个简单、可提交的基线</div><p>作者明确说这是“快速粗糙”的做法：用户特征用到了未来的答题结果。<span data-cell="97">出处</span> 分数在运行输出里，源码不带。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">竞赛共给了 7 个文件（第 2 格）。主表 <code>train.csv</code> 每行是一个学生的一次互动（做一道题或看一次讲座）。以下数字来自作者的文字说明。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">训练集行数</div><div class="v">1 亿+</div></div>
+        <div class="stat-tile"><div class="k">文件数</div><div class="v">7</div></div>
+        <div class="stat-tile"><div class="k">题组 task_container</div><div class="v">10,000</div></div>
+        <div class="stat-tile"><div class="k">答错的比例</div><div class="v">约 1/3</div></div>
+        <div class="stat-tile"><div class="k">TOEIC 题型部分</div><div class="v">Part 1–7</div></div>
+        <div class="stat-tile"><div class="k">建模抽样</div><div class="v">1000 万行</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">行数见第 4 格 <span data-cell="4">出处</span>，题组数见第 33 格 <span data-cell="33">出处</span>，答错比例见第 29 格 <span data-cell="29">出处</span>，TOEIC 说明见第 65 格 <span data-cell="65">出处</span>，抽样见第 108 格 <span data-cell="108">出处</span>。竞赛背景：Riiid 的 AI 辅导应用吸引了超过一百万韩国学生（第 0 格）。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">train.csv 每一列是什么（第 13 格）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>白话含义</th></tr>
+        <tr><td><code>timestamp</code></td><td>距离这个学生第一次互动过了多少毫秒</td></tr>
+        <tr><td><code>user_id</code></td><td>学生编号</td></tr>
+        <tr><td><code>content_id</code></td><td>题目或讲座编号</td></tr>
+        <tr><td><code>content_type_id</code></td><td>0 = 做题，1 = 看讲座</td></tr>
+        <tr><td><code>task_container_id</code></td><td>题组编号：几道题连续出现，做完才看解析</td></tr>
+        <tr><td><code>user_answer</code></td><td>选了哪个选项（0–3；讲座为 −1）</td></tr>
+        <tr><td><code>answered_correctly</code></td><td><b>要预测的答案</b>：1 答对，0 答错（讲座为 −1）</td></tr>
+        <tr><td><code>prior_question_elapsed_time</code></td><td>上一个题组平均每题用了多少毫秒</td></tr>
+        <tr><td><code>prior_question_had_explanation</code></td><td>做完上一个题组后有没有看解析</td></tr>
+      </table></div>
+      <p style="font-size:14px">另有 <code>questions.csv</code>（题目所属 TOEIC 部分、标签、正确答案）和 <code>lectures.csv</code>（讲座的部分、标签、类型）。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="37">
+    <h3>动手试试 A · 只做了 5 道题的学生，正确率可信吗？ <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="98">
+    <h3>动手试试 B · 用“全部答题”算平均正确率，为什么会让分数虚高 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的发现</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>发现</th><th>出处</th></tr>
+        <tr><td>注册时间较短的学生，正确率略低</td><td><span data-cell="31">第 31 格</span></td></tr>
+        <tr><td>做题越多的学生，正确率总体越高，但做题少的学生差异很大</td><td><span data-cell="35">第 35 格</span></td></tr>
+        <tr><td>上一题组看过解析时，正确率约高 17%</td><td><span data-cell="41">第 41 格</span></td></tr>
+        <tr><td>答对和答错时，上一题组平均用时都约 25 秒</td><td><span data-cell="43">第 43 格</span></td></tr>
+        <tr><td>Part 5 的题目最多，也最难</td><td><span data-cell="66">第 66 格</span></td></tr>
+        <tr><td>看过讲座的学生正确率更高；但含讲座的题组，正确率反而低约 8%</td><td><span data-cell="73">第 73 格</span> <span data-cell="81">第 81 格</span></td></tr>
+        <tr><td>加上“看讲座”“看解析”两个特征，CV 提升不到 0.001、公开榜反降 0.001，所以只用 5 个特征</td><td><span data-cell="107">第 107 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">模型的 AUC 在训练日志里（运行输出），源码不带，这里不列分数。作者在第 97 格自己声明：用户平均正确率是用这个学生<b>全部</b>答题算的，包括要预测的那道题和之后的题，这属于用到了未来信息；高分公开 notebook 会用循环只统计“之前”的答题。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>学生对下一道题答对的概率，用来挑“难度刚好”的题、提醒复习薄弱知识点、估计考试分数。</li>
+        <li><b>同类问题：</b>MOOC 辍学预警、作业系统自适应推题、语言学习 App 的复习间隔安排、在线考试的作弊检测。</li>
+        <li><b>可迁移的套路：</b>“用户平均表现 + 题目平均难度”是推荐、教育、广告点击预测中最强的基础特征；但必须只用当时之前的数据计算。</li>
+        <li><b>伦理提醒：</b>“看讲座的人答得好”是相关，不一定是讲座的功劳，可能是更认真的学生更爱看讲座。若系统据此给学生贴“能力低”的标签、减少推送有挑战的题目，可能让落后的学生更难追上。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>读 pickle 加速、修正数据类型省内存 <span data-cell="5">第 5 格</span> <span data-cell="10">第 10 格</span></li>
+        <li>按用户、题目、标签、TOEIC 部分分组统计正确率 <span data-cell="36">第 36 格</span> <span data-cell="60">第 60 格</span></li>
+        <li>用户 / 题目的平均正确率与答题数特征 <span data-cell="98">第 98 格</span> <span data-cell="100">第 100 格</span></li>
+        <li>借用他人构造的验证集划分 <span data-cell="102">第 102 格</span></li>
+        <li>LightGBM（metric = AUC，早停 8 轮） <span data-cell="111">第 111 格</span></li>
+        <li>竞赛时序 API 逐批预测 <span data-cell="115">第 115 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>“看过讲座的学生正确率更高”和“含讲座的题组正确率更低”同时成立。你能想出一种解释，让这两个看似矛盾的结果都说得通吗？</li>
+      <li>作者用学生的全部答题算“平均正确率”。为什么这在比赛提交时问题不大（测试集都是新数据），但在验证分数时会虚高？</li>
+      <li>新用户没有任何历史，作者用 0.5 填充平均正确率。还有什么更好的办法？</li>
+      <li>如果学习 App 根据模型预测，给“预测正确率低”的学生只推简单题，长期看会发生什么？</li>
+      <li>AUC 只看排序对不对。对一个自适应推题系统来说，“概率准不准”（比如说 70% 的题是否真有七成答对）重要吗？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Erik Bruin，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Kaggle 竞赛 Riiid Answer Correctness Prediction（Riiid Labs，EdNet）；作者还使用了 Rohan Rao 的数据格式转换与 tito 的验证集划分。
+</footer>
+</main>
+
+<script src="nb/riiid-answer-correctness.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const T = (svg, x, y, s, o) => K.svg(svg, "text", Object.assign({ x, y, "font-size": 13 }, o || {}), s);
+  const fade = (els, ctx, ms) => { els.forEach((e) => (e.style.opacity = 0)); return ctx.tween(ms || 500, (t) => els.forEach((e) => (e.style.opacity = t))); };
+  /* 横向比较条 */
+  function compareBars(svg, ctx, items, title, maxv) {
+    T(svg, 30, 30, title, { "font-weight": 700 });
+    const els = items.map((d, i) => {
+      const y = 60 + i * 64;
+      T(svg, 210, y + 26, d[0], { "text-anchor": "end", "font-size": 13 });
+      K.svg(svg, "rect", { x: 220, y, width: 440, height: 38, rx: 4, fill: "var(--panel-2)" });
+      const b = K.svg(svg, "rect", { x: 220, y, width: 0, height: 38, rx: 4, fill: d[2] || "var(--c1)" });
+      const t = T(svg, 228, y + 25, "", { "font-weight": 700 });
+      return { b, t, v: d[1] };
+    });
+    return ctx.tween(1200, (t) => els.forEach((e) => { e.b.setAttribute("width", (440 * e.v * t) / maxv); e.t.setAttribute("x", 228 + (440 * e.v * t) / maxv); e.t.textContent = Math.round(e.v * t * 100) + "%"; }));
+  }
+
+  const steps = [
+    {
+      title: "一亿多行数据，先解决“装不下”", kicker: "第 2–12 格 · 读数据与省内存",
+      html: `<p>竞赛给了 7 个文件，主表超过 1 亿行。作者用 Rohan Rao 预先转好的 pickle 文件，把读入时间从将近 9 分钟降到约 16 秒（第 4 格）。</p><p>接着用 <code>memory_usage</code> 查每列占多少内存，发现“是否看过解析”这一列本该是布尔值（真/假），却被存成了 object（通用对象），很占内存，于是改成 <code>boolean</code>（第 10 格）。</p><p>还要注意：这是一个<b>时序 API</b> 比赛，测试数据是一批一批按时间顺序给出的，不能一次拿到全部（第 2 格）。</p>`,
+      cells: [2, 5, 7, 10], highlight: ["read_pickle", "astype('boolean')"],
+      draw(svg, ctx) {
+        T(svg, 40, 40, "读入时间", { "font-weight": 700 });
+        const b1 = K.svg(svg, "rect", { x: 160, y: 60, width: 0, height: 36, rx: 4, fill: "var(--c6)" });
+        const b2 = K.svg(svg, "rect", { x: 160, y: 110, width: 0, height: 36, rx: 4, fill: "var(--good)" });
+        T(svg, 150, 84, "CSV", { "text-anchor": "end" }); T(svg, 150, 134, "pickle", { "text-anchor": "end" });
+        const l1 = T(svg, 170, 84, "", { "font-weight": 700, fill: "#fff" }), l2 = T(svg, 170, 134, "", { "font-weight": 700 });
+        T(svg, 40, 200, "一列的内存：object → boolean", { "font-weight": 700 });
+        const m1 = K.svg(svg, "rect", { x: 160, y: 220, width: 420, height: 36, rx: 4, fill: "var(--c4)" });
+        T(svg, 150, 244, "这一列", { "text-anchor": "end" });
+        T(svg, 40, 320, "时间来自第 4 格的文字；内存条长短为示意", { "font-size": 12, class: "muted" });
+        ctx.tween(1200, (t) => { b1.setAttribute("width", 480 * t); b2.setAttribute("width", Math.max(2, 480 * (16 / 540) * t)); l1.textContent = t > 0.3 ? "约 9 分钟" : ""; l2.setAttribute("x", 170 + 480 * (16 / 540) * t + 6); l2.textContent = "约 16 秒"; })
+          .then((ok) => ok && ctx.wait(300)).then((ok) => ok && ctx.tween(900, (t) => m1.setAttribute("width", K.lerp(420, 50, t))));
+      },
+    },
+    {
+      title: "训练表的字段：题、题组、选项、时间戳", kicker: "第 13–28 格 · 认识每一列",
+      html: `<p>作者逐列查看（第 13–28 格）：</p><ul class="tight"><li><code>content_type_id</code>：大部分是做题，少数是看讲座</li><li><code>task_container_id</code>：题组。比如连续出 3 道题，做完才一起看解析，这 3 道共享一个题组号</li><li><code>user_answer</code>：选项 0–3，说明是四选一；−1 表示这一行是讲座</li><li><code>timestamp</code>：从这个学生第一次互动开始算的毫秒数。直方图显示，大多数互动来自刚注册不久的学生</li></ul><p>作者还确认：每个学生都有 timestamp = 0 的记录，也就是训练集里有每个人<b>从头开始</b>的完整历史（第 27 格）。</p>`,
+      cells: [13, 14, 15, 17, 19, 22, 24, 26, 28], highlight: ["content_type_id", "timestamp == 0"],
+      draw(svg, ctx) {
+        T(svg, 30, 30, "一个学生的时间线（示意）", { "font-weight": 700 });
+        K.svg(svg, "line", { x1: 40, x2: 690, y1: 150, y2: 150, stroke: "var(--ink-3)", "stroke-width": 2 });
+        const ev = [["题", 1, 1], ["题", 1, 0], ["题", 1, 1], ["讲", 0, 0], ["题", 2, 1], ["题", 2, 1], ["题", 3, 0], ["题", 3, 1], ["题", 3, 1], ["讲", 0, 0], ["题", 4, 1]];
+        const els = ev.map((e, i) => {
+          const x = 70 + i * 58, g = K.svg(svg, "g");
+          if (e[0] === "讲") K.svg(g, "rect", { x: x - 16, y: 130, width: 32, height: 40, rx: 6, fill: "var(--c4)" });
+          else K.svg(g, "circle", { cx: x, cy: 150, r: 16, fill: e[2] ? "var(--good)" : "var(--bad)" });
+          K.svg(g, "text", { x, y: 155, "text-anchor": "middle", "font-size": 12, fill: "#fff", "font-weight": 700 }, e[0] === "讲" ? "讲座" : e[2] ? "✓" : "✗");
+          if (e[1]) K.svg(g, "text", { x, y: 200, "text-anchor": "middle", "font-size": 11, class: "muted" }, "组" + e[1]);
+          g.style.opacity = 0; return g;
+        });
+        T(svg, 40, 110, "timestamp = 0", { "font-size": 12, fill: "var(--accent)" });
+        T(svg, 40, 260, "绿 ✓ 答对　红 ✗ 答错　紫 = 看讲座　“组 n” = 同一个题组，做完一起看解析", { "font-size": 12, class: "muted" });
+        (async () => { for (const e of els) { if (!(await ctx.tween(160, (t) => (e.style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      title: "目标：大约三分之一答错", kicker: "第 29–34 格 · 目标分布",
+      html: `<p>去掉讲座行（−1）后，大约三分之一的题答错，三分之二答对（第 29 格）。</p><p>作者把 timestamp 分成 5 段，看各段的正确率：只有“注册时间较短”的学生略差一点（第 31 格）。他又按 1 万个题组分别算正确率，看分布（第 33–34 格）。</p><p>因为答对多、答错少，比赛用 <b>AUC</b> 打分：它只看模型能不能把“会答对的”排在“会答错的”前面，不受比例影响。</p>`,
+      cells: [29, 30, 32, 34], highlight: ["answered_correctly != -1", "pd.qcut"],
+      draw(svg, ctx) {
+        const dots = [];
+        for (let i = 0; i < 90; i++) dots.push(K.svg(svg, "circle", { cx: 50 + (i % 18) * 24, cy: 60 + Math.floor(i / 18) * 34, r: 0, fill: i % 3 === 2 ? "var(--bad)" : "var(--good)" }));
+        T(svg, 510, 80, "■ 答对 约 2/3", { fill: "var(--good)", "font-weight": 700 });
+        T(svg, 510, 106, "■ 答错 约 1/3", { fill: "var(--bad)", "font-weight": 700 });
+        T(svg, 50, 280, "按注册时长分 5 段：越新的学生正确率略低（第 31 格）", { "font-size": 13 });
+        ctx.tween(1200, (t) => dots.forEach((d, i) => d.setAttribute("r", K.clamp(t * 90 - i, 0, 1) * 9)));
+      },
+    },
+    {
+      title: "做题越多越准？题越热门越简单？", kicker: "第 35–40 格 · 用户与题目",
+      html: `<p>作者按学生统计“答了几题、正确率多少”，随机抽 200 名学生画散点（去掉答题超过 1000 道的），趋势是做题越多正确率越高，但<b>做题少的学生差异非常大</b>（第 35 格）。</p><p>同样按题目统计，抽 200 道题（去掉被答超过 25000 次的），被答次数越多的题正确率略有下降（第 38 格）。</p><p>“做题少的学生差异大”是一个统计规律：样本少时，平均数本身就很不稳定。下面的实验 A 可以看到这一点。</p>`,
+      cells: [35, 36, 37, 39, 40], highlight: ["agg(Mean='mean', Answers='count')", "query('Answers <= 1000')"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 20, w: 600, h: 260 }, [0, 1000], [0, 1], { xlabel: "学生答过的题数（示意）", ylabel: "正确率" });
+        const r = K.rng(7), pts = [];
+        for (let i = 0; i < 200; i++) { const n = Math.floor(Math.exp(r() * 6.9)); const p = 0.55 + 0.12 * Math.log10(n + 1) / 3 + K.randn(r) * 0.4 / Math.sqrt(n + 2); pts.push([n, K.clamp(p, 0, 1)]); }
+        const els = pts.map((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 0, fill: "var(--c1)", opacity: 0.6 }));
+        const n = T(svg, 360, 320, "左边（题少）上下乱跳，右边（题多）收拢：样本少，平均数不稳定", { "text-anchor": "middle", "font-weight": 700 });
+        n.style.opacity = 0;
+        ctx.tween(1400, (t) => els.forEach((e, i) => e.setAttribute("r", K.clamp(t * 200 - i, 0, 1) * 3.5))).then((ok) => ok && fade([n], ctx, 500));
+      },
+    },
+    {
+      title: "看过解析和答题用时", kicker: "第 41–46 格 · 两个“上一题”特征",
+      html: `<p><b>看过解析</b>：上一题组做完看过解析的，这一题正确率约高 17%（第 41 格）。作者补充：绝大多数题之前都有解析，所以更像是“没看解析”是一种劣势。缺失值（每个学生的第一题组）的正确率更接近“看过”。</p><p><b>答题用时</b>：答对和答错的题，上一题组的平均用时都约 25 秒，看起来区别不大（第 43 格）；但作者发现这个特征在交叉验证里有用，抽样散点也显示略微的下降趋势（第 45 格）。</p><p>平均数没差别，不代表这个特征没用：它可能和其他特征组合起来才起作用。</p>`,
+      cells: [41, 42, 44, 46], highlight: ["prior_question_had_explanation", "prior_question_elapsed_time"],
+      draw(svg, ctx) {
+        compareBars(svg, ctx, [["上一组看过解析", 0.68, "var(--good)"], ["上一组没看解析", 0.51, "var(--bad)"], ["缺失（第一个题组）", 0.65, "var(--ink-3)"]], "这一题的正确率（示意，差距方向来自第 41 格）", 1);
+        T(svg, 30, 300, "答对 vs 答错：上一题组平均用时都约 25 秒（第 43 格）", { "font-size": 13 });
+      },
+    },
+    {
+      title: "题目表：标签与难度", kicker: "第 47–64 格 · 题目元数据",
+      html: `<p><code>questions.csv</code> 里每道题有：题组 <code>bundle_id</code>、正确答案、所属 TOEIC 部分 <code>part</code>、若干个<b>标签</b> tags（标签含义不公开，但可以用来把题归类）。</p><p>作者发现只有一道题没有标签，而那道题在训练集里只被答过一次（第 50–53 格）。他把每道题的答对、答错次数汇总到标签上，算出每个标签的正确率，最难和最容易的标签差别很大（第 60–62 格）。但他也提醒：最难的那个标签只有约 25 万次作答，比热门标签少得多（第 63 格）；而且一道题有多个标签时，它会被重复计入每个标签。</p>`,
+      cells: [47, 48, 51, 54, 56, 60, 62, 64], highlight: ["tags", "Percent_correct"],
+      draw(svg, ctx) {
+        const tags = ["标签 a", "标签 b", "标签 c", "标签 d", "…", "标签 x", "标签 y", "标签 z"], v = [0.9, 0.88, 0.85, 0.83, 0, 0.5, 0.45, 0.4];
+        const ax = { x: 40, w: 640 };
+        const els = tags.map((t, i) => {
+          const x = 50 + i * 80;
+          T(svg, x + 30, 310, t, { "text-anchor": "middle", "font-size": 12 });
+          if (!v[i]) return null;
+          return K.svg(svg, "rect", { x, y: 290, width: 60, height: 0, rx: 4, fill: v[i] < 0.6 ? "var(--bad)" : "var(--good)" });
+        }).filter(Boolean);
+        const vv = v.filter(Boolean);
+        T(svg, 40, 30, "各标签的正确率：最容易 vs 最难（示意，红色 = 低于 60%）", { "font-weight": 700 });
+        ctx.tween(1200, (t) => els.forEach((e, i) => { const h = vv[i] * 240 * t; e.setAttribute("height", h); e.setAttribute("y", 290 - h); }));
+      },
+    },
+    {
+      title: "TOEIC 的 7 个部分", kicker: "第 65–67 格 · 题型",
+      html: `<p>“part” 指 TOEIC 听力阅读考试的部分。作者查到：考试共 200 题、两小时；<b>听力</b>是 Part 1–4（约 45 分钟、100 题），<b>阅读</b>是 Part 5–7（75 分钟、100 题）（第 65 格）。</p><p>按部分统计后发现：<b>Part 5 的题目数量最多，也是最难的</b>（第 66 格）。TOEIC 是一种面向职场的英语能力考试，Part 5 是阅读部分的“句子填空”。</p>`,
+      cells: [65, 67], highlight: ["groupby(\"part\")"],
+      draw(svg, ctx) {
+        const parts = [1, 2, 3, 4, 5, 6, 7], cnt = [1, 3, 3, 2.5, 7, 2, 4], acc = [0.75, 0.71, 0.70, 0.64, 0.61, 0.67, 0.66];
+        T(svg, 40, 26, "各部分的题目数量（上）和正确率（下），示意", { "font-weight": 700 });
+        const b1 = parts.map((p, i) => { T(svg, 90 + i * 85, 330, "Part " + p, { "text-anchor": "middle", "font-size": 12 }); K.svg(svg, "text", { x: 90 + i * 85, y: 52, "text-anchor": "middle", "font-size": 11, fill: i < 4 ? "var(--c4)" : "var(--c3)" }, i < 4 ? "听力" : "阅读"); return K.svg(svg, "rect", { x: 65 + i * 85, y: 170, width: 50, height: 0, fill: i === 4 ? "var(--c6)" : "var(--c1)" }); });
+        const b2 = parts.map((p, i) => K.svg(svg, "rect", { x: 65 + i * 85, y: 190, width: 50, height: 0, fill: i === 4 ? "var(--c6)" : "var(--c3)" }));
+        ctx.tween(1200, (t) => { b1.forEach((b, i) => { const h = cnt[i] * 15 * t; b.setAttribute("height", h); b.setAttribute("y", 170 - h); }); b2.forEach((b, i) => b.setAttribute("height", (acc[i] - 0.5) * 400 * t)); });
+        T(svg, 640, 130, "数量", { "font-size": 12, class: "muted" }); T(svg, 640, 230, "正确率", { "font-size": 12, class: "muted" });
+      },
+    },
+    {
+      title: "看讲座的学生答得更好？", kicker: "第 68–74 格 · 讲座",
+      html: `<p><code>lectures.csv</code> 记录讲座的部分、标签和类型（概念讲解、解题技巧等）。讲座不多，作者想看“是否看过任何讲座”的学生正确率有没有差别：结论是<b>看过讲座的学生正确率更高</b>，“确实有帮助”（第 73 格）。</p><p>这里要停一下：这是两类<b>不同学生</b>之间的比较。愿意看讲座的学生，可能本来就更认真、学得更久。“看讲座”和“答得好”一起出现，不能直接说明讲座让人答得更好。</p>`,
+      cells: [68, 69, 72, 74], highlight: ["Watches_lecture"],
+      draw(svg, ctx) {
+        compareBars(svg, ctx, [["看过讲座的学生", 0.66, "var(--good)"], ["从没看过讲座的学生", 0.58, "var(--ink-3)"]], "学生的平均正确率（示意，方向来自第 73 格）", 1).then((ok) => {
+          if (!ok) return;
+          const t = T(svg, 360, 260, "是讲座的作用？还是认真的学生更爱看讲座？", { "text-anchor": "middle", "font-weight": 700, fill: "var(--warn)", "font-size": 15 });
+          fade([t], ctx, 500);
+        });
+      },
+    },
+    {
+      title: "含讲座的题组，正确率反而更低", kicker: "第 75–83 格 · 一个“矛盾”",
+      html: `<p>作者又按题组看：讲座在题组里占比最多约 2.8%，相当于约 36 道题配 1 个讲座（第 77 格）。题组的讲座比例和正确率看不出正相关，甚至略为负（第 79 格）。最后：<b>不含讲座的题组，正确率比含讲座的高约 8%</b>（第 81 格）。</p><p>同一份数据里，“看讲座的学生答得好”而“有讲座的题组答得差”。一种可能的解释：系统往往在<b>难的内容</b>前后安排讲座，所以含讲座的题组本身更难。比较对象不同（学生 vs 题组），混杂的因素也不同。</p>`,
+      cells: [75, 76, 80, 82, 83], highlight: ["Has_lecture", "Percent_lecture"],
+      draw(svg, ctx) {
+        compareBars(svg, ctx, [["不含讲座的题组", 0.66, "var(--good)"], ["含讲座的题组", 0.58, "var(--bad)"]], "题组的平均正确率（示意，约差 8%，第 81 格）", 1).then((ok) => {
+          if (!ok) return;
+          const a = K.node(svg, 120, 210, 220, 50, "难的知识点", { bold: true, fill: "color-mix(in srgb, var(--warn) 18%, var(--panel))", stroke: "var(--warn)" });
+          const b = K.node(svg, 440, 190, 220, 40, "安排讲座", { fill: "var(--panel-2)" });
+          const c = K.node(svg, 440, 250, 220, 40, "正确率低", { fill: "var(--panel-2)" });
+          const a1 = K.arrow(svg, 340, 230, 438, 210), a2 = K.arrow(svg, 340, 240, 438, 270);
+          fade([a, b, c, a1, a2], ctx, 600);
+        });
+      },
+    },
+    {
+      title: "测试集：新学生、按时间顺序给", kicker: "第 84–89 格 · 了解提交方式",
+      html: `<p>作者查看 <code>example_test.csv</code>，并引用比赛的说明（第 84 格）：</p><ul class="tight"><li>隐藏测试集里有<b>新学生</b>，但没有新题目</li><li>测试数据在时间上接在训练数据<b>之后</b>，通过 API 按时间顺序一批批给出</li></ul><p>他验证了：示例测试里的题组都在训练集出现过，也确实有一个训练集里没有的新学生（第 87–89 格）。这决定了建模方式：题目特征可以放心用训练集算，但新学生没有历史，只能用默认值。</p>`,
+      cells: [84, 85, 87, 89], highlight: ["issubset", "user_test - user_train"],
+      draw(svg, ctx) {
+        K.svg(svg, "line", { x1: 40, x2: 690, y1: 120, y2: 120, stroke: "var(--ink-3)", "stroke-width": 2 });
+        K.svg(svg, "rect", { x: 40, y: 90, width: 420, height: 60, rx: 6, fill: "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: "var(--c1)" });
+        T(svg, 250, 126, "训练集（过去）", { "text-anchor": "middle", "font-weight": 700 });
+        const batches = [0, 1, 2, 3].map((i) => { const g = K.node(svg, 480 + i * 55, 90, 48, 60, "批" + (i + 1), { fs: 12, fill: "color-mix(in srgb, var(--c3) 18%, var(--panel))", stroke: "var(--c3)" }); g.style.opacity = 0; return g; });
+        T(svg, 480, 80, "测试：API 按时间逐批给出", { "font-size": 12, fill: "var(--c3)" });
+        const nu = K.node(svg, 480, 200, 210, 50, "新学生：没有任何历史", { fill: "color-mix(in srgb, var(--warn) 18%, var(--panel))", stroke: "var(--warn)" });
+        nu.style.opacity = 0;
+        (async () => { for (const b of batches) { if (!(await ctx.tween(300, (t) => (b.style.opacity = t)))) return; } await ctx.tween(400, (t) => (nu.style.opacity = t)); })();
+      },
+    },
+    {
+      title: "基线特征：学生平均正确率、题目平均正确率", kicker: "第 90–100 格 · 特征",
+      html: `<p>第二部分先清空内存（<code>%reset -f</code>），只读入需要的列。然后造特征（第 98、100 格）：</p><ul class="tight"><li><b>学生特征</b>：这个学生答过几题 <code>user_questions</code>、平均正确率 <code>user_mean</code>、是否看过讲座</li><li><b>题目特征</b>：这道题被答过几次 <code>content_questions</code>、平均正确率 <code>content_mean</code>（即难度）</li></ul><p>作者在第 97 格写了<b>免责声明</b>：这是“快速粗糙”的做法。学生第 10 题的平均正确率本应只用前 9 题算，这里却用了他<b>全部</b>的答题（包括第 10 题本身和以后的题），等于偷看了答案。下面的实验 B 展示这样做为什么会让验证分数虚高。</p>`,
+      cells: [90, 93, 98, 100], highlight: ["groupby('user_id').agg({'answered_correctly': ['count', 'mean']})", "groupby('content_id')"],
+      draw(svg, ctx) {
+        const seq = [1, 0, 1, 1, 0, 1, 1, 1, 0, 1];
+        T(svg, 30, 30, "预测第 7 题时，“学生平均正确率”该怎么算？", { "font-weight": 700 });
+        const cs = seq.map((v, i) => { K.svg(svg, "circle", { cx: 60 + i * 62, cy: 90, r: 20, fill: v ? "var(--good)" : "var(--bad)", stroke: i === 6 ? "var(--accent)" : "none", "stroke-width": 4 }); T(svg, 60 + i * 62, 96, v ? "✓" : "✗", { "text-anchor": "middle", fill: "#fff", "font-weight": 700 }); T(svg, 60 + i * 62, 130, "第" + (i + 1) + "题", { "text-anchor": "middle", "font-size": 11 }); });
+        const okR = K.svg(svg, "rect", { x: 34, y: 160, width: 6 * 62 - 10, height: 40, rx: 6, fill: "var(--good)", opacity: 0 });
+        const badR = K.svg(svg, "rect", { x: 34, y: 230, width: 10 * 62 - 10, height: 40, rx: 6, fill: "var(--bad)", opacity: 0 });
+        const t1 = T(svg, 44, 186, "正确：只用前 6 题 → 4/6 = 0.67", { "font-weight": 700, fill: "#fff" });
+        const t2 = T(svg, 44, 256, "作者的快捷做法：用全部 10 题（含第 7 题和以后）→ 7/10 = 0.70", { "font-weight": 700, fill: "#fff" });
+        t1.style.opacity = t2.style.opacity = 0;
+        ctx.tween(600, (t) => { okR.style.opacity = 0.85 * t; t1.style.opacity = t; }).then((ok) => ok && ctx.tween(600, (t) => { badR.style.opacity = 0.85 * t; t2.style.opacity = t; }));
+      },
+    },
+    {
+      title: "验证集怎么切", kicker: "第 101–106 格 · 验证集与填补",
+      html: `<p>作者没有简单地“每个学生的最后几题当验证集”，而是用了 tito 构造的验证划分（第 102 格）。tito 指出，只取每人最后几题，会让做题很少的“轻度用户”在验证集里占比过高（第 101 格）。</p><p>然后把学生、题目特征合并到训练集和验证集上，并填补缺失：新学生或新题的平均正确率用 0.5，答题数用 0，用时用全体平均（第 105–106 格）。</p><p>注意：<code>user_df</code>、<code>content_df</code> 是用<b>切分之前的全部训练数据</b>算的，所以验证集的答案也被算进了特征里，这是前一章那个泄漏在验证集上的体现。</p>`,
+      cells: [101, 102, 103, 105, 106], highlight: ["cv2_valid", "fillna(0.5"],
+      draw(svg, ctx) {
+        const users = [3, 12, 40, 6, 90, 2, 25];
+        T(svg, 30, 28, "每个学生的答题序列（长短 = 题数），橙色 = 划给验证集的部分（示意）", { "font-weight": 700 });
+        const els = users.map((n, i) => {
+          const y = 50 + i * 38, w = Math.min(600, n * 6.5);
+          K.svg(svg, "rect", { x: 40, y, width: w, height: 24, rx: 4, fill: "color-mix(in srgb, var(--c1) 25%, var(--panel))", stroke: "var(--c1)" });
+          const vw = Math.max(6, w * 0.15);
+          const v = K.svg(svg, "rect", { x: 40 + w - vw, y, width: vw, height: 24, rx: 4, fill: "var(--c2)", opacity: 0 });
+          return v;
+        });
+        T(svg, 40, 330, "做题少的学生也有完整的“尾巴”在验证集里；tito 的划分会平衡这一点", { "font-size": 12, class: "muted" });
+        ctx.tween(1000, (t) => els.forEach((e) => (e.style.opacity = t)));
+      },
+    },
+    {
+      title: "LightGBM 训练与按时间提交", kicker: "第 107–115 格 · 建模与提交",
+      html: `<p>最终只用 5 个特征：学生答题数、学生平均正确率、题目被答次数、题目平均正确率、上一题组用时（第 108 格）。“看讲座”“看解析”两个特征几乎没带来提升（CV 不到 +0.001，公开榜 −0.001），作者选择更简单的模型（第 107 格）。</p><p>从训练集随机抽 <b>1000 万行</b>，用 <b>LightGBM</b> 训练：一棵接一棵地种决策树，每棵新树专门修正前面的错误；评价指标 AUC，验证集连续 8 轮不提升就<b>早停</b>（第 111 格）。</p><p>提交时通过 <code>riiideducation</code> 的 API 逐批拿到测试数据，合并同样的特征，预测并提交（第 115 格）。</p>`,
+      cells: [107, 108, 109, 111, 115], highlight: ["sample(n=10000000", "early_stopping_rounds=8", "env.predict"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [0, 120], [0.70, 0.78], { xlabel: "树的棵数（示意）", ylabel: "AUC", yfmt: (v) => v.toFixed(2) });
+        const tr = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const va = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        T(svg, 470, 60, "— 训练集", { fill: "var(--c1)", "font-weight": 700 }); T(svg, 470, 82, "— 验证集", { fill: "var(--c6)", "font-weight": 700 });
+        const fT = (n) => 0.71 + 0.06 * (1 - Math.exp(-n / 35)) + 0.0001 * n, fV = (n) => 0.71 + 0.052 * (1 - Math.exp(-n / 30)) - 0.00002 * Math.max(0, n - 80) ** 2 / 10;
+        const stop = K.svg(svg, "line", { x1: ax.sx(92), x2: ax.sx(92), y1: 30, y2: 270, stroke: "var(--warn)", "stroke-dasharray": "5 4", opacity: 0 });
+        const st = T(svg, ax.sx(92) + 6, 120, "验证集 8 轮不再提升 → 停", { fill: "var(--warn)", "font-size": 12 }); st.style.opacity = 0;
+        T(svg, 60, 320, "曲线为示意，作者的真实 AUC 在训练日志里", { "font-size": 12, class: "muted" });
+        ctx.tween(1600, (t) => { let a = "", b = ""; for (let n = 0; n <= 100 * t; n += 1) { a += (a ? "L" : "M") + ax.sx(n) + "," + ax.sy(fT(n)); b += (b ? "L" : "M") + ax.sx(n) + "," + ax.sy(fV(n)); } tr.setAttribute("d", a); va.setAttribute("d", b); })
+          .then((ok) => ok && ctx.tween(400, (t) => { stop.style.opacity = t; st.style.opacity = t; }));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：样本少，平均数不稳 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "k", label: "平滑强度：往全体平均 0.65 “拉回”多少题的分量（0 = 不平滑）", min: 0, max: 50, step: 1, value: 0 },
+      { id: "seed", label: "重新生成学生", button: true },
+    ],
+    note: "现场生成 400 名模拟学生，每人有一个看不见的“真实水平”，做题数从 1 到 500 不等。横轴是做题数，纵轴是观察到的正确率。平滑公式 = (答对数 + k × 0.65) ÷ (做题数 + k)：题少的学生被拉向全体平均，题多的学生几乎不受影响。看看平滑后，估计值离真实水平是不是更近了。",
+    render(svg, v) {
+      const r = K.rng(31 + v.seed * 7), U = [];
+      for (let i = 0; i < 400; i++) {
+        const true_p = K.clamp(0.65 + K.randn(r) * 0.12, 0.2, 0.97), n = Math.max(1, Math.floor(Math.exp(r() * 6.2)));
+        let c = 0; for (let j = 0; j < n; j++) if (r() < true_p) c++;
+        U.push({ true_p, n, raw: c / n, sm: (c + v.k * 0.65) / (n + v.k) });
+      }
+      const ax = K.axes(svg, { x: 60, y: 20, w: 560, h: 250 }, [0, Math.log(500)], [0, 1], { xticks: 0, xlabel: "做题数（对数刻度：1、10、100、500）", ylabel: "正确率" });
+      [1, 10, 100, 500].forEach((n) => T(svg, ax.sx(Math.log(n)), 286, String(n), { "text-anchor": "middle", "font-size": 11 }));
+      U.forEach((u) => { const x = ax.sx(Math.log(u.n)); if (v.k > 0) K.svg(svg, "line", { x1: x, x2: x, y1: ax.sy(u.raw), y2: ax.sy(u.sm), stroke: "var(--ink-3)", opacity: 0.25 }); K.svg(svg, "circle", { cx: x, cy: ax.sy(v.k > 0 ? u.sm : u.raw), r: 2.8, fill: "var(--c1)", opacity: 0.7 }); });
+      K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(Math.log(500)), y1: ax.sy(0.65), y2: ax.sy(0.65), stroke: "var(--warn)", "stroke-dasharray": "4 3" });
+      T(svg, 60, 318, "黄虚线 = 全体平均 0.65；点 = 每个学生（平滑后会画出从原始值到平滑值的细线）", { "font-size": 11, class: "muted" });
+      const err = (key, f) => Math.sqrt(U.filter(f).reduce((s, u) => s + (u[key] - u.true_p) ** 2, 0) / Math.max(1, U.filter(f).length));
+      const few = (u) => u.n <= 10;
+      return { readout: [
+        { k: "题数 ≤ 10 的学生：原始估计误差", v: err("raw", few).toFixed(3), color: "var(--bad)" },
+        { k: "题数 ≤ 10：平滑后误差", v: err("sm", few).toFixed(3), color: err("sm", few) < err("raw", few) ? "var(--good)" : "var(--ink)" },
+        { k: "全部学生：平滑后误差", v: err("sm", () => true).toFixed(3) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：用全部答题算 user_mean 的泄漏 ---------- */
+  function auc(scores, labels) {
+    const idx = scores.map((s, i) => i).sort((a, b) => scores[a] - scores[b]);
+    let rank = 0, sumPos = 0, nPos = 0, nNeg = 0;
+    for (let i = 0; i < idx.length; i++) { rank = i + 1; if (labels[idx[i]]) { sumPos += rank; nPos++; } else nNeg++; }
+    return nPos && nNeg ? (sumPos - (nPos * (nPos + 1)) / 2) / (nPos * nNeg) : 0.5;
+  }
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "nq", label: "每个学生做题数的典型值（越少泄漏越严重）", min: 3, max: 200, step: 1, value: 20 },
+      { id: "learn", label: "学生在做题过程中的进步速度（模拟设定）", min: 0, max: 1, step: 0.05, value: 0.3, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "重新生成", button: true },
+    ],
+    note: "现场生成 600 名模拟学生的答题序列。每人最后 20% 的题当验证集。特征只有一个：学生的平均正确率。比较两种算法：A 只用验证题之前的答题；B 用这个学生的全部答题（包括验证题本身）。在验证集上算 AUC。B 的分数更高，但它偷看了答案；真正上线预测新题时，只有 A 的做法是可行的。",
+    render(svg, v) {
+      const r = K.rng(900 + v.seed * 23);
+      const sA = [], sB = [], lab = [];
+      for (let u = 0; u < 600; u++) {
+        const ab = K.randn(r) * 0.9, n = Math.max(3, Math.round(v.nq * Math.exp(K.randn(r) * 0.6)));
+        const ans = [];
+        for (let j = 0; j < n; j++) ans.push(r() < K.sigmoid(0.7 + ab + v.learn * 2 * (j / n) + K.randn(r) * 0.8) ? 1 : 0);
+        const cut = Math.max(1, Math.floor(n * 0.8)), past = ans.slice(0, cut);
+        const meanPast = (past.reduce((a, b) => a + b, 0) + 0.5) / (past.length + 1);
+        const meanAll = (ans.reduce((a, b) => a + b, 0) + 0.5) / (ans.length + 1);
+        for (let j = cut; j < n; j++) { sA.push(meanPast); sB.push(meanAll); lab.push(ans[j]); }
+      }
+      const aA = auc(sA, lab), aB = auc(sB, lab);
+      const bar = (y, val, name, col) => { T(svg, 210, y + 26, name, { "text-anchor": "end", "font-size": 13 }); K.svg(svg, "rect", { x: 220, y, width: 400, height: 38, rx: 4, fill: "var(--panel-2)" }); K.svg(svg, "rect", { x: 220, y, width: 400 * (val - 0.5) / 0.5, height: 38, rx: 4, fill: col }); T(svg, 226 + 400 * (val - 0.5) / 0.5, y + 25, val.toFixed(3), { "font-weight": 700 }); };
+      T(svg, 30, 30, `验证集 AUC（共 ${lab.length} 道验证题；条从 0.5 = 瞎猜 开始画）`, { "font-weight": 700 });
+      bar(60, aA, "A：只用之前的答题", "var(--good)");
+      bar(130, aB, "B：用全部答题（作者的快捷做法）", "var(--bad)");
+      T(svg, 30, 230, "B 比 A 高出的部分，来自把验证题自己的答案算进了特征", { "font-size": 13, fill: "var(--warn)" });
+      return { readout: [
+        { k: "A 的 AUC（诚实）", v: aA.toFixed(3), color: "var(--good)" },
+        { k: "B 的 AUC（偷看）", v: aB.toFixed(3), color: "var(--bad)" },
+        { k: "虚高", v: "+" + (aB - aA).toFixed(3) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

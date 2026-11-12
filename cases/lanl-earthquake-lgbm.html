@@ -1,0 +1,670 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>实验室地震预测</title>
+<meta name="description" content="Kaggle 案例拆解：从实验室岩石摩擦的声波信号里预测“离下一次地震还有几秒”。切段、统计与频谱特征、STA/LTA、LightGBM 回归。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">声波信号 · 回归预测 · 地震科学</div>
+  <h1>听岩石“说话”：离下一次实验室地震还有几秒？</h1>
+  <p class="en">LANL Earthquake EDA and Prediction</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">信号切段</span><span class="tag method">统计特征</span><span class="tag method">FFT 频谱</span>
+    <span class="tag method">STA/LTA</span><span class="tag method">滚动窗口</span><span class="tag method">标准化</span>
+    <span class="tag method">LightGBM 回归</span><span class="tag method">K 折交叉验证</span><span class="tag method">早停</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Gabriel Preda</b></span>
+    <span>Kaggle 点赞 <b>1,574</b>（2026-11 抓取）</span>
+    <span>比赛 <b>LANL Earthquake Prediction</b>（洛斯阿拉莫斯国家实验室）</span>
+    <span><a href="https://www.kaggle.com/code/gpreda/lanl-earthquake-eda-and-prediction" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">实验室“人造断层”上录下的声波</div><p>两块岩石夹着一层碎石粉被持续推挤，会反复“卡住—突然滑动”，每次滑动就是一次小型实验室地震。传感器一直在录声音。<span data-cell="1">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">离下一次“地震”还有几秒</div><p>给一段 15 万个采样点的声波，回答 <code>time_to_failure</code>：距离下一次滑动还剩多少秒。这是一个回归问题（答案是连续的数）。<span data-cell="18">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">把每段声音浓缩成约 160 个数字</div><p>每段算均值、标准差、分位数、FFT 频谱、STA/LTA（地震台常用的“突然变吵”指标）、滚动窗口统计等，再用 LightGBM 做 5 折交叉验证回归。<span data-cell="24">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一份完整的比赛提交流程</div><p>作者观察到大滑动前声波振幅会变大；最后给出特征重要性和提交文件。具体误差（MAE）在运行输出里，源码不带，本页不列。<span data-cell="15">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛数据由美国洛斯阿拉莫斯国家实验室（LANL）提供：一次很长的连续实验录音，加上很多段单独的测试片段。下面的规模来自作者 notebook 的文字和代码。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">训练集行数</div><div class="v">6 亿多</div></div>
+        <div class="stat-tile"><div class="k">列数</div><div class="v">2</div></div>
+        <div class="stat-tile"><div class="k">每个测试片段</div><div class="v">15 万点</div></div>
+        <div class="stat-tile"><div class="k">每段算出的特征</div><div class="v">约 160</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">“超过 6 亿行”见第 13 格 <span data-cell="13">出处</span>；作者在第 16 格用前 6,291,455 行当作“1% 的数据” <span data-cell="16">出处</span>；测试片段长度见第 18 格 <span data-cell="18">出处</span>；特征个数是本页按第 24 格代码数出来的（约 160 个）。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>acoustic_data</code></td><td>传感器录到的声波振幅，一个采样点一个整数，正负来回振荡</td><td>整数（int16）</td></tr>
+        <tr><td><code>time_to_failure</code></td><td><b>要预测的答案</b>：从这个采样点算起，离下一次实验室地震还有多少秒</td><td>小数（秒）</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">数据类型见第 9 格 <span data-cell="9">出处</span>，列的含义见第 13 格 <span data-cell="13">出处</span>。训练集是一整条长录音，答案随时间像锯齿一样：慢慢减到 0（地震发生），再跳回一个较大的值，开始下一轮。</p>
+      <p class="callout">测试集是很多段互不相连的 15 万点片段，每段只要求给出一个数：这一段<b>结束时</b>离地震还有几秒。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="21">
+    <h3>实验 A · STA/LTA：怎样发现声音“突然变吵” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labA"></div>
+  </div>
+  <div data-at="24">
+    <h3>实验 B · FFT：把一段声音拆成不同的“音高” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labB"></div>
+  </div>
+  <div data-at="47">
+    <h3>实验 C · 用段特征预测“还剩几秒”，以及打乱切分的陷阱 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labC"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论与做法</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论 / 做法</th><th>出处</th></tr>
+        <tr><td>声波振幅变化复杂；每次滑动之前振幅会明显增大，但在两次滑动中间也会出现大振幅</td><td><span data-cell="15">第 15 格</span></td></tr>
+        <tr><td>放大看，最大的那次振荡并不在滑动的最后一刻，之前有成串的强振荡，之后还有小峰，然后才发生滑动</td><td><span data-cell="17">第 17 格</span></td></tr>
+        <tr><td>把训练录音切成和测试片段一样长（15 万点）的段，每段的答案取这一段最后一个点的 time_to_failure</td><td><span data-cell="25">第 25 格</span></td></tr>
+        <tr><td>LightGBM 5 折交叉验证，每折都对测试集预测，最终提交取 5 折平均</td><td><span data-cell="46">第 46 格</span></td></tr>
+        <tr><td>给出按 5 折平均的特征重要性排名图</td><td><span data-cell="49">第 49 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">原 notebook 的 MAE（平均绝对误差）和特征重要性排名都在运行输出里，Kaggle 下载的源码不带输出，作者文字里也没写具体数值，所以这里不列分数。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li><b>“变化率”特征算的不是变化率：</b><code>np.mean(np.nonzero(...)[0])</code> 求的是“非零位置的下标”的平均值，几乎是个常数 <span data-cell="24">第 24 格</span>。</li>
+        <li><b>名字和参数对不上：</b><code>exp_Moving_average_30000_mean</code> 实际用的是 <code>span=6000</code>；<code>MA_400MA_BB_*</code> 用的是 700 点的均值 <span data-cell="24">第 24 格</span>。</li>
+        <li><b>打乱的 K 折：</b><code>KFold(shuffle=True)</code> 让同一个地震周期里相邻的段同时出现在训练折和验证折，验证分数会偏乐观 <span data-cell="43">第 43 格</span>。</li>
+        <li>第 21 格的 <code>np.float</code> 和第 24 格的 <code>Series.mad()</code> 在新版 NumPy / pandas 里已被移除，今天直接运行会报错。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一段声波，估计离下一次“滑动失稳”还有多久。真实地壳远比实验室复杂，这项研究目前是在实验室里检验“声音里是否藏着前兆”。</li>
+        <li><b>对社会的意义：</b>如果能提前几秒到几十秒知道断层要滑动，就能让高铁减速、电梯停靠、手术暂停、燃气阀门自动关闭。这正是“地震预警”系统在做的事。</li>
+        <li><b>同类问题：</b>机器轴承、风机齿轮箱的振动监测（预测还能转多久）、桥梁和大坝的声发射监测、心电图异常预警。</li>
+        <li><b>可迁移的套路：</b>超长信号 → 按固定长度切段 → 每段算统计和频谱特征 → 梯度提升树回归。验证时按时间或按周期切分，不要随机打乱。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>切段：每段 15 万点 <span data-cell="19">第 19 格</span></li>
+        <li>趋势特征（线性回归斜率）、STA/LTA <span data-cell="21">第 21 格</span></li>
+        <li>统计、分位数、FFT、Hilbert 包络、Hann 平滑、滚动窗口 <span data-cell="24">第 24 格</span></li>
+        <li>StandardScaler 标准化 <span data-cell="30">第 30 格</span></li>
+        <li>LightGBM 回归 + 5 折 KFold + 早停 <span data-cell="47">第 47 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者把相邻的段随机分进训练折和验证折。同一个地震周期里相邻两段的答案只差约 0.04 秒，这会让验证分数偏高还是偏低？你会怎样重新切分？</li>
+      <li>训练录音是一整条连续的数据，测试片段却是互不相连的短段。只看 15 万个点，模型能不能知道“现在处在周期的哪个阶段”？还缺什么信息？</li>
+      <li>作者观察到在两次滑动的中间也会出现大振幅。这对“声音越大就越快要地震”的直觉意味着什么？</li>
+      <li>实验室地震周期比较规律，真实断层可能几十年、几百年才滑动一次。实验室里学到的规律能直接搬到真实地震上吗？要补哪些数据？</li>
+      <li>假如地震预警系统提前 10 秒报警，但有 20% 是误报。你觉得学校、医院、高铁分别应不应该接入？误报和漏报哪个代价更大？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Gabriel Preda，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。比赛数据：Los Alamos National Laboratory, LANL Earthquake Prediction。
+</footer>
+</main>
+
+<script src="nb/lanl-earthquake-lgbm.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---- 模拟“实验室地震”声波：多个周期，越接近滑动振幅越大，滑动时有一个大尖峰 ---- */
+  function quakeSignal(seed, nCycles, perCycle, opt) {
+    opt = opt || {};
+    const r = K.rng(seed), sig = [], ttf = [], cyc = [];
+    for (let c = 0; c < nCycles; c++) {
+      const len = Math.round(perCycle * (0.7 + r() * 0.6)), T = len / perCycle * 10; // 周期长度（秒）
+      const g = opt.gain ? 0.6 + r() * 1.0 : 1; let dc = opt.gain ? (r() - 0.5) * 6 : 0;   // 每个周期自己的“音量”，零点还会慢慢漂移
+      for (let i = 0; i < len; i++) {
+        const u = i / len, left = T * (1 - u);
+        let amp = g * (4 + 10 * Math.pow(u, 3)) + (opt.mid ? 6 * Math.exp(-Math.pow((u - 0.5) / 0.04, 2)) * (r() < 0.6 ? 1 : 0) : 0);
+        if (opt.gain) dc += K.randn(r) * 0.6;
+        let v = dc + K.randn(r) * amp;
+        if (r() < 0.004 + 0.02 * u * u) v += K.randn(r) * amp * 4;          // 零星爆发
+        if (i > len - 6) v += K.randn(r) * 90;                                // 滑动瞬间的大尖峰
+        sig.push(v); ttf.push(left); cyc.push(c);
+      }
+    }
+    return { sig, ttf, cyc };
+  }
+  function line(svg, ax, xs, ys, attrs) {
+    let d = "";
+    for (let i = 0; i < xs.length; i++) d += (i ? "L" : "M") + ax.sx(xs[i]).toFixed(1) + "," + ax.sy(ys[i]).toFixed(1);
+    return K.svg(svg, "path", Object.assign({ d, fill: "none", "stroke-width": 1.4 }, attrs));
+  }
+
+  const steps = [
+    {
+      at: 0, title: "实验室里的地震：数据从哪来", kicker: "第 0–2 格 · 背景",
+      html: `<p>数据来自一个经典的<b>实验室地震</b>装置：两层碎石粉（断层泥）夹在岩块之间，一边施加固定的压力，一边以固定速度推。岩块会“卡住、慢慢憋劲、突然滑动”，循环往复，这叫<b>黏滑</b>，模仿的是真实断层的“积累应力—破裂”过程。</p><p>作者在第 1 格说明：LANL 之前已经证明，在比较规律的实验周期里，可以从连续声波预测滑动；这次比赛给的数据周期更不规律，更难。</p>`,
+      cells: [1], highlight: ["stick and slip", "laboratory earthquake"],
+      draw(svg, ctx) {
+        // 弹簧拉着木块：应力慢慢积累，突然滑动
+        K.svg(svg, "rect", { x: 40, y: 220, width: 640, height: 14, fill: "var(--ink-3)", opacity: 0.5 });
+        const block = K.svg(svg, "rect", { x: 300, y: 160, width: 110, height: 60, rx: 4, fill: "var(--c1)", opacity: 0.85 });
+        K.svg(svg, "text", { x: 355, y: 196, "text-anchor": "middle", "font-size": 13, fill: "#fff", "font-weight": 700 }, "岩块");
+        const spring = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--ink)", "stroke-width": 2 });
+        const hand = K.svg(svg, "rect", { x: 80, y: 176, width: 16, height: 28, fill: "var(--warn)" });
+        K.svg(svg, "text", { x: 40, y: 150, "font-size": 12, class: "muted" }, "固定速度推");
+        const gauge = K.svg(svg, "rect", { x: 520, y: 40, width: 0, height: 16, rx: 3, fill: "var(--warn)" });
+        K.svg(svg, "rect", { x: 520, y: 40, width: 160, height: 16, rx: 3, fill: "none", stroke: "var(--line)" });
+        K.svg(svg, "text", { x: 520, y: 32, "font-size": 12 }, "憋着的劲（应力）");
+        const label = K.svg(svg, "text", { x: 360, y: 290, "text-anchor": "middle", "font-size": 15, "font-weight": 700 }, "");
+        const wave = [];
+        for (let i = 0; i < 60; i++) wave.push(K.svg(svg, "line", { x1: 40 + i * 10.6, x2: 40 + i * 10.6, y1: 320, y2: 320, stroke: "var(--c6)", "stroke-width": 2 }));
+        let bx = 300;
+        const drawSpring = (hx) => {
+          let d = `M${hx + 16},190`; const n = 12, L = bx - hx - 16;
+          for (let i = 1; i <= n; i++) d += ` L${hx + 16 + (L * i) / n},${190 + (i % 2 ? -10 : 10)}`;
+          spring.setAttribute("d", d);
+        };
+        (async () => {
+          let hx = 80;
+          for (let c = 0; c < 3; c++) {
+            label.textContent = "卡住：弹簧越拉越长";
+            if (!(await ctx.tween(1500, (t) => { const x = hx + t * 70; hand.setAttribute("x", x); drawSpring(x); gauge.setAttribute("width", 160 * t); wave.forEach((w, i) => { const a = 2 + 8 * t * t * Math.abs(Math.sin(i * 1.7 + t * 30)); w.setAttribute("y1", 320 - a); w.setAttribute("y2", 320 + a); }); }))) return;
+            hx += 70;
+            label.textContent = "突然滑动 = 一次实验室地震";
+            label.style.fill = "var(--bad)";
+            const b0 = bx;
+            if (!(await ctx.tween(260, (t) => { bx = b0 + 70 * t; block.setAttribute("x", bx); drawSpring(hx); gauge.setAttribute("width", 160 * (1 - t)); wave.forEach((w, i) => { const a = 20 * (1 - t) * Math.abs(Math.sin(i * 2.3)); w.setAttribute("y1", 320 - a); w.setAttribute("y2", 320 + a); }); }))) return;
+            label.style.fill = "var(--ink)";
+            if (bx > 560) { bx = 300; hx = 80; block.setAttribute("x", bx); hand.setAttribute("x", hx); drawSpring(hx); }
+            if (!(await ctx.wait(300))) return;
+          }
+          label.textContent = "下方红线 = 传感器录到的声音（示意）";
+        })();
+      },
+    },
+    {
+      title: "导入工具，读入 6 亿行录音", kicker: "第 3–12 格 · 准备",
+      html: `<p>作者导入了一大批工具：NumPy、pandas 处理数据，scipy 做信号处理，LightGBM、XGBoost、CatBoost 等做模型（实际只用到了 LightGBM）。</p><p>训练文件很大，读的时候专门指定了列的类型：声波用 <code>int16</code>（小整数），答案用 <code>float32</code>，这样能省一半以上的内存。</p>`,
+      cells: [3, 9], highlight: ["np.int16", "np.float32"],
+      draw(svg, ctx) {
+        const rows = [["acoustic_data", "time_to_failure"], ["12", "1.4691"], ["6", "1.4691"], ["8", "1.4691"], ["5", "1.4691"], ["…", "…"]];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "两列、6 亿多行（下表数字为示意，不是原文件的真实行）");
+        const els = [];
+        rows.forEach((r, i) => r.forEach((v, j) => {
+          const g = K.node(svg, 40 + j * 170, 46 + i * 40, 160, 34, v, { fill: i ? "var(--panel-2)" : "var(--accent-soft)", fs: 12, bold: !i });
+          g.style.opacity = 0; els.push(g);
+        }));
+        const mem = [{ k: "默认 64 位", w: 400, c: "var(--bad)" }, { k: "int16 + float32", w: 120, c: "var(--good)" }];
+        mem.forEach((m, i) => { K.svg(svg, "text", { x: 420, y: 90 + i * 70, "font-size": 13 }, m.k); m.r = K.svg(svg, "rect", { x: 420, y: 100 + i * 70, width: 0, height: 22, rx: 3, fill: m.c }); });
+        K.svg(svg, "text", { x: 420, y: 270, "font-size": 12, class: "muted" }, "条越长 = 占内存越多（比例示意）");
+        ctx.tween(1200, (t) => els.forEach((e, i) => (e.style.opacity = K.clamp(t * els.length - i, 0, 1))))
+          .then((ok) => ok && ctx.tween(900, (t) => mem.forEach((m) => m.r.setAttribute("width", (m.w * 0.62) * t))));
+      },
+    },
+    {
+      title: "看全貌：声音和倒计时", kicker: "第 13–15 格 · 探索",
+      html: `<p>6 亿行画不出来，作者每隔 100 个点取 1 个（1% 的数据）画图：红线是声波，蓝线是“离地震还有几秒”。</p><p>蓝线像<b>锯齿</b>：一路降到 0（地震发生），再跳回去开始下一轮。作者发现每次跳变之前，红色声波的振幅都会变大；不过在两次地震中间，有时也会冒出大振幅。</p>`,
+      cells: [14], highlight: ["[::100]"],
+      draw(svg, ctx) {
+        const S = quakeSignal(3, 5, 260, { mid: true });
+        const n = S.sig.length, xs = S.sig.map((_, i) => i);
+        const ax = K.axes(svg, { x: 50, y: 20, w: 620, h: 280 }, [0, n], [-60, 60], { xticks: 0, yticks: 0 });
+        const ax2 = K.axes(svg, { x: 50, y: 20, w: 620, h: 280 }, [0, n], [0, 14], { xticks: 0, yticks: 0 });
+        const p1 = line(svg, ax, xs, S.sig.map((v) => K.clamp(v, -60, 60)), { stroke: "var(--c6)", "stroke-width": 0.8, opacity: 0.8 });
+        const p2 = line(svg, ax2, xs, S.ttf, { stroke: "var(--c1)", "stroke-width": 2.2 });
+        K.svg(svg, "text", { x: 60, y: 330, "font-size": 12, fill: "var(--c6)" }, "红：声波（示意）");
+        K.svg(svg, "text", { x: 200, y: 330, "font-size": 12, fill: "var(--c1)" }, "蓝：离地震还有几秒（锯齿，到 0 = 地震）");
+        [p1, p2].forEach((p) => { const L = p.getTotalLength ? p.getTotalLength() : 3000; p.style.strokeDasharray = L; p.style.strokeDashoffset = L; p._L = L; });
+        ctx.tween(2600, (t) => { p1.style.strokeDashoffset = p1._L * (1 - t); p2.style.strokeDashoffset = p2._L * (1 - t); });
+      },
+    },
+    {
+      title: "放大看：滑动前的“前兆”", kicker: "第 16–17 格 · 探索",
+      html: `<p>作者再画训练集开头连续的 1%（前 6,291,455 行），时间分辨率高得多。</p><p>他发现：最大的那次振荡<b>并不在滑动的最后一刻</b>。前面先有一串强振荡，最大的一次之后还有些小峰，然后才真正滑动。这说明“最吵的时候 = 马上地震”并不完全成立，模型需要更细的特征。</p>`,
+      cells: [16, 17],
+      draw(svg, ctx) {
+        const r = K.rng(8), n = 520, sig = [];
+        for (let i = 0; i < n; i++) {
+          const u = i / n; let a = 4 + 8 * u;
+          if (u > 0.55 && u < 0.62) a += 18 * Math.sin(((u - 0.55) / 0.07) * Math.PI) * (r() < 0.5 ? 1 : 0.6);
+          if (u > 0.72 && u < 0.76) a += 45 * Math.sin(((u - 0.72) / 0.04) * Math.PI);
+          if (u > 0.8 && u < 0.93 && r() < 0.05) a += 15;
+          sig.push(K.randn(r) * a);
+        }
+        const ax = K.axes(svg, { x: 50, y: 30, w: 620, h: 240 }, [0, n], [-80, 80], { xticks: 0, yticks: 0 });
+        const p = line(svg, ax, sig.map((_, i) => i), sig.map((v) => K.clamp(v, -80, 80)), { stroke: "var(--c6)", "stroke-width": 0.9 });
+        const L = p.getTotalLength(); p.style.strokeDasharray = L; p.style.strokeDashoffset = L;
+        const marks = [[0.585, "成串的强振荡"], [0.74, "最大的一次"], [0.86, "之后的小峰"], [0.985, "真正滑动"]];
+        const ms = marks.map(([u, t], i) => {
+          const g = K.svg(svg, "g"); g.style.opacity = 0;
+          K.svg(g, "line", { x1: ax.sx(u * n), x2: ax.sx(u * n), y1: 30, y2: 270, stroke: i === 3 ? "var(--bad)" : "var(--warn)", "stroke-dasharray": "4 3" });
+          K.svg(g, "text", { x: ax.sx(u * n), y: 295 + (i % 2) * 18, "text-anchor": "middle", "font-size": 12, fill: i === 3 ? "var(--bad)" : "var(--ink)" }, t);
+          return g;
+        });
+        ctx.tween(2200, (t) => (p.style.strokeDashoffset = L * (1 - t)))
+          .then(async (ok) => { for (const g of ms) { if (!ok) return; ok = await ctx.tween(350, (t) => (g.style.opacity = t)); } });
+      },
+    },
+    {
+      title: "切成 15 万点一段", kicker: "第 18–19 格 · 对齐测试集",
+      html: `<p>测试集的每个片段都是 15 万个点，只要一个答案。为了让训练和考试“题型一致”，作者把训练录音也按 15 万点一段切开：6 亿多行大约能切出四千多段。</p><p>每一段的答案取这一段<b>最后一个点</b>的 time_to_failure，因为测试也是问“这一段结束时离地震还有几秒”。</p>`,
+      cells: [19], highlight: ["150000"],
+      draw(svg, ctx) {
+        const S = quakeSignal(5, 3, 300);
+        const n = S.sig.length;
+        const ax = K.axes(svg, { x: 40, y: 30, w: 640, h: 150 }, [0, n], [-50, 50], { xticks: 0, yticks: 0 });
+        line(svg, ax, S.sig.map((_, i) => i), S.sig.map((v) => K.clamp(v, -50, 50)), { stroke: "var(--c6)", "stroke-width": 0.7, opacity: 0.7 });
+        const seg = 60, k = Math.floor(n / seg);
+        const cuts = [], bars = [];
+        const axy = K.axes(svg, { x: 40, y: 210, w: 640, h: 100 }, [0, n], [0, 14], { xticks: 0, yticks: 0 });
+        K.svg(svg, "text", { x: 40, y: 205, "font-size": 12, class: "muted" }, "每段一个答案：段末的“还剩几秒”");
+        for (let j = 1; j < k; j++) { const c = K.svg(svg, "line", { x1: ax.sx(j * seg), x2: ax.sx(j * seg), y1: 30, y2: 30, stroke: "var(--ink)", "stroke-width": 1 }); cuts.push(c); }
+        for (let j = 0; j < k; j++) {
+          const v = S.ttf[(j + 1) * seg - 1];
+          const b = K.svg(svg, "rect", { x: axy.sx(j * seg) + 1, y: axy.sy(0), width: axy.sx(seg) - axy.sx(0) - 2, height: 0, fill: "var(--c1)", rx: 2 });
+          b._h = axy.sy(0) - axy.sy(v); bars.push(b);
+        }
+        ctx.tween(1200, (t) => cuts.forEach((c, i) => c.setAttribute("y2", 30 + 150 * K.clamp(t * cuts.length - i, 0, 1))))
+          .then((ok) => ok && ctx.tween(1400, (t) => bars.forEach((b, i) => { const h = b._h * K.clamp(t * bars.length - i, 0, 1); b.setAttribute("height", h); b.setAttribute("y", axy.sy(0) - h); })));
+      },
+    },
+    {
+      title: "两个小工具：趋势和 STA/LTA", kicker: "第 20–23 格 · 辅助函数",
+      html: `<p><code>add_trend_feature</code>：对一段信号拟合一条直线，取斜率，看这段声音整体在变大还是变小。</p><p><code>classic_sta_lta</code>：地震台站沿用了几十年的“触发器”。STA 是<b>短时间窗</b>里的平均能量（最近一小会儿有多吵），LTA 是<b>长时间窗</b>里的平均能量（平时有多吵）。两者相除，比值突然升高就说明“来事了”。</p>`,
+      cells: [21], highlight: ["def classic_sta_lta", "return sta / lta"],
+      draw(svg, ctx) {
+        const r = K.rng(12), n = 300, x = [];
+        for (let i = 0; i < n; i++) x.push(K.randn(r) * (i > 180 && i < 215 ? 9 : 2));
+        const ax = K.axes(svg, { x: 40, y: 20, w: 640, h: 140 }, [0, n], [-30, 30], { xticks: 0, yticks: 0 });
+        line(svg, ax, x.map((_, i) => i), x, { stroke: "var(--c6)", "stroke-width": 1 });
+        const sta = K.svg(svg, "rect", { x: 0, y: 20, width: ax.sx(10) - ax.sx(0), height: 140, fill: "var(--c2)", opacity: 0.25 });
+        const lta = K.svg(svg, "rect", { x: 0, y: 20, width: ax.sx(80) - ax.sx(0), height: 140, fill: "var(--c1)", opacity: 0.12 });
+        K.svg(svg, "text", { x: 40, y: 182, "font-size": 12, fill: "var(--c2)" }, "■ 短窗 STA：最近有多吵");
+        K.svg(svg, "text", { x: 220, y: 182, "font-size": 12, fill: "var(--c1)" }, "■ 长窗 LTA：平时有多吵");
+        const ax2 = K.axes(svg, { x: 40, y: 200, w: 640, h: 110 }, [0, n], [0, 12], { xticks: 0, yticks: 2, ylabel: "比值" });
+        const ratio = [];
+        for (let i = 0; i < n; i++) {
+          let s = 0, l = 0; for (let j = Math.max(0, i - 9); j <= i; j++) s += x[j] * x[j];
+          for (let j = Math.max(0, i - 79); j <= i; j++) l += x[j] * x[j];
+          ratio.push(i < 80 ? 1 : (s / 10) / (l / 80));
+        }
+        const rp = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--warn)", "stroke-width": 2 });
+        ctx.tween(3200, (t) => {
+          const i = Math.max(1, Math.floor(t * (n - 1)));
+          sta.setAttribute("x", ax.sx(Math.max(0, i - 10))); lta.setAttribute("x", ax.sx(Math.max(0, i - 80)));
+          let d = ""; for (let j = 0; j <= i; j++) d += (j ? "L" : "M") + ax2.sx(j).toFixed(1) + "," + ax2.sy(Math.min(ratio[j], 12)).toFixed(1);
+          rp.setAttribute("d", d);
+        });
+      },
+    },
+    {
+      title: "FFT：把声音拆成不同的音高", kicker: "第 24 格 · 频谱特征",
+      html: `<p>每段除了看“有多吵”，作者还用 <code>np.fft.fft</code> 做了<b>傅里叶变换（FFT）</b>：把一段声波拆成很多不同频率的正弦波，看每种频率占多少。</p><p>然后对拆出来的实部、虚部取均值、标准差、最大、最小，以及最后 5000 / 15000 个频率分量的统计。下面的实验 B 可以亲手试一下 FFT 在干什么。</p>`,
+      cells: [24], highlight: ["np.fft.fft", "realFFT", "imagFFT"],
+      draw(svg, ctx) {
+        const comps = [{ f: 2, a: 1, c: "var(--c1)" }, { f: 7, a: 0.6, c: "var(--c2)" }, { f: 15, a: 0.35, c: "var(--c3)" }];
+        const N = 200, ax = K.axes(svg, { x: 40, y: 20, w: 380, h: 120 }, [0, N], [-2.2, 2.2], { xticks: 0, yticks: 0 });
+        const mix = []; for (let i = 0; i < N; i++) mix.push(comps.reduce((s, c) => s + c.a * Math.sin((2 * Math.PI * c.f * i) / N), 0));
+        line(svg, ax, mix.map((_, i) => i), mix, { stroke: "var(--c6)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 40, y: 160, "font-size": 12, class: "muted" }, "一段混合的声音（示意）");
+        const parts = comps.map((c, k) => {
+          const a2 = K.axes(svg, { x: 40, y: 180 + k * 52, w: 380, h: 40 }, [0, N], [-1.1, 1.1], { xticks: 0, yticks: 0 });
+          const p = line(svg, a2, mix.map((_, i) => i), mix.map((_, i) => c.a * Math.sin((2 * Math.PI * c.f * i) / N)), { stroke: c.c, "stroke-width": 1.6 });
+          p.style.opacity = 0; return p;
+        });
+        const ax3 = K.axes(svg, { x: 480, y: 40, w: 200, h: 230 }, [0, 20], [0, 1.1], { xticks: 4, yticks: 0, xlabel: "频率（音高）" });
+        const bars = comps.map((c) => K.svg(svg, "rect", { x: ax3.sx(c.f) - 6, y: ax3.sy(0), width: 12, height: 0, fill: c.c }));
+        K.svg(svg, "text", { x: 480, y: 30, "font-size": 12, class: "muted" }, "FFT 结果：每种频率有多强");
+        (async () => {
+          for (let k = 0; k < 3; k++) {
+            if (!(await ctx.tween(600, (t) => { parts[k].style.opacity = t; const h = (ax3.sy(0) - ax3.sy(comps[k].a)) * t; bars[k].setAttribute("height", h); bars[k].setAttribute("y", ax3.sy(0) - h); }))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "每段浓缩成约 160 个数字", kicker: "第 24–28 格 · 特征工程",
+      html: `<p><code>create_features</code> 是整个 notebook 的核心：对每段 15 万个点，算出约 160 个“摘要数字”，包括：</p><ul class="tight"><li>基本统计：均值、标准差、最大、最小、峰度、偏度、中位数</li><li>开头 / 结尾 1 万、5 万点的统计（看段内前后是否变吵）</li><li>分位数：1%、5%、95%、99%（看极端值）</li><li>Hilbert 包络、Hann 窗平滑、四组 STA/LTA</li><li>窗口 10、100、1000 的滚动均值和滚动标准差的各种统计</li></ul><p>第 25 格用循环对每一段调用它，并记下段末的答案。</p>`,
+      cells: [24, 25], highlight: ["create_features(seg_id, seg, train_X)", "values[-1]"],
+      notes: { 27: "看看特征表的形状：行数 = 段数，列数 = 特征个数" },
+      draw(svg, ctx) {
+        const r = K.rng(4), n = 150, x = [];
+        for (let i = 0; i < n; i++) x.push(K.randn(r) * (3 + 6 * (i / n)));
+        const ax = K.axes(svg, { x: 30, y: 40, w: 260, h: 220 }, [0, n], [-30, 30], { xticks: 0, yticks: 0 });
+        line(svg, ax, x.map((_, i) => i), x, { stroke: "var(--c6)", "stroke-width": 1 });
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "一段 15 万点的声波（示意）");
+        const s = x.slice().sort((a, b) => a - b), mean = x.reduce((a, b) => a + b, 0) / n, sd = Math.sqrt(x.reduce((a, b) => a + (b - mean) ** 2, 0) / n);
+        const feats = [["mean", mean], ["std", sd], ["max", s[n - 1]], ["q99", s[Math.floor(0.99 * n)]], ["q01", s[Math.floor(0.01 * n)]], ["std_last_10000", 0], ["sta_lta_mean", 0], ["roll_std_100…", 0], ["…共约 160 个", null]];
+        const last = x.slice(-30), lm = last.reduce((a, b) => a + b, 0) / 30; feats[5][1] = Math.sqrt(last.reduce((a, b) => a + (b - lm) ** 2, 0) / 30);
+        feats[6][1] = feats[5][1] / sd; feats[7][1] = sd * 0.97;
+        K.arrow(svg, 300, 150, 360, 150);
+        const rows = feats.map((f, i) => {
+          const g = K.node(svg, 370, 30 + i * 32, 320, 28, f[1] == null ? f[0] : `${f[0]} = ${f[1].toFixed(2)}`, { fs: 12, fill: i === 8 ? "var(--accent-soft)" : "var(--panel-2)" });
+          g.style.opacity = 0; return g;
+        });
+        ctx.tween(2000, (t) => rows.forEach((g, i) => (g.style.opacity = K.clamp(t * rows.length - i, 0, 1))));
+      },
+    },
+    {
+      title: "标准化：把特征换成同一把尺子", kicker: "第 29–32 格 · 预处理",
+      html: `<p>约 160 个特征的数量级差别很大：有的是零点几，有的上万（比如 FFT 的最大值）。作者用 <code>StandardScaler</code> 把每列变成“减均值、除标准差”的 z 分数：平均是 0，大多数落在 −3 到 3 之间。</p><p>注意 scaler 只在训练特征上 <code>fit</code>，之后拿同一套均值和标准差去变换测试特征，这是正确的做法。</p>`,
+      cells: [30], highlight: ["StandardScaler", "scaler.fit(train_X)"],
+      draw(svg, ctx) {
+        const cols = [{ n: "std", m: 6, s: 2 }, { n: "Rmax", m: 9000, s: 2500 }, { n: "kurt", m: 40, s: 25 }];
+        const r = K.rng(2);
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 13, class: "muted" }, "三列特征，原始数量级不同 → 标准化后都落在同一范围（示意）");
+        const axz = K.axes(svg, { x: 380, y: 50, w: 300, h: 240 }, [-4, 4], [0, 3], { xticks: 4, yticks: 0, xlabel: "z 分数" });
+        cols.forEach((c, k) => {
+          const ax = K.axes(svg, { x: 40, y: 60 + k * 85, w: 280, h: 50 }, [c.m - 4 * c.s, c.m + 4 * c.s], [0, 1], { xticks: 2, yticks: 0 });
+          K.svg(svg, "text", { x: 40, y: 54 + k * 85, "font-size": 12, "font-weight": 700, fill: K.colors[k] }, c.n);
+          const pts = []; for (let i = 0; i < 40; i++) { const z = K.randn(r); pts.push({ z, e: K.svg(svg, "circle", { cx: ax.sx(c.m + z * c.s), cy: 80 + k * 85 + (i % 5) * 4, r: 3, fill: K.colors[k], opacity: 0.7 }), x0: ax.sx(c.m + z * c.s), y0: 80 + k * 85 + (i % 5) * 4 }); }
+          c.pts = pts; c.yz = axz.sy(2.6 - k * 0.9);
+        });
+        ctx.wait(600).then((ok) => ok && ctx.tween(1600, (t) => cols.forEach((c) => c.pts.forEach((p, i) => { p.e.setAttribute("cx", K.lerp(p.x0, axz.sx(K.clamp(p.z, -4, 4)), t)); p.e.setAttribute("cy", K.lerp(p.y0, c.yz + (i % 5) * 4, t)); }))));
+      },
+    },
+    {
+      title: "测试片段：同样的流程再走一遍", kicker: "第 33–41 格 · 测试集",
+      html: `<p>测试数据是很多个单独的 CSV 文件，每个文件一段。作者读入样例提交表 <code>sample_submission.csv</code> 拿到所有片段编号，然后逐个文件读入、调用同一个 <code>create_features</code>，再用训练时的 scaler 变换。</p><p>这一步的要点是“<b>训练和测试必须用一模一样的加工流程</b>”，否则模型看到的数字含义就变了。</p>`,
+      cells: [34, 37], highlight: ["create_features(seg_id, seg, test_X)"],
+      draw(svg, ctx) {
+        const files = ["seg_00030f.csv", "seg_0012b5.csv", "seg_00184e.csv", "…"];
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 12, class: "muted" }, "文件名为示意");
+        const fs = files.map((f, i) => { const g = K.node(svg, 30, 50 + i * 62, 170, 46, f, { fs: 12 }); g.style.opacity = 0; return g; });
+        const fn = K.node(svg, 270, 120, 170, 70, "create_features\n（和训练时同一个）", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const sc = K.node(svg, 490, 120, 90, 70, "scaler\n.transform", {});
+        const out = K.node(svg, 610, 120, 90, 70, "test_X\n每行一段", { bold: true });
+        K.arrow(svg, 440, 155, 488, 155); K.arrow(svg, 580, 155, 608, 155);
+        (async () => {
+          for (let i = 0; i < files.length; i++) {
+            if (!(await ctx.tween(300, (t) => (fs[i].style.opacity = t)))) return;
+            const a = K.arrow(svg, 200, 73 + i * 62, 268, 155, { color: "var(--accent)" }); a.style.opacity = 0;
+            if (!(await ctx.tween(300, (t) => (a.style.opacity = t)))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "5 折交叉验证", kicker: "第 42–44 格 · 验证策略",
+      html: `<p>作者用 <code>KFold(n_splits=5, shuffle=True)</code>：把所有段<b>随机打乱</b>后分成 5 份，轮流拿 1 份当验证、4 份训练。</p><p>这里有个隐患：同一个地震周期里相邻的段非常像，答案也只差一点点。打乱后，验证折里的段往往在训练折里有“几乎一样的邻居”，模型像是提前见过答案，验证误差会偏小。更稳妥的做法是按时间或按地震周期分组切分。实验 C 可以直接对比两种切法。</p>`,
+      cells: [43], highlight: ["shuffle=True"],
+      draw(svg, ctx) {
+        const n = 40, r = K.rng(6);
+        const order = Array.from({ length: n }, (_, i) => i);
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700, fill: "var(--bad)" }, "随机打乱：验证段（橙）和训练段（蓝）紧挨着");
+        K.svg(svg, "text", { x: 30, y: 190, "font-size": 13, "font-weight": 700, fill: "var(--good)" }, "按时间分块：验证段是一整块没见过的时间");
+        const w = 15.5;
+        const top = order.map((i) => K.svg(svg, "rect", { x: 30 + i * w, y: 50, width: w - 2, height: 40, rx: 2, fill: "var(--c1)", opacity: 0.6 }));
+        const bot = order.map((i) => K.svg(svg, "rect", { x: 30 + i * w, y: 210, width: w - 2, height: 40, rx: 2, fill: "var(--c1)", opacity: 0.6 }));
+        // 锯齿：每 10 段一个周期
+        let d1 = "", d2 = "";
+        for (let i = 0; i < n; i++) { const y = 40 - (i % 10) * 3.6; d1 += (i ? "L" : "M") + (30 + i * w + w / 2) + "," + (130 - y + 0); }
+        K.svg(svg, "path", { d: d1, fill: "none", stroke: "var(--ink-3)", "stroke-width": 1.5 });
+        for (let i = 0; i < n; i++) { const y = 40 - (i % 10) * 3.6; d2 += (i ? "L" : "M") + (30 + i * w + w / 2) + "," + (290 - y); }
+        K.svg(svg, "path", { d: d2, fill: "none", stroke: "var(--ink-3)", "stroke-width": 1.5 });
+        K.svg(svg, "text", { x: 660, y: 125, "font-size": 11, class: "muted" }, "答案");
+        const pick = order.filter(() => r() < 0.2);
+        ctx.wait(500).then((ok) => ok && ctx.tween(900, (t) => {
+          pick.forEach((i) => { top[i].style.fill = "var(--warn)"; top[i].style.opacity = 0.6 + 0.4 * t; });
+          for (let i = 16; i < 24; i++) { bot[i].style.fill = "var(--warn)"; bot[i].style.opacity = 0.6 + 0.4 * t; }
+        }));
+      },
+    },
+    {
+      title: "LightGBM：一棵接一棵改错题", kicker: "第 45–47 格 · 建模",
+      html: `<p>模型是 <b>LightGBM</b>，一种梯度提升树：先用一棵小树粗略预测“还剩几秒”，下一棵树专门学上一棵预测错了多少，再下一棵接着改……几千棵树的预测加起来就是最终答案。</p><p>参数里学习率只有 0.001（每棵树只改一点点），最多 2 万棵树，目标是 MAE（平均差几秒）。<b>早停</b>：验证误差连续 500 棵树都不再下降就停。每一折训练完都预测一次测试集，5 折取平均提交。</p>`,
+      cells: [45, 47], highlight: ["'learning_rate': 0.001", "early_stopping_rounds=500", "/ folds.n_splits"],
+      draw(svg, ctx) {
+        const r = K.rng(9), N = 60, X = [], Y = [];
+        for (let i = 0; i < N; i++) { const x = i / N * 10; X.push(x); Y.push(10 - x + K.randn(r) * 0.8); }
+        const ax = K.axes(svg, { x: 50, y: 20, w: 420, h: 250 }, [0, 10], [-2, 12], { xticks: 5, yticks: 4, xlabel: "某个特征（如 q99，越大越吵）", ylabel: "还剩几秒" });
+        X.forEach((x, i) => K.svg(svg, "circle", { cx: ax.sx(x), cy: ax.sy(Y[i]), r: 3, fill: "var(--c1)", opacity: 0.6 }));
+        const pred = new Array(N).fill(Y.reduce((a, b) => a + b, 0) / N), lr = 0.35;
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--warn)", "stroke-width": 2.5 });
+        const draw = () => { let d = ""; X.forEach((x, i) => (d += (i ? "L" : "M") + ax.sx(x) + "," + ax.sy(pred[i]))); path.setAttribute("d", d); };
+        const ax2 = K.axes(svg, { x: 530, y: 40, w: 160, h: 200 }, [0, 12], [0, 3], { xticks: 3, yticks: 3, xlabel: "树的数量", ylabel: "" });
+        K.svg(svg, "text", { x: 530, y: 30, "font-size": 12 }, "平均误差 MAE");
+        const mae = []; const mp = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--bad)", "stroke-width": 2 });
+        draw();
+        (async () => {
+          for (let t = 0; t < 12; t++) {
+            // 一棵树桩：在最佳切点把残差分成两半
+            const res = Y.map((y, i) => y - pred[i]);
+            let best = null;
+            for (let s = 1; s < N; s++) { const L = res.slice(0, s), R = res.slice(s); const mL = L.reduce((a, b) => a + b, 0) / L.length, mR = R.reduce((a, b) => a + b, 0) / R.length; const e = L.reduce((a, b) => a + (b - mL) ** 2, 0) + R.reduce((a, b) => a + (b - mR) ** 2, 0); if (!best || e < best.e) best = { s, mL, mR, e }; }
+            const from = pred.slice();
+            if (!(await ctx.tween(380, (k) => { for (let i = 0; i < N; i++) pred[i] = from[i] + k * lr * (i < best.s ? best.mL : best.mR); draw(); }))) return;
+            mae.push(Y.reduce((a, y, i) => a + Math.abs(y - pred[i]), 0) / N);
+            let d = ""; mae.forEach((m, i) => (d += (i ? "L" : "M") + ax2.sx(i + 1) + "," + ax2.sy(Math.min(m, 3)))); mp.setAttribute("d", d);
+          }
+        })();
+        K.svg(svg, "text", { x: 60, y: 330, "font-size": 12, class: "muted" }, "橙线 = 前几棵树的预测之和，一棵棵贴近蓝点（示意，学习率放大了便于观看）");
+      },
+    },
+    {
+      title: "特征重要性：模型最看重哪些摘要", kicker: "第 48–49 格 · 解释",
+      html: `<p>LightGBM 会记录每个特征被拿来切分了多少次，次数越多越“重要”。作者把 5 折的重要性取平均，画出排名图。</p><p>具体排名在作者的运行输出里，本页不列。直觉上，描述“极端值有多大、有多频繁”的特征（如分位数、滚动标准差的分位数）最可能排前面，因为越接近滑动声音越吵，但这只是推测，需要看原图确认。</p>`,
+      cells: [49], highlight: ["groupby(\"Feature\")"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 12, class: "muted" }, "示意：重要性 = 这个特征在所有树里被用来切分的次数（下图条长不是原文数值）");
+        const items = ["特征 A", "特征 B", "特征 C", "特征 D", "特征 E", "特征 F"].map((l, i) => ({ label: l, value: 0 }));
+        const els = K.bars(svg, { x: 40, y: 40, w: 640, h: 270 }, items.map((d) => Object.assign({}, d, { value: 1 })), { horizontal: true, labelWidth: 80, fmt: () => "" });
+        const target = [1, 0.82, 0.7, 0.55, 0.42, 0.3];
+        const full = 640 - 80 - 50;
+        els.forEach((e) => e.rect.setAttribute("width", 0));
+        ctx.tween(1500, (t) => els.forEach((e, i) => e.rect.setAttribute("width", full * target[i] * t)));
+      },
+    },
+    {
+      title: "生成提交文件", kicker: "第 50–52 格 · 提交",
+      html: `<p>最后把 5 折平均的预测填进提交表，保存为 <code>submission.csv</code>，上传到 Kaggle 由系统用隐藏答案打分（MAE，越小越好）。</p><p>作者在末尾列出参考资料：FFT、移动孔径方法，以及他借鉴的 Andrew 和 Scirpus 两位选手的公开 notebook。</p>`,
+      cells: [51], highlight: ["to_csv"],
+      draw(svg, ctx) {
+        const preds = [];
+        for (let k = 0; k < 5; k++) { const g = K.node(svg, 40, 30 + k * 56, 150, 44, `第 ${k + 1} 折模型的预测`, { fs: 12 }); g.style.opacity = 0; preds.push(g); }
+        const avg = K.node(svg, 290, 140, 140, 60, "5 折平均", { fill: "var(--accent-soft)", stroke: "var(--accent)", bold: true });
+        const sub = K.node(svg, 520, 140, 170, 60, "submission.csv\nseg_id, time_to_failure", { fs: 12 });
+        avg.style.opacity = sub.style.opacity = 0;
+        (async () => {
+          for (let k = 0; k < 5; k++) { if (!(await ctx.tween(220, (t) => (preds[k].style.opacity = t)))) return; K.arrow(svg, 190, 52 + k * 56, 288, 170); }
+          if (!(await ctx.tween(400, (t) => (avg.style.opacity = t)))) return;
+          K.arrow(svg, 430, 170, 518, 170);
+          await ctx.tween(400, (t) => (sub.style.opacity = t));
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：STA/LTA 触发器 ---------- */
+  K.lab(document.getElementById("labA"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "sta", label: "短窗 STA 长度（点）", min: 3, max: 60, step: 1, value: 10 },
+      { id: "lta", label: "长窗 LTA 长度（点）", min: 40, max: 400, step: 10, value: 150 },
+      { id: "th", label: "报警阈值（STA/LTA 超过多少算“来事了”）", min: 1.5, max: 8, step: 0.1, value: 3, fmt: (v) => (+v).toFixed(1) },
+      { id: "seed", label: "换一段模拟录音", button: true },
+    ],
+    note: "模拟录音含 3 个“实验室地震”周期：越接近滑动越吵，滑动瞬间有大尖峰，中间还有零星爆发。红色竖线是 STA/LTA 超过阈值的时刻。短窗越短越灵敏、越容易误报；长窗决定“平时有多吵”的参照。",
+    render(svg, v) {
+      const S = quakeSignal(40 + v.seed * 13, 3, 420, { mid: true });
+      const x = S.sig, n = x.length;
+      const c = [0]; for (let i = 0; i < n; i++) c.push(c[i] + x[i] * x[i]);
+      const ratio = new Array(n).fill(0);
+      for (let i = v.lta; i < n; i++) { const s = (c[i + 1] - c[i + 1 - v.sta]) / v.sta, l = (c[i + 1] - c[i + 1 - v.lta]) / v.lta; ratio[i] = l > 0 ? s / l : 0; }
+      const ax = K.axes(svg, { x: 40, y: 14, w: 580, h: 150 }, [0, n], [-80, 80], { xticks: 0, yticks: 0 });
+      line(svg, ax, x.map((_, i) => i), x.map((q) => K.clamp(q, -80, 80)), { stroke: "var(--c6)", "stroke-width": 0.6, opacity: 0.8 });
+      const ax2 = K.axes(svg, { x: 40, y: 190, w: 580, h: 130 }, [0, n], [0, 10], { xticks: 0, yticks: 2, ylabel: "STA/LTA" });
+      line(svg, ax2, ratio.map((_, i) => i), ratio.map((q) => Math.min(q, 10)), { stroke: "var(--warn)", "stroke-width": 1.2 });
+      K.svg(svg, "line", { x1: ax2.sx(0), x2: ax2.sx(n), y1: ax2.sy(v.th), y2: ax2.sy(v.th), stroke: "var(--ink)", "stroke-dasharray": "5 3" });
+      // 地震时刻
+      const quakes = []; for (let i = 1; i < n; i++) if (S.cyc[i] !== S.cyc[i - 1]) quakes.push(i); quakes.push(n - 1);
+      quakes.forEach((q) => K.svg(svg, "text", { x: ax.sx(q), y: 178, "text-anchor": "middle", "font-size": 11, fill: "var(--bad)" }, "▲地震"));
+      // 触发（去抖：触发后 30 点内不重复计）
+      let trig = 0, hit = 0, last = -999;
+      for (let i = 0; i < n; i++) if (ratio[i] > v.th && i - last > 30) {
+        last = i; trig++;
+        const near = quakes.some((q) => q - i >= -8 && q - i < 60);
+        if (near) hit++;
+        K.svg(svg, "line", { x1: ax.sx(i), x2: ax.sx(i), y1: 14, y2: 320, stroke: near ? "var(--good)" : "var(--bad)", "stroke-width": 1, opacity: 0.6 });
+      }
+      K.svg(svg, "text", { x: 40, y: 350, "font-size": 12, class: "muted" }, "竖线：绿 = 发生在地震前后附近的报警；红 = 其他时刻的报警（误报）");
+      const caught = quakes.filter((q) => { for (let i = Math.max(0, q - 60); i <= Math.min(n - 1, q + 8); i++) if (ratio[i] > v.th) return true; return false; }).length;
+      return { readout: [
+        { k: "报警次数", v: String(trig) },
+        { k: "其中靠近地震", v: String(hit), color: "var(--good)" },
+        { k: "误报", v: String(trig - hit), color: trig - hit > 3 ? "var(--bad)" : "var(--ink)" },
+        { k: "抓到的地震", v: `${caught} / ${quakes.length}` },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：现场算 DFT ---------- */
+  K.lab(document.getElementById("labB"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "f1", label: "低音成分的频率", min: 1, max: 10, step: 1, value: 3 },
+      { id: "a2", label: "高音成分的强度（越接近地震，高频“嘶嘶声”越多？试试看）", min: 0, max: 1.5, step: 0.05, value: 0.4, fmt: (v) => (+v).toFixed(2) },
+      { id: "f2", label: "高音成分的频率", min: 12, max: 40, step: 1, value: 25 },
+      { id: "noise", label: "随机噪声强度", min: 0, max: 1, step: 0.05, value: 0.2, fmt: (v) => (+v).toFixed(2) },
+    ],
+    note: "浏览器里对 128 个点直接做离散傅里叶变换（和 np.fft.fft 同一个公式）。上图是声音，下图是每种频率的强度（振幅谱）。作者第 24 格的 Rmean、Rstd、Rmax 等就是对这种结果再取统计。",
+    render(svg, v) {
+      const N = 128, r = K.rng(77), x = [];
+      for (let i = 0; i < N; i++) x.push(Math.sin((2 * Math.PI * v.f1 * i) / N) + v.a2 * Math.sin((2 * Math.PI * v.f2 * i) / N) + v.noise * K.randn(r));
+      const ax = K.axes(svg, { x: 40, y: 14, w: 580, h: 130 }, [0, N - 1], [-3, 3], { xticks: 0, yticks: 2 });
+      line(svg, ax, x.map((_, i) => i), x, { stroke: "var(--c6)", "stroke-width": 1.6 });
+      const mag = [], re = [], im = [];
+      for (let k = 0; k < N / 2; k++) { let a = 0, b = 0; for (let t = 0; t < N; t++) { a += x[t] * Math.cos((2 * Math.PI * k * t) / N); b -= x[t] * Math.sin((2 * Math.PI * k * t) / N); } re.push(a); im.push(b); mag.push(Math.hypot(a, b) / (N / 2)); }
+      const ax2 = K.axes(svg, { x: 40, y: 180, w: 580, h: 140 }, [0, N / 2], [0, 1.6], { xticks: 8, yticks: 2, xlabel: "频率序号 k（越大音越高）" });
+      mag.forEach((m, k) => K.svg(svg, "rect", { x: ax2.sx(k) + 1, y: ax2.sy(Math.min(m, 1.6)), width: Math.max(1, ax2.sx(1) - ax2.sx(0) - 2), height: ax2.sy(0) - ax2.sy(Math.min(m, 1.6)), fill: k >= 12 ? "var(--c2)" : "var(--c1)" }));
+      const hi = mag.slice(12).reduce((a, b) => a + b * b, 0), all = mag.reduce((a, b) => a + b * b, 0) || 1;
+      const peak = mag.indexOf(Math.max(...mag));
+      const sd = (a) => { const m = a.reduce((p, q) => p + q, 0) / a.length; return Math.sqrt(a.reduce((p, q) => p + (q - m) ** 2, 0) / a.length); };
+      return { readout: [
+        { k: "最强的频率 k", v: String(peak) },
+        { k: "高频能量占比", v: ((hi / all) * 100).toFixed(1) + "%", color: "var(--c2)" },
+        { k: "实部标准差 Rstd", v: sd(re).toFixed(2) },
+        { k: "虚部标准差 Istd", v: sd(im).toFixed(2) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：段特征 + 梯度提升树桩，比较两种切分 ---------- */
+  function segFeatures(S, L) {
+    const rows = [];
+    for (let s = 0; s + L <= S.sig.length; s += L) {
+      const seg = S.sig.slice(s, s + L), m = seg.reduce((a, b) => a + b, 0) / L;
+      const sd = Math.sqrt(seg.reduce((a, b) => a + (b - m) ** 2, 0) / L);
+      const ab = seg.map(Math.abs).sort((a, b) => a - b), q95 = ab[Math.floor(0.95 * (L - 1))];
+      const half = seg.slice(L / 2), m2 = half.reduce((a, b) => a + b, 0) / half.length;
+      const sdLast = Math.sqrt(half.reduce((a, b) => a + (b - m2) ** 2, 0) / half.length);
+      rows.push({ f: { std: sd, q95, sdLast, mean: m }, y: S.ttf[s + L - 1], cyc: S.cyc[s + L - 1], t: s });
+    }
+    return rows;
+  }
+  function fitGB(train, feats, rounds, lr) {
+    const base = train.reduce((a, r) => a + r.y, 0) / train.length, trees = [];
+    const pred = train.map(() => base);
+    for (let k = 0; k < rounds; k++) {
+      const res = train.map((r, i) => r.y - pred[i]);
+      let best = null;
+      feats.forEach((f) => {
+        const idx = train.map((_, i) => i).sort((a, b) => train[a].f[f] - train[b].f[f]);
+        let sL = 0, nL = 0, sT = res.reduce((a, b) => a + b, 0);
+        for (let j = 0; j < idx.length - 1; j++) {
+          sL += res[idx[j]]; nL++;
+          if (train[idx[j]].f[f] === train[idx[j + 1]].f[f]) continue;
+          const nR = idx.length - nL, gain = (sL * sL) / nL + ((sT - sL) * (sT - sL)) / nR;
+          if (!best || gain > best.gain) best = { gain, f, thr: (train[idx[j]].f[f] + train[idx[j + 1]].f[f]) / 2, l: sL / nL, r: (sT - sL) / nR };
+        }
+      });
+      if (!best) break;
+      trees.push(best);
+      train.forEach((r, i) => (pred[i] += lr * (r.f[best.f] <= best.thr ? best.l : best.r)));
+    }
+    return (r) => trees.reduce((a, t) => a + lr * (r.f[t.f] <= t.thr ? t.l : t.r), base);
+  }
+  K.lab(document.getElementById("labC"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "fs", label: "给模型哪些段特征", value: "all", options: [["std", "只用标准差 std"], ["q95", "只用 |振幅| 的 95% 分位数"], ["all", "std + q95 + 后半段 std + 均值 mean"]] },
+      { id: "cv", label: "验证怎么切", value: "shuf", options: [["shuf", "随机打乱 5 折（作者的做法）"], ["cyc", "按地震周期分组 5 折"]] },
+      { id: "rounds", label: "树的数量（每棵是只切一刀的树桩）", min: 5, max: 300, step: 5, value: 150 },
+      { id: "seed", label: "换一批模拟数据", button: true },
+    ],
+    note: "模拟 10 个地震周期的录音，每 40 点切一段，算段特征；现场训练梯度提升（学习率 0.1）。两种验证都要做 5 次训练。模拟里每个周期的“音量”不同、零点还会慢慢漂移，就像真实实验里每轮都不完全一样。比较“随机打乱”和“按周期分组”的 MAE：前者通常小一些，但那是因为验证段的邻居（同一周期）在训练里，换到没见过的周期就做不到这么好。",
+    render(svg, v) {
+      const S = quakeSignal(500 + v.seed * 7, 10, 400, { mid: true, gain: true });
+      const rows = segFeatures(S, 40);
+      const feats = v.fs === "all" ? ["std", "q95", "sdLast", "mean"] : [v.fs];
+      const r = K.rng(321 + v.seed), K5 = 5;
+      const fold = rows.map((row, i) => (v.cv === "shuf" ? Math.floor(r() * K5) : row.cyc % K5));
+      const oof = new Array(rows.length);
+      for (let k = 0; k < K5; k++) {
+        const tr = rows.filter((_, i) => fold[i] !== k);
+        const f = fitGB(tr, feats, v.rounds, 0.1);
+        rows.forEach((row, i) => { if (fold[i] === k) oof[i] = f(row); });
+      }
+      const mae = rows.reduce((a, row, i) => a + Math.abs(row.y - oof[i]), 0) / rows.length;
+      const base = rows.reduce((a, row) => a + row.y, 0) / rows.length, maeBase = rows.reduce((a, row) => a + Math.abs(row.y - base), 0) / rows.length;
+      const ymax = Math.max(...rows.map((x) => x.y)) * 1.05;
+      const ax = K.axes(svg, { x: 50, y: 14, w: 570, h: 300 }, [0, rows.length], [0, ymax], { xticks: 0, yticks: 4, ylabel: "还剩几秒" });
+      line(svg, ax, rows.map((_, i) => i), rows.map((x) => x.y), { stroke: "var(--c1)", "stroke-width": 2 });
+      line(svg, ax, rows.map((_, i) => i), oof.map((p) => K.clamp(p, 0, ymax)), { stroke: "var(--warn)", "stroke-width": 1.4 });
+      K.svg(svg, "text", { x: 50, y: 345, "font-size": 12, fill: "var(--c1)" }, "蓝：真实答案（锯齿）");
+      K.svg(svg, "text", { x: 200, y: 345, "font-size": 12, fill: "var(--warn)" }, "橙：每段在“没见过它”的那一折里得到的预测");
+      K.svg(svg, "text", { x: 50, y: 368, "font-size": 12, class: "muted" }, `共 ${rows.length} 段，横轴是时间顺序`);
+      return { readout: [
+        { k: "验证 MAE（秒）", v: mae.toFixed(2), color: "var(--warn)" },
+        { k: "全猜平均值的 MAE", v: maeBase.toFixed(2), color: "var(--ink-3)" },
+        { k: "比瞎猜好多少", v: ((1 - mae / maeBase) * 100).toFixed(0) + "%" },
+        { k: "验证方式", v: v.cv === "shuf" ? "随机打乱" : "按周期分组" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

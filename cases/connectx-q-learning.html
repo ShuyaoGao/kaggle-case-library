@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>四子棋 Q 学习</title>
+<meta name="description" content="Kaggle 案例拆解：ConnectX（四子棋）比赛，用一张边下边长的 Q 表做 Q-learning：ε-贪心、奖励改写、Q 值更新，以及状态数爆炸的问题。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">问题</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">棋类环境 · 两人对弈 · 表格型强化学习</div>
+  <h1>四子棋里的 Q 表：边下边记“哪步棋值钱”</h1>
+  <p class="en">ConnectX with Q-Learning</p>
+  <div class="tags">
+    <span class="tag rl">强化学习</span>
+    <span class="tag method">Q-learning</span><span class="tag method">ε-贪心</span><span class="tag method">奖励改写</span>
+    <span class="tag method">动态 Q 表</span><span class="tag method">学习率衰减</span><span class="tag method">gym 包装</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Hieu Phung</b></span>
+    <span>Kaggle 点赞 <b>514</b>（2026-11 抓取）</span>
+    <span>比赛 <b>ConnectX（kaggle_environments）</b></span>
+    <span><a href="https://www.kaggle.com/code/phunghieu/connectx-with-q-learning" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">没有数据表，只有一个四子棋对手</div><p>智能体和内置的 negamax 对手下棋，每局随机决定谁先手。<span data-cell="7">出处</span></p></div>
+    <div class="card panel"><h3>要决定什么</h3><div class="big">这一步把棋子投进哪一列</div><p>赢 +20、输 −20、平 +10，每多走一步 −0.05（作者改写后的奖励）。<span data-cell="13">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">Q-learning + 一张“用到才添”的 Q 表</div><p>给“某个局面 × 某一列”记一个分数，下完一步就用奖励和下一局面的最高分去修正它。<span data-cell="13">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">训练 10000 局，生成可提交的智能体</div><p>最后对随机和 negamax 各下 10 局算平均奖励。<span data-cell="27">出处</span> 分数在运行输出里，源码不带，这里不列。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>问题长什么样</h2>
+  <p class="lead">ConnectX 就是“四子棋”：两人轮流往竖直的格子里投棋子，棋子会落到这一列最下面的空位，谁先把自己的棋子连成一条线谁赢。比赛默认是经典的 6 行 7 列、连成 4 子（比赛说明），notebook 代码里则通过 <code>configuration.rows / columns</code> 读取。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">训练设置（第 11 格）</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">训练局数</div><div class="v">10,000</div></div>
+        <div class="stat-tile"><div class="k">学习率 α</div><div class="v">0.1</div></div>
+        <div class="stat-tile"><div class="k">折扣 γ</div><div class="v">0.6</div></div>
+        <div class="stat-tile"><div class="k">探索率 ε</div><div class="v">0.99 起</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">ε 每局乘 0.9999，下限 0.1；α 每 1000 局乘 0.9。<span data-cell="11">出处</span> 对手是 negamax，每局开始时有 50% 的概率交换先后手。<span data-cell="7">出处</span></p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">状态、动作、奖励</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>名字</th><th>白话含义</th><th>角色</th></tr>
+        <tr><td><code>observation.board</code></td><td>棋盘从左上到右下排成一列数：0 空、1 和 2 是两方的棋子</td><td>状态</td></tr>
+        <tr><td><code>observation.mark</code></td><td>我是 1 号还是 2 号</td><td>状态</td></tr>
+        <tr><td>动作</td><td><b>要做的决定</b>：投进第几列（0 到 columns−1），只能选顶上还空着的列</td><td>动作</td></tr>
+        <tr><td>赢 / 输 / 平</td><td>改写成 +20 / −20 / +10</td><td>奖励</td></tr>
+        <tr><td>没分出胜负</td><td>每一步 −0.05，催它别拖</td><td>奖励</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">Q 表的“钥匙”= 棋盘加上自己的编号，当成一个三进制数再转成十六进制字符串。<span data-cell="7">出处</span></p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="11">
+    <h3>动手试试 A · ε 衰减计算器：训练结束时还在“乱下”几成？ <span class="sim-badge">浏览器内计算</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="20">
+    <h3>动手试试 B · 在小棋盘上真训练一张 Q 表 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者写明的内容</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>Q-learning 不需要环境模型，能处理有随机性的转移和奖励（引用维基百科）</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>把所有可能的局面都列进 Q 表不现实，内存也放不下，所以只在遇到新局面时才往表里添一行</td><td><span data-cell="6">第 6 格</span></td></tr>
+        <tr><td>训练时记录了每局步数、总奖励、最近 100 局平均奖励、Q 表行数、ε 五条曲线，最后画了后三条</td><td><span data-cell="13">第 13 格</span> <span data-cell="18">第 18 格</span></td></tr>
+        <tr><td>提交时只保留至少有一个非零 Q 值的局面，每个局面只存“最好的那一列”</td><td><span data-cell="22">第 22 格</span></td></tr>
+        <tr><td>评估：对随机智能体、对 negamax 各下 10 局，算平均奖励</td><td><span data-cell="27">第 27 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">平均奖励曲线、Q 表行数和两项评估分数都在运行输出里，Kaggle 下载的源码不带输出，作者文字里也没写，所以这里不列分数。实验 B 是在一个更小的棋盘上用同样的算法重新训练，数字只代表本页模拟。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>局面数不太多的回合制游戏或决策问题，边玩边把“在这个局面下做这件事值多少分”记成一张表。</li>
+        <li><b>同类问题：</b>井字棋、小迷宫、简单的库存补货、电梯调度的小规模版本。</li>
+        <li><b>局限：</b>局面一多，表就爆炸，很多局面一辈子只见过一次。解决办法是用神经网络代替表格（DQN），作者后来也写了 Deep Q-Learning 版本。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>gym 包装、随机交换先后手 <span data-cell="7">第 7 格</span></li>
+        <li>动态 Q 表（字典） <span data-cell="7">第 7 格</span></li>
+        <li>ε-贪心 + 非法列屏蔽 <span data-cell="13">第 13 格</span></li>
+        <li>奖励改写与 Q 值更新 <span data-cell="13">第 13 格</span></li>
+        <li>ε、α 衰减 <span data-cell="11">第 11 格</span></li>
+        <li>Q 表压缩成提交文件 <span data-cell="23">第 23 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>按第 11 格的设置，ε 从 0.99 开始每局乘 0.9999，一万局后大约还剩 0.36，离下限 0.1 还很远。这意味着训练的最后阶段在干什么？你会怎么改？</li>
+      <li>作者把“平局”设成 +10，只比“赢”少一半。这对智能体的下法会有什么影响？</li>
+      <li>6 行 7 列的棋盘，每格有 3 种可能（空、我、对手），局面数的上限是 3 的 42 次方。训练一万局能见到其中多大一部分？没见过的局面，提交的智能体会怎么下？</li>
+      <li>第 27 格对每个对手只下 10 局。10 局的平均奖励能说明多少问题？</li>
+      <li>γ = 0.6 意味着 5 步以后的奖励只剩不到十分之一。四子棋里，这样的“短视”会不会吃亏？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Hieu Phung，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。比赛：Kaggle ConnectX。
+</footer>
+</main>
+
+<script src="nb/connectx-q-learning.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 小棋盘四子棋引擎（实验和动画共用；R 行 C 列，连 W 子） ---------- */
+  function Game(R, C, W) {
+    const g = { R, C, W };
+    g.drop = (b, c, m) => { for (let r = R - 1; r >= 0; r--) if (!b[r * C + c]) { b[r * C + c] = m; return r; } return -1; };
+    g.wins = (b, r, c, m) => {
+      for (const [dr, dc] of [[0, 1], [1, 0], [1, 1], [1, -1]]) {
+        let n = 1;
+        for (const s of [1, -1]) { let rr = r + dr * s, cc = c + dc * s; while (rr >= 0 && rr < R && cc >= 0 && cc < C && b[rr * C + cc] === m) { n++; rr += dr * s; cc += dc * s; } }
+        if (n >= W) return true;
+      }
+      return false;
+    };
+    g.legal = (b) => { const o = []; for (let c = 0; c < C; c++) if (!b[c]) o.push(c); return o; };
+    g.opp = (b, m, kind, r) => {
+      const L = g.legal(b);
+      if (kind === "look") for (const mm of [m, 3 - m]) for (const c of L) { const bb = b.slice(), rr = g.drop(bb, c, mm); if (g.wins(bb, rr, c, mm)) return c; }
+      return L[Math.floor(r() * L.length)];
+    };
+    return g;
+  }
+  // 第 13 格的训练循环，照搬奖励改写和更新公式
+  function train(G, N, o) {
+    const r = K.rng(o.seed), Q = new Map(), key = (b, m) => b.join("") + m;
+    const q = (k) => { let v = Q.get(k); if (!v) { v = new Float64Array(G.C); Q.set(k, v); } return v; };
+    let eps = o.eps0, alpha = 0.1; const hist = [], last = [];
+    for (let ep = 0; ep < N; ep++) {
+      eps = Math.max(o.epsMin, eps * o.decay);
+      const b = new Array(G.R * G.C).fill(0), me = r() < 0.5 ? 1 : 2, op = 3 - me;
+      if (me === 2) G.drop(b, G.opp(b, op, o.opp, r), op);
+      let done = false, tot = 0;
+      while (!done) {
+        const k = key(b, me), L = G.legal(b);
+        let a;
+        if (r() < eps) a = L[Math.floor(r() * L.length)];
+        else { const row = q(k); a = L.reduce((x, y) => (row[y] > row[x] ? y : x), L[0]); }
+        const rr = G.drop(b, a, me); let rew;
+        if (G.wins(b, rr, a, me)) { rew = 20; done = true; }
+        else if (!G.legal(b).length) { rew = 10; done = true; }
+        else {
+          const c = G.opp(b, op, o.opp, r), r2 = G.drop(b, c, op);
+          if (G.wins(b, r2, c, op)) { rew = -20; done = true; } else if (!G.legal(b).length) { rew = 10; done = true; } else rew = -0.05;
+        }
+        const row = q(k), nm = Math.max(...q(key(b, me)));
+        row[a] = (1 - alpha) * row[a] + alpha * (rew + o.gamma * nm);
+        tot += rew;
+      }
+      last.push(tot); if (last.length > 100) last.shift();
+      if ((ep + 1) % 1000 === 0) alpha *= 0.9;
+      if (ep % Math.max(1, Math.floor(N / 200)) === 0 || ep === N - 1) hist.push({ ep, avg: last.reduce((a, b) => a + b, 0) / last.length, states: Q.size, eps });
+    }
+    return { Q, hist };
+  }
+  function evaluate(G, Q, n, opp, seed) {
+    const r = K.rng(seed); let w = 0, d = 0, l = 0, demo = null;
+    for (let i = 0; i < n; i++) {
+      const b = new Array(G.R * G.C).fill(0), me = i % 2 ? 2 : 1, op = 3 - me; let turn = 1, res = 0;
+      for (;;) {
+        const L = G.legal(b); if (!L.length) { d++; break; }
+        let c;
+        if (turn === me) { const row = Q.get(b.join("") + me); c = row ? L.reduce((x, y) => (row[y] > row[x] ? y : x), L[0]) : L[Math.floor(r() * L.length)]; }
+        else c = G.opp(b, op, opp, r);
+        const rr = G.drop(b, c, turn);
+        if (G.wins(b, rr, c, turn)) { if (turn === me) { w++; res = 1; } else { l++; res = -1; } break; }
+        turn = 3 - turn;
+      }
+      if (i === 0) demo = { b: b.slice(), me, res };
+    }
+    return { w, d, l, demo };
+  }
+  function drawBoard(svg, x0, y0, sz, R, C, b, opt) {
+    opt = opt || {};
+    K.svg(svg, "rect", { x: x0 - 6, y: y0 - 6, width: C * sz + 12, height: R * sz + 12, rx: 10, fill: "var(--c1)", opacity: 0.85 });
+    const discs = [];
+    for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+      const v = b[r * C + c];
+      discs.push(K.svg(svg, "circle", { cx: x0 + c * sz + sz / 2, cy: y0 + r * sz + sz / 2, r: sz * 0.4, fill: v === 1 ? "var(--c6)" : v === 2 ? "var(--warn)" : "var(--panel)" }));
+    }
+    return discs;
+  }
+
+  const steps = [
+    {
+      title: "开场：Q-learning 是什么", at: 0, kicker: "第 0–5 格 · 开场",
+      html: `<p>作者开篇引用维基百科：Q-learning 是一种<b>不需要环境模型</b>的强化学习算法，目标是学出一个“在什么情况下该做什么”的策略。<span data-cell="0">出处</span></p><p>“不需要模型”的意思是：智能体不用事先知道对手会怎么下、棋子落下后棋盘变成什么样，只要不停地下棋、看结果，就能学。核心是一张 <b>Q 表</b>：每一行是一个局面，每一列是一个动作，格子里的数 Q(局面, 动作) = “在这个局面下这么走，以后大概能拿多少分”。</p>`,
+      draw(svg, ctx) {
+        const rows = ["局面 A", "局面 B", "局面 C", "局面 D"], C = 7;
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "Q 表：行 = 局面，列 = 投进第几列（示意）");
+        for (let c = 0; c < C; c++) K.svg(svg, "text", { x: 150 + c * 62 + 28, y: 58, "text-anchor": "middle", "font-size": 12 }, "第 " + c + " 列");
+        const r = K.rng(4), cells = [];
+        rows.forEach((n, i) => {
+          K.svg(svg, "text", { x: 140, y: 92 + i * 52, "text-anchor": "end", "font-size": 13 }, n);
+          for (let c = 0; c < C; c++) {
+            const rect = K.svg(svg, "rect", { x: 150 + c * 62, y: 68 + i * 52, width: 56, height: 44, rx: 5, fill: "var(--panel-2)", stroke: "var(--line)" });
+            const t = K.svg(svg, "text", { x: 150 + c * 62 + 28, y: 96 + i * 52, "text-anchor": "middle", "font-size": 13, "font-family": "var(--mono)" }, "0");
+            cells.push({ rect, t, v: 0 });
+          }
+        });
+        const lab = K.svg(svg, "text", { x: 150, y: 300, "font-size": 13 }, "");
+        (async () => {
+          for (let s = 0; s < 40; s++) {
+            const i = Math.floor(r() * cells.length), d = (r() - 0.4) * 6;
+            cells[i].v += d; cells[i].t.textContent = cells[i].v.toFixed(1);
+            K.set(cells[i].rect, { fill: K.heat(K.clamp(cells[i].v / 10, -1, 1), true), stroke: "var(--accent)" });
+            lab.textContent = `下完一步 → 修正一个格子：${rows[Math.floor(i / C)]} × 第 ${i % C} 列`;
+            if (!(await ctx.wait(160))) return;
+            K.set(cells[i].rect, { stroke: "var(--line)" });
+          }
+        })();
+      },
+    },
+    {
+      title: "包一层 gym 外壳：对手 negamax、随机换先后手", kicker: "第 6–7 格 · 环境",
+      html: `<p>作者把 Kaggle 的 ConnectX 环境包成 OpenAI gym 的样子：<code>reset()</code> 开一局、<code>step(action)</code> 走一步。对手固定为内置的 <b>negamax</b>（会往前算几步的搜索型对手）。<span data-cell="7">第 7 格</span></p><p>一个细节：每局开始时有 50% 的概率交换双方位置，这样智能体既练先手也练后手。动作空间是“第几列”，观察空间大小是行数 × 列数。</p>`,
+      cells: [7], highlight: ["self.pair = [None, 'negamax']", "self.pair = self.pair[::-1]", "switch_prob=0.5"],
+      draw(svg, ctx) {
+        const G = Game(6, 7, 4), b = new Array(42).fill(0), discs = drawBoard(svg, 40, 40, 38, 6, 7, b);
+        const who = K.svg(svg, "text", { x: 360, y: 60, "font-size": 15, "font-weight": 700 }, "");
+        K.svg(svg, "circle", { cx: 372, cy: 110, r: 10, fill: "var(--c6)" }); K.svg(svg, "text", { x: 390, y: 115, "font-size": 13 }, "我们的智能体（Q 表）");
+        K.svg(svg, "circle", { cx: 372, cy: 140, r: 10, fill: "var(--warn)" }); K.svg(svg, "text", { x: 390, y: 145, "font-size": 13 }, "内置对手 negamax");
+        const coin = K.svg(svg, "text", { x: 360, y: 210, "font-size": 14 }, "");
+        K.svg(svg, "text", { x: 360, y: 300, "font-size": 12, class: "muted" }, "棋子落到这一列最下面的空位（示意对局）");
+        const r = K.rng(7);
+        (async () => {
+          for (let game = 0; game < 2; game++) {
+            b.fill(0); discs.forEach((d) => K.set(d, { fill: "var(--panel)" }));
+            const first = game === 0 ? 1 : 2;
+            coin.textContent = game === 0 ? "抛硬币：这局我们先手" : "抛硬币：这局交换，对手先手";
+            let turn = first;
+            for (let k = 0; k < 10; k++) {
+              const L = G.legal(b), c = L[Math.floor(r() * L.length)], rr = G.drop(b, c, turn);
+              who.textContent = turn === 1 ? "我们投第 " + c + " 列" : "negamax 投第 " + c + " 列";
+              const d = discs[rr * 7 + c], cy = +d.getAttribute("cy");
+              K.set(d, { fill: turn === 1 ? "var(--c6)" : "var(--warn)" });
+              if (!(await ctx.tween(260, (t) => d.setAttribute("cy", K.lerp(40, cy, t))))) return;
+              turn = 3 - turn;
+            }
+            if (!(await ctx.wait(800))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "Q 表：遇到新局面才添一行", kicker: "第 7–8 格 · 动态 Q 表",
+      html: `<p>四子棋的局面多到列不完，作者说：把所有局面都放进表里不现实，内存也装不下。<span data-cell="6">第 6 格</span> 所以 <code>QTable</code> 是一个字典：查一个局面时，如果表里没有，就当场添一行全 0 的。<span data-cell="7">第 7 格</span></p><p>“钥匙”怎么来：把棋盘 42 个格子的 0/1/2 排成一串，后面再接上自己的编号，当成一个三进制数，再转成十六进制字符串。动画演示这个转换（用一个小棋盘示意）。</p>`,
+      cells: [7], highlight: ["hex(int(''.join(state_key), 3))", "self.add_item(state_key)"],
+      draw(svg, ctx) {
+        const b = [0, 0, 0, 0, 0, 0, 1, 0, 0, 2, 1, 2], R = 3, C = 4;
+        drawBoard(svg, 40, 60, 46, R, C, b);
+        K.svg(svg, "text", { x: 40, y: 40, "font-size": 13, class: "muted" }, "3 行 4 列的小棋盘（示意），我是 1 号");
+        const digits = b.concat([1]).join("");
+        const t1 = K.svg(svg, "text", { x: 280, y: 90, "font-size": 15, "font-family": "var(--mono)" }, "");
+        const t2 = K.svg(svg, "text", { x: 280, y: 150, "font-size": 15, "font-family": "var(--mono)" }, "");
+        const t3 = K.svg(svg, "text", { x: 280, y: 210, "font-size": 15, "font-family": "var(--mono)", fill: "var(--accent)", "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 280, y: 70, "font-size": 12, class: "muted" }, "① 棋盘逐格读出来 + 我的编号");
+        K.svg(svg, "text", { x: 280, y: 130, "font-size": 12, class: "muted" }, "② 当成三进制数，换算成普通数字");
+        K.svg(svg, "text", { x: 280, y: 190, "font-size": 12, class: "muted" }, "③ 写成十六进制，当作字典的钥匙");
+        const dec = parseInt(digits, 3);
+        const row = K.svg(svg, "text", { x: 280, y: 270, "font-size": 13 }, "");
+        (async () => {
+          for (let i = 1; i <= digits.length; i++) { t1.textContent = digits.slice(0, i); if (!(await ctx.wait(80))) return; }
+          if (!(await ctx.wait(300))) return; t2.textContent = String(dec);
+          if (!(await ctx.wait(500))) return; t3.textContent = dec.toString(16);
+          if (!(await ctx.wait(500))) return; row.textContent = "表里没有这把钥匙 → 新添一行 [0, 0, 0, 0]";
+        })();
+      },
+    },
+    {
+      title: "超参数：α、γ、ε 和它们的衰减", kicker: "第 9–11 格 · 超参数",
+      html: `<p>第 11 格定下了训练的“性格”：</p><ul class="tight"><li><b>α = 0.1</b>（学习率）：每次只把旧分数往新估计挪 10%；每 1000 局再乘 0.9</li><li><b>γ = 0.6</b>（折扣）：一步之后的分只算六成，两步之后只算三成六……比较“短视”</li><li><b>ε = 0.99</b>（探索率）：一开始 99% 的步都是随机乱下，每局乘 0.9999，最低降到 0.1</li></ul><p>动画画出这三个数随训练局数的变化。可以看到 ε 到第 10000 局时还停在 0.36 左右，<b>根本没降到下限 0.1</b>（要两万多局才到）。</p>`,
+      cells: [9, 11], highlight: ["epsilon_decay_rate = 0.9999", "min_epsilon = 0.1", "gamma = 0.6"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 20, w: 460, h: 260 }, [0, 30000], [0, 1], { yticks: 4, xlabel: "训练局数" });
+        const cur = (f, color) => { let d = ""; for (let e = 0; e <= 30000; e += 150) d += (d ? "L" : "M") + ax.sx(e) + "," + ax.sy(f(e)); return K.svg(svg, "path", { d, fill: "none", stroke: color, "stroke-width": 2.5 }); };
+        const pe = cur((e) => Math.max(0.1, 0.99 * Math.pow(0.9999, e)), "var(--c6)");
+        const pa = cur((e) => 0.1 * Math.pow(0.9, Math.floor(e / 1000)) * 5, "var(--c1)");
+        K.svg(svg, "line", { x1: ax.sx(10000), x2: ax.sx(10000), y1: 20, y2: 280, stroke: "var(--ink)", "stroke-dasharray": "5 3" });
+        K.svg(svg, "text", { x: ax.sx(10000) + 4, y: 34, "font-size": 12 }, "作者训练到这里停");
+        K.svg(svg, "circle", { cx: ax.sx(10000), cy: ax.sy(0.364), r: 6, fill: "var(--c6)" });
+        K.svg(svg, "text", { x: ax.sx(10000) + 10, y: ax.sy(0.364) - 8, "font-size": 13, fill: "var(--c6)", "font-weight": 700 }, "ε ≈ 0.36");
+        K.svg(svg, "text", { x: 540, y: 60, "font-size": 13, fill: "var(--c6)", "font-weight": 700 }, "ε 探索率");
+        K.svg(svg, "text", { x: 540, y: 84, "font-size": 13, fill: "var(--c1)", "font-weight": 700 }, "α 学习率 × 5");
+        K.svg(svg, "text", { x: 540, y: 104, "font-size": 11, class: "muted" }, "（放大 5 倍便于观看）");
+        K.svg(svg, "text", { x: 540, y: 150, "font-size": 12 }, "0.99 × 0.9999^10000");
+        K.svg(svg, "text", { x: 540, y: 170, "font-size": 12 }, "≈ 0.364");
+        [pe, pa].forEach((p) => { const L = p.getTotalLength(); p.style.strokeDasharray = L; p.style.strokeDashoffset = L; });
+        ctx.tween(1800, (t) => [pe, pa].forEach((p) => (p.style.strokeDashoffset = p.getTotalLength() * (1 - t))));
+      },
+    },
+    {
+      title: "训练循环①：ε-贪心选一列", kicker: "第 12–13 格 · 训练",
+      html: `<p>每一局开始先把 ε 乘一次 0.9999。每一步：<span data-cell="13">第 13 格</span></p><ul class="tight"><li>掷一个 0–1 的随机数，小于 ε 就<b>随机</b>挑一个还没满的列（探索）</li><li>否则查 Q 表这一行，把已满的列分数设成 −1e7（等于屏蔽掉），挑分数最高的列（利用）</li></ul><p>动画里每一步都“掷骰子”：落在橙色区就随机下，落在蓝色区就按 Q 表下。</p>`,
+      cells: [13], highlight: ["if random.uniform(0, 1) < epsilon:", "selected_items.append(-1e7)", "np.argmax(selected_items)"],
+      draw(svg, ctx) {
+        const eps = 0.6, r = K.rng(5);
+        K.svg(svg, "rect", { x: 60, y: 60, width: 600 * eps, height: 40, fill: "var(--warn)", opacity: 0.5 });
+        K.svg(svg, "rect", { x: 60 + 600 * eps, y: 60, width: 600 * (1 - eps), height: 40, fill: "var(--c1)", opacity: 0.5 });
+        K.svg(svg, "text", { x: 60 + 300 * eps, y: 85, "text-anchor": "middle", "font-size": 13 }, `随机下（ε = ${eps}）`);
+        K.svg(svg, "text", { x: 60 + 600 * eps + 300 * (1 - eps), y: 85, "text-anchor": "middle", "font-size": 13 }, "查 Q 表");
+        const mk = K.svg(svg, "path", { d: "", fill: "var(--ink)" });
+        const row = [1.2, -3.0, 4.5, 2.1, 0.0, 6.0, -1.0], full = [false, false, false, false, false, true, false];
+        const rects = row.map((v, c) => {
+          K.svg(svg, "text", { x: 90 + c * 84 + 35, y: 160, "text-anchor": "middle", "font-size": 12 }, "第 " + c + " 列" + (full[c] ? "（满）" : ""));
+          const rc = K.svg(svg, "rect", { x: 90 + c * 84, y: 170, width: 70, height: 46, rx: 5, fill: "var(--panel-2)", stroke: "var(--line)" });
+          K.svg(svg, "text", { x: 90 + c * 84 + 35, y: 199, "text-anchor": "middle", "font-size": 14, "font-family": "var(--mono)" }, full[c] ? "−1e7" : v.toFixed(1));
+          return rc;
+        });
+        K.svg(svg, "text", { x: 90, y: 140, "font-size": 12, class: "muted" }, "Q 表里当前局面这一行（示意；满的列被屏蔽）");
+        const lab = K.svg(svg, "text", { x: 90, y: 270, "font-size": 15, "font-weight": 700 }, "");
+        (async () => {
+          for (let s = 0; s < 10; s++) {
+            const u = r(), x = 60 + 600 * u;
+            mk.setAttribute("d", `M${x},56 l-7,-14 l14,0 Z`);
+            rects.forEach((rc) => K.set(rc, { stroke: "var(--line)", "stroke-width": 1 }));
+            let c;
+            if (u < eps) { const L = [0, 1, 2, 3, 4, 6]; c = L[Math.floor(r() * L.length)]; lab.textContent = `骰子 ${u.toFixed(2)} < ε → 随机下第 ${c} 列`; }
+            else { c = 2; lab.textContent = `骰子 ${u.toFixed(2)} ≥ ε → 第 5 列满了，Q 表里最高的是第 2 列`; }
+            K.set(rects[c], { stroke: "var(--accent)", "stroke-width": 3 });
+            if (!(await ctx.wait(1000))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "训练循环②：改写奖励，更新 Q 值", kicker: "第 13 格 · Q-learning 更新",
+      html: `<p>走完一步，环境返回下一个局面和奖励。作者先<b>改写奖励</b>：赢 → +20，输 → −20，平 → +10，没结束 → −0.05。<span data-cell="13">第 13 格</span></p><p>然后是 Q-learning 的核心一行：</p><p><code>新 Q = (1 − α) × 旧 Q + α × (奖励 + γ × 下一局面的最高 Q)</code></p><p>意思是：“这步棋值多少”= 马上拿到的分 + 打过折的“下一步最好能拿多少”。旧估计只挪 α 那么一点，防止被一盘偶然的输赢带偏。动画用一局里的最后几步，演示“赢棋的好消息”怎么一步步往前传。</p>`,
+      cells: [13], highlight: ["new_value = (1 - alpha) * old_value + alpha * (reward + gamma * next_max)", "reward = 20", "reward = -20", "reward = 10", "reward = -0.05"],
+      draw(svg, ctx) {
+        const S = ["倒数第 3 步", "倒数第 2 步", "最后一步"], Q = [0, 0, 0], alpha = 0.5, gamma = 0.6;
+        const boxes = S.map((n, i) => { K.svg(svg, "text", { x: 90 + i * 210, y: 60, "text-anchor": "middle", "font-size": 13 }, n); return K.node(svg, 30 + i * 210, 74, 120, 60, "Q = 0", { stroke: "var(--c1)", fs: 15 }); });
+        K.node(svg, 640, 74, 70, 60, "赢！\n+20", { stroke: "var(--good)", bold: true });
+        for (let i = 0; i < 3; i++) K.arrow(svg, 152 + i * 210, 104, 238 + i * 210 - (i === 2 ? 0 : 0), 104);
+        const lab = K.svg(svg, "text", { x: 30, y: 190, "font-size": 14, "font-family": "var(--mono)" }, "");
+        const lab2 = K.svg(svg, "text", { x: 30, y: 220, "font-size": 13 }, "");
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12, class: "muted" }, "示意：同一条棋路反复下几局，α 取 0.5 便于看清；中间步奖励 −0.05");
+        (async () => {
+          for (let game = 1; game <= 4; game++) {
+            for (let i = 2; i >= 0; i--) {
+              const rew = i === 2 ? 20 : -0.05, nm = i === 2 ? 0 : Q[i + 1];
+              const nv = (1 - alpha) * Q[i] + alpha * (rew + gamma * nm);
+              lab.textContent = `第 ${game} 局 · ${S[i]}：(1−α)×${Q[i].toFixed(2)} + α×(${rew} + γ×${nm.toFixed(2)}) = ${nv.toFixed(2)}`;
+              Q[i] = nv;
+              boxes[i].querySelector("text").textContent = "Q = " + nv.toFixed(2);
+              K.set(boxes[i].querySelector("rect"), { fill: K.heat(K.clamp(nv / 20, 0, 1)) });
+              lab2.textContent = i === 0 ? "好消息已经传到最前面了" : "";
+              if (!(await ctx.wait(900))) return;
+            }
+          }
+        })();
+      },
+    },
+    {
+      title: "训练完看什么：奖励曲线、Q 表行数、ε", kicker: "第 14–20 格 · 训练监控",
+      html: `<p>训练循环里每局记了五样东西。作者看了 Q 表一共多少行（<code>len(q_table.table)</code>）<span data-cell="14">第 14 格</span>，画出三条曲线：最近 100 局的平均奖励、已探索的局面数、ε。<span data-cell="18">第 18–20 格</span></p><p>曲线本身在运行输出里。可以预期的是：局面数会一直往上涨，因为四子棋的局面太多，几乎每局都会碰到没见过的新局面。动画是实验 B 里小棋盘上真实训练出来的局面数曲线，形状可以参考。</p><p>小毛病：代码注释写“Last 100 steps”，实际算的是最近约 100 <b>局</b>的平均。</p>`,
+      cells: [14, 18, 19, 20], highlight: ["len(q_table.table)", "all_qtable_rows", "all_avg_rewards"],
+      draw(svg, ctx) {
+        const G = Game(4, 5, 3), res = train(G, 6000, { seed: 3, eps0: 0.99, epsMin: 0.1, decay: 0.9995, gamma: 0.6, opp: "random" });
+        const H = res.hist, maxS = H[H.length - 1].states;
+        const a1 = K.axes(svg, { x: 60, y: 20, w: 280, h: 240 }, [0, 6000], [0, maxS], { yticks: 4, xlabel: "训练局数", ylabel: "Q 表行数" });
+        const a2 = K.axes(svg, { x: 420, y: 20, w: 280, h: 240 }, [0, 6000], [-20, 20], { yticks: 4, xlabel: "训练局数", ylabel: "近 100 局平均奖励" });
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c4)", "stroke-width": 2.4 }), p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c3)", "stroke-width": 2.4 });
+        K.svg(svg, "text", { x: 60, y: 320, "font-size": 12, class: "muted" }, "浏览器内模拟：4 行 5 列、连 3 子的小棋盘，对手随机，ε 衰减率 0.9995（不是作者的运行结果）");
+        ctx.tween(2000, (t) => {
+          const m = Math.max(2, Math.floor(t * H.length));
+          p1.setAttribute("d", H.slice(0, m).map((h, i) => (i ? "L" : "M") + a1.sx(h.ep) + "," + a1.sy(h.states)).join(""));
+          p2.setAttribute("d", H.slice(0, m).map((h, i) => (i ? "L" : "M") + a2.sx(h.ep) + "," + a2.sy(h.avg)).join(""));
+        });
+      },
+    },
+    {
+      title: "把 Q 表压成一个提交文件", kicker: "第 21–24 格 · 生成智能体",
+      html: `<p>比赛要求提交的智能体是一个独立的 Python 函数。作者的做法很直接：<span data-cell="22">第 22 格</span></p><ol class="tight"><li>只保留 Q 值不全为 0 的局面（全 0 说明没学到东西）</li><li>每个局面只存“分数最高的那一列”，把整张表压成 <code>{钥匙: 列号}</code> 的字典</li><li>把这个字典直接拼进函数源码，写成 <code>submission.py</code> <span data-cell="23">第 23 格</span></li></ol><p>下棋时：查得到这个局面就照表下；查不到，或表里那一列已经满了，就随机挑一列。所以<b>没见过的局面全靠随机</b>。</p>`,
+      cells: [22, 23], highlight: ["np.count_nonzero(tmp_dict_q_table[k]) > 0", "int(np.argmax(tmp_dict_q_table[k]))", "if state_key not in q_table.keys():"],
+      draw(svg, ctx) {
+        const rows = [["3fa2…", [0, 0, 0, 0, 0, 0, 0]], ["1b7c…", [1.2, -3, 4.5, 2.1, 0, 0.3, -1]], ["9e01…", [0, 0, 0, 0.6, 0, 0, 0]], ["c4d8…", [0, 0, 0, 0, 0, 0, 0]], ["77a5…", [-2, 5.2, 1, 0, 0.1, 0, 0]]];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "训练后的 Q 表（示意）");
+        const els = rows.map((r, i) => {
+          const y = 50 + i * 46;
+          K.svg(svg, "text", { x: 30, y: y + 24, "font-size": 13, "font-family": "var(--mono)" }, r[0]);
+          const g = K.svg(svg, "g");
+          r[1].forEach((v, c) => { K.svg(g, "rect", { x: 100 + c * 36, y, width: 32, height: 34, rx: 3, fill: v ? K.heat(K.clamp(v / 6, -1, 1), true) : "var(--panel-2)", stroke: "var(--line)" }); });
+          return g;
+        });
+        K.svg(svg, "text", { x: 470, y: 30, "font-size": 13, class: "muted" }, "提交文件里的字典");
+        const out = K.svg(svg, "g");
+        (async () => {
+          let y = 60;
+          for (let i = 0; i < rows.length; i++) {
+            const nz = rows[i][1].some((v) => v !== 0);
+            if (!nz) { if (!(await ctx.tween(400, (t) => (els[i].style.opacity = 1 - 0.8 * t)))) return; continue; }
+            const best = rows[i][1].reduce((b, v, c, a) => (v > a[b] ? c : b), 0);
+            K.svg(out, "text", { x: 470, y, "font-size": 15, "font-family": "var(--mono)", fill: "var(--accent)" }, `'${rows[i][0]}': ${best},`);
+            y += 30;
+            if (!(await ctx.wait(500))) return;
+          }
+          K.svg(out, "text", { x: 470, y: y + 20, "font-size": 12, class: "muted" }, "全 0 的行被扔掉；");
+          K.svg(out, "text", { x: 470, y: y + 38, "font-size": 12, class: "muted" }, "每行只留最高分的列号");
+        })();
+      },
+    },
+    {
+      title: "评估：对随机、对 negamax 各下 10 局", kicker: "第 25–27 格 · 评估",
+      html: `<p>最后用 <code>evaluate</code> 让提交的智能体分别和随机智能体、negamax 各下 10 局，用 <code>mean_reward</code> 算平均奖励（自己的奖励占双方奖励之和的比例）。<span data-cell="27">第 27 格</span></p><p>10 局太少，结果会有不小的运气成分。动画是在小棋盘上，把同一个智能体拿去和随机对手下 10 局重复好几次，每次的胜率都不一样：这就是“样本太少”的效果。</p>`,
+      cells: [27], highlight: ["num_episodes=10", "mean_reward"],
+      draw(svg, ctx) {
+        const G = Game(4, 5, 3), Q = train(G, 3000, { seed: 5, eps0: 0.99, epsMin: 0.1, decay: 0.999, gamma: 0.6, opp: "random" }).Q;
+        const ax = K.axes(svg, { x: 60, y: 20, w: 460, h: 260 }, [0, 12], [0, 1], { xticks: 0, yticks: 4, ylabel: "10 局里的胜率", yfmt: (v) => Math.round(v * 100) + "%" });
+        const big = evaluate(G, Q, 1000, "random", 999), p = big.w / 1000;
+        K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(12), y1: ax.sy(p), y2: ax.sy(p), stroke: "var(--good)", "stroke-dasharray": "5 3", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 540, y: ax.sy(p) + 4, "font-size": 12, fill: "var(--good)" }, `下 1000 局的胜率 ${(p * 100).toFixed(0)}%`);
+        K.svg(svg, "text", { x: 60, y: 320, "font-size": 12, class: "muted" }, "浏览器内模拟：小棋盘上训练 3000 局的 Q 表 vs 随机对手；每个点是独立的“10 局评估”");
+        (async () => {
+          for (let k = 0; k < 12; k++) {
+            const e = evaluate(G, Q, 10, "random", 100 + k * 37);
+            const dot = K.svg(svg, "circle", { cx: ax.sx(k + 0.5), cy: ax.sy(e.w / 10), r: 0, fill: "var(--c1)" });
+            K.svg(svg, "text", { x: ax.sx(k + 0.5), y: ax.sy(e.w / 10) - 10, "text-anchor": "middle", "font-size": 11 }, e.w + "/10");
+            if (!(await ctx.tween(250, (t) => dot.setAttribute("r", 7 * t)))) return;
+          }
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+  if (/[?&]fold/.test(location.search)) document.querySelectorAll(".ch-cells > .cell, .cell-note").forEach((e) => (e.style.display = "none"));  // 自查截图用
+
+  /* ---------- 实验 A：ε 衰减计算器 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "lg", label: "ε 每局乘的衰减率", min: 0, max: 4, step: 0.05, value: 3, fmt: (v) => (1 - Math.pow(10, -1 - v)).toFixed(Math.max(2, Math.ceil(1 + v))) },
+      { id: "N", label: "训练局数", min: 1000, max: 50000, step: 1000, value: 10000, fmt: (v) => v.toLocaleString() },
+      { id: "min", label: "ε 下限", min: 0, max: 0.3, step: 0.01, value: 0.1, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "默认值就是第 11 格的设置（0.99 起步，每局乘 0.9999，下限 0.1，训练 10000 局）。注意衰减率滑块越往右越接近 1。",
+    render(svg, v) {
+      const dec = 1 - Math.pow(10, -1 - v.lg), eps = (e) => Math.max(v.min, 0.99 * Math.pow(dec, e));
+      const ax = K.axes(svg, { x: 60, y: 16, w: 540, h: 250 }, [0, v.N], [0, 1], { yticks: 4, xlabel: "训练局数", ylabel: "ε" });
+      let d = "", area = `M${ax.sx(0)},${ax.sy(0)}`;
+      for (let i = 0; i <= 200; i++) { const e = (v.N * i) / 200; d += (i ? "L" : "M") + ax.sx(e) + "," + ax.sy(eps(e)); area += `L${ax.sx(e)},${ax.sy(eps(e))}`; }
+      area += `L${ax.sx(v.N)},${ax.sy(0)}Z`;
+      K.svg(svg, "path", { d: area, fill: "var(--warn)", "fill-opacity": 0.18 });
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+      K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(v.N), y1: ax.sy(v.min), y2: ax.sy(v.min), stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+      K.svg(svg, "text", { x: ax.sx(v.N) - 4, y: ax.sy(v.min) - 6, "text-anchor": "end", "font-size": 11, class: "muted" }, "下限");
+      K.svg(svg, "text", { x: 70, y: 310, "font-size": 12, class: "muted" }, "橙色面积 ∝ 训练中随机乱下的步数");
+      let sum = 0; for (let e = 0; e < v.N; e++) sum += eps(e);
+      const reach = v.min > 0 ? Math.ceil(Math.log(v.min / 0.99) / Math.log(dec)) : Infinity;
+      return { readout: [
+        { k: "最后一局的 ε", v: eps(v.N).toFixed(3), color: eps(v.N) > v.min + 1e-6 ? "var(--warn)" : "var(--good)" },
+        { k: "整个训练里随机下的比例", v: ((sum / v.N) * 100).toFixed(0) + "%" },
+        { k: "第几局降到下限", v: isFinite(reach) ? reach.toLocaleString() : "永远不会" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：小棋盘真训练 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "N", label: "训练局数", min: 0, max: 20000, step: 500, value: 4000, fmt: (v) => v.toLocaleString() },
+      { id: "dec", label: "ε 衰减率", value: "0.999", options: [["0.9999", "0.9999（作者原值）"], ["0.9995", "0.9995"], ["0.999", "0.999"], ["0.99", "0.99"]] },
+      { id: "gamma", label: "折扣 γ", min: 0, max: 0.99, step: 0.01, value: 0.6, fmt: (v) => v.toFixed(2) },
+      { id: "opp", label: "对手", value: "random", options: [["random", "随机下"], ["look", "看一步：能赢就赢、能堵就堵"]] },
+      { id: "seed", label: "换随机种子", button: true },
+    ],
+    note: "为了能在浏览器里几百毫秒训练完，棋盘缩小成 4 行 5 列、连 3 子获胜；奖励改写、更新公式、α 衰减都照第 13 格。训练完用“只按 Q 表下、没见过的局面随机下”的智能体和同一个对手下 400 局，先后手各半。",
+    render(svg, v) {
+      const G = Game(4, 5, 3), t0 = performance.now();
+      const res = train(G, v.N, { seed: 11 + v.seed * 101, eps0: 0.99, epsMin: 0.1, decay: +v.dec, gamma: v.gamma, opp: v.opp });
+      const ev = evaluate(G, res.Q, 400, v.opp, 7 + v.seed);
+      const ms = performance.now() - t0;
+      const H = res.hist.length ? res.hist : [{ ep: 0, avg: 0, states: 0 }];
+      const maxS = Math.max(10, H[H.length - 1].states);
+      const a1 = K.axes(svg, { x: 56, y: 14, w: 230, h: 190 }, [0, Math.max(1, v.N)], [-20, 20], { yticks: 4, xticks: 2, xlabel: "训练局数", ylabel: "近 100 局平均奖励" });
+      K.svg(svg, "path", { d: H.map((h, i) => (i ? "L" : "M") + a1.sx(h.ep) + "," + a1.sy(h.avg)).join(""), fill: "none", stroke: "var(--c3)", "stroke-width": 2.2 });
+      const a2 = K.axes(svg, { x: 380, y: 14, w: 230, h: 190 }, [0, Math.max(1, v.N)], [0, maxS], { yticks: 4, xticks: 2, xlabel: "训练局数", ylabel: "Q 表行数" });
+      K.svg(svg, "path", { d: H.map((h, i) => (i ? "L" : "M") + a2.sx(h.ep) + "," + a2.sy(h.states)).join(""), fill: "none", stroke: "var(--c4)", "stroke-width": 2.2 });
+      // 评估里的第一局终局
+      drawBoard(svg, 70, 270, 20, 4, 5, ev.demo.b);
+      K.svg(svg, "text", { x: 70, y: 260, "font-size": 12, class: "muted" }, `评估第 1 局终局（红 = Q 表智能体）：${ev.demo.res > 0 ? "赢" : ev.demo.res < 0 ? "输" : "平"}`);
+      K.svg(svg, "text", { x: 220, y: 300, "font-size": 12, class: "muted" }, `训练 + 评估耗时 ${ms.toFixed(0)} 毫秒`);
+      return { readout: [
+        { k: "400 局胜 / 平 / 负", v: `${ev.w} / ${ev.d} / ${ev.l}` },
+        { k: "胜率", v: ((ev.w / 400) * 100).toFixed(0) + "%", color: ev.w > ev.l ? "var(--good)" : "var(--bad)" },
+        { k: "Q 表行数", v: res.Q.size.toLocaleString() },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

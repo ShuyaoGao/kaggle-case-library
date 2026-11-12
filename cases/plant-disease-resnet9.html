@@ -1,0 +1,703 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>植物病害识别</title>
+<meta name="description" content="Kaggle 案例拆解：用 PyTorch 从零搭一个 ResNet-9，在 38 类农作物叶片图像上识别病害，配合一周期学习率、权重衰减和梯度裁剪。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">农业图像 · 38 类多分类 · 残差网络</div>
+  <h1>植物病害识别：PyTorch 手搭 ResNet-9，看叶子认 38 种病</h1>
+  <p class="en">Plant Disease Classification - ResNet- 99.2%</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">PyTorch</span><span class="tag method">ResNet-9 残差网络</span><span class="tag method">BatchNorm</span>
+    <span class="tag method">One Cycle 学习率</span><span class="tag method">权重衰减</span><span class="tag method">梯度裁剪</span><span class="tag method">ImageFolder / DataLoader</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Atharva Ingle</b></span>
+    <span>Kaggle 点赞 <b>3,999</b>（2026-11 抓取）</span>
+    <span>数据集 <b>vipoooool/new-plant-diseases-dataset</b></span>
+    <span><a href="https://www.kaggle.com/code/atharvaingle/plant-disease-classification-resnet-99-2" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">约 8.7 万张农作物叶片彩色照片</div><p>来自 PlantVillage 数据集并做过离线增强，分 38 个类别（14 种作物，健康或某种病害），按 80/20 分成训练和验证，另有 33 张测试图。<span data-cell="3">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这片叶子是哪种作物、得了什么病</div><p>38 选 1 的多分类，类别名形如 <code>Tomato___Late_blight</code>（番茄 · 晚疫病）、<code>Apple___healthy</code>（苹果 · 健康）。<span data-cell="4">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">自己搭的 ResNet-9 + 一周期训练</div><p>9 层卷积网络，中间有两个残差块（输出 = F(x) + x）。训练时学习率先升后降（One Cycle），同时加权重衰减和梯度裁剪，只训 2 轮。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">作者写的验证准确率 99.2%</div><p>作者还写道 33 张测试图全部预测正确。<span data-cell="81">出处</span> <span data-cell="98">出处</span> 这些数字的含义和局限见第 04、05 节。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>New Plant Diseases Dataset</b>：由公开的 PlantVillage 叶片图像“离线增强”（旋转、翻转等之后另存）而来。以下信息来自 notebook 第 3 格引用的数据集说明和作者在第 21、34 格的文字。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">图片数（训练 + 验证）</div><div class="v">约 87K</div></div>
+        <div class="stat-tile"><div class="k">类别数</div><div class="v">38</div></div>
+        <div class="stat-tile"><div class="k">作物 / 病害种类</div><div class="v">14 / 26</div></div>
+        <div class="stat-tile"><div class="k">训练 : 验证</div><div class="v">80 : 20</div></div>
+        <div class="stat-tile"><div class="k">测试图</div><div class="v">33 张</div></div>
+        <div class="stat-tile"><div class="k">单张图片</div><div class="v">3×256×256</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">87K、38 类、80/20、33 张测试图见 <span data-cell="3">第 3 格</span>；14 种作物、26 种病害见 <span data-cell="21">第 21 格</span>；图片形状见 <span data-cell="34">第 34 格</span>。各类的具体张数在原 notebook 的运行输出里，这里不列。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每条数据由什么组成</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>部分</th><th>含义</th><th>类型</th></tr>
+        <tr><td>图片</td><td>一片叶子的 RGB 彩色照片，256×256 像素，读入后是 3 个 256×256 的数字矩阵（红、绿、蓝）</td><td>图像</td></tr>
+        <tr><td>所在文件夹名</td><td><b>要预测的答案</b>：形如 <code>作物___病害</code>，如 <code>Tomato___Late_blight</code>、<code>Apple___healthy</code></td><td>类别（38 选 1）</td></tr>
+        <tr><td><code>train</code> / <code>valid</code></td><td>训练集 / 验证集，按 80/20 划分，文件夹结构相同</td><td>划分</td></tr>
+        <tr><td><code>test</code></td><td>33 张单独的测试图，文件名里带着真实类别</td><td>划分</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">14 种作物（来自数据集的文件夹名）：苹果、蓝莓、樱桃、玉米、葡萄、橙子、桃、甜椒、马铃薯、树莓、大豆、南瓜、草莓、番茄。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="62">
+    <h3>动手试试 B · 为什么残差连接让深网络“训得动” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="80">
+    <h3>动手试试 A · 一周期学习率 vs 恒定学习率，再加梯度裁剪 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>训练 2 轮后得到 99.2% 的准确率（<code>fit_OneCycle</code> 每轮结束时在验证集上评估，所以这是验证准确率）</td><td><span data-cell="81">第 81 格</span></td></tr>
+        <tr><td>训练前权重是随机的，准确率约 0.019（1.9%），相当于在 38 类里瞎猜</td><td><span data-cell="77">第 77 格</span></td></tr>
+        <tr><td>33 张测试图全部预测正确</td><td><span data-cell="98">第 98 格</span></td></tr>
+        <tr><td>各类别图片数量几乎均衡</td><td><span data-cell="25">第 25 格</span></td></tr>
+        <tr><td>数据含 14 种作物、26 种病害（不算健康类）</td><td><span data-cell="21">第 21 格</span></td></tr>
+        <tr><td>ResNet 配合学习率调度、梯度裁剪、权重衰减效果很好</td><td><span data-cell="106">第 106 格</span></td></tr>
+        <tr><td>在 Kaggle 的 P100 GPU 上训练约 20 分钟</td><td><span data-cell="79">第 79 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">每轮的损失、学习率、准确率具体数值都在运行输出里，Kaggle 下载的源码不带输出，这里只列作者在文字里写明的 99.2%、1.9% 和“33 张全对”。另外请注意：这个数据集本身是“离线增强”生成的，同一片叶子的旋转、翻转版本可能同时出现在训练集和验证集里，99.2% 可能偏乐观（见第 05 节）。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>输入一张 256×256 的叶片照片，输出 38 类里最可能的一类（作物 + 病害）。可以做成手机拍照诊断的原型。</li>
+        <li><b>同类问题：</b>木薯、水稻、小麦病害识别；果实成熟度和瑕疵分级；害虫识别；病理切片分类；工业产品表面缺陷分类。</li>
+        <li><b>可迁移的套路：</b>按“文件夹 = 类别”组织数据 → <code>ImageFolder</code> + <code>DataLoader</code> → 小型 ResNet（卷积 + BN + ReLU，加残差） → One Cycle 学习率 + 权重衰减 + 梯度裁剪，几轮就能收敛 → 保存 <code>state_dict</code>。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>读数据：<code>ImageFolder</code> + <code>transforms.ToTensor()</code> <span data-cell="29">第 29 格</span></li>
+        <li>分批：<code>DataLoader(batch_size=32, shuffle=True)</code> <span data-cell="44">第 44 格</span></li>
+        <li>搬到 GPU：<code>DeviceDataLoader</code> <span data-cell="51">第 51 格</span></li>
+        <li>残差块示例 <span data-cell="62">第 62 格</span>；ResNet-9 结构 <span data-cell="66">第 66 格</span></li>
+        <li>训练循环：<code>OneCycleLR</code>、<code>clip_grad_value_</code>、<code>weight_decay</code> <span data-cell="74">第 74 格</span></li>
+        <li>超参数：2 轮、max_lr = 0.01、grad_clip = 0.1、weight_decay = 1e-4、Adam <span data-cell="78">第 78 格</span></li>
+        <li>保存：<code>torch.save(model.state_dict(), ...)</code> <span data-cell="102">第 102 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>数据集是对原始 PlantVillage 图片做“离线增强”后再按 80/20 切分的。如果同一片叶子的不同旋转版本分别落在训练集和验证集，99.2% 的验证准确率还能代表模型对“新叶子”的能力吗？应该怎样切分才干净？</li>
+      <li>测试集只有 33 张图，全对说明了什么，没说明什么？33 张全对时，真实准确率的置信区间大概有多宽？</li>
+      <li>PlantVillage 的照片大多是摘下来放在统一背景上拍的。把模型拿到田间（有土、有别的叶子、有光斑）去用，你预计会发生什么？怎么验证？</li>
+      <li>只训练 2 轮就达到很高的准确率，One Cycle 学习率在里面起了什么作用？如果换成固定学习率 0.01，你预计会怎样？（可以用实验 A 体会）</li>
+      <li>第 51 格写的是 <code>if torch.cuda.is_available:</code>，少了一对括号。这个判断永远为真还是永远为假？在没有 GPU 的电脑上运行会发生什么？</li>
+      <li>ResNet-9 的残差块是 <code>self.res1(out) + out</code>。为什么这里要求残差分支的输入输出通道数相同（128→128、512→512）？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Atharva Ingle，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：Samir Bhattarai（vipoooool）, New Plant Diseases Dataset，由 PlantVillage 数据集离线增强而来。
+</footer>
+</main>
+
+<script src="nb/plant-disease-resnet9.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* ===== 页面专用：像素图工具（用代码生成小图并在浏览器里真算卷积、池化、仿射变换） ===== */
+  const PX = (function () {
+    function rgbOf(name, fb) {
+      let s = (K.css(name) || fb || "#888888").trim();
+      if (s[0] !== "#") return [128, 128, 128];
+      if (s.length === 4) s = "#" + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+      return [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
+    }
+    function grid(W, H, f) { const a = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) a[y * W + x] = f(x, y); return { W, H, a }; }
+    function at(m, x, y) { return m.a[y * m.W + x]; }
+    function atClamp(m, x, y) { x = x < 0 ? 0 : x >= m.W ? m.W - 1 : x; y = y < 0 ? 0 : y >= m.H ? m.H - 1 : y; return m.a[y * m.W + x]; }
+    function atZero(m, x, y) { return x < 0 || y < 0 || x >= m.W || y >= m.H ? 0 : m.a[y * m.W + x]; }
+    /* Keras padding='same'：边界外按 0 补 */
+    function conv(m, k) { const n = k.length, r = (n - 1) / 2; return grid(m.W, m.H, (x, y) => { let s = 0; for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) s += k[j][i] * atZero(m, x + i - r, y + j - r); return s; }); }
+    function map(m, f) { const o = { W: m.W, H: m.H, a: new Float32Array(m.a.length) }; for (let i = 0; i < m.a.length; i++) o.a[i] = f(m.a[i], i); return o; }
+    const relu = (m) => map(m, (v) => (v > 0 ? v : 0));
+    function pool(m, s) { s = s || 2; const W = Math.ceil(m.W / s), H = Math.ceil(m.H / s); return grid(W, H, (x, y) => { let b = -Infinity; for (let j = 0; j < s; j++) for (let i = 0; i < s; i++) { const xx = x * s + i, yy = y * s + j; if (xx < m.W && yy < m.H) b = Math.max(b, at(m, xx, yy)); } return b; }); }
+    function range(m) { let lo = Infinity, hi = -Infinity; for (const v of m.a) { if (v < lo) lo = v; if (v > hi) hi = v; } return [lo, hi]; }
+    function bilinear(m, x, y) {
+      const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+      return (atClamp(m, x0, y0) * (1 - fx) + atClamp(m, x0 + 1, y0) * fx) * (1 - fy) + (atClamp(m, x0, y0 + 1) * (1 - fx) + atClamp(m, x0 + 1, y0 + 1) * fx) * fy;
+    }
+    /* 类似 Keras ImageDataGenerator：绕中心旋转/剪切/缩放/平移/翻转，边界外用最近像素填充（fill_mode='nearest'） */
+    function affine(m, p) {
+      const th = ((p.rot || 0) * Math.PI) / 180, c = Math.cos(th), s = Math.sin(th), sh = p.shear || 0, z = p.zoom || 1;
+      const cx = (m.W - 1) / 2, cy = (m.H - 1) / 2, tx = (p.tx || 0) * m.W, ty = (p.ty || 0) * m.H;
+      return grid(m.W, m.H, (x, y) => {
+        let u = x - cx - tx, v = y - cy - ty;
+        if (p.flip) u = -u;
+        if (p.vflip) v = -v;
+        let a = c * u + s * v, b = -s * u + c * v;
+        a = a - sh * b;
+        return bilinear(m, a / z + cx, b / z + cy) * (p.bright == null ? 1 : p.bright);
+      });
+    }
+    function toURL(m, mode, lo, hi) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      const P = rgbOf("--panel", "#ffffff"), A = rgbOf("--c1"), B = rgbOf("--c2");
+      if (lo == null || hi == null) { const r = range(m); if (lo == null) lo = r[0]; if (hi == null) hi = r[1]; }
+      const span = hi - lo || 1, amax = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+      for (let i = 0; i < m.a.length; i++) {
+        const v = m.a[i]; let r, gg, b;
+        if (mode === "div") { const t = Math.max(-1, Math.min(1, v / amax)), C = t >= 0 ? B : A, k = Math.abs(t); r = P[0] + (C[0] - P[0]) * k; gg = P[1] + (C[1] - P[1]) * k; b = P[2] + (C[2] - P[2]) * k; }
+        else if (mode === "heat") { const k = Math.max(0, Math.min(1, (v - lo) / span)); r = P[0] + (A[0] - P[0]) * k; gg = P[1] + (A[1] - P[1]) * k; b = P[2] + (A[2] - P[2]) * k; }
+        else { const k = Math.max(0, Math.min(1, (v - lo) / span)) * 255; r = gg = b = k; }
+        d[i * 4] = r; d[i * 4 + 1] = gg; d[i * 4 + 2] = b; d[i * 4 + 3] = 255;
+      }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    /* 彩色图：m 为 {W,H,rgb:[Float32Array*3]}，取值 0–1 */
+    function rgbURL(m) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      for (let i = 0; i < m.W * m.H; i++) { for (let c = 0; c < 3; c++) d[i * 4 + c] = Math.max(0, Math.min(1, m.rgb[c][i])) * 255; d[i * 4 + 3] = 255; }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    function draw(svg, x, y, w, h, m, mode, lo, hi) {
+      const e = K.svg(svg, "image", { x, y, width: w, height: h, preserveAspectRatio: "none" });
+      e.style.imageRendering = "pixelated";
+      e.setAttribute("href", m.rgb ? rgbURL(m) : toURL(m, mode, lo, hi));
+      K.svg(svg, "rect", { x, y, width: w, height: h, fill: "none", stroke: "var(--line)" });
+      return e;
+    }
+    function update(e, m, mode, lo, hi) { e.setAttribute("href", m.rgb ? rgbURL(m) : toURL(m, mode, lo, hi)); }
+    function lines(svg, x, y, w, h, W, H, op) {
+      const g = K.svg(svg, "g");
+      for (let i = 0; i <= W; i++) K.svg(g, "line", { x1: x + (w * i) / W, x2: x + (w * i) / W, y1: y, y2: y + h, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      for (let j = 0; j <= H; j++) K.svg(g, "line", { y1: y + (h * j) / H, y2: y + (h * j) / H, x1: x, x2: x + w, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      return g;
+    }
+    const smooth = (e0, e1, x) => { const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+    const blob = (x, y, cx, cy, sx, sy) => Math.exp(-(((x - cx) * (x - cx)) / (2 * sx * sx) + ((y - cy) * (y - cy)) / (2 * sy * sy)));
+    return { grid, at, atClamp, conv, map, relu, pool, range, bilinear, affine, toURL, rgbURL, draw, update, lines, smooth, blob, rgbOf };
+  })();
+
+  /* 用代码画一片叶子（RGB，取值 0–1）。kind：healthy 健康 / spot 斑点 / blight 大块枯斑 / mosaic 花叶 / rust 锈病 */
+  function leaf(N, kind, seed) {
+    const r = K.rng(seed || 1), ang = (r() - 0.5) * 0.7, tone = 0.85 + r() * 0.3, spots = [];
+    const ns = kind === "rust" ? 22 : kind === "blight" ? 3 : kind === "spot" ? 9 : 0;
+    for (let i = 0; i < ns; i++) spots.push([0.5 + (r() - 0.5) * 0.36, 0.2 + r() * 0.6, kind === "blight" ? 0.07 + r() * 0.06 : kind === "rust" ? 0.012 + r() * 0.01 : 0.025 + r() * 0.02]);
+    const R = new Float32Array(N * N), G = new Float32Array(N * N), B = new Float32Array(N * N);
+    const c = Math.cos(ang), s = Math.sin(ang);
+    for (let py = 0; py < N; py++) for (let px = 0; px < N; px++) {
+      const i = py * N + px, x0 = (px + 0.5) / N - 0.5, y0 = (py + 0.5) / N - 0.5;
+      const u = c * x0 + s * y0 + 0.5, v = -s * x0 + c * y0 + 0.5;
+      const nz = (r() - 0.5) * 0.04;
+      let rr = 0.86 + nz, gg = 0.86 + nz, bb = 0.83 + nz;
+      const t = (v - 0.08) / 0.84, hw = t > 0 && t < 1 ? 0.27 * Math.pow(Math.sin(Math.PI * Math.pow(t, 0.8)), 0.9) : 0, du = Math.abs(u - 0.5);
+      if (du < hw) {
+        rr = 0.22 * tone; gg = 0.52 * tone; bb = 0.18 * tone;
+        const edge = du / hw; rr *= 1 - 0.15 * edge; gg *= 1 - 0.15 * edge;
+        if (du < 0.012) { rr += 0.18; gg += 0.18; bb += 0.1; }
+        const vein = Math.abs(((v + du * 0.9) * 8) % 1 - 0.5);
+        if (vein < 0.05 && du > 0.02) { rr += 0.08; gg += 0.1; bb += 0.05; }
+        if (kind === "mosaic") { const m = Math.sin(u * 23 + Math.sin(v * 17) * 2) * Math.sin(v * 19 + u * 7); if (m > 0.2) { rr += 0.4 * m; gg += 0.25 * m; } }
+        for (const sp of spots) {
+          const d = Math.hypot(u - sp[0], v - sp[1]) / sp[2];
+          if (d < 1) { const col = kind === "rust" ? [0.8, 0.45, 0.12] : [0.42, 0.27, 0.12]; rr = col[0]; gg = col[1]; bb = col[2]; }
+          else if (d < 1.6 && kind !== "blight") { rr += 0.25; gg += 0.18; }
+        }
+      }
+      R[i] = rr + nz; G[i] = gg + nz; B[i] = bb + nz;
+    }
+    return { W: N, H: N, rgb: [R, G, B] };
+  }
+  const KINDS = ["healthy", "spot", "blight", "mosaic", "rust"];
+  const KIND_ZH = { healthy: "健康", spot: "斑点病", blight: "枯萎/疫病", mosaic: "花叶病", rust: "锈病" };
+  function thumb(svg, x, y, w, kind, seed) { const e = K.svg(svg, "image", { x, y, width: w, height: w }); e.setAttribute("href", PX.rgbURL(leaf(32, kind, seed))); return e; }
+
+  /* PyTorch OneCycleLR 默认参数：pct_start=0.3，余弦退火，div_factor=25，final_div_factor=1e4 */
+  function oneCycle(maxLr, total, pct) {
+    pct = pct == null ? 0.3 : pct;
+    const init = maxLr / 25, minLr = init / 1e4, up = pct * total - 1, end = total - 1, out = [];
+    const cosA = (a, b, p) => b + ((a - b) / 2) * (1 + Math.cos(Math.PI * p));
+    for (let k = 0; k < total; k++) out.push(k <= up ? cosA(init, maxLr, up > 0 ? k / up : 1) : cosA(maxLr, minLr, (k - up) / (end - up)));
+    return out;
+  }
+
+  const steps = [
+    {
+      title: "认识数据：38 类叶片照片", kicker: "第 0–10 格 · 背景",
+      notes: {8: "安装 torchsummary，用来像 Keras 那样打印一张模型结构表", 10: "导入 PyTorch 和图像处理需要的各种工具" },
+      html: `<p>数据来自 PlantVillage：约 <b>8.7 万张</b>健康或患病的农作物叶片彩色照片，分 <b>38 类</b>，按 80/20 分成训练集和验证集，另建了一个 33 张图的测试文件夹。</p><p>数据集说明写明它是“用离线增强生成的”：原图被旋转、翻转等之后另存成新图片。目标：识别叶子健康与否，如果有病，判断是哪种病。</p>`,
+      cells: [3, 4], at: 0,
+      draw(svg, ctx) {
+        const els = [];
+        for (let i = 0; i < 38; i++) {
+          const col = i % 10, row = Math.floor(i / 10);
+          els.push(thumb(svg, 40 + col * 66, 30 + row * 66, 58, KINDS[i % 5 === 0 ? 0 : i % 5], 100 + i));
+        }
+        els.forEach((e) => (e.style.opacity = 0));
+        K.svg(svg, "text", { x: 40, y: 310, "font-size": 13 }, "38 类 = 14 种作物 ×（健康 / 各自的病害），每格代表一类（示意图）");
+        K.svg(svg, "text", { x: 40, y: 330, "font-size": 12, class: "muted" }, "健康叶子是均匀的绿色；病叶上有褐斑、黄色晕圈、大片枯死或花斑");
+        ctx.tween(1800, (t) => els.forEach((e, i) => (e.style.opacity = K.clamp(t * 38 - i, 0, 1))));
+      },
+    },
+    {
+      title: "从文件夹名拆出“作物”和“病害”", kicker: "第 11–21 格 · 探索",
+      notes: {14: "打印全部 38 个类别（文件夹）的名字", 18: "打印作物名单（具体内容在运行输出里）" },
+      html: `<p>每个类别是一个文件夹，名字形如 <code>Tomato___Late_blight</code>。作者用 <code>split('___')</code> 把它拆成两半：前半是作物，后半是病害；后半是 <code>healthy</code> 的不算病害。</p><p>统计结果写在第 21 格：<b>14 种作物</b>，除去健康类共 <b>26 种病害</b>。</p>`,
+      cells: [16, 21], at: 11, highlight: ["split('___')", "'healthy'"],
+      draw(svg, ctx) {
+        const names = ["Tomato___Late_blight", "Apple___healthy", "Grape___Black_rot", "Corn_(maize)___Common_rust_", "Potato___Early_blight"];
+        const rows = names.map((n, i) => {
+          const y = 50 + i * 54, [p, d] = n.split("___");
+          const a = K.svg(svg, "text", { x: 30, y, "font-size": 14, "font-family": "var(--mono)" }, n);
+          const pl = K.node(svg, 380, y - 22, 150, 32, p, { fs: 12, fill: "color-mix(in srgb, var(--c3) 18%, var(--panel))", stroke: "var(--c3)" });
+          const ds = K.node(svg, 545, y - 22, 160, 32, d === "healthy" ? "healthy（不计病害）" : d, { fs: 12, fill: d === "healthy" ? "var(--panel-2)" : "color-mix(in srgb, var(--c2) 18%, var(--panel))", stroke: d === "healthy" ? "var(--line)" : "var(--c2)" });
+          pl.style.opacity = ds.style.opacity = 0;
+          return { pl, ds };
+        });
+        K.svg(svg, "text", { x: 455, y: 22, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--c3)" }, "作物");
+        K.svg(svg, "text", { x: 625, y: 22, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--c2)" }, "病害");
+        const sum = K.svg(svg, "text", { x: 30, y: 326, "font-size": 15, "font-weight": 700 }, "合计：14 种作物，26 种病害，38 个类别"); sum.style.opacity = 0;
+        (async () => {
+          for (const r of rows) { if (!(await ctx.tween(450, (t) => { r.pl.style.opacity = r.ds.style.opacity = t; }))) return; }
+          await ctx.tween(500, (t) => (sum.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "每类图片数：几乎均衡", kicker: "第 22–27 格 · 探索",
+      notes: {27: "把各类张数加起来，得到训练图片总数（具体数字在运行输出里）" },
+      html: `<p>作者数了训练集里每个类别文件夹的图片数，画成 38 根柱子，结论是“数据集几乎是均衡的”。</p><p>类别均衡的好处：准确率这个指标不容易骗人，也不需要像不平衡数据那样做重采样或加类别权重。动画里柱子高低是示意，具体数字在原 notebook 的运行输出里。</p>`,
+      cells: [24, 25], at: 22,
+      draw(svg, ctx) {
+        const r = K.rng(5), vals = Array.from({ length: 38 }, () => 0.82 + r() * 0.16);
+        const ax = K.axes(svg, { x: 50, y: 30, w: 640, h: 240 }, [0, 38], [0, 1], { xticks: 0, yticks: 0 });
+        const bars = vals.map((v, i) => K.svg(svg, "rect", { x: ax.sx(i) + 2, y: ax.sy(0), width: 640 / 38 - 4, height: 0, rx: 2, fill: K.colors[i % 6] }));
+        K.svg(svg, "text", { x: 370, y: 300, "text-anchor": "middle", "font-size": 13 }, "38 个类别（示意高度）");
+        const line = K.svg(svg, "line", { x1: 50, x2: 690, y1: ax.sy(0.9), y2: ax.sy(0.9), stroke: "var(--ink)", "stroke-dasharray": "5 4", opacity: 0 });
+        const note = K.svg(svg, "text", { x: 60, y: 22, "font-size": 13, "font-weight": 700, fill: "var(--good)" }, "");
+        ctx.tween(1500, (t) => bars.forEach((b, i) => { const h = (ax.sy(0) - ax.sy(vals[i])) * K.clamp(t * 1.6 - i / 60, 0, 1); K.set(b, { y: ax.sy(0) - h, height: h }); }))
+          .then((ok) => { if (ok) { line.style.opacity = 0.7; note.textContent = "高低差不多 → 不必做重采样"; } });
+      },
+    },
+    {
+      title: "ImageFolder + ToTensor：图片变成张量", kicker: "第 28–40 格 · 读数据",
+      notes: {36: "写一个小函数：把一张图和它的类别名显示出来", 39: "随便挑两张训练图看看长什么样" },
+      html: `<p><code>ImageFolder</code> 按“一个子文件夹就是一类”自动给图片打标签；<code>transforms.ToTensor()</code> 把每张图从 0–255 的像素变成 0–1 的浮点数，并把形状从“高 × 宽 × 通道”改成 PyTorch 习惯的<b>“通道 × 高 × 宽”</b>。</p><p>作者打印出第一张图的形状是 <code>(3, 256, 256)</code>：3 个颜色通道（红、绿、蓝），256×256 像素。</p>`,
+      cells: [29, 34], at: 28, highlight: ["ImageFolder", "transforms.ToTensor()"],
+      draw(svg, ctx) {
+        const L = leaf(64, "spot", 7);
+        const src = K.svg(svg, "image", { x: 40, y: 70, width: 200, height: 200 }); src.setAttribute("href", PX.rgbURL(L)); src.style.imageRendering = "pixelated";
+        K.svg(svg, "text", { x: 140, y: 296, "text-anchor": "middle", "font-size": 13 }, "彩色照片 256×256（示意）");
+        const tint = [[1, 0.25, 0.25], [0.25, 1, 0.25], [0.3, 0.45, 1]], names = ["R 红", "G 绿", "B 蓝"];
+        const planes = [2, 1, 0].map((ch) => {
+          const m = { W: 64, H: 64, rgb: [0, 1, 2].map((k) => L.rgb[ch].map((v) => v * tint[ch][k])) };
+          const e = K.svg(svg, "image", { x: 40, y: 70, width: 200, height: 200 }); e.setAttribute("href", PX.rgbURL(m)); e.style.imageRendering = "pixelated"; e.style.opacity = 0;
+          return { e, ch };
+        });
+        const labs = planes.map((p) => { const t = K.svg(svg, "text", { x: 0, y: 0, "font-size": 13, "font-weight": 700 }, names[p.ch]); t.style.opacity = 0; return t; });
+        const shape = K.node(svg, 470, 290, 220, 36, "张量形状 (3, 256, 256)，值 0–1", { fs: 12, fill: "var(--accent-soft)", stroke: "var(--accent)" }); shape.style.opacity = 0;
+        const ar = K.arrow(svg, 255, 170, 330, 170); ar.style.opacity = 0;
+        ctx.wait(500).then((ok) => ok && ctx.tween(400, (t) => (ar.style.opacity = t))).then((ok) => ok && ctx.tween(1500, (t) => planes.forEach((p, i) => {
+          const k = 2 - i, x = K.lerp(40, 360 + k * 50, t), y = K.lerp(70, 40 + k * 40, t);
+          K.set(p.e, { x, y, width: K.lerp(200, 170, t), height: K.lerp(200, 170, t) }); p.e.style.opacity = t;
+          K.set(labs[i], { x: x + 175 * t + 6, y: y + 20 }); labs[i].style.opacity = t;
+        }))).then((ok) => ok && ctx.tween(500, (t) => (shape.style.opacity = t)));
+      },
+    },
+    {
+      title: "DataLoader：打乱后每 32 张一批", kicker: "第 41–48 格 · 分批",
+      notes: {47: "把第一批 32 张拼成一张大图展示出来" },
+      html: `<p>8 万多张图不可能一次塞进显存。<code>DataLoader(train, batch_size=32, shuffle=True)</code> 每次取 32 张组成一个<b>批次（batch）</b>，网络每看完一批就更新一次参数。</p><p><code>shuffle=True</code> 让每一轮的分批顺序都不一样，避免同类图片扎堆出现；验证集不需要打乱。随机种子固定为 7，结果可复现。</p>`,
+      cells: [44], at: 41, highlight: ["batch_size", "shuffle=True"],
+      draw(svg, ctx) {
+        const n = 48, r = K.rng(3), cards = [];
+        for (let i = 0; i < n; i++) {
+          const kind = KINDS[Math.floor(i / 10) % 5];
+          const g = K.svg(svg, "g");
+          const im = K.svg(g, "image", { x: 0, y: 0, width: 26, height: 26 }); im.setAttribute("href", PX.rgbURL(leaf(20, kind, 300 + i)));
+          K.svg(g, "rect", { x: 0, y: 0, width: 26, height: 26, fill: "none", stroke: "var(--line)" });
+          cards.push({ g, i, kind });
+        }
+        const order = cards.map((c, i) => i).sort(() => r() - 0.5);
+        const at = (c, x, y) => c.g.setAttribute("transform", `translate(${x},${y})`);
+        cards.forEach((c, i) => at(c, 30 + (i % 16) * 30, 30 + Math.floor(i / 16) * 30));
+        K.svg(svg, "text", { x: 30, y: 20, "font-size": 12, class: "muted" }, "按文件夹顺序：同类挨在一起");
+        const lab = K.svg(svg, "text", { x: 30, y: 150, "font-size": 13, "font-weight": 700 }, "");
+        const boxes = [0, 1, 2].map((b) => { const e = K.svg(svg, "rect", { x: 26 + b * 230, y: 168, width: 222, height: 150, rx: 8, fill: "none", stroke: "var(--accent)", "stroke-dasharray": "5 4" }); e.style.opacity = 0; return e; });
+        const bl = [0, 1, 2].map((b) => { const t = K.svg(svg, "text", { x: 30 + b * 230 + 105, y: 312, "text-anchor": "middle", "font-size": 12, fill: "var(--accent)" }, `batch ${b + 1}：32 张（图上画 16 张）`); t.style.opacity = 0; return t; });
+        ctx.wait(800).then((ok) => { if (ok) lab.textContent = "shuffle=True：先打乱"; return ok && ctx.tween(1200, (t) => cards.forEach((c, i) => { const j = order.indexOf(i), x0 = 30 + (i % 16) * 30, y0 = 30 + Math.floor(i / 16) * 30, x1 = 30 + (j % 16) * 30, y1 = 30 + Math.floor(j / 16) * 30; at(c, K.lerp(x0, x1, t), K.lerp(y0, y1, t)); })); })
+          .then((ok) => { if (ok) lab.textContent = "再按顺序切成批次（每批混着各种类别）"; return ok && ctx.tween(1200, (t) => { boxes.forEach((b, k) => (b.style.opacity = bl[k].style.opacity = t)); cards.forEach((c, i) => { const j = order.indexOf(i), b = Math.floor(j / 16), k = j % 16; const x0 = 30 + (j % 16) * 30, y0 = 30 + Math.floor(j / 16) * 30, x1 = 34 + b * 230 + (k % 8) * 27, y1 = 178 + Math.floor(k / 8) * 30 + 20; at(c, K.lerp(x0, x1, t), K.lerp(y0, y1, t)); }); }); });
+      },
+    },
+    {
+      title: "把数据和模型搬到 GPU", kicker: "第 49–55 格 · 设备",
+      notes: {53: "看看当前用的是 GPU 还是 CPU" },
+      html: `<p>图像卷积要做海量乘加，GPU 有成千上万个核心可以并行算。作者写了 <code>get_default_device()</code>、<code>to_device()</code> 和 <code>DeviceDataLoader</code>：每取出一批数据，就顺手把它搬到 GPU 上（<code>non_blocking=True</code> 表示搬运和计算可以重叠）。</p><p>小细节：第 51 格写的是 <code>if torch.cuda.is_available:</code>，少了括号，判断的是“函数对象是否存在”，永远为真（见讨论题 5）。</p>`,
+      cells: [51], at: 49, highlight: ["torch.cuda.is_available", "non_blocking=True", "class DeviceDataLoader"],
+      draw(svg, ctx) {
+        K.node(svg, 40, 110, 170, 120, "CPU 内存\n\nDataLoader\n逐批读图", { bold: true });
+        const gpu = K.node(svg, 470, 70, 220, 200, "GPU 显存\n\nResNet-9 模型参数\n+ 当前批次", { bold: true, fill: "color-mix(in srgb, var(--c3) 14%, var(--panel))", stroke: "var(--c3)" });
+        K.arrow(svg, 215, 170, 465, 170, { color: "var(--c3)" });
+        K.svg(svg, "text", { x: 340, y: 160, "text-anchor": "middle", "font-size": 12, "font-family": "var(--mono)" }, "to_device(b, device)");
+        const cores = [];
+        for (let i = 0; i < 64; i++) cores.push(K.svg(svg, "rect", { x: 500 + (i % 16) * 10, y: 210 + Math.floor(i / 16) * 10, width: 8, height: 8, fill: "var(--c3)", opacity: 0.2 }));
+        K.svg(svg, "text", { x: 580, y: 300, "text-anchor": "middle", "font-size": 12, class: "muted" }, "许多核心同时做乘加（示意）");
+        const pk = K.svg(svg, "rect", { x: 220, y: 182, width: 30, height: 22, rx: 3, fill: "var(--c2)" });
+        (async () => {
+          for (let k = 0; k < 4; k++) {
+            if (!(await ctx.tween(700, (t) => K.set(pk, { x: K.lerp(220, 430, t) })))) return;
+            if (!(await ctx.tween(500, (t) => cores.forEach((c, i) => (c.style.opacity = 0.2 + 0.8 * Math.abs(Math.sin((i + k * 7) * 1.7 + t * 6)) * t))))) return;
+            cores.forEach((c) => (c.style.opacity = 0.2));
+          }
+        })();
+      },
+    },
+    {
+      title: "残差块：输出 = F(x) + x", kicker: "第 56–62 格 · 核心思想",
+      notes: {59: "作者解释残差网络：每层不只连下一层，还跳过两三层直接相连" },
+      html: `<p>普通网络是一层接一层往下传。ResNet 多了一条<b>“抄近路”的跳连</b>：输入 x 绕过两层卷积，直接加到它们的输出上，得到 F(x) + x。</p><p>好处：卷积层只需要学“在 x 基础上改多少”（残差）；反向传播时梯度可以顺着近路直接流回去，不容易越传越小（梯度消失），所以网络可以更深。作者在第 62 格写了一个最简单的残差块。</p>`,
+      cells: [62], at: 56, highlight: ["self.relu2(out) + x"],
+      draw(svg, ctx) {
+        const y = 200;
+        const nodes = [[30, "x 输入"], [160, "Conv 3×3"], [285, "ReLU"], [410, "Conv 3×3"], [600, "输出"]].map((d) => K.node(svg, d[0], y - 26, d[1] === "输出" ? 100 : 100, 52, d[1], { fs: 13 }));
+        const plus = K.svg(svg, "circle", { cx: 548, cy: y, r: 20, fill: "var(--accent-soft)", stroke: "var(--accent)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 548, y: y + 7, "text-anchor": "middle", "font-size": 22, "font-weight": 700, fill: "var(--accent)" }, "+");
+        [[130, 160], [260, 285], [385, 410], [510, 528], [568, 600]].forEach((d) => K.arrow(svg, d[0], y, d[1], y));
+        const skip = K.svg(svg, "path", { d: `M80,${y - 26} C80,60 548,60 548,${y - 20}`, fill: "none", stroke: "var(--c2)", "stroke-width": 3, "stroke-dasharray": "7 5" });
+        K.svg(svg, "text", { x: 314, y: 74, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--c2)" }, "跳连：x 原样送过来");
+        K.svg(svg, "text", { x: 330, y: 275, "text-anchor": "middle", "font-size": 13, fill: "var(--c1)" }, "F(x)：两层卷积学到的“修改量”");
+        K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 13, class: "muted" }, "反向传播时，梯度既走卷积这条路，也能沿橙色近路直接回到前面");
+        const d1 = K.svg(svg, "circle", { cx: 80, cy: y, r: 8, fill: "var(--c1)" }), d2 = K.svg(svg, "circle", { cx: 80, cy: y - 26, r: 8, fill: "var(--c2)" });
+        const len = skip.getTotalLength ? skip.getTotalLength() : 0;
+        (async () => {
+          for (let k = 0; k < 3; k++) {
+            if (!(await ctx.tween(1600, (t) => {
+              K.set(d1, { cx: K.lerp(80, 548, t), cy: y });
+              if (len) { const p = skip.getPointAtLength(len * t); K.set(d2, { cx: p.x, cy: p.y }); }
+            }))) return;
+            if (!(await ctx.tween(300, (t) => plus.setAttribute("r", 20 + 6 * Math.sin(Math.PI * t))))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "ResNet-9 整体结构", kicker: "第 63–70 格 · 模型",
+      notes: {64: "定义准确率，以及训练、验证时每一步要算什么（损失用交叉熵）", 68: "把模型建好并放到 GPU 上", 70: "打印每一层的输出形状和参数量" },
+      html: `<p><code>ConvBlock</code> = 卷积 3×3 + BatchNorm + ReLU，有的再接 <code>MaxPool2d(4)</code>（长宽缩小到 1/4）。整体：</p><ul class="tight"><li>conv1 (64) → conv2 (128, 池化) → <b>res1</b>（两个 128 通道块 + 跳连）</li><li>conv3 (256, 池化) → conv4 (512, 池化) → <b>res2</b>（两个 512 通道块 + 跳连）</li><li>分类头：MaxPool(4) → Flatten → Linear(512 → 38)</li></ul><p>代码注释写了中间尺寸：128×64×64、256×16×16、512×4×4。损失函数是交叉熵（<code>F.cross_entropy</code>）。</p>`,
+      cells: [66], at: 63, highlight: ["self.res1(out) + out", "self.res2(out) + out", "nn.MaxPool2d(4)", "nn.Linear(512, num_diseases)"],
+      draw(svg, ctx) {
+        const B = [["输入", "3×256²", 1], ["conv1", "64×256²", 1], ["conv2", "128×64²", 2], ["res1", "128×64²", 3], ["conv3", "256×16²", 2], ["conv4", "512×4²", 2], ["res2", "512×4²", 3], ["分类头", "38", 4]];
+        const gs = B.map((b, i) => {
+          const x = 14 + i * 88, h = [150, 150, 110, 110, 80, 60, 60, 40][i];
+          const col = b[2] === 3 ? "var(--c2)" : b[2] === 4 ? "var(--accent)" : b[2] === 2 ? "var(--c4)" : "var(--c1)";
+          const g = K.svg(svg, "g");
+          K.svg(g, "rect", { x, y: 170 - h / 2, width: 74, height: h, rx: 6, fill: `color-mix(in srgb, ${col} 18%, var(--panel))`, stroke: col });
+          K.svg(g, "text", { x: x + 37, y: 166, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, b[0]);
+          K.svg(g, "text", { x: x + 37, y: 184, "text-anchor": "middle", "font-size": 11, "font-family": "var(--mono)" }, b[1]);
+          if (i < B.length - 1) K.arrow(g, x + 74, 170, x + 88, 170);
+          g.style.opacity = 0;
+          return g;
+        });
+        const skips = [3, 6].map((i) => { const x = 14 + i * 88; const p = K.svg(svg, "path", { d: `M${x - 14},${170 - 60} C${x - 10},50 ${x + 84},50 ${x + 88},${170 - 40}`, fill: "none", stroke: "var(--c2)", "stroke-width": 2.5, "stroke-dasharray": "6 4" }); p.style.opacity = 0; return p; });
+        [["紫：卷积块 + MaxPool(4)", "var(--c4)"], ["橙：残差块（带跳连）", "var(--c2)"], ["蓝：普通卷积块", "var(--c1)"]].forEach((d, i) => K.svg(svg, "text", { x: 20 + i * 220, y: 300, "font-size": 12, fill: d[1] }, "■ " + d[0]));
+        K.svg(svg, "text", { x: 20, y: 324, "font-size": 12, class: "muted" }, "方块下方是输出形状：通道 × 边长²（来自代码注释与 MaxPool(4) 推算）");
+        (async () => {
+          for (let i = 0; i < gs.length; i++) {
+            if (!(await ctx.tween(320, (t) => (gs[i].style.opacity = t)))) return;
+            if (i === 3) await ctx.tween(300, (t) => (skips[0].style.opacity = t));
+            if (i === 6) await ctx.tween(300, (t) => (skips[1].style.opacity = t));
+          }
+        })();
+      },
+    },
+    {
+      title: "三个训练技巧：一周期、权重衰减、梯度裁剪", kicker: "第 71–74 格 · 训练策略",
+      html: `<ul class="tight"><li><b>One Cycle 学习率</b>：学习率每个批次都变，前约 30% 从很小升到最大值，然后一路降到极小。先“热身”，再大步探索，最后小步收尾。</li><li><b>权重衰减</b>：在损失里额外惩罚过大的权重，相当于 L2 正则，防过拟合。</li><li><b>梯度裁剪</b>：<code>clip_grad_value_(…, 0.1)</code> 把每个梯度分量截到 [−0.1, 0.1]，防止一次更新跨得太猛。</li></ul><p>左图是按 PyTorch 默认公式算出的学习率曲线，右图演示裁剪：超出虚线的梯度被截平。</p>`,
+      cells: [74], at: 71, highlight: ["OneCycleLR", "clip_grad_value_", "weight_decay=weight_decay", "sched.step()"],
+      draw(svg, ctx) {
+        const total = 200, lrs = oneCycle(0.01, total);
+        const ax = K.axes(svg, { x: 60, y: 30, w: 300, h: 230 }, [0, total], [0, 0.011], { xticks: 4, yticks: 2, xlabel: "批次（batch）", yfmt: (v) => v.toFixed(3) });
+        K.svg(svg, "text", { x: 66, y: 24, "font-size": 12, class: "muted" }, "学习率（max_lr = 0.01）");
+        const p = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        const peak = K.svg(svg, "line", { x1: ax.sx(0.3 * total), x2: ax.sx(0.3 * total), y1: 30, y2: 260, stroke: "var(--warn)", "stroke-dasharray": "4 3" });
+        K.svg(svg, "text", { x: ax.sx(0.3 * total) + 4, y: 46, "font-size": 11, fill: "var(--warn)" }, "30% 处达到最大");
+        const r = K.rng(2), g = Array.from({ length: 12 }, () => K.randn(r) * 0.12);
+        const bx = { x: 420, y: 40, w: 270, h: 220 }, sy = (v) => bx.y + bx.h / 2 - v * 700;
+        K.svg(svg, "line", { x1: bx.x, x2: bx.x + bx.w, y1: sy(0), y2: sy(0), stroke: "var(--ink-3)" });
+        [0.1, -0.1].forEach((c) => K.svg(svg, "line", { x1: bx.x, x2: bx.x + bx.w, y1: sy(c), y2: sy(c), stroke: "var(--bad)", "stroke-dasharray": "5 3" }));
+        K.svg(svg, "text", { x: bx.x + bx.w, y: sy(0.1) - 4, "text-anchor": "end", "font-size": 11, fill: "var(--bad)" }, "+0.1");
+        K.svg(svg, "text", { x: bx.x + bx.w, y: sy(-0.1) + 13, "text-anchor": "end", "font-size": 11, fill: "var(--bad)" }, "−0.1");
+        K.svg(svg, "text", { x: bx.x, y: 24, "font-size": 12, class: "muted" }, "12 个梯度分量（示意）");
+        const bars = g.map((v, i) => K.svg(svg, "rect", { x: bx.x + 8 + i * 22, y: sy(0), width: 16, height: 0, fill: "var(--c1)" }));
+        const setBar = (b, v) => K.set(b, { y: Math.min(sy(0), sy(v)), height: Math.abs(sy(v) - sy(0)) });
+        ctx.tween(1600, (t) => { let d = ""; const n = Math.max(1, Math.round(total * t)); for (let k = 0; k < n; k++) d += (d ? "L" : "M") + ax.sx(k) + "," + ax.sy(lrs[k]); p.setAttribute("d", d); g.forEach((v, i) => setBar(bars[i], v * Math.min(1, t * 2))); })
+          .then((ok) => ok && ctx.wait(400))
+          .then((ok) => ok && ctx.tween(900, (t) => g.forEach((v, i) => { const c = K.clamp(v, -0.1, 0.1); setBar(bars[i], K.lerp(v, c, t)); if (Math.abs(v) > 0.1) bars[i].style.fill = "var(--warn)"; })));
+      },
+    },
+    {
+      title: "训练前先测一次，再设超参数", kicker: "第 75–78 格 · 准备训练",
+      notes: {76: "训练前先在验证集上评估一次，得到约 1.9% 的基线" },
+      html: `<p>训练前作者先用随机初始化的模型在验证集上评估一次，准确率约 <b>0.019（1.9%）</b>，作者解释这就相当于在类别里随机乱选（38 类均匀乱猜约 2.6%，量级一致）。这是个好习惯：先确认流程跑通、基线合理。</p><p>超参数：<code>epochs = 2</code>、<code>max_lr = 0.01</code>、<code>grad_clip = 0.1</code>、<code>weight_decay = 1e-4</code>、优化器 <code>Adam</code>。</p>`,
+      cells: [77, 78], at: 75, highlight: ["epochs = 2", "max_lr = 0.01", "grad_clip = 0.1", "weight_decay = 1e-4", "torch.optim.Adam"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "随机初始化：38 类的输出概率差不多（示意）");
+        const r = K.rng(9), ps = Array.from({ length: 38 }, () => 1 + (r() - 0.5) * 0.5), s = ps.reduce((a, b) => a + b, 0);
+        const bars = ps.map((p, i) => K.svg(svg, "rect", { x: 30 + i * 9.5, y: 160, width: 7.5, height: 0, fill: "var(--ink-3)" }));
+        const pick = K.svg(svg, "text", { x: 30, y: 190, "font-size": 12, class: "muted" }, "");
+        const params = [["epochs", "2"], ["max_lr", "0.01"], ["grad_clip", "0.1"], ["weight_decay", "1e-4"], ["opt_func", "Adam"]];
+        const rows = params.map((d, i) => { const g = K.node(svg, 440, 40 + i * 50, 250, 40, `${d[0]} = ${d[1]}`, { fs: 13, fill: "var(--accent-soft)", stroke: "var(--accent)" }); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 30, y: 230, "font-size": 15, "font-weight": 700 }, "作者实测：约 1.9%");
+        K.svg(svg, "text", { x: 30, y: 254, "font-size": 13, class: "muted" }, "（第 77 格原文：near 0.019，相当于随机选类别）");
+        K.svg(svg, "text", { x: 30, y: 280, "font-size": 13, class: "muted" }, "均匀乱猜的理论值：1 / 38 ≈ 2.6%");
+        ctx.tween(900, (t) => bars.forEach((b, i) => { const h = (ps[i] / s) * 38 * 80 * t; K.set(b, { y: 160 - h, height: h }); }))
+          .then(async (ok) => {
+            if (!ok) return;
+            for (let k = 0; k < 6; k++) { const j = Math.floor(r() * 38); bars.forEach((b, i) => (b.style.fill = i === j ? "var(--warn)" : "var(--ink-3)")); pick.textContent = `随机挑中第 ${j + 1} 类`; if (!(await ctx.wait(260))) return; }
+            for (const g of rows) { if (!(await ctx.tween(260, (t) => (g.style.opacity = t)))) return; }
+          });
+      },
+    },
+    {
+      title: "训练 2 轮，验证准确率 99.2%", kicker: "第 79–90 格 · 训练与曲线",
+      notes: {84: "三个画图函数：准确率、损失、学习率随时间的变化", 86: "画验证准确率曲线", 88: "画训练和验证损失曲线", 90: "画学习率随批次变化的曲线" },
+      html: `<p><code>fit_OneCycle</code> 跑 2 轮，每个批次：前向算损失 → 反向求梯度 → 裁剪梯度 → Adam 更新 → 调度器把学习率推进一步。每轮结束在验证集上评估。作者说在 Kaggle 的 P100 GPU 上约 20 分钟。</p><p>作者写道：<b>“We got an accuracy of 99.2 %”</b>。之后画了验证准确率、训练/验证损失、学习率随批次变化三张图。下面的曲线形状是示意，具体数值见原 notebook 运行输出。</p>`,
+      cells: [80, 81], at: 79, highlight: ["fit_OneCycle", "99.2"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 40, w: 280, h: 210 }, [0, 2], [0, 1], { xticks: 2, yticks: 2, xlabel: "轮次", yfmt: (v) => v.toFixed(1) });
+        K.svg(svg, "text", { x: 66, y: 32, "font-size": 12, class: "muted" }, "验证准确率（示意）");
+        const pts = [[0, 0.019], [1, 0.95], [2, 0.992]];
+        const pth = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c3)", "stroke-width": 2.5 });
+        const dots = pts.map((p) => { const c = K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 5, fill: "var(--c3)" }); c.style.opacity = 0; return c; });
+        K.svg(svg, "text", { x: ax.sx(0) + 8, y: ax.sy(0.019) - 8, "font-size": 11 }, "≈1.9%（第 77 格）");
+        const lab = K.svg(svg, "text", { x: ax.sx(2) - 4, y: ax.sy(0.992) - 10, "text-anchor": "end", "font-size": 13, "font-weight": 700, fill: "var(--c3)" }, "99.2%（第 81 格）"); lab.style.opacity = 0;
+        K.svg(svg, "text", { x: ax.sx(1) + 6, y: ax.sy(0.95) + 34, "font-size": 11, class: "muted" }, "第 1 轮的值未写明（示意）");
+        const total = 120, lrs = oneCycle(0.01, total);
+        const ax2 = K.axes(svg, { x: 420, y: 40, w: 270, h: 210 }, [0, total], [0, 0.011], { xticks: 2, yticks: 2, xlabel: "批次（两轮合计）", xfmt: (v) => (v === 0 ? "0" : v === total ? "第2轮末" : "第1轮末"), yfmt: (v) => v.toFixed(3) });
+        K.svg(svg, "text", { x: 426, y: 32, "font-size": 12, class: "muted" }, "学习率随批次（plot_lrs 的形状）");
+        const lp = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        ctx.tween(2400, (t) => {
+          const n = Math.max(1, Math.round(total * t)); let d = ""; for (let k = 0; k < n; k++) d += (d ? "L" : "M") + ax2.sx(k) + "," + ax2.sy(lrs[k]); lp.setAttribute("d", d);
+          const e = 2 * t; let dd = ""; pts.forEach((p, i) => { if (p[0] <= e + 1e-9) { dd += (dd ? "L" : "M") + ax.sx(p[0]) + "," + ax.sy(p[1]); dots[i].style.opacity = 1; } }); pth.setAttribute("d", dd);
+        }).then((ok) => ok && ctx.tween(400, (t) => (lab.style.opacity = t)));
+      },
+    },
+    {
+      title: "33 张测试图逐张预测", kicker: "第 91–98 格 · 测试",
+      notes: {97: "对 33 张测试图逐张预测，打印“真实标签 / 预测结果”" },
+      html: `<p>测试文件夹只有 33 张图，作者逐张调用 <code>predict_image</code>：把单张图加一个批次维度 <code>unsqueeze(0)</code>，取输出最大的类别名，和文件名对照。作者写道：<b>模型把所有测试图都预测对了</b>。</p><p>注意测试图只有 33 张，“全对”是一个好信号，但还不足以说明真实准确率有多高。</p>`,
+      cells: [95], at: 91, highlight: ["unsqueeze(0)", "torch.max(yb, dim=1)"],
+      draw(svg, ctx) {
+        const els = [];
+        for (let i = 0; i < 33; i++) {
+          const x = 30 + (i % 11) * 44, y = 30 + Math.floor(i / 11) * 64;
+          const im = thumb(svg, x, y, 38, KINDS[i % 5], 500 + i); im.style.opacity = 0;
+          const ok = K.svg(svg, "text", { x: x + 19, y: y + 54, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--good)" }, "✓"); ok.style.opacity = 0;
+          els.push([im, ok]);
+        }
+        const cnt = K.svg(svg, "text", { x: 30, y: 240, "font-size": 15, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 30, y: 264, "font-size": 12, class: "muted" }, "（示意图；“全部正确”是作者在第 98 格写的结论）");
+        (async () => {
+          for (let i = 0; i < 33; i++) { const [a, b] = els[i]; a.style.opacity = 1; if (!(await ctx.wait(70))) return; b.style.opacity = 1; cnt.textContent = `已预测 ${i + 1} / 33`; }
+          cnt.textContent = "33 / 33 全部正确（作者原话）";
+        })();
+      },
+    },
+    {
+      title: "保存模型，作者的结论", kicker: "第 99–108 格 · 保存与总结",
+      html: `<p>作者介绍了两种保存方式：</p><ul class="tight"><li><b>只存 <code>state_dict</code></b>（推荐）：只保存每一层的参数数值，加载时先用同样的类建好网络，再把数值填进去；</li><li><b>存整个模型对象</b>：写法最短，但 pickle 记录的是类所在的文件路径，换个项目或改了代码就可能加载失败。</li></ul><p>作者还提醒：预测前要调用 <code>model.eval()</code>，让 Dropout 和 BatchNorm 切换到推理模式。结论（第 106 格）：ResNet 配合学习率调度、梯度裁剪和权重衰减效果很好。</p>`,
+      cells: [102], at: 99, highlight: ["state_dict()", "torch.save"],
+      notes: { 104: "另一种保存方式：把整个模型对象存下来（作者在第 103 格说明了它的缺点）" },
+      draw(svg, ctx) {
+        K.node(svg, 40, 110, 170, 120, "训练好的 ResNet-9\n（结构 + 参数）", { bold: true, fill: "color-mix(in srgb, var(--c1) 14%, var(--panel))", stroke: "var(--c1)" });
+        const a1 = K.arrow(svg, 215, 140, 330, 80), a2 = K.arrow(svg, 215, 200, 330, 260);
+        const s1 = K.node(svg, 335, 40, 230, 80, "state_dict()\n只存参数：一串串数字\nplant-disease-model.pth", { fs: 12, fill: "color-mix(in srgb, var(--good) 16%, var(--panel))", stroke: "var(--good)" });
+        const s2 = K.node(svg, 335, 220, 230, 80, "torch.save(model)\n整个对象（pickle）\n记着类定义所在路径", { fs: 12, fill: "color-mix(in srgb, var(--warn) 16%, var(--panel))", stroke: "var(--warn)" });
+        const t1 = K.svg(svg, "text", { x: 575, y: 86, "font-size": 13, fill: "var(--good)", "font-weight": 700 }, "✓ 推荐");
+        const t2 = K.svg(svg, "text", { x: 575, y: 266, "font-size": 13, fill: "var(--warn)", "font-weight": 700 }, "△ 改代码易失效");
+        const parts = [a1, s1, t1, a2, s2, t2]; parts.forEach((e) => (e.style.opacity = 0));
+        (async () => { for (const e of parts) if (!(await ctx.tween(350, (t) => (e.style.opacity = t)))) return; })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：OneCycleLR + 梯度裁剪，在 2D 螺旋数据上训练一个小 MLP ---------- */
+  function spiral(seed, n) {
+    const r = K.rng(seed), X = [], y = [];
+    for (let c = 0; c < 3; c++) for (let i = 0; i < n; i++) {
+      const t = i / n, ang = c * 2.094 + t * 3.6 + K.randn(r) * 0.18;
+      X.push([t * Math.cos(ang) * 2.2, t * Math.sin(ang) * 2.2]); y.push(c);
+    }
+    return { X, y };
+  }
+  function mlpInit(seed, H) {
+    const r = K.rng(seed), s1 = Math.sqrt(2 / 2), s2 = Math.sqrt(2 / H);
+    return { W1: Array.from({ length: H }, () => [K.randn(r) * s1, K.randn(r) * s1]), b1: new Array(H).fill(0), W2: Array.from({ length: 3 }, () => Array.from({ length: H }, () => K.randn(r) * s2)), b2: [0, 0, 0] };
+  }
+  function forward(m, x) {
+    const H = m.b1.length, h = new Array(H), z = [0, 0, 0];
+    for (let j = 0; j < H; j++) { const a = m.W1[j][0] * x[0] + m.W1[j][1] * x[1] + m.b1[j]; h[j] = a > 0 ? a : 0; }
+    for (let k = 0; k < 3; k++) { let s = m.b2[k]; for (let j = 0; j < H; j++) s += m.W2[k][j] * h[j]; z[k] = s; }
+    const mx = Math.max(...z), e = z.map((v) => Math.exp(v - mx)), se = e[0] + e[1] + e[2];
+    return { h, p: e.map((v) => v / se) };
+  }
+  function train(data, sched, opt) {
+    const m = mlpInit(opt.seed, 24), H = 24, N = data.X.length, bs = 32, r = K.rng(opt.seed + 1);
+    const params = [m.W1, m.b1, m.W2, m.b2];
+    const flat = () => { const out = []; m.W1.forEach((row, j) => row.forEach((_, i) => out.push([row, i]))); m.b1.forEach((_, j) => out.push([m.b1, j])); m.W2.forEach((row) => row.forEach((_, j) => out.push([row, j]))); m.b2.forEach((_, k) => out.push([m.b2, k])); return out; };
+    const P = flat(), mA = new Float64Array(P.length), vA = new Float64Array(P.length);
+    const losses = []; let step = 0;
+    const idx = Array.from({ length: N }, (_, i) => i);
+    for (let ep = 0; ep < opt.epochs; ep++) {
+      idx.sort(() => r() - 0.5);
+      for (let b0 = 0; b0 < N; b0 += bs) {
+        const lr = sched[step];
+        const gW1 = m.W1.map(() => [0, 0]), gb1 = new Array(H).fill(0), gW2 = m.W2.map(() => new Array(H).fill(0)), gb2 = [0, 0, 0];
+        const B = idx.slice(b0, b0 + bs); let L = 0;
+        for (const i of B) {
+          const x = data.X[i], { h, p } = forward(m, x); L -= Math.log(p[data.y[i]] + 1e-12);
+          const dz = p.map((v, k) => (v - (k === data.y[i] ? 1 : 0)) / B.length);
+          for (let k = 0; k < 3; k++) { gb2[k] += dz[k]; for (let j = 0; j < H; j++) gW2[k][j] += dz[k] * h[j]; }
+          for (let j = 0; j < H; j++) { if (h[j] <= 0) continue; let dh = 0; for (let k = 0; k < 3; k++) dh += dz[k] * m.W2[k][j]; gW1[j][0] += dh * x[0]; gW1[j][1] += dh * x[1]; gb1[j] += dh; }
+        }
+        losses.push(L / B.length);
+        const G = []; gW1.forEach((row) => row.forEach((v) => G.push(v))); gb1.forEach((v) => G.push(v)); gW2.forEach((row) => row.forEach((v) => G.push(v))); gb2.forEach((v) => G.push(v));
+        step++;
+        for (let q = 0; q < P.length; q++) {
+          const [arr, k] = P[q];
+          let g = G[q] + 1e-4 * arr[k];               // weight_decay（PyTorch Adam/SGD 的 L2 形式）
+          if (opt.clip) g = K.clamp(g, -0.1, 0.1);    // clip_grad_value_(…, 0.1)
+          if (opt.adam) { mA[q] = 0.9 * mA[q] + 0.1 * g; vA[q] = 0.999 * vA[q] + 0.001 * g * g; const mh = mA[q] / (1 - Math.pow(0.9, step)), vh = vA[q] / (1 - Math.pow(0.999, step)); arr[k] -= (lr * mh) / (Math.sqrt(vh) + 1e-8); }
+          else arr[k] -= lr * g;
+          if (!isFinite(arr[k])) arr[k] = 0;
+        }
+      }
+    }
+    let acc = 0; data.X.forEach((x, i) => { const p = forward(m, x).p; if (p.indexOf(Math.max(...p)) === data.y[i]) acc++; });
+    return { m, losses, acc: acc / N };
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 660, height: 372,
+    controls: [
+      { id: "lr", label: "max_lr（最大学习率）", min: -3, max: 0, step: 0.05, value: -0.3, fmt: (v) => Math.pow(10, v).toFixed(Math.pow(10, v) < 0.01 ? 4 : 3) },
+      { id: "ep", label: "训练轮数 epochs", min: 2, max: 30, step: 1, value: 15 },
+      { id: "opt", label: "优化器", value: "adam", options: [["adam", "Adam（作者用的）"], ["sgd", "SGD"]] },
+      { id: "clip", label: "梯度裁剪 clip_grad_value_(0.1)", value: "on", options: [["on", "开"], ["off", "关"]] },
+      { id: "seed", label: "换一组初始权重", button: true },
+    ],
+    note: "数据：三条交错的螺旋臂（3 类，共 360 个点），模型：2 → 24（ReLU）→ 3 的小网络，批大小 32，权重衰减 1e-4。同一组初始权重分别用“一周期”和“恒定 = max_lr”训练，学习率曲线按 PyTorch OneCycleLR 的默认公式计算。观察：max_lr 小（如 0.01）时恒定学习率反而更好，因为一周期的平均学习率更低；max_lr 大（0.3 以上）时恒定学习率一直在大步乱跳，一周期最后降下来能稳稳收敛。一周期的价值在于“敢用大学习率”。",
+    render(svg, v) {
+      const data = spiral(4, 120), maxLr = Math.pow(10, v.lr), stepsPer = Math.ceil(360 / 32), total = stepsPer * v.ep;
+      const sc = oneCycle(maxLr, total), cst = new Array(total).fill(maxLr);
+      const opt = { seed: 11 + v.seed * 5, epochs: v.ep, clip: v.clip === "on", adam: v.opt === "adam" };
+      const A = train(data, sc, opt), B = train(data, cst, opt);
+      const ax = K.axes(svg, { x: 60, y: 24, w: 260, h: 120 }, [0, total], [0, maxLr * 1.1], { xticks: 2, yticks: 2, yfmt: (x) => (x < 0.01 ? x.toFixed(4) : x.toFixed(3)) });
+      K.svg(svg, "text", { x: 64, y: 18, "font-size": 12, class: "muted" }, "学习率 vs 批次");
+      const line = (axx, arr, col, w, dash) => { let d = ""; arr.forEach((y, k) => (d += (d ? "L" : "M") + axx.sx(k) + "," + axx.sy(y))); K.svg(svg, "path", { d, fill: "none", stroke: col, "stroke-width": w || 2, "stroke-dasharray": dash || null }); };
+      line(ax, sc, "var(--accent)", 2.5); line(ax, cst, "var(--c2)", 2, "6 4");
+      const smooth = (a) => a.map((_, i) => { let s = 0, n = 0; for (let j = Math.max(0, i - 5); j <= i; j++) { s += a[j]; n++; } return s / n; });
+      const la = smooth(A.losses).map((x) => Math.min(x, 3)), lb = smooth(B.losses).map((x) => Math.min(x, 3));
+      const ax2 = K.axes(svg, { x: 60, y: 190, w: 260, h: 130 }, [0, total], [0, 1.6], { xticks: 2, yticks: 2, xlabel: "批次", yfmt: (x) => x.toFixed(1) });
+      K.svg(svg, "text", { x: 64, y: 184, "font-size": 12, class: "muted" }, "训练损失（滑动平均，超过 1.6 截顶）");
+      line(ax2, la.map((x) => Math.min(x, 1.6)), "var(--accent)", 2.5); line(ax2, lb.map((x) => Math.min(x, 1.6)), "var(--c2)", 2, "6 4");
+      K.svg(svg, "text", { x: 370, y: 340, "font-size": 12, fill: "var(--accent)" }, "— 一周期 One Cycle");
+      K.svg(svg, "text", { x: 500, y: 340, "font-size": 12, fill: "var(--c2)" }, "- - 恒定学习率（= max_lr）");
+      // 一周期模型的决策区域
+      const G = 44, cols = [PX.rgbOf("--c1"), PX.rgbOf("--c2"), PX.rgbOf("--c3")].map((c) => c.map((x) => x / 255));
+      const R = new Float32Array(G * G), Gc = new Float32Array(G * G), Bc = new Float32Array(G * G);
+      for (let j = 0; j < G; j++) for (let i = 0; i < G; i++) { const x = -2.6 + (5.2 * (i + 0.5)) / G, y = 2.6 - (5.2 * (j + 0.5)) / G, p = forward(A.m, [x, y]).p; const k = j * G + i; R[k] = Gc[k] = Bc[k] = 0; p.forEach((pp, c) => { R[k] += pp * (0.55 + 0.45 * cols[c][0]); Gc[k] += pp * (0.55 + 0.45 * cols[c][1]); Bc[k] += pp * (0.55 + 0.45 * cols[c][2]); }); }
+      const bx = 370, by = 30, bw = 280;
+      PX.draw(svg, bx, by, bw, bw, { W: G, H: G, rgb: [R, Gc, Bc] });
+      data.X.forEach((x, i) => K.svg(svg, "circle", { cx: bx + ((x[0] + 2.6) / 5.2) * bw, cy: by + ((2.6 - x[1]) / 5.2) * bw, r: 2.6, fill: ["var(--c1)", "var(--c2)", "var(--c3)"][data.y[i]], stroke: "var(--panel)", "stroke-width": 0.6 }));
+      K.svg(svg, "text", { x: bx, y: 24, "font-size": 12, class: "muted" }, "一周期训练出的模型：底色 = 预测类别");
+      const fin = (a) => a.slice(-stepsPer).reduce((s, x) => s + x, 0) / stepsPer;
+      return { readout: [
+        { k: "一周期：最后一轮损失", v: isFinite(fin(A.losses)) ? fin(A.losses).toFixed(3) : "发散", color: "var(--accent)" },
+        { k: "恒定：最后一轮损失", v: isFinite(fin(B.losses)) ? fin(B.losses).toFixed(3) : "发散", color: "var(--c2)" },
+        { k: "一周期 / 恒定 训练准确率", v: `${(A.acc * 100).toFixed(0)}% / ${(B.acc * 100).toFixed(0)}%` },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：梯度连乘 —— 普通网络 vs 残差网络 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 660, height: 320,
+    controls: [
+      { id: "L", label: "网络层数", min: 4, max: 60, step: 1, value: 30 },
+      { id: "g", label: "每层的“放大倍数”均值（权重尺度 × 激活导数）", min: 0.3, max: 1.4, step: 0.01, value: 0.7, fmt: (v) => v.toFixed(2) },
+      { id: "s", label: "每层倍数的随机波动", min: 0, max: 0.6, step: 0.01, value: 0.2, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "把每一层对梯度的作用简化成一个随机倍数 a（标量示意）。普通网络：传回第 1 层的梯度 = a₁ × a₂ × … × a_L；残差网络：每层是 x + F(x)，倍数变成 (1 + a·δ)，这里 δ = 0.1 表示残差分支只做小修改。纵轴是对数刻度。",
+    render(svg, v) {
+      const r = K.rng(5 + v.seed * 3), L = v.L, plain = [1], res = [1];
+      for (let l = 0; l < L; l++) { const a = v.g + K.randn(r) * v.s; plain.push(plain[l] * Math.abs(a)); const sgn = r() < 0.5 ? 1 : -1; res.push(res[l] * Math.abs(1 + 0.1 * a * sgn)); }
+      const lg = (x) => Math.log10(Math.max(x, 1e-30));
+      const ys = plain.concat(res).map(lg), lo = Math.max(-30, Math.min(-1, Math.min(...ys))), hi = Math.max(1, Math.max(...ys));
+      const ax = K.axes(svg, { x: 70, y: 20, w: 560, h: 240 }, [0, L], [lo, hi], { xticks: Math.min(10, L), yticks: 4, xfmt: (x) => Math.round(x), yfmt: (y) => "1e" + Math.round(y), xlabel: "从输出层往回数的层数" });
+      K.svg(svg, "line", { x1: 70, x2: 630, y1: ax.sy(0), y2: ax.sy(0), stroke: "var(--ink-3)", "stroke-dasharray": "3 3" });
+      const path = (a, col) => { let d = ""; a.forEach((y, i) => (d += (d ? "L" : "M") + ax.sx(i) + "," + ax.sy(lg(y)))); K.svg(svg, "path", { d, fill: "none", stroke: col, "stroke-width": 2.5 }); };
+      path(plain, "var(--c6)"); path(res, "var(--c3)");
+      K.svg(svg, "text", { x: 80, y: 300, "font-size": 12, fill: "var(--c6)" }, "— 普通网络：梯度逐层连乘");
+      K.svg(svg, "text", { x: 280, y: 300, "font-size": 12, fill: "var(--c3)" }, "— 残差网络：每层乘的是 (1 + 小量)");
+      const f = (x) => (x < 1e-3 || x > 1e3 ? x.toExponential(1) : x.toFixed(3));
+      return { readout: [
+        { k: "普通网络：传到第 1 层的梯度倍数", v: f(plain[L]), color: plain[L] < 1e-3 || plain[L] > 1e3 ? "var(--bad)" : "var(--good)" },
+        { k: "残差网络：传到第 1 层的梯度倍数", v: f(res[L]), color: res[L] < 1e-3 || res[L] > 1e3 ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

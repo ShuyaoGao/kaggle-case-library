@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>加密货币收益预测</title>
+<meta name="description" content="Kaggle 案例拆解：G-Research 加密货币预测比赛官方教程——K 线、缺失分钟、对数收益率、资产相关性、去掉大盘的残差目标、线性回归基线。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">金融时间序列 · 回归 · 量化入门</div>
+  <h1>加密货币：预测 15 分钟后的“超额涨跌”</h1>
+  <p class="en">Tutorial to the G-Research Crypto Competition</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">K 线图</span><span class="tag method">前向填充</span><span class="tag method">对数收益率</span>
+    <span class="tag method">滚动相关</span><span class="tag method">相关矩阵</span><span class="tag method">残差化目标（去 β）</span>
+    <span class="tag method">特征设计</span><span class="tag method">按时间切分</span><span class="tag method">线性回归 / 多输出回归</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Carlos Stein N Brito</b>（比赛主办方 G-Research 发布的教程）</span>
+    <span>Kaggle 点赞 <b>2,343</b>（2026-11 抓取）</span>
+    <span>比赛 <b>g-research-crypto-forecasting</b></span>
+    <span><a href="https://www.kaggle.com/code/cstein06/tutorial-to-the-g-research-crypto-competition" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">14 种加密货币逐分钟的交易记录</div><p>每分钟一行：开盘价、最高价、最低价、收盘价、成交笔数、成交量、成交量加权均价，数据有几百万行。<span data-cell="3">出处</span> <span data-cell="11">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">未来 15 分钟的“去掉大盘后”的对数收益</div><p>不是预测价格，而是预测涨跌幅；而且先把“整个币圈一起涨跌”的部分减掉，只预测这种币自己多涨或多跌的部分。<span data-cell="51">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">先把数据理顺，再搭最简单的基线</div><p>K 线图、补齐缺失的分钟、计算对数收益率、看币与币之间的相关性；设计 4 个特征，按时间切训练/测试，用线性回归和多输出线性回归做基线。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">多资产一起建模比单独建模好</div><p>用预测值与真实值的相关系数打分。作者写：在所选时段，多资产线性回归比每种币单独建模表现更好，但数据高度不平稳，换个时段结果可能差很多。<span data-cell="63">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据来自 Kaggle 比赛 <b>G-Research Crypto Forecasting</b>，主文件 <code>train.csv</code>（逐分钟交易数据），另有 <code>asset_details.csv</code>（币种编号、名称、评分权重）。以下信息来自 notebook 的文字说明。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">币种数</div><div class="v">14</div></div>
+        <div class="stat-tile"><div class="k">时间粒度</div><div class="v">1 分钟</div></div>
+        <div class="stat-tile"><div class="k">预测跨度</div><div class="v">15 分钟</div></div>
+        <div class="stat-tile"><div class="k">去大盘的滚动窗口</div><div class="v">3,750 分钟</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">14 种币、逐分钟、几百万行见第 3 格 <span data-cell="3">出处</span>；目标的 15 分钟跨度与 3750 分钟窗口见第 51 格 <span data-cell="51">出处</span>。缺失的分钟不是空值，而是<b>整行不存在</b> <span data-cell="26">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>timestamp</code></td><td>时间戳：从 1970 年起过了多少秒，都是 60 的倍数（每分钟一行）</td><td>整数</td></tr>
+        <tr><td><code>Asset_ID</code></td><td>币种编号，如 1 = 比特币，6 = 以太坊</td><td>类别</td></tr>
+        <tr><td><code>Count</code></td><td>这一分钟成交了多少笔</td><td>数值</td></tr>
+        <tr><td><code>Open</code> <code>High</code> <code>Low</code> <code>Close</code></td><td>这一分钟的开盘价、最高价、最低价、收盘价（美元）</td><td>数值</td></tr>
+        <tr><td><code>Volume</code></td><td>这一分钟的成交量</td><td>数值</td></tr>
+        <tr><td><code>VWAP</code></td><td>成交量加权平均价：买卖越多的价位权重越大</td><td>数值</td></tr>
+        <tr><td><code>Target</code></td><td><b>要预测的答案</b>：未来 15 分钟去掉大盘影响后的对数收益（残差）</td><td>数值</td></tr>
+      </table></div>
+      <p style="font-size:13px;color:var(--ink-2)">字段说明见第 11 格 <span data-cell="11">出处</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="41">
+    <h3>动手试试 A · 涨 50% 再跌 50%，回本了吗？对数收益率的好处 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="51">
+    <h3>动手试试 B · 把“大盘”减掉：残差收益是怎么算的 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="62">
+    <h3>动手试试 C · 市场变脸：训练时有效的规律，测试时还灵吗 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>加密货币之间价格变动高度关联，比特币历来是主要驱动</td><td><span data-cell="2">第 2 格</span></td></tr>
+        <tr><td>缺失的分钟表现为整行缺失，数据中有很多时间缺口，需要先补齐</td><td><span data-cell="26">第 26 格</span> <span data-cell="28">第 28 格</span></td></tr>
+        <tr><td>换成对数收益率后，序列更像白噪声，漂移更少</td><td><span data-cell="40">第 40 格</span></td></tr>
+        <tr><td>BTC 与 ETH 的相关性高但随时间变化：数据高度不平稳</td><td><span data-cell="44">第 44 格</span></td></tr>
+        <tr><td>有些币之间的两两相关性明显高于其他币</td><td><span data-cell="44">第 44 格</span></td></tr>
+        <tr><td>在所选训练/测试时段，多资产线性回归优于单资产线性回归；换时段结果可能差很多</td><td><span data-cell="63">第 63 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">两个基线模型的相关系数分数由第 62 格打印在运行输出里，Kaggle 下载的源码不带输出，作者的文字里也没写具体数值，所以这里不列分数。</p>
+      <p class="callout warn"><b>读的时候要留心：</b>① 第 55 格把缺失的 <code>Target</code> 用 0 填上再训练和打分，而比赛规定缺失目标不计分 <span data-cell="51">出处</span>，教程里的分数会被这些“假 0”影响。② 第 45 格对收盘价先 <code>fillna(0)</code> 再取对数收益，如果真有缺失，log(0) 会产生无穷大；用前向填充更稳妥。③ 第 35 格用 <code>time.mktime</code> 把日期转成时间戳，结果取决于运行机器的时区，可能和数据的 UTC 时间差几个小时。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>某个资产接下来一小段时间相对大盘是跑赢还是跑输、幅度多大，作为交易信号的一部分。</li>
+        <li><b>同类问题：</b>股票、汇率、期货的短期收益预测；基金经理评估“选股能力”时也要先扣掉大盘（β）的贡献。</li>
+        <li><b>可迁移的套路：</b>补齐时间缺口 → 价格转对数收益 → 看相关性和平稳性 → 把共同因素从目标里剔除 → 只用过去的信息造特征 → 按时间先后切分 → 用相关系数这类“方向对不对”的指标评估，并换多个时段检验稳定性。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>K 线图（plotly Candlestick） <span data-cell="16">第 16 格</span></li>
+        <li>按时间重建索引 + 前向填充 <code>reindex(method='pad')</code> <span data-cell="29">第 29 格</span></li>
+        <li>对数收益率函数 <span data-cell="39">第 39 格</span></li>
+        <li>分段相关、14 种币相关矩阵 <span data-cell="43">第 43 格</span> <span data-cell="47">第 47 格</span></li>
+        <li>4 个特征：5 分钟收益、1 分钟收益绝对值、上影线、下影线 <span data-cell="53">第 53 格</span></li>
+        <li>StandardScaler、LinearRegression、MultiOutputRegressor <span data-cell="57">第 57 格</span> <span data-cell="60">第 60 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>为什么金融里更喜欢预测“收益率”而不是直接预测“价格”？如果模型预测“明天比特币价格 ≈ 今天价格”，它的误差会很小，这算好模型吗？</li>
+      <li>比赛把“大盘一起涨跌”的部分从目标里减掉了。这样做是让题目变难了还是变简单了？主办方为什么要这样设计？</li>
+      <li>缺失的分钟用“上一分钟的值”补上（前向填充）。这样补出来的收益率是 0，会给模型带来什么错觉？</li>
+      <li>为什么训练集必须是 5 月、测试集必须是 6 月，而不能把两个月的数据随机打乱再切分？</li>
+      <li>相关系数只有 0.05 的预测信号，在金融市场上有没有价值？如果要真拿去交易，还需要考虑哪些成本和风险？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Carlos Stein N Brito（G-Research 比赛教程），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意，不构成任何投资建议。数据：G-Research Crypto Forecasting 比赛。
+</footer>
+</main>
+
+<script src="nb/crypto-returns-gresearch.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  if (location.hash === "#fast") { // 自查用：动画直接跳到最后一帧
+    K.tween = (ms, fn, ctx) => { if (ctx && !ctx.alive()) return Promise.resolve(false); fn(1, 1); return Promise.resolve(true); };
+    K.wait = (ms, ctx) => Promise.resolve(!ctx || ctx.alive());
+    document.head.appendChild(K.el("style", null, ".ch-cells > .cell, .ch-cells > .cell-note { display: none }"));
+  }
+  const fade = (els, ctx, ms) => ctx.tween(ms || 500, (t) => els.forEach((e) => (e.style.opacity = t)));
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+  /* 生成随机游走价格（示意） */
+  function walk(seed, n, p0, vol, drift) { const r = K.rng(seed), P = [p0]; for (let i = 1; i < n; i++) P.push(P[i - 1] * Math.exp(drift + vol * K.randn(r))); return P; }
+  function linePath(ax, xs, ys) { let d = ""; ys.forEach((y, i) => (d += (d ? "L" : "M") + ax.sx(xs[i]).toFixed(1) + "," + ax.sy(y).toFixed(1))); return d; }
+  const corr = (a, b) => { const n = a.length; let ma = 0, mb = 0; for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; } ma /= n; mb /= n; let sab = 0, saa = 0, sbb = 0; for (let i = 0; i < n; i++) { sab += (a[i] - ma) * (b[i] - mb); saa += (a[i] - ma) ** 2; sbb += (b[i] - mb) ** 2; } return sab / Math.sqrt(saa * sbb || 1); };
+
+  const steps = [
+    {
+      at: 0, title: "加密货币市场与预测任务", kicker: "第 0–4 格 · 背景",
+      html: `<p>这是比赛主办方 G-Research（一家量化投资公司）写的官方教程。加密货币波动极大，币与币之间价格变动高度关联，比特币长期是“领头羊” <span data-cell="2">出处</span>。</p><p>任务：用历史逐分钟数据，预测 14 种币在<b>几分钟到几小时</b>尺度上的<b>收益</b>（涨跌幅），而不是价格本身；评分看预测和真实结果的相关程度 <span data-cell="3">出处</span>。作者直言这是一个开放而且极难的问题：波动大、不平稳、有人为操纵、市场变化快。</p>`,
+      cells: [2, 3],
+      draw(svg, ctx) {
+        const names = ["BTC", "ETH", "DOGE", "ADA", "BNB", "XRP", "LTC"];
+        const P = names.map((n, i) => walk(10 + i, 120, 100, 0.012 + i * 0.002, 0));
+        const r = K.rng(4), common = [0]; for (let i = 1; i < 120; i++) common.push(common[i - 1] + K.randn(r) * 0.012);
+        const series = names.map((n, k) => P[k].map((p, i) => 100 * Math.exp(Math.log(p / 100) * 0.5 + common[i])));
+        const ax = K.axes(svg, { x: 50, y: 30, w: 560, h: 260 }, [0, 119], [70, 140], { xticks: 0, yticks: 0, xlabel: "时间（示意）" });
+        K.svg(svg, "text", { x: 50, y: 20, "font-size": 13, class: "muted" }, "多种币一起起落：共同的“大盘”+ 各自的小波动（模拟走势，起点都设为 100）");
+        const paths = series.map((s, k) => K.svg(svg, "path", { d: "", fill: "none", stroke: K.colors[k % 6], "stroke-width": k === 0 ? 2.5 : 1.3, opacity: k === 0 ? 1 : 0.7 }));
+        names.forEach((n, k) => K.svg(svg, "text", { x: 620, y: 60 + k * 20, "font-size": 12, fill: K.colors[k % 6] }, n));
+        const xs = series[0].map((_, i) => i);
+        ctx.tween(2200, (t) => { const m = Math.max(2, Math.round(t * 120)); paths.forEach((p, k) => p.setAttribute("d", linePath(ax, xs.slice(0, m), series[k].slice(0, m).map((v) => K.clamp(v, 70, 140))))); });
+      },
+    },
+    {
+      title: "读入数据：每分钟一行", kicker: "第 5–12 格 · 数据",
+      html: `<p>读入 <code>train.csv</code>，每一行是“某种币在某一分钟”的交易汇总：开、高、低、收四个价格，成交笔数、成交量、成交量加权均价 VWAP，以及答案 <code>Target</code>。</p><p><code>asset_details.csv</code> 给出 14 种币的编号、名称和<b>权重</b>，权重决定每种币在最终评分里占多大分量 <span data-cell="11">出处</span>。</p>`,
+      cells: [8, 11, 12],
+      draw(svg, ctx) {
+        const cols = ["timestamp", "Asset_ID", "Count", "Open", "High", "Low", "Close", "Volume", "VWAP", "Target"];
+        const W = 66;
+        cols.forEach((c, j) => K.node(svg, 30 + j * W, 40, W - 4, 30, c, { fs: 10, bold: true, fill: j === 9 ? "var(--accent-soft)" : "var(--panel-2)", stroke: j === 9 ? "var(--accent)" : "var(--line)" }));
+        const rows = [];
+        for (let i = 0; i < 6; i++) {
+          const g = K.svg(svg, "g"); g.style.opacity = 0;
+          cols.forEach((c, j) => K.node(g, 30 + j * W, 76 + i * 34, W - 4, 30, j === 0 ? "…" + (60 * i).toString().padStart(3, "0") : j === 1 ? String([1, 6, 1, 6, 1, 6][i]) : j === 9 ? "?" : "·", { fs: 11 }));
+          rows.push(g);
+        }
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12, class: "muted" }, "示意：同一分钟里不同币各占一行；Asset_ID 1 = 比特币，6 = 以太坊；时间戳每行加 60 秒");
+        (async () => { for (const g of rows) if (!(await ctx.tween(250, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "K 线图：一分钟的四个价格", kicker: "第 13–16 格 · 可视化",
+      html: `<p>开盘、最高、最低、收盘四个价格可以画成<b>K 线（蜡烛图）</b>：柱体从开盘价到收盘价，收盘高于开盘画绿色（涨），低于开盘画红色（跌）；上下的细线叫影线，顶端是最高价，底端是最低价 <span data-cell="13">出处</span>。</p><p>作者取比特币最近 200 分钟，用 plotly 画出可缩放的 K 线图。后面造特征时还会用到“上影线”“下影线”。</p>`,
+      cells: [13, 15, 16], highlight: ["go.Candlestick"],
+      draw(svg, ctx) {
+        const r = K.rng(21), bars = []; let p = 100;
+        for (let i = 0; i < 24; i++) { const o = p, c = o + K.randn(r) * 1.6, h = Math.max(o, c) + Math.abs(K.randn(r)) * 1.0, l = Math.min(o, c) - Math.abs(K.randn(r)) * 1.0; bars.push({ o, c, h, l }); p = c; }
+        const lo = Math.min(...bars.map((b) => b.l)) - 1, hi = Math.max(...bars.map((b) => b.h)) + 1;
+        const ax = K.axes(svg, { x: 50, y: 30, w: 430, h: 270 }, [0, 24], [lo, hi], { xticks: 0, yticks: 3, xlabel: "分钟（示意）" });
+        const els = bars.map((b, i) => {
+          const g = K.svg(svg, "g"); g.style.opacity = 0; const col = b.c >= b.o ? "var(--c3)" : "var(--c6)";
+          K.svg(g, "line", { x1: ax.sx(i + 0.5), x2: ax.sx(i + 0.5), y1: ax.sy(b.h), y2: ax.sy(b.l), stroke: col, "stroke-width": 1.5 });
+          K.svg(g, "rect", { x: ax.sx(i + 0.18), width: ax.sx(0.64) - ax.sx(0), y: ax.sy(Math.max(b.o, b.c)), height: Math.max(1.5, Math.abs(ax.sy(b.o) - ax.sy(b.c))), fill: col });
+          return g;
+        });
+        // 右侧图例：一根放大的蜡烛
+        const X = 590;
+        K.svg(svg, "line", { x1: X, x2: X, y1: 50, y2: 290, stroke: "var(--c3)", "stroke-width": 2 });
+        K.svg(svg, "rect", { x: X - 22, y: 110, width: 44, height: 110, fill: "var(--c3)" });
+        [["最高价 High", 52], ["收盘价 Close", 112], ["开盘价 Open", 222], ["最低价 Low", 290]].forEach(([t, y]) => K.svg(svg, "text", { x: X + 30, y: y + 4, "font-size": 12 }, t));
+        K.svg(svg, "text", { x: X - 30, y: 82, "font-size": 11, "text-anchor": "end", class: "muted" }, "上影线");
+        K.svg(svg, "text", { x: X - 30, y: 260, "font-size": 11, "text-anchor": "end", class: "muted" }, "下影线");
+        (async () => { for (const g of els) if (!(await ctx.tween(90, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "缺失的分钟：补上时间缺口", kicker: "第 17–31 格 · 预处理",
+      html: `<p>以以太坊为例：<code>Target</code> 列有空值；更隐蔽的是，<b>某一分钟没有交易数据时，这一行直接不存在</b> <span data-cell="26">出处</span>。作者计算相邻两行的时间差，发现很多不是 60 秒，说明数据里有不少缺口。</p><p>处理办法：用 <code>reindex</code> 把时间轴补成每 60 秒一行，空出来的行用<b>上一行的值</b>填（前向填充 <code>method='pad'</code>）。补完再检查，时间差全是 60 秒了。</p>`,
+      cells: [26, 27, 29], highlight: ["reindex", "method='pad'"],
+      draw(svg, ctx) {
+        const have = [1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 1], vals = [101, 102, 0, 0, 99, 100, 103, 0, 104, 103, 105, 104];
+        K.svg(svg, "text", { x: 30, y: 36, "font-size": 13, class: "muted" }, "时间轴（每格 1 分钟）：灰色虚框 = 这一分钟整行缺失");
+        const boxes = have.map((h, i) => {
+          const x = 30 + i * 56;
+          K.svg(svg, "text", { x: x + 25, y: 70, "text-anchor": "middle", "font-size": 11, class: "muted" }, "t" + i);
+          return { rect: K.svg(svg, "rect", { x, y: 80, width: 50, height: 44, rx: 6, fill: h ? "var(--panel-2)" : "none", stroke: h ? "var(--c1)" : "var(--ink-3)", "stroke-dasharray": h ? null : "4 3" }), txt: K.svg(svg, "text", { x: x + 25, y: 107, "text-anchor": "middle", "font-size": 14 }, h ? String(vals[i]) : ""), x };
+        });
+        K.svg(svg, "text", { x: 30, y: 170, "font-size": 13 }, "相邻两行的时间差：");
+        const gaps = K.svg(svg, "text", { x: 160, y: 170, "font-size": 13, "font-weight": 700, fill: "var(--warn)" }, "60, 180, 60, 60, 120, 60 …（不是全都 60 秒）");
+        const res = K.svg(svg, "text", { x: 30, y: 230, "font-size": 14, "font-weight": 700, fill: "var(--good)" }, "");
+        (async () => {
+          if (!(await ctx.wait(900))) return;
+          let last = null;
+          for (let i = 0; i < have.length; i++) {
+            if (have[i]) { last = vals[i]; continue; }
+            const b = boxes[i];
+            if (!(await ctx.tween(500, (t) => { K.set(b.rect, { fill: `color-mix(in srgb, var(--warn) ${Math.round(t * 25)}%, var(--panel))`, stroke: "var(--warn)" }); b.txt.textContent = String(last); b.txt.style.opacity = t; }))) return;
+          }
+          gaps.textContent = "60, 60, 60, 60, 60 …（补齐了）";
+          res.textContent = "前向填充：缺的那一分钟照抄上一分钟的值（橙色格）";
+          K.svg(svg, "text", { x: 30, y: 258, "font-size": 12, class: "muted" }, "副作用：照抄的价格不变，这几分钟的收益率会变成 0");
+        })();
+      },
+    },
+    {
+      title: "价格走势：两种币一起看", kicker: "第 32–37 格 · 可视化",
+      html: `<p>作者先画出比特币和以太坊整个时段的收盘价：两者的历史走势很不一样。再截取 2021 年 6 月这一个月放大看，能看到一些<b>同时涨、同时跌</b>的地方。</p><p>但价格的“长相”不好直接比较：两种币价格差几十倍，而且价格本身一直在漂移。更好的办法是看<b>收益率</b> <span data-cell="37">出处</span>。</p>`,
+      cells: [33, 35, 36], highlight: ["totimestamp"],
+      draw(svg, ctx) {
+        const r = K.rng(6), n = 150, m = [0];
+        for (let i = 1; i < n; i++) m.push(m[i - 1] + K.randn(r) * 0.01);
+        const btc = m.map((v, i) => 35000 * Math.exp(v + 0.004 * K.randn(r))), eth = m.map((v, i) => 2400 * Math.exp(1.2 * v + 0.006 * K.randn(r)));
+        const xs = btc.map((_, i) => i);
+        const a1 = K.axes(svg, { x: 70, y: 20, w: 600, h: 120 }, [0, n - 1], [Math.min(...btc) * 0.99, Math.max(...btc) * 1.01], { xticks: 0, yticks: 2, ylabel: "BTC" });
+        const a2 = K.axes(svg, { x: 70, y: 180, w: 600, h: 120 }, [0, n - 1], [Math.min(...eth) * 0.99, Math.max(...eth) * 1.01], { xticks: 0, yticks: 2, ylabel: "ETH", xlabel: "2021 年 6 月某段（模拟走势）" });
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2 }), p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2 });
+        ctx.tween(2000, (t) => { const k = Math.max(2, Math.round(t * n)); p1.setAttribute("d", linePath(a1, xs.slice(0, k), btc.slice(0, k))); p2.setAttribute("d", linePath(a2, xs.slice(0, k), eth.slice(0, k))); });
+      },
+    },
+    {
+      title: "对数收益率：把价格变成“涨跌幅”", kicker: "第 38–41 格 · 特征变换",
+      html: `<p><b>收益率</b> = 价格变化的百分比，不同价位的币可以放在一起比较。金融建模更常用<b>对数收益率</b>：<code>log(今天价格 / 昨天价格)</code>，第 39 格一行代码就实现了 <span data-cell="39">出处</span>。</p><p>两个好处：① 可以<b>直接相加</b>，连续几段的对数收益加起来就是整段的对数收益；② 没有 −100% 的下限 <span data-cell="38">出处</span>。转换后的序列在 0 附近上下跳，像白噪声，漂移少了很多 <span data-cell="40">出处</span>。</p>`,
+      cells: [38, 39, 41], highlight: ["np.log(series).diff(periods=periods)"],
+      draw(svg, ctx) {
+        const P = walk(33, 80, 100, 0.02, 0.004), xs = P.map((_, i) => i);
+        const L = P.map((p, i) => (i ? Math.log(p / P[i - 1]) : 0));
+        const a1 = K.axes(svg, { x: 60, y: 20, w: 600, h: 120 }, [0, 79], [Math.min(...P) * 0.98, Math.max(...P) * 1.02], { xticks: 0, yticks: 2, ylabel: "价格" });
+        const a2 = K.axes(svg, { x: 60, y: 190, w: 600, h: 110 }, [0, 79], [-0.06, 0.06], { xticks: 0, yticks: 2, ylabel: "对数收益", xlabel: "时间（模拟）", yfmt: (q) => (q * 100).toFixed(0) + "%" });
+        K.svg(svg, "path", { d: linePath(a1, xs, P), fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+        const bars = L.map((v, i) => K.svg(svg, "rect", { x: a2.sx(i) - 2.5, width: 5, y: a2.sy(0), height: 0, fill: v >= 0 ? "var(--c3)" : "var(--c6)" }));
+        ctx.wait(500).then((ok) => ok && ctx.tween(1600, (t) => bars.forEach((b, i) => { const v = L[i] * K.clamp(t * 80 - i, 0, 1), y = a2.sy(Math.max(v, 0)); b.setAttribute("y", y); b.setAttribute("height", Math.abs(a2.sy(v) - a2.sy(0))); })));
+        K.svg(svg, "text", { x: 360, y: 168, "font-size": 12, class: "muted", "text-anchor": "middle" }, "↓ 每一步：log(这一刻价格 ÷ 上一刻价格)");
+      },
+    },
+    {
+      title: "相关性会变：BTC 与 ETH", kicker: "第 42–44 格 · 相关分析",
+      html: `<p>把两种币的对数收益并排，每 10,000 分钟分一段，分别算一次<b>相关系数</b>（−1 到 1：越接近 1 越“同涨同跌”）。画出来：相关性很高，但<b>随时间起伏</b> <span data-cell="44">出处</span>。</p><p>作者借此解释<b>平稳性</b>：平均值、波动大小、相关关系不随时间变，叫平稳；一直在变，叫不平稳。很多统计工具都假设平稳，而加密货币恰恰很不平稳。</p>`,
+      cells: [43, 44], highlight: ["groupby(two_assets.index//(10000*60)).corr()"],
+      draw(svg, ctx) {
+        const r = K.rng(14), segs = 30, cs = [];
+        let c = 0.75; for (let i = 0; i < segs; i++) { c = K.clamp(c + K.randn(r) * 0.08, 0.3, 0.95); cs.push(c); }
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [0, segs - 1], [0, 1], { xticks: 0, yticks: 4, ylabel: "相关系数", xlabel: "时间段（每段 10,000 分钟，数值为模拟）" });
+        const p = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const xs = cs.map((_, i) => i);
+        ctx.tween(1800, (t) => { const k = Math.max(2, Math.round(t * segs)); p.setAttribute("d", linePath(ax, xs.slice(0, k), cs.slice(0, k))); });
+        K.svg(svg, "text", { x: 70, y: 22, "font-size": 12, class: "muted" }, "高，但上上下下：今天成立的关系，下个月未必成立");
+      },
+    },
+    {
+      title: "14 种币的相关矩阵", kicker: "第 45–48 格 · 相关矩阵",
+      html: `<p>对 2021 年 1–5 月，把 14 种币的对数收益排成 14 列，算两两相关系数，画成热力图：颜色越亮，两种币越同步。作者指出<b>有些币之间的相关性明显高于其他币</b> <span data-cell="44">出处</span>。</p><p>他也鼓励大家继续做自相关、时间序列分解、平稳性检验等分析 <span data-cell="48">出处</span>。</p>`,
+      cells: [45, 47], highlight: ["all_assets_2021.corr()", "fillna(0)"],
+      draw(svg, ctx) {
+        const n = 14, r = K.rng(8), load = []; for (let i = 0; i < n; i++) load.push(0.4 + r() * 0.55);
+        const S = 18, x0 = 200, y0 = 30, cells = [];
+        for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+          const v = i === j ? 1 : load[i] * load[j] * (0.85 + 0.15 * r());
+          const c = K.svg(svg, "rect", { x: x0 + j * S, y: y0 + i * S, width: S - 1, height: S - 1, fill: K.heat(v) });
+          c.style.opacity = 0; cells.push({ c, d: i + j });
+        }
+        K.svg(svg, "text", { x: x0, y: y0 + n * S + 22, "font-size": 12, class: "muted" }, "14 × 14：每格 = 两种币收益的相关系数（模拟示意，对角线 = 1）");
+        ctx.tween(1500, (t) => cells.forEach((o) => (o.c.style.opacity = K.clamp(t * 28 - o.d, 0, 1))));
+      },
+    },
+    {
+      title: "预测目标：减掉大盘的那一份", kicker: "第 49–51 格 · 目标定义",
+      html: `<p>目标 <code>Target</code> 的做法：先算每种币未来 15 分钟的对数收益 R；再按权重算出整个市场的平均收益 M；用滚动 3,750 分钟窗口估计这种币对大盘有多敏感，叫 <b>β（贝塔）</b>；最后 <code>Target = R − β × M</code> <span data-cell="51">出处</span>。</p><p>意思是：币圈整体涨了，这种币跟着涨的那部分不算本事，只预测它<b>比大盘多涨或少涨</b>的部分。评分用（加权）皮尔逊相关系数；教程里简化为不加权、只看 BTC 和 ETH。</p>`,
+      cells: [51],
+      draw(svg, ctx) {
+        const r = K.rng(5), n = 60, M = [], R = [], beta = 1.3;
+        for (let i = 0; i < n; i++) { const m = K.randn(r) * 0.01; M.push(m); R.push(beta * m + K.randn(r) * 0.004); }
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [0, n - 1], [-0.04, 0.04], { xticks: 0, yticks: 2, xlabel: "时间（模拟）", yfmt: (q) => (q * 100).toFixed(0) + "%" });
+        const xs = M.map((_, i) => i);
+        const pm = K.svg(svg, "path", { d: linePath(ax, xs, M.map((v) => beta * v)), fill: "none", stroke: "var(--ink-3)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+        const pr = K.svg(svg, "path", { d: linePath(ax, xs, R), fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+        const lab = K.svg(svg, "text", { x: 70, y: 22, "font-size": 13, "font-weight": 700, fill: "var(--c1)" }, "蓝 = 这种币的收益 R；灰虚线 = β × 大盘 M");
+        ctx.wait(1200).then((ok) => ok && ctx.tween(1600, (t) => pr.setAttribute("d", linePath(ax, xs, R.map((v, i) => v - t * beta * M[i])))))
+          .then((ok) => { if (ok) { lab.textContent = "减掉之后只剩小小的“自己的”波动 = Target"; K.set(lab, { fill: "var(--accent)" }); pm.style.opacity = 0.3; } });
+      },
+    },
+    {
+      title: "特征设计：收益与影线", kicker: "第 52–53 格 · 特征工程",
+      html: `<p>作者为每种币设计了 4 个输入特征：</p><ul class="tight"><li>过去 5 分钟的对数收益（用 VWAP 算）：最近的走势</li><li>过去 1 分钟对数收益的<b>绝对值</b>：波动有多剧烈</li><li><b>上影线</b> = 最高价 − max(开盘, 收盘)：冲高后被打回来多少</li><li><b>下影线</b> = min(开盘, 收盘) − 最低价：探底后被拉回来多少</li></ul><p>注意它们都只用<b>当前和过去</b>的数据，不会偷看未来。</p>`,
+      cells: [53], highlight: ["upper_shadow", "lower_shadow", "periods=5"],
+      draw(svg, ctx) {
+        const X = 160;
+        K.svg(svg, "line", { x1: X, x2: X, y1: 40, y2: 300, stroke: "var(--c3)", "stroke-width": 2 });
+        K.svg(svg, "rect", { x: X - 30, y: 120, width: 60, height: 100, fill: "var(--c3)" });
+        const up = K.svg(svg, "line", { x1: X + 50, x2: X + 50, y1: 120, y2: 120, stroke: "var(--warn)", "stroke-width": 4 });
+        const dn = K.svg(svg, "line", { x1: X + 50, x2: X + 50, y1: 220, y2: 220, stroke: "var(--c2)", "stroke-width": 4 });
+        const t1 = K.svg(svg, "text", { x: X + 60, y: 84, "font-size": 13, fill: "var(--warn)", "font-weight": 700 }, "上影线 = High − max(Open, Close)");
+        const t2 = K.svg(svg, "text", { x: X + 60, y: 266, "font-size": 13, fill: "var(--c2)", "font-weight": 700 }, "下影线 = min(Open, Close) − Low");
+        hide([t1, t2]);
+        const feats = ["① 5 分钟对数收益", "② |1 分钟对数收益|", "③ 上影线", "④ 下影线"].map((f, i) => { const g = K.node(svg, 470, 60 + i * 60, 220, 44, f, { stroke: K.colors[i] }); g.style.opacity = 0; return g; });
+        ctx.tween(800, (t) => { up.setAttribute("y1", 120 - 80 * t); dn.setAttribute("y2", 220 + 80 * t); })
+          .then((ok) => ok && fade([t1, t2], ctx, 400))
+          .then(async (ok) => { if (!ok) return; for (const g of feats) if (!(await ctx.tween(250, (t) => (g.style.opacity = t)))) return; });
+      },
+    },
+    {
+      title: "按时间切分 + 标准化", kicker: "第 54–57 格 · 数据准备",
+      html: `<p>时间序列不能随机切分。作者用 <b>2021 年 5 月当训练集，6 月当测试集</b>，测试永远在训练之后 <span data-cell="54">出处</span>。缺失值（包括缺失的 Target）用 0 填。</p><p>然后 <code>StandardScaler</code> 标准化：用训练集算出每个特征的均值和标准差，再套到测试集上（只 fit 训练集，测试集只 transform）。</p>`,
+      cells: [55, 57], highlight: ["train_window", "test_window", "fillna(0)"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 40, "font-size": 13, class: "muted" }, "时间从左往右流：只能“用过去学，在未来考”");
+        const days = 60, W = 10.5, cells = [];
+        for (let d = 0; d < days; d++) cells.push(K.svg(svg, "rect", { x: 40 + d * W, y: 70, width: W - 1.5, height: 40, rx: 2, fill: "var(--panel-2)", stroke: "var(--line)" }));
+        const l1 = K.svg(svg, "text", { x: 40 + 15 * W, y: 140, "font-size": 14, "font-weight": 700, "text-anchor": "middle", fill: "var(--c1)" }, "训练：2021 年 5 月");
+        const l2 = K.svg(svg, "text", { x: 40 + 45 * W, y: 140, "font-size": 14, "font-weight": 700, "text-anchor": "middle", fill: "var(--c2)" }, "测试：2021 年 6 月");
+        hide([l1, l2]);
+        K.svg(svg, "text", { x: 30, y: 210, "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "✗ 随机打乱再切：测试集里有 5 月的日子，训练集里有 6 月的日子 → 等于偷看未来");
+        K.svg(svg, "text", { x: 30, y: 250, "font-size": 13 }, "标准化：均值和标准差只从训练段算 → 测试段照着这把“尺子”换算");
+        ctx.tween(1400, (t) => cells.forEach((c, d) => { if (t * days > d) K.set(c, { fill: d < 30 ? "color-mix(in srgb, var(--c1) 40%, var(--panel))" : "color-mix(in srgb, var(--c2) 40%, var(--panel))" }); }))
+          .then((ok) => ok && fade([l1, l2], ctx, 400));
+      },
+    },
+    {
+      title: "线性回归基线：单独建模 vs 一起建模", kicker: "第 58–60 格 · 建模",
+      html: `<p><b>线性回归</b>：给每个特征一个系数，加权求和得到预测的收益。作者先给 BTC、ETH <b>各训练一个</b>（单资产）；再把两种币的 8 个特征拼在一起，用 <code>MultiOutputRegressor</code> 同时预测两种币（多资产），这样 BTC 的模型也能看到 ETH 的信息。</p><p>作者坦言：线性回归在时间序列里不常用，只看一个时间步就更简单了，这只是<b>基线</b>，用来给后面更复杂的模型当参照 <span data-cell="58">出处</span>。</p>`,
+      cells: [58, 59, 60], highlight: ["MultiOutputRegressor", "np.concatenate"],
+      draw(svg, ctx) {
+        const left = ["BTC 4 个特征", "ETH 4 个特征"];
+        K.svg(svg, "text", { x: 40, y: 30, "font-size": 13, "font-weight": 700 }, "单资产：各管各的");
+        K.svg(svg, "text", { x: 400, y: 30, "font-size": 13, "font-weight": 700 }, "多资产：特征拼起来");
+        left.forEach((l, i) => { K.node(svg, 30, 60 + i * 120, 130, 50, l, { stroke: K.colors[i] }); K.arrow(svg, 160, 85 + i * 120, 210, 85 + i * 120); K.node(svg, 215, 60 + i * 120, 120, 50, (i ? "ETH" : "BTC") + " 预测", { stroke: K.colors[i] }); });
+        const L2 = left.map((l, i) => K.node(svg, 390, 60 + i * 120, 130, 50, l, { stroke: K.colors[i] }));
+        const arrs = [];
+        [0, 1].forEach((i) => [0, 1].forEach((j) => { const a = K.arrow(svg, 520, 85 + i * 120, 580, 85 + j * 120, { color: i === j ? "var(--ink-3)" : "var(--accent)" }); a.style.opacity = 0; arrs.push(a); }));
+        [0, 1].forEach((j) => K.node(svg, 585, 60 + j * 120, 110, 50, (j ? "ETH" : "BTC") + " 预测", { stroke: K.colors[j] }));
+        K.svg(svg, "text", { x: 390, y: 320, "font-size": 12, fill: "var(--accent)" }, "橙色交叉箭头：一种币的模型也能参考另一种币");
+        ctx.wait(500).then((ok) => ok && fade(arrs, ctx, 900));
+      },
+    },
+    {
+      title: "用相关系数打分", kicker: "第 61–64 格 · 评估与提交",
+      html: `<p>比赛评分是加权相关系数，这里先用普通的<b>相关系数</b>：把测试期的预测值和真实值配对，看它们“同方向变化”的程度。预测完全无关是 0，方向全对是 1。</p><p>作者写：在所选时段，<b>多资产模型比单资产模型好</b>；但数据高度不平稳，换个时段结果可能差很多 <span data-cell="63">出处</span>。最后提醒：这是代码比赛，提交时要用官方的时间序列 API，保证模型不能偷看未来 <span data-cell="64">出处</span>。</p>`,
+      cells: [62, 63, 64], highlight: ["np.corrcoef"],
+      draw(svg, ctx) {
+        const r = K.rng(31), n = 120, pts = [];
+        for (let i = 0; i < n; i++) { const p = K.randn(r); pts.push([p, 0.25 * p + K.randn(r)]); }
+        const ax = K.axes(svg, { x: 60, y: 20, w: 300, h: 280 }, [-3, 3], [-3.5, 3.5], { xticks: 0, yticks: 0, xlabel: "预测值", ylabel: "真实值" });
+        const ds = pts.map((p) => K.svg(svg, "circle", { cx: ax.sx(0), cy: ax.sy(0), r: 3, fill: "var(--c1)", opacity: 0.6 }));
+        ctx.tween(1200, (t) => ds.forEach((d, i) => { d.setAttribute("cx", ax.sx(pts[i][0] * t)); d.setAttribute("cy", ax.sy(pts[i][1] * t)); }));
+        const c = corr(pts.map((p) => p[0]), pts.map((p) => p[1]));
+        K.svg(svg, "text", { x: 400, y: 80, "font-size": 15, "font-weight": 700 }, "相关系数 = " + c.toFixed(2) + "（模拟）");
+        K.svg(svg, "text", { x: 400, y: 110, "font-size": 13, class: "muted" }, "点云只是“略微”往右上倾斜");
+        K.svg(svg, "text", { x: 400, y: 150, "font-size": 13 }, "短期收益里噪声远大于规律，");
+        K.svg(svg, "text", { x: 400, y: 172, "font-size": 13 }, "很小的正相关也可能有参考价值");
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：简单收益 vs 对数收益 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "up", label: "第一段涨幅", min: -50, max: 100, step: 1, value: 50, fmt: (v) => (v > 0 ? "+" : "") + v + "%" },
+      { id: "dn", label: "第二段涨幅", min: -60, max: 100, step: 1, value: -50, fmt: (v) => (v > 0 ? "+" : "") + v + "%" },
+      { id: "vol", label: "再加一段随机走势：每分钟波动", min: 0, max: 3, step: 0.1, value: 1, fmt: (v) => v.toFixed(1) + "%" },
+      { id: "seed", label: "换一段随机走势", button: true },
+    ],
+    note: "从 100 元出发，先按两个滑块涨跌两段，再走 60 分钟随机行情。右边比较：把每段“简单收益率”直接相加，和把每段“对数收益率”相加，哪个等于最终真实的涨跌？默认的 +50% 再 −50%，最后剩多少钱？",
+    render(svg, v) {
+      const r = K.rng(400 + v.seed * 7), P = [100, 100 * (1 + v.up / 100)];
+      P.push(P[1] * (1 + v.dn / 100));
+      for (let i = 0; i < 60; i++) P.push(P[P.length - 1] * Math.exp((v.vol / 100) * K.randn(r)));
+      const simple = [], logr = [];
+      for (let i = 1; i < P.length; i++) { simple.push(P[i] / P[i - 1] - 1); logr.push(Math.log(P[i] / P[i - 1])); }
+      const sumS = simple.reduce((a, b) => a + b, 0), sumL = logr.reduce((a, b) => a + b, 0), real = P[P.length - 1] / P[0] - 1;
+      const xs = P.map((_, i) => i);
+      const ax = K.axes(svg, { x: 60, y: 20, w: 560, h: 250 }, [0, P.length - 1], [0, Math.max(...P) * 1.1], { xticks: 0, yticks: 4, xlabel: "时间（第 1、2 段是两个滑块，后面是随机行情）", ylabel: "价格（元）" });
+      K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(P.length - 1), y1: ax.sy(100), y2: ax.sy(100), stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+      K.svg(svg, "path", { d: linePath(ax, xs, P), fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+      [0, 1, 2].forEach((i) => K.svg(svg, "circle", { cx: ax.sx(i), cy: ax.sy(P[i]), r: 5, fill: "var(--c2)" }));
+      const pct = (x) => (x >= 0 ? "+" : "") + (x * 100).toFixed(1) + "%";
+      return { readout: [
+        { k: "最后剩下", v: P[P.length - 1].toFixed(2) + " 元" },
+        { k: "真实总涨跌", v: pct(real) },
+        { k: "简单收益率直接相加", v: pct(sumS), color: Math.abs(sumS - real) > 0.005 ? "var(--bad)" : "var(--good)" },
+        { k: "对数收益相加 → 换算回来", v: pct(Math.exp(sumL) - 1), color: "var(--good)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：残差化 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "beta", label: "这种币对大盘的真实敏感度 β", min: 0, max: 2.5, step: 0.05, value: 1.3, fmt: (v) => v.toFixed(2) },
+      { id: "idio", label: "它自己的独立波动（相对大盘）", min: 0.1, max: 1.5, step: 0.05, value: 0.4, fmt: (v) => v.toFixed(2) },
+      { id: "win", label: "估计 β 的滚动窗口（分钟）", min: 20, max: 600, step: 10, value: 200 },
+      { id: "seed", label: "换一段行情", button: true },
+    ],
+    note: "模拟 1,500 分钟：大盘收益 M 随机波动，这种币的收益 R = β×M + 自己的波动。每一分钟都只用“过去 N 分钟”估计 β，再算 Target = R − β̂×M（和第 51 格公式一样，只是这里不做加权）。看看减完以后，Target 和大盘的相关系数是不是接近 0。",
+    render(svg, v) {
+      const r = K.rng(77 + v.seed * 19), n = 1500, M = [], R = [];
+      for (let i = 0; i < n; i++) { const m = K.randn(r); M.push(m); R.push(v.beta * m + v.idio * K.randn(r)); }
+      const bh = new Array(n).fill(NaN), T = [], Mt = [], Rt = [];
+      let smr = 0, smm = 0;
+      for (let i = 0; i < n; i++) {
+        if (i >= v.win) { bh[i] = smr / smm; T.push(R[i] - bh[i] * M[i]); Mt.push(M[i]); Rt.push(R[i]); }
+        smr += M[i] * R[i]; smm += M[i] * M[i];
+        if (i >= v.win) { smr -= M[i - v.win] * R[i - v.win]; smm -= M[i - v.win] * M[i - v.win]; }
+      }
+      const ax = K.axes(svg, { x: 60, y: 20, w: 560, h: 250 }, [0, n - 1], [0, Math.max(2.6, v.beta * 1.4)], { xticks: 0, yticks: 4, xlabel: "时间（分钟，模拟）", ylabel: "β 的估计值" });
+      K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(n - 1), y1: ax.sy(v.beta), y2: ax.sy(v.beta), stroke: "var(--good)", "stroke-width": 2, "stroke-dasharray": "6 3" });
+      let d = ""; for (let i = v.win; i < n; i += 3) d += (d ? "L" : "M") + ax.sx(i).toFixed(1) + "," + ax.sy(K.clamp(bh[i], 0, 4)).toFixed(1);
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+      K.svg(svg, "text", { x: 70, y: 324, "font-size": 12, fill: "var(--good)" }, "绿虚线 = 真实 β");
+      K.svg(svg, "text", { x: 200, y: 324, "font-size": 12, fill: "var(--c1)" }, "蓝线 = 每一分钟用过去窗口估出来的 β");
+      const avgB = bh.filter((x) => !isNaN(x)).reduce((a, b) => a + b, 0) / (n - v.win);
+      return { readout: [
+        { k: "估计 β 的平均", v: avgB.toFixed(2) },
+        { k: "原始收益 R 与大盘相关", v: corr(Rt, Mt).toFixed(2) },
+        { k: "Target 与大盘相关", v: corr(T, Mt).toFixed(3), color: Math.abs(corr(T, Mt)) < 0.05 ? "var(--good)" : "var(--warn)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：不平稳导致规律失效 ---------- */
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 345,
+    controls: [
+      { id: "sig", label: "特征里的真实信号强度", min: 0, max: 0.5, step: 0.01, value: 0.15, fmt: (v) => v.toFixed(2) },
+      { id: "shift", label: "6 月（测试期）规律变了多少：系数乘以", min: -1, max: 1, step: 0.05, value: 1, fmt: (v) => "×" + v.toFixed(2) },
+      { id: "seed", label: "换一段行情", button: true },
+    ],
+    note: "现场训练线性回归：用“5 月”的 3,000 分钟拟合（一个特征 → 下一段收益），再在“6 月”的 3,000 分钟上算预测与真实值的相关系数。把第二个滑块从 ×1 拖到 ×0，再拖到负数：市场规律反过来时，训练得再好的模型也会亏。",
+    render(svg, v) {
+      const r = K.rng(600 + v.seed * 23), n = 3000;
+      const gen = (coef) => { const X = [], Y = []; for (let i = 0; i < n; i++) { const x = K.randn(r); X.push(x); Y.push(coef * x + K.randn(r)); } return { X, Y }; };
+      const tr = gen(v.sig), te = gen(v.sig * v.shift);
+      let mx = 0, my = 0; tr.X.forEach((x, i) => { mx += x; my += tr.Y[i]; }); mx /= n; my /= n;
+      let sxy = 0, sxx = 0; tr.X.forEach((x, i) => { sxy += (x - mx) * (tr.Y[i] - my); sxx += (x - mx) ** 2; });
+      const b = sxy / sxx, a = my - b * mx;
+      const pred = te.X.map((x) => a + b * x);
+      const cTr = corr(tr.X.map((x) => a + b * x), tr.Y), cTe = corr(pred, te.Y);
+      const ax = K.axes(svg, { x: 50, y: 20, w: 260, h: 250 }, [-3, 3], [-4, 4], { xticks: 0, yticks: 0, xlabel: "特征（5 月，训练）" });
+      for (let i = 0; i < 400; i++) K.svg(svg, "circle", { cx: ax.sx(K.clamp(tr.X[i], -3, 3)), cy: ax.sy(K.clamp(tr.Y[i], -4, 4)), r: 2, fill: "var(--c1)", opacity: 0.4 });
+      K.svg(svg, "line", { x1: ax.sx(-3), y1: ax.sy(a - 3 * b), x2: ax.sx(3), y2: ax.sy(a + 3 * b), stroke: "var(--ink)", "stroke-width": 2 });
+      const bx = K.axes(svg, { x: 360, y: 20, w: 260, h: 250 }, [-3, 3], [-4, 4], { xticks: 0, yticks: 0, xlabel: "特征（6 月，测试）" });
+      for (let i = 0; i < 400; i++) K.svg(svg, "circle", { cx: bx.sx(K.clamp(te.X[i], -3, 3)), cy: bx.sy(K.clamp(te.Y[i], -4, 4)), r: 2, fill: "var(--c2)", opacity: 0.4 });
+      K.svg(svg, "line", { x1: bx.sx(-3), y1: bx.sy(a - 3 * b), x2: bx.sx(3), y2: bx.sy(a + 3 * b), stroke: "var(--ink)", "stroke-width": 2, "stroke-dasharray": "6 3" });
+      K.svg(svg, "text", { x: 50, y: 334, "font-size": 12, class: "muted" }, "黑线 = 5 月学到的回归线，原样拿到 6 月使用（每边只画 400 个点）");
+      return { readout: [
+        { k: "学到的系数", v: b.toFixed(3) },
+        { k: "训练期相关系数", v: cTr.toFixed(3) },
+        { k: "测试期相关系数", v: cTe.toFixed(3), color: cTe < 0 ? "var(--bad)" : cTe > 0.05 ? "var(--good)" : "var(--warn)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

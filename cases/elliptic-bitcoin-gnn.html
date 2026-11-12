@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>比特币交易反洗钱</title>
+<meta name="description" content="Kaggle 案例拆解：Elliptic 比特币交易图。先做图的统计分析（度分布、连通分量、三种中心性、社区发现），再用 GCN、GAT、GIN 三种图神经网络判断交易是否非法。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">图数据 · 节点分类 · 反洗钱</div>
+  <h1>顺着比特币的流向，找出可疑交易</h1>
+  <p class="en">💰 Bitcoin Transactions 🔗 Graph Neural Networks 🪙</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span><span class="tag ml">数据挖掘</span>
+    <span class="tag method">度分布 / 连通分量</span><span class="tag method">度 / 介数 / 接近中心性</span><span class="tag method">Louvain 社区发现</span>
+    <span class="tag method">GCN</span><span class="tag method">GAT 图注意力</span><span class="tag method">GIN</span><span class="tag method">t-SNE</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Clem W</b></span>
+    <span>Kaggle 点赞 <b>157</b>（2026-11 抓取）</span>
+    <span>数据集 <b>ellipticco/elliptic-data-set</b></span>
+    <span><a href="https://www.kaggle.com/code/clemwo/bitcoin-transactions-graph-neural-networks" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">20 万笔比特币交易和它们之间的资金流</div><p>每笔交易是一个点，带 166 个匿名特征；钱从一笔交易流到另一笔，就连一条边。<span data-cell="3">出处</span> <span data-cell="14">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">一笔交易是合法还是非法</div><p>非法只占 2.23%，合法 20.62%，其余 77.15% 没人标过（unknown）。<span data-cell="20">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">先看图的“长相”，再训练三种 GNN</div><p>度分布、连通分量、三种中心性、社区发现；然后 GCN、GAT、GIN 三种图神经网络对比。<span data-cell="45">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">作者认为 GIN 的精确率最好</div><p>GIN 在后期最稳、精确率最高，但前期不稳定。<span data-cell="104">出处</span> 其余分数在运行输出里，这里不列。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集由区块链分析公司 Elliptic 公开：比特币区块链上的一批交易，部分交易被人工标成“合法”（交易所、钱包、矿工等）或“非法”（诈骗、恶意软件、勒索等）。规模见作者第 14 格和第 20 格的说明。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">交易（节点）</div><div class="v">203,768</div></div>
+        <div class="stat-tile"><div class="k">资金流（边）</div><div class="v">234,355</div></div>
+        <div class="stat-tile"><div class="k">非法 illicit</div><div class="v" style="color:var(--c6)">2.23%</div></div>
+        <div class="stat-tile"><div class="k">未标注 unknown</div><div class="v" style="color:var(--ink-3)">77.15%</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">节点数和边数见 <span data-cell="14">第 14 格</span>；类别占比见 <span data-cell="20">第 20 格</span>（合法 20.62%）；每个节点 166 个特征见 <span data-cell="3">第 3 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">三张表</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>文件</th><th>每行是什么</th><th>列</th></tr>
+        <tr><td><code>elliptic_txs_features.csv</code></td><td>一笔交易</td><td>交易编号 + 166 个匿名数值特征（作者命名为 V1…V166）</td></tr>
+        <tr><td><code>elliptic_txs_classes.csv</code></td><td>一笔交易的标签</td><td><code>txId</code>、<code>class</code>：<b>要预测的答案</b>，1 = 非法，2 = 合法，unknown = 未标注</td></tr>
+        <tr><td><code>elliptic_txs_edgelist.csv</code></td><td>一条资金流</td><td><code>txId1</code> → <code>txId2</code></td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">读入代码见 <span data-cell="13">第 13 格</span>，标签含义见 <span data-cell="19">第 19 格</span>。特征是匿名的，数据集说明没有公开每一列的含义。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="37">
+    <h3>动手试试 A · 三种中心性：谁是交易网里的“枢纽” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="73">
+    <h3>动手试试 B · 加权精确率会掩盖什么：在模拟交易图上训练 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>三种 GNN 中，GIN 的验证精确率整体最好，后期最稳，但前期波动大</td><td><span data-cell="104">第 104 格</span></td></tr>
+        <tr><td>GCN 对非法交易的判断“还行但不确定”，只认对 46% 的非法节点；有 42% 的合法节点被判成 unknown（见下方说明）</td><td><span data-cell="74">第 74 格</span></td></tr>
+        <tr><td>非法交易子图较稀疏、呈环状，少数节点在中心像枢纽；合法交易子图更密</td><td><span data-cell="42">第 42 格</span></td></tr>
+        <tr><td>训练、验证、测试三份数据中合法和非法的比例相近</td><td><span data-cell="63">第 63 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">其余准确率、精确率、召回率、F1 都由代码打印在运行输出里，Kaggle 下载的源码不带输出，这里不列。第 74 格的 46% 和 42% 是作者文字里写的数，但它提到的 “unknown” 类和后面的代码对不上（见下）。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li><b>合法 / 非法概率列颠倒</b>：标签编码后 0 = 非法、1 = 合法（第 56、71 格注释），但第 77、86、95 格把第 0 列当成“合法”、第 1 列当成“非法”，所以后面的概率分布图、箱线图和 t 检验（第 105–108 格）里两类的名字是反的。</li>
+        <li><b>第 74 格的说明过时</b>：第 59–61 格已经只在有标签的节点上划分训练 / 验证 / 测试，测试集里没有 unknown；第 74 格却在讨论 unknown 类的预测，像是早期版本留下的文字。</li>
+        <li><b>输出层有 3 类</b>：模型输出包含 unknown（<code>len(le.classes_)</code> = 3），但训练时从来没有 unknown 标签。</li>
+        <li><b>指标用加权平均</b>：<code>average='weighted'</code> 按样本数加权，合法交易占大多数，分数主要反映合法类，非法类做得差也看不太出来（实验 B）。</li>
+        <li><b>随机切分</b>：交易有时间先后，随机切分可能让模型“看到未来”。作者在待办里也写了还没做非 GNN 的基线（第 109 格）。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给区块链上一笔新交易，结合它自己的特征和它前后连着的交易，给出“可疑程度”，交给合规人员复核。</li>
+        <li><b>同类问题：</b>银行转账反洗钱、电商刷单团伙、保险骗保团伙、电信诈骗号码识别：坏人之间往往互相连着。</li>
+        <li><b>可迁移的套路：</b>先用中心性、社区发现看图的结构 → 只在有标签的点上训练、但让信息在整张图上流动 → 用少数类的召回率和精确率评估。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>图统计：度分布、连通分量、最短路径 <span data-cell="26">第 26 格</span> <span data-cell="31">第 31 格</span></li>
+        <li>中心性：度、介数、接近 <span data-cell="33">第 33–35 格</span></li>
+        <li>社区发现：Louvain <span data-cell="44">第 44 格</span></li>
+        <li>PyG 数据对象：<code>x</code>、<code>edge_index</code>、<code>y</code> + 掩码 <span data-cell="57">第 57 格</span> <span data-cell="61">第 61 格</span></li>
+        <li>GCN（2 层，16 维） <span data-cell="66">第 66 格</span>；GAT（8 头注意力） <span data-cell="79">第 79 格</span>；GIN（MLP 64 维） <span data-cell="88">第 88 格</span></li>
+        <li>t-SNE 看 GIN 的节点嵌入 <span data-cell="99">第 99 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>77% 的交易没有标签，作者没用它们训练，却仍把它们留在图里。这些“没标签的点”对模型有什么用？</li>
+      <li>反洗钱场景下，“漏掉一笔非法交易”和“误报一笔合法交易”各有什么代价？你会更看重召回率还是精确率？</li>
+      <li>作者用了加权平均的精确率。如果只看这个数，会不会以为模型很好、其实非法交易抓得很少？应该补充看什么指标？</li>
+      <li>洗钱的人如果知道银行用“看邻居”的方法，可能会故意和很多正常交易连在一起。GNN 会不会被骗？怎么防？</li>
+      <li>交易是按时间发生的。用随机切分训练出的模型，拿到明天的新交易上还会一样准吗？</li>
+      <li>GCN 平均对待每个邻居，GAT 给邻居打不同的“注意力”分数。在资金流网络里，哪种更合理？为什么？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Clem W，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：Elliptic, Elliptic Data Set（Kaggle：ellipticco/elliptic-data-set）。
+</footer>
+</main>
+
+<script src="nb/elliptic-bitcoin-gnn.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* ===== 本页图神经网络小工具（页面专用，不改共用文件） ===== */
+  const G = {};
+  /* 自查开关：网址带 ?fast 时用定时器代替 requestAnimationFrame（无界面截图时动画也能播完），并折叠代码 */
+  G.fast = /[?&]fast/.test(location.search);
+  if (G.fast) window.requestAnimationFrame = (cb) => setTimeout(() => cb(performance.now()), 8);
+  G.selfcheck = function () {
+    if (!G.fast) return;
+    setTimeout(() => {
+      if (/[?&]labs/.test(location.search)) {
+        const box = document.createElement("div"); const m = document.querySelector("main"); m.insertBefore(box, m.firstChild);
+        document.querySelectorAll(".inline-lab").forEach((x) => box.appendChild(x));
+        return;
+      }
+      if (/[?&]nofold/.test(location.search)) return;
+      const b = document.querySelector('[data-a="fold"]'); if (b) b.click();
+    }, 50);
+  };
+  /* 随机“社团图”：n 个点、k 类；同类连边概率 pIn，异类 pOut */
+  G.make = function (seed, n, k, pIn, pOut) {
+    const r = K.rng(seed), cls = [], edges = [], adj = Array.from({ length: n }, () => []);
+    for (let i = 0; i < n; i++) cls.push(i % k);
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+      if (r() < (cls[i] === cls[j] ? pIn : pOut)) { edges.push([i, j]); adj[i].push(j); adj[j].push(i); }
+    }
+    // 保证没有孤立点：孤立点随机连一个同类点
+    for (let i = 0; i < n; i++) if (!adj[i].length) {
+      let j = i; while (j === i || cls[j] !== cls[i]) j = Math.floor(r() * n);
+      edges.push([i, j]); adj[i].push(j); adj[j].push(i);
+    }
+    return { n, k, cls, edges, adj };
+  };
+  G.grav = 1;
+  /* 简单力导向布局（确定性），返回 [[x,y]...] 落在 box 里 */
+  G.layout = function (g, box, seed, iters) {
+    const r = K.rng(seed || 1), n = g.n, P = [];
+    for (let i = 0; i < n; i++) {
+      const a = (2 * Math.PI * g.cls[i]) / Math.max(1, g.k) + r() * 1.2, d = 0.25 + r() * 0.2;
+      P.push([0.5 + Math.cos(a) * d, 0.5 + Math.sin(a) * d]);
+    }
+    const it = iters || 160, kk = 0.6 / Math.sqrt(n);
+    for (let t = 0; t < it; t++) {
+      const D = P.map(() => [0, 0]), temp = 0.05 * (1 - t / it) + 0.002;
+      for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+        let dx = P[i][0] - P[j][0], dy = P[i][1] - P[j][1], d2 = dx * dx + dy * dy + 1e-6, f = (kk * kk) / d2;
+        D[i][0] += dx * f; D[i][1] += dy * f; D[j][0] -= dx * f; D[j][1] -= dy * f;
+      }
+      g.edges.forEach(([a, b]) => {
+        const dx = P[a][0] - P[b][0], dy = P[a][1] - P[b][1], d = Math.sqrt(dx * dx + dy * dy) + 1e-6, f = d / kk;
+        D[a][0] -= (dx / d) * f * d; D[a][1] -= (dy / d) * f * d; D[b][0] += (dx / d) * f * d; D[b][1] += (dy / d) * f * d;
+      });
+      for (let i = 0; i < n; i++) {
+        D[i][0] += (0.5 - P[i][0]) * G.grav; D[i][1] += (0.5 - P[i][1]) * G.grav;
+        const L = Math.sqrt(D[i][0] ** 2 + D[i][1] ** 2) + 1e-9, s = Math.min(L, temp);
+        P[i][0] = K.clamp(P[i][0] + (D[i][0] / L) * s + 0, -2, 3);
+        P[i][1] = K.clamp(P[i][1] + (D[i][1] / L) * s + 0, -2, 3);
+      }
+    }
+    const xs = P.map((p) => p[0]), ys = P.map((p) => p[1]);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys), m = 10;
+    return P.map(([x, y]) => [box.x + m + ((x - x0) / (x1 - x0 || 1)) * (box.w - 2 * m), box.y + m + ((y - y0) / (y1 - y0 || 1)) * (box.h - 2 * m)]);
+  };
+  /* 画图：返回 {nodes, lines} */
+  G.draw = function (svg, g, pos, opt) {
+    opt = opt || {};
+    const lines = g.edges.map(([a, b]) => K.svg(svg, "line", { x1: pos[a][0], y1: pos[a][1], x2: pos[b][0], y2: pos[b][1], stroke: "var(--line)", "stroke-width": opt.ew || 1.2 }));
+    const nodes = pos.map((p, i) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: opt.r || 6, fill: opt.fill ? opt.fill(i) : K.colors[g.cls[i] % 6], stroke: "var(--panel)", "stroke-width": 1.5 }));
+    return { nodes, lines };
+  };
+  /* 一个“消息”小圆点沿边从 a 飞到 b */
+  G.fly = function (svg, ctx, pa, pb, color, ms) {
+    const d = K.svg(svg, "circle", { cx: pa[0], cy: pa[1], r: 4, fill: color || "var(--accent)" });
+    return ctx.tween(ms || 600, (t) => { d.setAttribute("cx", K.lerp(pa[0], pb[0], t)); d.setAttribute("cy", K.lerp(pa[1], pb[1], t)); }).then((ok) => { d.remove(); return ok; });
+  };
+  /* 一轮消息传递：H 是每个点的向量；mode = mean / sum / max；self 是否带上自己 */
+  G.prop = function (H, adj, mode, self) {
+    return H.map((h, i) => {
+      const nb = self ? adj[i].concat([i]) : adj[i];
+      if (!nb.length) return h.slice();
+      const out = h.map(() => (mode === "max" ? -Infinity : 0));
+      nb.forEach((j) => H[j].forEach((v, d) => { if (mode === "max") out[d] = Math.max(out[d], v); else out[d] += v; }));
+      if (mode === "mean") return out.map((v) => v / nb.length);
+      return out;
+    });
+  };
+  /* GCN 式对称归一化传播：D^-1/2 (A+I) D^-1/2 H */
+  G.gcn = function (H, adj) {
+    const deg = adj.map((a) => a.length + 1);
+    return H.map((h, i) => {
+      const out = h.map((v) => v / deg[i]);
+      adj[i].forEach((j) => { const w = 1 / Math.sqrt(deg[i] * deg[j]); H[j].forEach((v, d) => (out[d] += w * v)); });
+      return out;
+    });
+  };
+  /* 多分类逻辑回归（softmax），全批量梯度下降 */
+  G.softmaxFit = function (X, y, K_, epochs, lr, l2) {
+    const D = X[0].length, W = Array.from({ length: K_ }, () => new Array(D + 1).fill(0));
+    for (let e = 0; e < epochs; e++) {
+      const Gr = W.map((w) => w.map(() => 0));
+      for (let i = 0; i < X.length; i++) {
+        const p = G.softmaxP(W, X[i]);
+        for (let c = 0; c < K_; c++) { const g = p[c] - (y[i] === c ? 1 : 0); for (let d = 0; d < D; d++) Gr[c][d] += g * X[i][d]; Gr[c][D] += g; }
+      }
+      for (let c = 0; c < K_; c++) for (let d = 0; d <= D; d++) W[c][d] -= lr * (Gr[c][d] / X.length + (d < D ? (l2 || 0) * W[c][d] : 0));
+    }
+    return W;
+  };
+  G.softmaxP = function (W, x) {
+    const z = W.map((w) => { let s = w[w.length - 1]; for (let d = 0; d < x.length; d++) s += w[d] * x[d]; return s; });
+    const m = Math.max(...z), ex = z.map((v) => Math.exp(v - m)), S = ex.reduce((a, b) => a + b, 0);
+    return ex.map((v) => v / S);
+  };
+  G.argmax = (a) => a.reduce((bi, v, i) => (v > a[bi] ? i : bi), 0);
+  /* 一圈圈扩散的“跳数”环 */
+  G.ring = function (svg, p, r, color) { return K.svg(svg, "circle", { cx: p[0], cy: p[1], r, fill: "none", stroke: color || "var(--accent)", "stroke-width": 2, "stroke-dasharray": "5 4" }); };
+  /* 小工具：节点向量 → 颜色（取最大类的颜色，透明度=置信度） */
+  G.paint = function (el, vec) {
+    const s = vec.reduce((a, b) => a + Math.max(0, b), 0) || 1, c = G.argmax(vec), conf = Math.max(0, vec[c]) / s;
+    K.set(el, { fill: K.colors[c % 6], "fill-opacity": 0.25 + 0.75 * conf });
+  };
+
+
+  const ILL = "var(--c6)", LIC = "var(--c3)", UNK = "var(--ink-3)";
+  /* 模拟交易图：少数非法交易互相成链，合法交易成簇，大量未标注 */
+  function txGraph(seed, n, pIll, pLic, homo) {
+    const r = K.rng(seed), lab = [], adj = Array.from({ length: n }, () => []), edges = [], has = new Set();
+    for (let i = 0; i < n; i++) { const u = r(); lab.push(u < pIll ? 0 : u < pIll + pLic ? 1 : 2); }
+    // 隐藏的真实身份：未标注节点也有真实类别（大多合法）
+    const truth = lab.map((l) => (l === 2 ? (r() < pIll / (pIll + pLic) ? 0 : 1) : l));
+    const add = (a, b) => { if (a === b) return; const k = Math.min(a, b) + "_" + Math.max(a, b); if (has.has(k)) return; has.add(k); edges.push([a, b]); adj[a].push(b); adj[b].push(a); };
+    for (let i = 0; i < n; i++) for (let e = 0; e < 2; e++) {
+      let j, tries = 0;
+      if (r() < homo) { do { j = Math.floor(r() * n); tries++; } while (truth[j] !== truth[i] && tries < 200); }
+      else j = Math.floor(r() * n);
+      add(i, j);
+    }
+    return { n, lab, truth, adj, edges, k: 2, cls: truth };
+  }
+
+  const steps = [
+    {
+      at: 0, title: "开场：导入、随机种子与训练函数", kicker: "第 0–11 格 · 准备工作",
+      html: `<p>作者先装好 networkx、PyTorch Geometric（PyG，专门做图神经网络的库）、node2vec，导入一堆工具；然后<b>固定随机种子</b>（第 5–7 格），保证每次运行结果一样；再写好训练、评估、预测和画图的通用函数（第 9–11 格），后面三种 GNN 都用它们。</p><p>注意第 9 格的评估函数：精确率、召回率、F1 都用 <code>average='weighted'</code>（按每类样本数加权平均），这一点后面会讨论。</p>`,
+      cells: [1, 9], highlight: ["torch_geometric", "average='weighted'"],
+      draw(svg, ctx) {
+        const items = [["固定随机种子", "每次结果可复现"], ["train()", "前向 → 只在训练节点上算损失 → 反向"], ["evaluate()", "准确率 + 加权精确率 / 召回率 / F1"], ["train_gnn()", "每一轮训练后在验证集上打分"]];
+        items.forEach(([a, b], i) => {
+          const g = K.node(svg, 40, 30 + i * 74, 200, 56, a, { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+          const t = K.svg(svg, "text", { x: 260, y: 64 + i * 74, "font-size": 13 }, b);
+          g.style.opacity = t.style.opacity = 0;
+          ctx.wait(i * 400).then((ok) => ok && ctx.tween(400, (u) => { g.style.opacity = t.style.opacity = u; }));
+        });
+      },
+    },
+    {
+      title: "比特币交易图：问题是什么", kicker: "第 3 格 · 介绍",
+      html: `<p>比特币的每笔交易都公开记录在区块链上。一笔交易的输出可以成为下一笔交易的输入，于是交易之间连成一张大网：<b>点是交易，边是比特币从一笔交易流向另一笔</b>。</p><p>数据集的目标是把图里的交易分成合法和非法。作者还复习了三个图论概念：图 G、度（一个点连了几条边）、连通分量（互相连得通的一大块）。</p>`,
+      cells: [3],
+      draw(svg, ctx) {
+        const P = [[60, 170], [170, 90], [170, 250], [290, 170], [410, 100], [410, 240], [530, 170], [650, 110], [650, 240]];
+        const E = [[0, 1], [0, 2], [1, 3], [2, 3], [3, 4], [3, 5], [4, 6], [5, 6], [6, 7], [6, 8]];
+        const col = [LIC, LIC, LIC, UNK, UNK, ILL, ILL, ILL, UNK];
+        E.forEach(([a, b]) => K.arrow(svg, P[a][0] + 18, P[a][1], P[b][0] - 18, P[b][1], { color: "var(--line)" }));
+        const nodes = P.map((p, i) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 16, fill: "var(--panel-2)", stroke: "var(--ink-3)" }));
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13 }, "点 = 一笔交易　箭头 = 比特币的流向（示意）");
+        [[LIC, "合法"], [ILL, "非法"], [UNK, "未标注"]].forEach(([c, t], i) => { K.svg(svg, "circle", { cx: 30 + i * 90, cy: 318, r: 7, fill: c }); K.svg(svg, "text", { x: 42 + i * 90, y: 323, "font-size": 12 }, t); });
+        (async () => {
+          for (let k = 0; k < E.length; k++) { const [a, b] = E[k]; if (!(await G.fly(svg, ctx, P[a], P[b], "var(--warn)", 300))) return; }
+          ctx.tween(800, (t) => nodes.forEach((n, i) => K.set(n, { fill: t > 0.5 ? col[i] : "var(--panel-2)" })));
+        })();
+      },
+    },
+    {
+      title: "三张表：特征、标签、边", kicker: "第 12–17 格 · 读数据",
+      html: `<p>读入三张 CSV：特征表（每行一笔交易，166 个匿名特征，作者命名为 V1…V166）、标签表、边表。作者在第 14 格写下：<b>20 万 3768 个点，23 万 4355 条边</b>。</p><p>边比点多不了多少，说明这张图非常<b>稀疏</b>：平均每笔交易只和两笔左右的交易相连。</p>`,
+      cells: [13, 14, 15, 16, 17], highlight: ["elliptic_txs_features", "elliptic_txs_classes", "elliptic_txs_edgelist"],
+      draw(svg, ctx) {
+        const T = [["features", "txId | V1 … V166", 30], ["classes", "txId | class", 260], ["edgelist", "txId1 | txId2", 490]];
+        T.forEach(([n, c, x], i) => {
+          const g = K.node(svg, x, 40, 200, 70, n + ".csv\n" + c, { bold: true });
+          g.style.opacity = 0;
+          ctx.wait(i * 350).then((ok) => ok && ctx.tween(400, (t) => (g.style.opacity = t)));
+        });
+        K.svg(svg, "text", { x: 30, y: 170, "font-size": 14 }, "节点 |V| = 203,768");
+        K.svg(svg, "text", { x: 30, y: 200, "font-size": 14 }, "边　 |E| = 234,355（第 14 格）");
+        const bars = K.bars(svg, { x: 330, y: 150, w: 360, h: 160 }, [{ label: "节点", value: 0, color: "var(--c1)" }, { label: "边", value: 0, color: "var(--c2)" }], { max: 250000, fmt: (v) => Math.round(v).toLocaleString() });
+        const V = [203768, 234355];
+        ctx.wait(1200).then((ok) => ok && ctx.tween(900, (t) => bars.forEach((b, i) => { const h = (160 * V[i] * t) / 250000; b.rect.setAttribute("height", h); b.rect.setAttribute("y", 310 - h); b.text.setAttribute("y", 305 - h); b.text.textContent = Math.round(V[i] * t).toLocaleString(); })));
+      },
+    },
+    {
+      title: "77% 没人知道：类别分布与抽样", kicker: "第 18–23 格 · 标签",
+      html: `<p>作者统计标签：<b>unknown 77.15%，合法 20.62%，非法 2.23%</b>（第 20 格）。大多数交易没人标过，有标签的里面非法又很少。</p><p>为了画图分析方便，作者从每类各抽 5% 的交易，连同和它们相连的边，组成一个小样本（第 23 格），后面的度分布、中心性、社区发现都在这个样本上做。</p>`,
+      cells: [19, 20, 21, 22, 23], highlight: ["value_counts(normalize=True)", "frac=0.05"],
+      draw(svg, ctx) {
+        const parts = [[77.15, UNK, "unknown 77.15%"], [20.62, LIC, "合法 20.62%"], [2.23, ILL, "非法 2.23%"]];
+        let x = 40;
+        K.svg(svg, "text", { x: 40, y: 50, "font-size": 13, class: "muted" }, "每类占比（第 20 格）");
+        const rects = parts.map(([p, c, t]) => {
+          const w = (p / 100) * 640, rc = K.svg(svg, "rect", { x, y: 70, width: 0, height: 60, fill: c });
+          const lab = K.svg(svg, "text", { x: p < 5 ? 680 : x + 4, y: 155 + (p < 5 ? 22 : 0), "text-anchor": p < 5 ? "end" : "start", "font-size": 13, fill: c, "font-weight": 700 }, t);
+          const o = { rc, w, lab }; x += w; return o;
+        });
+        ctx.tween(1200, (t) => rects.forEach((o) => o.rc.setAttribute("width", o.w * t)));
+        K.svg(svg, "text", { x: 40, y: 230, "font-size": 13 }, "每类各抽 5% 做分析样本（第 23 格）：");
+        const r = K.rng(3);
+        for (let i = 0; i < 60; i++) {
+          const c = i < 46 ? UNK : i < 58 ? LIC : ILL;
+          const d = K.svg(svg, "circle", { cx: 50 + i * 10.5, cy: 270, r: 4, fill: c });
+          d.style.opacity = 0;
+          ctx.wait(1400 + i * 15).then((ok) => ok && ctx.tween(200, (t) => (d.style.opacity = r() < 0.05 || t < 1 ? t : 1)));
+        }
+      },
+    },
+    {
+      title: "度分布与连通分量", kicker: "第 24–31 格 · 图的基本统计",
+      html: `<p>作者画了<b>度分布</b>（每个点连了几条边）的双对数直方图：绝大多数交易只连一两条边，极少数交易连了很多条，这叫“长尾”。</p><p>然后数<b>连通分量</b>：抽样后的图碎成很多小块，作者取最大的一块（巨大连通分量）继续分析，并画出其中任意两点之间最短路径长度的分布。</p>`,
+      cells: [25, 26, 28, 31], highlight: ["log=True", "number_connected_components", "giant_component"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 280, h: 250 }, [0, 3], [0, 4], { xticks: 3, yticks: 4, xfmt: (v) => "10^" + v, yfmt: (v) => "10^" + v, xlabel: "度（对数）" });
+        const pts = [];
+        for (let i = 0; i < 14; i++) { const x = i * 0.2, y = 3.8 - x * 1.3 + Math.sin(i) * 0.08; pts.push(K.svg(svg, "rect", { x: ax.sx(x), y: ax.sy(0), width: 16, height: 0, fill: "var(--c1)" })); pts[i]._h = Math.max(0, y); }
+        ctx.tween(1000, (t) => pts.forEach((p) => { const y = ax.sy(p._h * t); p.setAttribute("y", y); p.setAttribute("height", ax.sy(0) - y); }));
+        K.svg(svg, "text", { x: 60, y: 320, "font-size": 12, class: "muted" }, "示意：大多数交易只连 1–2 条边");
+        const g = G.make(17, 40, 5, 0.25, 0.0), pos = G.layout(g, { x: 400, y: 30, w: 300, h: 260 }, 4);
+        const d = G.draw(svg, g, pos, { r: 5, fill: (i) => K.colors[g.cls[i]] });
+        // 找最大连通分量
+        const comp = new Array(g.n).fill(-1); let c = 0;
+        for (let s = 0; s < g.n; s++) if (comp[s] < 0) { const q = [s]; comp[s] = c; while (q.length) { const u = q.pop(); g.adj[u].forEach((v) => { if (comp[v] < 0) { comp[v] = c; q.push(v); } }); } c++; }
+        const sizes = new Array(c).fill(0); comp.forEach((x) => sizes[x]++);
+        const big = sizes.indexOf(Math.max(...sizes));
+        K.svg(svg, "text", { x: 400, y: 320, "font-size": 12 }, `示意图有 ${c} 个连通分量，最大的一块高亮`);
+        ctx.wait(1300).then((ok) => ok && ctx.tween(700, (t) => d.nodes.forEach((n, i) => { if (comp[i] !== big) K.set(n, { opacity: 1 - 0.8 * t }); })));
+      },
+    },
+    {
+      title: "三种中心性：谁是枢纽", kicker: "第 32–37 格 · 节点重要性",
+      html: `<p>作者在最大连通分量上算了三种<b>中心性</b>（衡量一个点有多“重要”），各列出前 10 名：</p><ul class="tight"><li><b>度中心性</b>：直接连了多少个点；</li><li><b>介数中心性</b>：有多少条“最短路”要经过它，像交通要道；</li><li><b>接近中心性</b>：到所有其他点的平均距离有多近。</li></ul><p>第 37 格把三种排名都靠前的点用不同颜色和形状标在图上。</p>`,
+      cells: [33, 34, 35, 37], highlight: ["degree_centrality", "betweenness_centrality", "closeness_centrality"],
+      notes: { 32: "作者给出了三种中心性的公式和解释" },
+      draw(svg, ctx) {
+        const P = [[80, 90], [80, 250], [200, 170], [340, 170], [480, 170], [600, 80], [620, 170], [600, 260], [200, 60]];
+        const E = [[0, 2], [1, 2], [8, 2], [2, 3], [3, 4], [4, 5], [4, 6], [4, 7]];
+        E.forEach(([a, b]) => K.svg(svg, "line", { x1: P[a][0], y1: P[a][1], x2: P[b][0], y2: P[b][1], stroke: "var(--line)", "stroke-width": 2 }));
+        const nodes = P.map((p) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 14, fill: "var(--panel-2)", stroke: "var(--ink-3)" }));
+        const lab = K.svg(svg, "text", { x: 20, y: 320, "font-size": 14, "font-weight": 700 }, "");
+        const seq = [["度中心性：点 2 和点 4 连得最多", [2, 4], "var(--c1)"], ["介数中心性：点 3 是两团之间的必经之路", [3], "var(--c2)"], ["接近中心性：点 3 到所有点都最近", [3], "var(--c4)"]];
+        (async () => {
+          for (const [t, ids, c] of seq) {
+            lab.textContent = t;
+            nodes.forEach((n) => K.set(n, { fill: "var(--panel-2)" }));
+            if (!(await ctx.tween(600, (u) => ids.forEach((i) => K.set(nodes[i], { fill: c, r: 14 + 8 * u }))))) return;
+            if (!(await ctx.wait(900))) return;
+            ids.forEach((i) => K.set(nodes[i], { r: 14 }));
+          }
+        })();
+      },
+    },
+    {
+      title: "非法 vs 合法子图，再找社区", kicker: "第 38–44 格 · 分类别看结构 + Louvain",
+      html: `<p>作者把非法交易和合法交易各自单独画成子图。作者的观察（第 42 格）：<b>非法交易子图稀疏、呈环状</b>，多数点在外围，少数点在中心像枢纽；合法交易子图更密。</p><p>接着用 <b>Louvain 社区发现</b>把最大连通分量分成若干“小圈子”：圈子内部连得紧，圈子之间连得松。这一步不需要任何标签，属于数据挖掘。</p>`,
+      cells: [39, 41, 44], highlight: ["best_partition"],
+      draw(svg, ctx) {
+        const g = G.make(23, 54, 4, 0.22, 0.012), pos = G.layout(g, { x: 150, y: 20, w: 420, h: 290 }, 6);
+        const d = G.draw(svg, g, pos, { r: 6, fill: () => "var(--ink-3)" });
+        const lab = K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, "font-weight": 700 }, "Louvain：不看标签，只看谁和谁连得紧");
+        // 真的跑一个简化版标签传播来找社区
+        let L = g.cls.map((_, i) => i);
+        (async () => {
+          for (let it = 0; it < 6; it++) {
+            if (!(await ctx.wait(450))) return;
+            L = L.map((l, i) => { const cnt = {}; [i].concat(g.adj[i]).forEach((j) => (cnt[L[j]] = (cnt[L[j]] || 0) + 1)); return +Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a] || a - b)[0]; });
+            const ids = [...new Set(L)];
+            d.nodes.forEach((n, i) => K.set(n, { fill: K.colors[ids.indexOf(L[i]) % 6] }));
+            lab.textContent = `第 ${it + 1} 轮：每个点跟随邻居里最多的“圈子”，现在 ${ids.length} 个圈子`;
+          }
+        })();
+        K.svg(svg, "text", { x: 20, y: 325, "font-size": 11, class: "muted" }, "示意：用更简单的“标签传播”演示分圈子的过程，作者用的是 Louvain 算法");
+      },
+    },
+    {
+      title: "把三张表装进 PyG 的 Data 对象", kicker: "第 45–57 格 · 预处理",
+      html: `<p>正式进入图神经网络。作者先把交易编号映射成 0、1、2… 的行号（第 50 格），把边表变成 2 行的 <code>edge_index</code>（第 51 格），把 166 个特征变成张量 <code>x</code>（第 52 格），再把标签编码成数字：<b>0 = 非法，1 = 合法，2 = unknown</b>（第 55–56 格）。</p><p>最后打包成 PyG 的 <code>Data(x, edge_index, y)</code>（第 57 格）。注意这一步用的是<b>全部 20 万个点</b>，不是前面的 5% 样本。</p>`,
+      cells: [46, 47, 50, 51, 52, 55, 56, 57], highlight: ["tx_id_mapping", "edge_index", "LabelEncoder", "Data("],
+      draw(svg, ctx) {
+        const parts = [["x", "203,768 × 166\n节点特征", "var(--c1)"], ["edge_index", "2 × 边数\n资金流", "var(--c2)"], ["y", "203,768 个标签\n0 非法 / 1 合法 / 2 未知", "var(--c4)"]];
+        const nodes = parts.map(([a, b, c], i) => { const g = K.node(svg, 30, 30 + i * 100, 220, 76, a + "\n" + b, { stroke: c, sw: 2 }); g.style.opacity = 0; return g; });
+        const box = K.node(svg, 440, 110, 240, 110, "Data(x, edge_index, y)\nPyG 的图对象", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        box.style.opacity = 0;
+        (async () => {
+          for (let i = 0; i < 3; i++) if (!(await ctx.tween(400, (t) => (nodes[i].style.opacity = t)))) return;
+          for (let i = 0; i < 3; i++) K.arrow(svg, 250, 68 + i * 100, 438, 165, { color: parts[i][2] });
+          await ctx.tween(500, (t) => (box.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "只在有标签的点上训练：80 / 10 / 10", kicker: "第 58–64 格 · 掩码切分",
+      html: `<p>unknown 的点没有答案，不能拿来训练。作者用<b>掩码</b>（一串 True/False，标记哪些点参与）只在合法和非法的点里随机切：80% 训练、10% 验证、10% 测试（第 60–61 格）。</p><p>关键在于：unknown 的点虽然不参与算分，但它们<b>仍然留在图里</b>，消息传递时照样会传话。作者检查了三份数据里合法、非法的比例，基本一致（第 63 格）。</p>`,
+      cells: [59, 60, 61, 62], highlight: ["known_mask", "train_mask", "0.8 * num_known_nodes"],
+      draw(svg, ctx) {
+        const g = txGraph(4, 60, 0.06, 0.22, 0.75), pos = G.layout(g, { x: 20, y: 30, w: 400, h: 280 }, 2);
+        const d = G.draw(svg, g, pos, { r: 6, fill: (i) => [ILL, LIC, UNK][g.lab[i]] });
+        const r = K.rng(5), split = g.lab.map((l) => (l === 2 ? null : r() < 0.8 ? "tr" : r() < 0.5 ? "va" : "te"));
+        K.svg(svg, "text", { x: 450, y: 60, "font-size": 13, "font-weight": 700 }, "掩码：");
+        const leg = [["tr", "训练 80%", "var(--ink)"], ["va", "验证 10%", "var(--warn)"], ["te", "测试 10%", "var(--accent)"]];
+        leg.forEach(([k, t, c], i) => K.svg(svg, "text", { x: 450, y: 90 + i * 26, "font-size": 13, fill: c }, "○ " + t));
+        K.svg(svg, "text", { x: 450, y: 190, "font-size": 12, class: "muted" }, "灰点 unknown：不算分，");
+        K.svg(svg, "text", { x: 450, y: 208, "font-size": 12, class: "muted" }, "但仍在图里传递消息");
+        ctx.wait(600).then((ok) => ok && ctx.tween(900, (t) => d.nodes.forEach((n, i) => { const s = split[i]; if (s) K.set(n, { stroke: leg.find((x) => x[0] === s)[2], "stroke-width": 3 * t }); })));
+      },
+    },
+    {
+      title: "第一种：GCN 图卷积网络", kicker: "第 65–77 格 · GCN",
+      html: `<p>GCN 的公式（第 65 格）用白话说就是：<b>每个点把自己和邻居的特征加权平均</b>（连得多的邻居权重被调小），再乘一个可学习的矩阵、过激活函数。</p><p>作者的 GCN 只有两层：166 维 → 16 维 → 3 类，训练 100 轮（Adam，学习率 0.01）。之后画混淆矩阵、分类报告和预测概率分布。</p>`,
+      cells: [66, 67, 68, 73], highlight: ["GCNConv(num_node_features, 16)", "GCNConv(16, num_classes)", "weight_decay"],
+      notes: { 74: "作者文字：GCN 只认对 46% 的非法节点；但这里提到的 unknown 类与上文只在已知标签上切分的代码不一致", 77: "注意：这里把第 0 列当“合法”，但 0 其实是非法，概率图里两类名字颠倒了" },
+      draw(svg, ctx) {
+        const C = [360, 170], nb = [[200, 70], [520, 70], [180, 270], [540, 270]], deg = [1, 4, 2, 1];
+        nb.forEach((p) => K.svg(svg, "line", { x1: C[0], y1: C[1], x2: p[0], y2: p[1], stroke: "var(--line)", "stroke-width": 2 }));
+        nb.forEach((p, i) => { K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 16, fill: i === 1 ? ILL : LIC }); K.svg(svg, "text", { x: p[0], y: p[1] + 34, "text-anchor": "middle", "font-size": 11 }, `度 ${deg[i] + 1}，权重 ${(1 / Math.sqrt(3 * (deg[i] + 1))).toFixed(2)}`); });
+        const me = K.svg(svg, "circle", { cx: C[0], cy: C[1], r: 20, fill: UNK, stroke: "var(--ink)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, "font-weight": 700 }, "GCN：按度数归一化的加权平均（中心点度为 3）");
+        K.svg(svg, "text", { x: 20, y: 325, "font-size": 11, class: "muted" }, "连得越多的邻居，单条消息的权重越小：1/√(我的度 × 它的度)（示意）");
+        Promise.all(nb.map((p, i) => G.fly(svg, ctx, p, C, i === 1 ? ILL : LIC, 900))).then(() => ctx.alive() && ctx.tween(600, (t) => K.set(me, { fill: t > 0.5 ? LIC : UNK })));
+      },
+    },
+    {
+      title: "第二种：GAT 图注意力网络", kicker: "第 78–86 格 · GAT",
+      html: `<p>GCN 对邻居的权重是固定的（只看度数）；<b>GAT 让模型自己学</b>每个邻居该占多少权重，这个权重叫<b>注意力系数</b> α，所有邻居的系数加起来等于 1（第 78 格）。</p><p>作者的 GAT：第一层 8 个注意力“头”各输出 8 维，拼成 64 维；第二层合成 3 类。dropout 0.6，其余训练设置和 GCN 一样。</p>`,
+      cells: [79, 80, 83], highlight: ["GATConv", "heads=num_heads", "dropout=0.6"],
+      draw(svg, ctx) {
+        const C = [360, 175], nb = [[180, 70], [540, 70], [170, 280], [550, 280], [360, 320]];
+        const raw = [0.4, 2.2, 0.1, 0.6, 0.3], ex = raw.map(Math.exp), S = ex.reduce((a, b) => a + b, 0), alpha = ex.map((v) => v / S);
+        const lines = nb.map((p) => K.svg(svg, "line", { x1: C[0], y1: C[1], x2: p[0], y2: p[1], stroke: "var(--accent)", "stroke-width": 1 }));
+        nb.forEach((p, i) => { K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 15, fill: i === 1 ? ILL : LIC }); });
+        const labs = nb.map((p, i) => K.svg(svg, "text", { x: (p[0] + C[0]) / 2 + 10, y: (p[1] + C[1]) / 2, "font-size": 13, "font-weight": 700, fill: "var(--accent)" }, ""));
+        K.svg(svg, "circle", { cx: C[0], cy: C[1], r: 20, fill: UNK, stroke: "var(--ink)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, "font-weight": 700 }, "GAT：线越粗 = 注意力越大（softmax 后加起来 = 1，示意）");
+        ctx.wait(400).then((ok) => ok && ctx.tween(1200, (t) => lines.forEach((l, i) => { K.set(l, { "stroke-width": 1 + 14 * alpha[i] * t }); labs[i].textContent = "α=" + (alpha[i] * t).toFixed(2); })));
+      },
+    },
+    {
+      title: "第三种：GIN 图同构网络", kicker: "第 87–95 格 · GIN",
+      html: `<p>GIN 的更新规则（第 87 格）：新表示 = MLP（(1+ε) × 自己 + 所有邻居之和）。和 GCN 的区别有两点：邻居信息是<b>直接求和</b>而不是平均，而且之后接一个小型全连接网络（MLP）。</p><p>求和能区分“3 个非法邻居”和“1 个非法邻居”，平均就分不出来（都是 100% 非法）。理论上 GIN 区分不同邻居结构的能力最强。作者的 GIN：两层，每层 MLP 166→64→64，最后一层线性输出 3 类。</p>`,
+      cells: [88, 89, 92], highlight: ["GINConv", "torch.nn.Linear(num_node_features, 64)"],
+      draw(svg, ctx) {
+        const draw = (ox, n, title) => {
+          const C = [ox + 110, 160];
+          K.svg(svg, "text", { x: ox, y: 40, "font-size": 13, "font-weight": 700 }, title);
+          const nb = Array.from({ length: n }, (_, i) => [ox + 30 + i * (160 / Math.max(1, n - 1 || 1)), 260]);
+          nb.forEach((p) => { K.svg(svg, "line", { x1: C[0], y1: C[1], x2: p[0], y2: p[1], stroke: "var(--line)" }); K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 12, fill: ILL }); });
+          K.svg(svg, "circle", { cx: C[0], cy: C[1], r: 16, fill: UNK });
+          return { C, nb };
+        };
+        const A = draw(40, 1, "1 个非法邻居"), B = draw(400, 3, "3 个非法邻居");
+        const tA = K.svg(svg, "text", { x: 40, y: 310, "font-size": 13 }, ""), tB = K.svg(svg, "text", { x: 400, y: 310, "font-size": 13 }, "");
+        Promise.all([...A.nb.map((p) => G.fly(svg, ctx, p, A.C, ILL, 800)), ...B.nb.map((p) => G.fly(svg, ctx, p, B.C, ILL, 800))]).then(() => {
+          if (!ctx.alive()) return;
+          tA.textContent = "平均 = 1.0　求和 = 1"; tB.textContent = "平均 = 1.0　求和 = 3";
+          K.svg(svg, "text", { x: 200, y: 336, "font-size": 12, fill: "var(--accent)" }, "平均分不出两者，求和（GIN）可以");
+        });
+      },
+    },
+    {
+      title: "t-SNE：看看 GIN 学到的表示", kicker: "第 96–101 格 · 嵌入可视化",
+      html: `<p>GIN 最后一层之前，每笔交易都被表示成一个 64 维向量（嵌入）。作者随机抽 5,000 个点，用 t-SNE 压到 2 维画出来，按标签上色，看非法和合法有没有分开（第 99–100 格）。</p><p>作者还计划用 GNNExplainer 解释模型为什么这样判断，但这部分写着“待完成”（第 101 格）。</p>`,
+      cells: [97, 98, 99, 100], highlight: ["TSNE", "subset_size = 5_000"],
+      draw(svg, ctx) {
+        const r = K.rng(9), P = [];
+        for (let i = 0; i < 160; i++) { const c = i < 18 ? 0 : i < 70 ? 1 : 2; P.push({ c, x0: 360 + K.randn(r) * 150, y0: 170 + K.randn(r) * 70, x1: [180, 470, 380][c] + K.randn(r) * [35, 60, 90][c], y1: [110, 170, 230][c] + K.randn(r) * [30, 50, 40][c] }); }
+        const el = P.map((p) => K.svg(svg, "circle", { cx: p.x0, cy: p.y0, r: 3.5, fill: [ILL, LIC, UNK][p.c], opacity: 0.8 }));
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 13, class: "muted" }, "64 维嵌入 → t-SNE → 2 维（示意，不是作者的图）");
+        ctx.wait(500).then((ok) => ok && ctx.tween(2200, (t) => el.forEach((e, i) => { e.setAttribute("cx", K.lerp(P[i].x0, P[i].x1, t)); e.setAttribute("cy", K.lerp(P[i].y0, P[i].y1, t)); })));
+      },
+    },
+    {
+      title: "三种 GNN 对比", kicker: "第 102–110 格 · 比较与 t 检验",
+      html: `<p>作者把三种模型每一轮的验证精确率画在一起（第 103 格），结论是：<b>GIN 整体精确率最好</b>，后期最稳，但一开始波动较大（第 104 格）。</p><p>随后比较三种模型在测试集上给出的概率分布（第 105–106 格），并用 t 检验看差异是否显著（第 107–108 格）。注意：由于第 77 / 86 / 95 格把概率列的类别名弄反了，这几张图里“合法 / 非法”的标签是颠倒的。</p><p>作者在待办里写着：还没做非 GNN 的基线、还没做可解释性分析（第 109 格）。</p>`,
+      cells: [103, 105, 107], highlight: ["ttest_ind"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 560, h: 250 }, [0, 100], [0.5, 1], { xlabel: "训练轮数", ylabel: "验证精确率（示意）" });
+        const curves = [["GCN", "var(--c1)", (x) => 0.82 + 0.06 * (1 - Math.exp(-x / 20))], ["GAT", "var(--c2)", (x) => 0.8 + 0.07 * (1 - Math.exp(-x / 25)) + 0.01 * Math.sin(x / 3)], ["GIN", "var(--c3)", (x) => (x < 25 ? 0.65 + 0.2 * Math.abs(Math.sin(x / 2)) : 0.93 - 0.02 * Math.exp(-(x - 25) / 10))]];
+        const paths = curves.map(([n, c]) => K.svg(svg, "path", { d: "", fill: "none", stroke: c, "stroke-width": 2.5 }));
+        curves.forEach(([n, c], i) => K.svg(svg, "text", { x: 640, y: 60 + i * 22, "font-size": 13, fill: c, "font-weight": 700 }, n));
+        K.svg(svg, "text", { x: 60, y: 330, "font-size": 11, class: "muted" }, "曲线形状只示意作者的文字描述（GIN 先抖后稳、最高），不是真实数值");
+        ctx.tween(2000, (t) => curves.forEach(([, , f], i) => { let d = ""; for (let x = 1; x <= 100 * t; x++) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(f(x)); paths[i].setAttribute("d", d); }));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+  G.selfcheck();
+
+  /* ---------- 实验 A：三种中心性 ---------- */
+  function bfs(adj, s) { const d = new Array(adj.length).fill(-1); d[s] = 0; const q = [s]; for (let h = 0; h < q.length; h++) { const u = q[h]; adj[u].forEach((v) => { if (d[v] < 0) { d[v] = d[u] + 1; q.push(v); } }); } return d; }
+  function betweenness(adj) {
+    const n = adj.length, CB = new Array(n).fill(0);
+    for (let s = 0; s < n; s++) {
+      const S = [], P = Array.from({ length: n }, () => []), sig = new Array(n).fill(0), d = new Array(n).fill(-1);
+      sig[s] = 1; d[s] = 0; const Q = [s];
+      for (let h = 0; h < Q.length; h++) { const v = Q[h]; S.push(v); adj[v].forEach((w) => { if (d[w] < 0) { Q.push(w); d[w] = d[v] + 1; } if (d[w] === d[v] + 1) { sig[w] += sig[v]; P[w].push(v); } }); }
+      const del = new Array(n).fill(0);
+      while (S.length) { const w = S.pop(); P[w].forEach((v) => (del[v] += (sig[v] / sig[w]) * (1 + del[w]))); if (w !== s) CB[w] += del[w]; }
+    }
+    return CB.map((x) => x / 2);
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "m", label: "中心性", value: "deg", options: [["deg", "度中心性：直接连了多少"], ["bet", "介数中心性：多少最短路经过它"], ["clo", "接近中心性：离所有点多近"]] },
+      { id: "n", label: "交易数", min: 20, max: 70, step: 5, value: 40 },
+      { id: "hub", label: "“中转账户”数量（专门连接不同团伙）", min: 0, max: 4, step: 1, value: 2 },
+      { id: "seed", label: "换一张图", button: true },
+    ],
+    note: "浏览器里按定义现场计算三种中心性（介数用 Brandes 算法）。点越大、颜色越深 = 中心性越高，金色描边是前 5 名。切换三种中心性，看看排名第一的是不是同一个点；再把“中转账户”拖到 0，看介数中心性的前几名会不会变得很分散。",
+    render(svg, v) {
+      const seed = 50 + v.seed * 11, r = K.rng(seed);
+      const base = G.make(seed, v.n, 4, 0.22, 0);
+      const adj = base.adj.map((a) => a.slice()), edges = base.edges.slice();
+      const hubs = [];
+      for (let h = 0; h < v.hub; h++) {
+        const id = adj.length; adj.push([]); hubs.push(id);
+        for (let c = 0; c < 4; c++) { if (r() < 0.3 && c > 1) continue; let j; do j = Math.floor(r() * v.n); while (base.cls[j] !== c); adj[id].push(j); adj[j].push(id); edges.push([id, j]); }
+      }
+      const n = adj.length;
+      const g = { n, k: 5, cls: base.cls.concat(hubs.map(() => 4)), edges, adj };
+      const pos = G.layout(g, { x: 20, y: 20, w: 420, h: 340 }, seed, 150);
+      let val;
+      if (v.m === "deg") val = adj.map((a) => a.length / (n - 1));
+      else if (v.m === "bet") { const b = betweenness(adj), s = ((n - 1) * (n - 2)) / 2; val = b.map((x) => x / s); }
+      else val = adj.map((_, i) => { const d = bfs(adj, i), reach = d.filter((x) => x > 0); const sum = reach.reduce((a, b) => a + b, 0); return sum ? (reach.length / (n - 1)) * (reach.length / sum) : 0; });
+      const mx = Math.max(...val) || 1, order = val.map((x, i) => [x, i]).sort((a, b) => b[0] - a[0]);
+      const top = new Set(order.slice(0, 5).map((x) => x[1]));
+      edges.forEach(([a, b]) => K.svg(svg, "line", { x1: pos[a][0], y1: pos[a][1], x2: pos[b][0], y2: pos[b][1], stroke: "var(--line)" }));
+      pos.forEach((p, i) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 3 + 11 * (val[i] / mx), fill: hubs.includes(i) ? "var(--c6)" : "var(--c1)", "fill-opacity": 0.25 + 0.75 * (val[i] / mx), stroke: top.has(i) ? "var(--warn)" : "var(--panel)", "stroke-width": top.has(i) ? 3 : 1 }));
+      K.svg(svg, "text", { x: 460, y: 40, "font-size": 13, "font-weight": 700 }, "前 5 名");
+      order.slice(0, 5).forEach(([x, i], k) => K.svg(svg, "text", { x: 460, y: 66 + k * 22, "font-size": 12, "font-family": "var(--mono)", fill: hubs.includes(i) ? "var(--c6)" : "var(--ink)" }, `${k + 1}. 点 ${i}${hubs.includes(i) ? "（中转）" : ""}  ${x.toFixed(3)}`));
+      K.svg(svg, "text", { x: 460, y: 200, "font-size": 12, fill: "var(--c6)" }, "红色 = 中转账户");
+      const hubInTop = hubs.filter((h) => top.has(h)).length;
+      return { readout: [
+        { k: "节点 / 边", v: `${n} / ${edges.length}` },
+        { k: "第一名", v: "点 " + order[0][1] + (hubs.includes(order[0][1]) ? "（中转）" : "") },
+        { k: "前 5 名里的中转账户", v: `${hubInTop} / ${hubs.length}`, color: hubInTop ? "var(--c6)" : "var(--ink)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：两层传播 + 逻辑回归，看加权指标与少数类指标 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "ill", label: "非法交易占有标签交易的比例", min: 0.03, max: 0.5, step: 0.01, value: 0.1, fmt: (v) => (v * 100).toFixed(0) + "%" },
+      { id: "homo", label: "资金流在同类交易之间的比例", min: 0.2, max: 0.95, step: 0.05, value: 0.8, fmt: (v) => (v * 100).toFixed(0) + "%" },
+      { id: "hop", label: "消息传递层数（0 = 不用图）", min: 0, max: 3, step: 1, value: 2 },
+      { id: "thr", label: "判为“非法”的概率阈值", min: 0.1, max: 0.9, step: 0.05, value: 0.5, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "重新生成", button: true },
+    ],
+    note: "浏览器里生成 700 笔模拟交易（约 60% 未标注），每笔 4 个带噪声的特征。先把特征沿资金流传播若干层（GCN 式归一化），再在有标签的交易上现场训练逻辑回归 200 轮，在留出的 40% 有标签交易上测试。对比左边“加权平均”的分数和右边“只看非法类”的分数：把非法比例拖到 3%，加权分数依然好看，非法类的召回率却可能很低。",
+    render(svg, v) {
+      const seed = 9 + v.seed * 17, n = 700;
+      const pL = 0.4, pIll = pL * v.ill, pLic = pL - pIll;
+      const g = txGraph(seed, n, pIll, pLic, v.homo), r = K.rng(seed + 2);
+      let X = g.truth.map((t) => [0, 1, 2, 3].map((d) => (d < 2 ? (t === 0 ? 0.6 : -0.2) : 0) + K.randn(r) * 1.0));
+      for (let h = 0; h < v.hop; h++) X = G.gcn(X, g.adj);
+      const known = []; g.lab.forEach((l, i) => { if (l < 2) known.push(i); });
+      const isTe = new Set(known.filter(() => r() < 0.4));
+      const tx = [], ty = []; known.forEach((i) => { if (!isTe.has(i)) { tx.push(X[i]); ty.push(g.lab[i]); } });
+      const W = G.softmaxFit(tx, ty, 2, 200, 0.8, 0.001);
+      let TP = 0, FP = 0, FN = 0, TN = 0;
+      isTe.forEach((i) => { const p = G.softmaxP(W, X[i])[0] >= v.thr; const y = g.lab[i] === 0; if (p && y) TP++; else if (p) FP++; else if (y) FN++; else TN++; });
+      const N = TP + FP + FN + TN, nI = TP + FN, nL = TN + FP;
+      const pI = TP + FP ? TP / (TP + FP) : 0, rI = nI ? TP / nI : 0, pLc = TN + FN ? TN / (TN + FN) : 0, rL = nL ? TN / nL : 0;
+      const wP = (pI * nI + pLc * nL) / N, wR = (rI * nI + rL * nL) / N, acc = (TP + TN) / N;
+      const items = [["准确率", acc, "var(--ink-3)"], ["加权精确率", wP, "var(--ink-3)"], ["加权召回率", wR, "var(--ink-3)"], ["非法类精确率", pI, "var(--c6)"], ["非法类召回率", rI, "var(--c6)"]];
+      const ax = K.axes(svg, { x: 50, y: 20, w: 560, h: 260 }, [0, 5], [0, 1], { xticks: 0, yticks: 4, yfmt: (x) => (x * 100).toFixed(0) + "%" });
+      items.forEach(([nm, val, c], i) => {
+        K.svg(svg, "rect", { x: ax.sx(i + 0.15), y: ax.sy(val), width: ax.sx(0.7) - ax.sx(0), height: ax.sy(0) - ax.sy(val), fill: c, rx: 3 });
+        K.svg(svg, "text", { x: ax.sx(i + 0.5), y: ax.sy(val) - 6, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, (val * 100).toFixed(0) + "%");
+        K.svg(svg, "text", { x: ax.sx(i + 0.5), y: 300, "text-anchor": "middle", "font-size": 12 }, nm);
+      });
+      K.svg(svg, "text", { x: 50, y: 335, "font-size": 12, class: "muted" }, `测试集：非法 ${nI} 笔，合法 ${nL} 笔　抓到 ${TP}，漏掉 ${FN}，误报 ${FP}`);
+      return { readout: [
+        { k: "加权精确率（作者用的）", v: (wP * 100).toFixed(1) + "%" },
+        { k: "非法类召回率", v: (rI * 100).toFixed(1) + "%", color: rI < 0.5 ? "var(--bad)" : "var(--good)" },
+        { k: "非法类精确率", v: (pI * 100).toFixed(1) + "%", color: pI < 0.5 ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

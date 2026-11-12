@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>光伏发电预测</title>
+<meta name="description" content="Kaggle 案例拆解：用一座印度光伏电站 34 天的发电和气象传感器数据，看懂辐照度与发电量的关系、找出异常天，并用线性回归和随机森林预测交流功率。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">传感器时间序列 · 回归预测 · 光伏电站</div>
+  <h1>太阳能电站今天能发多少电？从辐照度到交流功率</h1>
+  <p class="en">Solar power generation forecast</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">表格合并</span><span class="tag method">时间特征</span><span class="tag method">逐日曲线对比</span>
+    <span class="tag method">逆变器效率</span><span class="tag method">线性回归</span><span class="tag method">决策树回归</span><span class="tag method">随机森林回归</span><span class="tag method">R²</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Afroz</b></span>
+    <span>Kaggle 点赞 <b>1,345</b>（2026-11 抓取）</span>
+    <span>数据集 <b>pythonafroz/solar-power</b></span>
+    <span><a href="https://www.kaggle.com/code/pythonafroz/solar-power-generation-forecast" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">一座光伏电站的发电记录 + 气象传感器</div><p>发电表记录各逆变器的直流功率、交流功率、当日和累计发电量；气象表记录气温、组件温度和辐照度。<span data-cell="14">出处</span> 共 34 天。<span data-cell="41">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">逆变器输出的交流功率 AC_POWER</div><p>作者用 6 列（当日/累计发电量、气温、组件温度、辐照度、直流功率）预测送进电网的交流功率。<span data-cell="79">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">先看曲线找异常，再做回归</div><p>把每天的功率和辐照度曲线排开对比，挑出最好和最差的一天分析原因；估算逆变器效率；最后比较线性回归、随机森林、决策树三个回归模型。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">发电量几乎跟着辐照度走</div><p>作者结论：直流功率与辐照度的曲线形状几乎一致，“可以说成正比”<span data-cell="55">出处</span>；最差的一天中午功率骤降，作者判断是暴雨和厚云，不太像设备故障。<span data-cell="68">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>Solar Power plant Dataset</b>（作者本人上传到 Kaggle，说明页没有文字描述）。数据集里有两座电站各两张表；这份 notebook 只用了 2 号电站（Plant_2）的两张表。<span data-cell="22">出处</span></p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">覆盖天数</div><div class="v">34 天</div></div>
+        <div class="stat-tile"><div class="k">用到的表</div><div class="v">2 张</div></div>
+        <div class="stat-tile"><div class="k">数据集文件</div><div class="v">4 个 CSV</div></div>
+        <div class="stat-tile"><div class="k">缺失值</div><div class="v" style="color:var(--good)">无</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">34 天见第 41 格 <span data-cell="41">出处</span>；无缺失值见第 34 格 <span data-cell="34">出处</span>；作者列出的日期在 2020 年 5 月 15 日到 6 月 17 日之间 <span data-cell="49">出处</span>。4 个文件（两座电站 × 发电表/气象表）来自数据集文件列表。总行数作者没有写，这里不列。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>来自</th></tr>
+        <tr><td><code>DATE_TIME</code></td><td>记录时刻，两张表靠它对齐合并</td><td>两表都有</td></tr>
+        <tr><td><code>SOURCE_KEY</code></td><td>发电表里是逆变器编号（一台逆变器管一片光伏板）</td><td>发电表</td></tr>
+        <tr><td><code>DC_POWER</code></td><td>光伏板送到逆变器的直流功率</td><td>发电表</td></tr>
+        <tr><td><code>AC_POWER</code></td><td><b>要预测的答案</b>：逆变器转换后送往电网的交流功率</td><td>发电表</td></tr>
+        <tr><td><code>DAILY_YIELD</code> / <code>TOTAL_YIELD</code></td><td>当天累计发电量 / 投运以来累计发电量</td><td>发电表</td></tr>
+        <tr><td><code>AMBIENT_TEMPERATURE</code></td><td>环境气温</td><td>气象表</td></tr>
+        <tr><td><code>MODULE_TEMPERATURE</code></td><td>光伏组件（板子本身）的温度</td><td>气象表</td></tr>
+        <tr><td><code>IRRADIATION</code></td><td>辐照：阳光照到单位面积上的能量强度</td><td>气象表</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">列名来自作者的数据说明 <span data-cell="14">第 14 格</span> <span data-cell="15">第 15 格</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="44">
+    <h3>实验 A · 云和太阳高度怎样塑造一天的发电曲线 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="89">
+    <h3>实验 B · 给模型哪些线索：预测交流功率 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>直流功率曲线和辐照度曲线形状非常相似，输出功率主要取决于辐照度，可以说成正比</td><td><span data-cell="55">第 55 格</span></td></tr>
+        <tr><td>多数日子功率有波动；作者把日子分成“波动小”“波动大”“波动很大且功率下降”三组</td><td><span data-cell="49">第 49 格</span></td></tr>
+        <tr><td>平均直流功率最高的是 2020-05-15，最低的是 2020-06-11</td><td><span data-cell="51">第 51 格</span></td></tr>
+        <tr><td>06-11 中午直流功率从约 700 kW 掉到约 20 kW，同时辐照从约 0.6 降到约 0.3，组件温度从 45℃ 降到 35℃</td><td><span data-cell="67">第 67 格</span></td></tr>
+        <tr><td>作者判断最差一天主要是暴雨、厚云等坏天气造成，系统故障的可能性很小</td><td><span data-cell="68">第 68 格</span></td></tr>
+        <tr><td>组件温度是光伏系统达不到峰值性能的首要原因（作者引用的行业说法）</td><td><span data-cell="60">第 60 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">三个回归模型的 R² 分数和逆变器效率都在运行输出里，Kaggle 下载的源码不带输出，作者的文字里也没写具体数值，所以这里不列分数。另外要注意：特征里已经包含直流功率 DC_POWER，而交流功率基本就是直流功率乘一个转换效率，所以这里的高分并不能说明“能提前预测发电量”。</p>
+      <p class="callout">原 notebook 里有几处代码问题：<span data-cell="89">第 89 格</span>“决策树”的预测其实用的是随机森林 <code>rfr.predict</code>；<span data-cell="85">第 85 格</span>起 <code>r2_score(预测, 真实)</code> 参数顺序写反了；<span data-cell="75">第 75 格</span>把交流、直流功率分别排序后再逐个相除，配对已经不是同一时刻；<span data-cell="82">第 82 格</span>对时间序列做的是随机切分。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给出某时刻的辐照度、温度和直流功率，估计送进电网的交流功率；对比实际值，偏差大就提示逆变器或组件可能有问题。</li>
+        <li><b>对社会的用处：</b>光伏只在白天发电、随云变化，电网调度要提前知道“下午会少多少电”，好安排火电、水电或储能补位；运维人员靠“曲线异常”判断该去清洗板子还是修设备。</li>
+        <li><b>同类问题：</b>风机功率预测、屋顶光伏发电量估算、储能充放电计划、建筑用电预测。</li>
+        <li><b>可迁移的套路：</b>按时间把多张传感器表对齐合并 → 逐日画曲线找异常 → 用物理关系（功率≈辐照×面积×效率）检查数据 → 按时间切分做预测，并避免把“答案的近亲”放进特征。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>按时间合并两张表：<code>pd.merge(..., on='DATE_TIME')</code> <span data-cell="29">第 29 格</span></li>
+        <li>时间特征：日、月、周、小时、分钟 <span data-cell="31">第 31 格</span>；逆变器编号编码 LabelEncoder <span data-cell="37">第 37 格</span></li>
+        <li>逐日曲线：透视表 pivot_table + 每天一张小图 <span data-cell="44">第 44 格</span></li>
+        <li>逆变器效率：最大交流功率 / 最大直流功率 <span data-cell="72">第 72 格</span></li>
+        <li>模型：线性回归 <span data-cell="85">第 85 格</span>、随机森林 <span data-cell="87">第 87 格</span>、决策树 <span data-cell="89">第 89 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者把 DC_POWER 放进特征去预测 AC_POWER。如果电网调度员想知道“明天下午能发多少电”，这个模型能用吗？缺了什么？</li>
+      <li>06-11 中午功率骤降，作者判断是坏天气而不是故障。你会再查哪些数据来确认？（提示：同一时刻所有逆变器是不是一起掉？）</li>
+      <li>数据是按时间先后记录的，作者却随机切分训练集和测试集。这样测出来的分数会偏高还是偏低？为什么？</li>
+      <li>第 89 格把决策树的预测写成了随机森林的预测，第 75 格把排序后的两列逐个相除。这类错误为什么不会报错？怎样养成习惯去发现它们？</li>
+      <li>组件温度越高发电效率越低。夏天阳光最强，但也最热，你觉得一年中光伏电站哪个季节发电最多？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Afroz，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：pythonafroz/solar-power（Solar Power plant Dataset）。
+</footer>
+</main>
+
+<script src="nb/solar-power-forecast.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const FAST = location.hash === "#fast";
+
+  /* 晴天辐照度（kW/m²），t 为小时 */
+  function clearSky(t) { const s = Math.sin(Math.PI * (t - 6) / 12.5); return s > 0 ? 1.0 * Math.pow(s, 1.25) : 0; }
+  function cloudy(t, seed, amt) { const r = K.rng(seed); let f = 1; const ph = [r() * 6, r() * 6, r() * 6]; f -= amt * (0.5 + 0.25 * Math.sin(t * 2.3 + ph[0]) + 0.25 * Math.sin(t * 5.1 + ph[1])); return K.clamp(f, 0.05, 1); }
+  function pathOf(ax, xs, f) { return xs.map((x, i) => (i ? "L" : "M") + ax.sx(x).toFixed(1) + "," + ax.sy(f(x)).toFixed(1)).join(""); }
+  const hours = []; for (let t = 5; t <= 19.001; t += 0.25) hours.push(t);
+
+  const steps = [
+    {
+      at: 0, title: "光伏电站怎么发电，难在哪", kicker: "第 0–11 格 · 背景",
+      html: `<p>作者先介绍光伏电站：阳光照到光伏组件上产生<b>直流电（DC）</b>，经过汇流箱送进<b>逆变器</b>，变成<b>交流电（AC）</b>，再经变压器升压送进电网。<span data-cell="5">出处</span></p><p>难点有四条：只有白天发电、随阳光变化大；没有储能时必须马上用掉；占地大且不能被遮挡；组件要定期清洗、现场排查故障。<span data-cell="8">出处</span></p>`,
+      cells: [2, 5, 8],
+      draw(svg, ctx) {
+        const sun = K.svg(svg, "circle", { cx: 70, cy: 70, r: 30, fill: "var(--warn)" });
+        const panel = K.node(svg, 150, 150, 120, 60, "光伏组件\n产生直流 DC", { fill: "color-mix(in srgb, var(--c1) 16%, var(--panel))", stroke: "var(--c1)" });
+        const inv = K.node(svg, 330, 150, 120, 60, "逆变器\nDC → AC", { fill: "color-mix(in srgb, var(--c3) 16%, var(--panel))", stroke: "var(--c3)" });
+        const tr = K.node(svg, 500, 150, 90, 60, "变压器\n升压", {});
+        const grid = K.node(svg, 620, 150, 80, 60, "电网", { bold: true });
+        K.arrow(svg, 270, 180, 328, 180); K.arrow(svg, 450, 180, 498, 180); K.arrow(svg, 590, 180, 618, 180);
+        K.svg(svg, "text", { x: 299, y: 170, "text-anchor": "middle", "font-size": 11, fill: "var(--c1)" }, "DC");
+        K.svg(svg, "text", { x: 474, y: 170, "text-anchor": "middle", "font-size": 11, fill: "var(--c3)" }, "AC");
+        const rays = [0, 1, 2].map((i) => K.svg(svg, "line", { x1: 95, y1: 90, x2: 95, y2: 90, stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "5 4" }));
+        const dots = [];
+        for (let i = 0; i < 6; i++) dots.push(K.svg(svg, "circle", { cx: 270, cy: 180, r: 4, fill: i % 2 ? "var(--c3)" : "var(--c1)", opacity: 0 }));
+        K.svg(svg, "text", { x: 30, y: 270, "font-size": 13, "font-weight": 700 }, "难点：");
+        K.svg(svg, "text", { x: 80, y: 270, "font-size": 13 }, "只在白天发电、随云变化 · 发出来要马上用掉 · 占地大怕遮挡 · 要清洗、排查故障");
+        (async () => {
+          if (!(await ctx.tween(800, (t) => rays.forEach((r, i) => { r.setAttribute("x2", 95 + t * (90 + i * 35)); r.setAttribute("y2", 90 + t * 60); })))) return;
+          for (let k = 0; k < 3; k++) {
+            if (!(await ctx.tween(1600, (t) => dots.forEach((d, i) => {
+              const u = ((t + i / 6) % 1) * 350; d.setAttribute("cx", 270 + u); d.setAttribute("cy", 180 + Math.sin(u / 20) * (u > 180 ? 6 : 0)); d.style.opacity = 1;
+              d.style.fill = u > 180 ? "var(--c3)" : "var(--c1)";
+            })))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 12, title: "辐照度与“峰值日照时数”", kicker: "第 12–18 格 · 数据说明与术语",
+      html: `<p>作者交代了两张表的列名，又解释了几个术语：<b>辐照度</b>是某一时刻每平方米受到的太阳功率（W/m²）；<b>辐照量</b>是一段时间里累计的能量；<b>峰值日照时数 PSH</b> 是把一天的辐照量折算成“按 1 kW/m² 照了几个小时”。<span data-cell="16">出处</span></p><p>作者的例子：1000 W/m² 照 2 小时 + 600 W/m² 照 1.5 小时 + 200 W/m² 照 1 小时 = 3100 Wh/m²，折合 <b>3.1 PSH</b>。<span data-cell="17">出处</span> 动画把这三段“面积”叠成一块 1 kW/m² 高的长方形。</p>`,
+      cells: [16, 17],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 230 }, [0, 5], [0, 1.1], { xticks: 5, yticks: 4, xlabel: "小时", ylabel: "辐照度 kW/m²", yfmt: (v) => v.toFixed(1) });
+        const segs = [[0, 2, 1.0, "var(--c1)"], [2, 3.5, 0.6, "var(--c2)"], [3.5, 4.5, 0.2, "var(--c3)"]];
+        const rects = segs.map((s) => K.svg(svg, "rect", { x: ax.sx(s[0]), y: ax.sy(s[2]), width: ax.sx(s[1]) - ax.sx(s[0]), height: ax.sy(0) - ax.sy(s[2]), fill: s[3], "fill-opacity": 0.55 }));
+        const lab = K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "1.0×2 + 0.6×1.5 + 0.2×1 = 3.1 kWh/m²");
+        const lab2 = K.svg(svg, "text", { x: 360, y: 324, "text-anchor": "middle", "font-size": 13, fill: "var(--accent)" }, "");
+        // 变形：第二、三段压成 1.0 高
+        ctx.wait(1200).then((ok) => ok && ctx.tween(1600, (t) => {
+          const w2 = 1.5 * K.lerp(1, 0.6, t), h2 = K.lerp(0.6, 1, t);
+          rects[1].setAttribute("x", ax.sx(2)); rects[1].setAttribute("width", ax.sx(2 + w2) - ax.sx(2)); rects[1].setAttribute("y", ax.sy(h2)); rects[1].setAttribute("height", ax.sy(0) - ax.sy(h2));
+          const x3 = 2 + w2, w3 = 1 * K.lerp(1, 0.2, t), h3 = K.lerp(0.2, 1, t);
+          rects[2].setAttribute("x", ax.sx(x3)); rects[2].setAttribute("width", ax.sx(x3 + w3) - ax.sx(x3)); rects[2].setAttribute("y", ax.sy(h3)); rects[2].setAttribute("height", ax.sy(0) - ax.sy(h3));
+        })).then((ok) => { if (ok) lab2.textContent = "面积不变，压成 1 kW/m² 高的长方形 → 宽 3.1 小时 = 3.1 PSH"; });
+      },
+    },
+    {
+      at: 19, title: "读入两张表，按时间对齐合并", kicker: "第 19–30 格 · 读数据",
+      html: `<p>发电表和气象表是两个设备分别记的。作者先把 <code>DATE_TIME</code> 转成真正的时间格式（两张表的写法还不一样，一个到分钟、一个到秒）<span data-cell="27">出处</span>，再用 <code>pd.merge(..., on='DATE_TIME')</code> 把同一时刻的两行拼成一行。<span data-cell="29">出处</span></p><p>动画里，左边是发电记录，右边是气象记录，同一时刻的两行“拉链”一样扣在一起。</p>`,
+      cells: [29], highlight: ["pd.merge", "on='DATE_TIME'"],
+      draw(svg, ctx) {
+        const times = ["10:00", "10:15", "10:30", "10:45"];
+        K.svg(svg, "text", { x: 40, y: 30, "font-size": 13, "font-weight": 700, fill: "var(--c1)" }, "发电表：时间 · 逆变器 · DC · AC");
+        K.svg(svg, "text", { x: 420, y: 30, "font-size": 13, "font-weight": 700, fill: "var(--c3)" }, "气象表：时间 · 气温 · 组件温度 · 辐照");
+        const L = times.map((tm, i) => K.node(svg, 40, 46 + i * 44, 250, 36, tm + "  ·  inv-A  ·  DC  ·  AC", { fill: "color-mix(in srgb, var(--c1) 12%, var(--panel))", stroke: "var(--c1)", fs: 12 }));
+        const R = times.map((tm, i) => K.node(svg, 420, 46 + i * 44, 260, 36, tm + "  ·  气温  ·  组件温度  ·  辐照", { fill: "color-mix(in srgb, var(--c3) 12%, var(--panel))", stroke: "var(--c3)", fs: 12 }));
+        K.svg(svg, "text", { x: 360, y: 260, "text-anchor": "middle", "font-size": 13, class: "muted" }, "按 DATE_TIME 相同的行拼在一起 ↓（示意）");
+        const out = K.node(svg, 110, 276, 500, 40, "时间 · 逆变器 · DC · AC · 气温 · 组件温度 · 辐照", { bold: true, fs: 13 });
+        out.style.opacity = 0;
+        ctx.wait(500).then((ok) => ok && ctx.tween(1600, (t) => {
+          L.forEach((g) => g.setAttribute("transform", `translate(${t * 60},0)`));
+          R.forEach((g) => g.setAttribute("transform", `translate(${-t * 70},0)`));
+        })).then((ok) => ok && ctx.tween(600, (t) => (out.style.opacity = t)));
+      },
+    },
+    {
+      title: "从时间戳里拆出日期、小时、分钟", kicker: "第 31–41 格 · 特征工程",
+      html: `<p>作者把一个时间戳拆成好几列：日期、时刻、日、月、周、小时、分钟，再算出“当天过了多少分钟”。<span data-cell="31">出处</span> 逆变器编号 <code>SOURCE_KEY</code> 是一串字母，用 <b>LabelEncoder</b> 换成 0、1、2…这样的编号。<span data-cell="37">出处</span></p><p>检查结果：没有缺失值 <span data-cell="34">出处</span>；数据一共覆盖 <b>34 天</b> <span data-cell="41">出处</span>。</p>`,
+      cells: [31, 37], highlight: ["TOTAL MINUTES PASS", "LabelEncoder"],
+      notes: { 39: "画环境气温的分布直方图。", 40: "数一数有多少个不同的日期。" },
+      draw(svg, ctx) {
+        K.node(svg, 40, 40, 200, 46, "2020-05-15 11:45:00", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const parts = [["DATE", "2020-05-15"], ["DAY", "15"], ["MONTH", "5"], ["HOURS", "11"], ["MINUTES", "45"], ["TOTAL MINUTES", "11×60+45 = 705"]];
+        const gs = parts.map((p, i) => { const g = K.node(svg, 300 + (i % 2) * 200, 30 + Math.floor(i / 2) * 60, 180, 46, p[0] + "\n" + p[1], { fs: 12 }); g.style.opacity = 0; return g; });
+        const ar = parts.map((p, i) => { const a = K.arrow(svg, 240, 63, 298 + (i % 2) * 200, 53 + Math.floor(i / 2) * 60); a.style.opacity = 0; return a; });
+        K.svg(svg, "text", { x: 40, y: 250, "font-size": 13, "font-weight": 700 }, "LabelEncoder：逆变器编号 → 整数");
+        const keys = ["4UPUqMRk7TRMgml", "81aHJ1q11NBPMrL", "9kRcWv60rDACzjR"];
+        keys.forEach((k, i) => {
+          K.svg(svg, "text", { x: 60, y: 280 + i * 20, "font-size": 12, "font-family": "var(--mono)" }, k + "…");
+          const n = K.svg(svg, "text", { x: 320, y: 280 + i * 20, "font-size": 12, "font-weight": 700, fill: "var(--c2)" }, "→ " + i);
+          n.style.opacity = 0; gs.push(n);
+        });
+        K.svg(svg, "text", { x: 400, y: 300, "font-size": 11, class: "muted" }, "（编号字符串为示意）");
+        (async () => { for (let i = 0; i < gs.length; i++) { if (!(await ctx.tween(300, (t) => { gs[i].style.opacity = t; if (ar[i]) ar[i].style.opacity = t; }))) return; } })();
+      },
+    },
+    {
+      at: 42, title: "每天一张图：理想曲线与波动", kicker: "第 42–52 格 · 找异常",
+      html: `<p>作者用透视表把数据变成“行是时刻、列是日期”，每天画一张直流功率小图。<span data-cell="44">出处</span> <b>理想形状</b>像一座山：早晚太阳低、光要穿过更厚的大气，功率小；中午太阳最高，功率最大。<span data-cell="47">出处</span></p><p>对照理想形状，作者把日子分成三组：波动小、波动大、波动很大且功率下降，并提醒原因可能是故障，也可能是云和天气，要进一步分析。<span data-cell="49">出处</span> 每日总量排序后，最高是 05-15，最低是 06-11。<span data-cell="51">出处</span></p>`,
+      cells: [44, 50], highlight: ["pivot_table", "Daywise_plot"],
+      draw(svg, ctx) {
+        const cols = 6, w = 110, h = 70;
+        const types = [0, 0, 1, 0, 2, 1, 0, 1, 0, 2, 0, 1];
+        const col = ["var(--good)", "var(--warn)", "var(--bad)"];
+        K.svg(svg, "text", { x: 20, y: 22, "font-size": 13, class: "muted" }, "每天一张直流功率曲线（示意）：绿=波动小  橙=波动大  红=波动很大且功率下降");
+        const paths = types.map((ty, i) => {
+          const x0 = 20 + (i % cols) * (w + 6), y0 = 36 + Math.floor(i / cols) * (h + 50);
+          const ax = K.axes(svg, { x: x0, y: y0, w, h }, [5, 19], [0, 1.05], { xticks: 0, yticks: 0 });
+          const amt = [0.05, 0.35, 0.7][ty];
+          const d = pathOf(ax, hours, (t) => clearSky(t) * (ty ? cloudy(t, 30 + i, amt) : 1));
+          K.svg(svg, "text", { x: x0 + w / 2, y: y0 + h + 16, "text-anchor": "middle", "font-size": 11, class: "muted" }, "第 " + (i + 1) + " 天");
+          return K.svg(svg, "path", { d, fill: "none", stroke: col[ty], "stroke-width": 1.8, "stroke-dasharray": 400, "stroke-dashoffset": 400 });
+        });
+        ctx.tween(2400, (t) => paths.forEach((p, i) => p.style.strokeDashoffset = 400 * (1 - K.clamp(t * 1.6 - i * 0.05, 0, 1))));
+      },
+    },
+    {
+      at: 53, title: "辐照度和功率几乎成正比", kicker: "第 53–58 格 · 关系分析",
+      html: `<p>作者又把每天的<b>辐照度</b>曲线画出来，发现它和对应那天的直流功率曲线“长得几乎一样”，结论是：光伏电站的输出功率主要取决于辐照度，<b>可以说成正比</b>。<span data-cell="55">出处</span></p><p>动画把同一天的两条曲线叠在一起，再把它们变成散点：每个点是一个时刻，横轴辐照度、纵轴功率，点排成一条斜线。接着作者也画了每天的环境气温。<span data-cell="57">出处</span></p>`,
+      cells: [54, 56], highlight: ["IRRADIATION"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 290, h: 240 }, [5, 19], [0, 1.1], { xticks: 7, yticks: 0, xlabel: "时刻", xfmt: (v) => Math.round(v) });
+        const ax2 = K.axes(svg, { x: 420, y: 30, w: 260, h: 240 }, [0, 1.1], [0, 1.1], { xticks: 2, yticks: 2, xlabel: "辐照度（相对）", ylabel: "直流功率（相对）" });
+        const f = (t) => clearSky(t) * cloudy(t, 77, 0.4);
+        K.svg(svg, "path", { d: pathOf(ax, hours, f), fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+        K.svg(svg, "path", { d: pathOf(ax, hours, (t) => f(t) * 0.96 + 0.02 * Math.sin(t * 9)), fill: "none", stroke: "var(--c6)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+        K.svg(svg, "text", { x: 70, y: 300, "font-size": 12, fill: "var(--c1)" }, "— 辐照度"); K.svg(svg, "text", { x: 160, y: 300, "font-size": 12, fill: "var(--c6)" }, "- - 直流功率（示意）");
+        const r = K.rng(5);
+        const pts = hours.map((t) => { const g = f(t); return [g, Math.max(0, g * 0.96 + 0.02 * Math.sin(t * 9) + K.randn(r) * 0.015)]; });
+        const els = pts.map((p) => K.svg(svg, "circle", { cx: ax2.sx(p[0]), cy: ax2.sy(p[1]), r: 0, fill: "var(--c6)", opacity: 0.7 }));
+        ctx.wait(700).then((ok) => ok && ctx.tween(1600, (t) => els.forEach((e, i) => e.setAttribute("r", K.clamp(t * els.length - i, 0, 1) * 3.5))));
+      },
+    },
+    {
+      at: 59, title: "最好的一天 vs 最差的一天", kicker: "第 59–69 格 · 原因分析",
+      html: `<p>作者先列出影响发电的环境因素：云层厚度、太阳位置、组件温度（行业里常说的首要原因）、辐照度。<span data-cell="60">出处</span></p><p>05-15 的功率和辐照曲线接近理想形状，天气好、没有云。<span data-cell="63">出处</span> 06-11 则在中午 12 点左右，直流功率从约 700 kW 骤降到约 20 kW，辐照从约 0.6 降到约 0.3，组件温度从 45℃ 掉到 35℃，气温也降了。<span data-cell="67">出处</span> 作者判断是暴雨、厚云等坏天气，<b>不太像系统故障</b>，因为辐照和温度也同时掉了。<span data-cell="68">出处</span></p>`,
+      cells: [62, 65], highlight: ["2020-05-15", "2020-06-11"],
+      draw(svg, ctx) {
+        const A = K.axes(svg, { x: 50, y: 30, w: 290, h: 230 }, [5, 19], [0, 1.1], { xticks: 7, yticks: 0, xfmt: (v) => Math.round(v), xlabel: "05-15（示意）" });
+        const B = K.axes(svg, { x: 400, y: 30, w: 290, h: 230 }, [5, 19], [0, 1.1], { xticks: 7, yticks: 0, xfmt: (v) => Math.round(v), xlabel: "06-11（示意）" });
+        const bad = (t) => clearSky(t) * (t > 11.6 && t < 15.5 ? K.lerp(1, 0.04, K.clamp((t - 11.6) * 3, 0, 1)) * (t > 14.5 ? K.lerp(1, 12, (t - 14.5)) : 1) : cloudy(t, 4, 0.35));
+        const p1 = K.svg(svg, "path", { d: pathOf(A, hours, clearSky), fill: "none", stroke: "var(--good)", "stroke-width": 2.2, "stroke-dasharray": 700, "stroke-dashoffset": 700 });
+        const p2 = K.svg(svg, "path", { d: pathOf(B, hours, (t) => Math.min(clearSky(t), bad(t))), fill: "none", stroke: "var(--bad)", "stroke-width": 2.2, "stroke-dasharray": 700, "stroke-dashoffset": 700 });
+        const note = K.svg(svg, "text", { x: B.sx(12.2), y: 60, "font-size": 12, fill: "var(--bad)", "font-weight": 700 }, "中午骤降：辐照、温度同时下降 → 云/雨");
+        note.style.opacity = 0;
+        const cloud = K.svg(svg, "ellipse", { cx: B.sx(13), cy: 20, rx: 50, ry: 14, fill: "var(--ink-3)", opacity: 0 });
+        ctx.tween(1800, (t) => { p1.style.strokeDashoffset = 700 * (1 - t); p2.style.strokeDashoffset = 700 * (1 - t); })
+          .then((ok) => ok && ctx.tween(700, (t) => { note.style.opacity = t; cloud.style.opacity = 0.5 * t; cloud.setAttribute("cy", 20 + 20 * t); }));
+      },
+    },
+    {
+      at: 70, title: "逆变器效率：直流变交流损失多少", kicker: "第 70–77 格 · 设备分析",
+      html: `<p>逆变器把直流变成交流时会有损耗：一部分变成热量，一部分是待机自耗。<b>效率 = 交流功率 ÷ 直流功率</b>。作者引用的资料说，优质纯正弦波逆变器效率通常在 90%–95%，负载低于 15% 时效率会很低。<span data-cell="77">出处</span></p><p>作者用“最大交流功率 ÷ 最大直流功率”估算了整站效率 <span data-cell="72">出处</span>，又画了效率随输出功率的曲线。<span data-cell="75">出处</span> 注意第 75 格的写法：交流和直流两列<b>各自排序后</b>再逐个相除，相除的两个数已经不是同一时刻的，这条曲线不能当成真正的效率曲线。</p>`,
+      cells: [72, 75], highlight: ["np.max(solar_ac_power)/np.max(solar_dc_power )", "AC_list.sort()", "DC_list.sort()"],
+      draw(svg, ctx) {
+        K.node(svg, 40, 120, 140, 70, "直流 DC\n100 份", { fill: "color-mix(in srgb, var(--c1) 16%, var(--panel))", stroke: "var(--c1)", bold: true });
+        K.node(svg, 270, 110, 160, 90, "逆变器", { fill: "color-mix(in srgb, var(--c3) 16%, var(--panel))", stroke: "var(--c3)", bold: true });
+        const out = K.node(svg, 520, 120, 150, 70, "交流 AC\n约 95 份（示意）", { fill: "color-mix(in srgb, var(--good) 16%, var(--panel))", stroke: "var(--good)", bold: true });
+        K.arrow(svg, 180, 155, 268, 155); K.arrow(svg, 430, 155, 518, 155);
+        const heat = [0, 1, 2].map((i) => K.svg(svg, "text", { x: 320 + i * 25, y: 100, "font-size": 18, fill: "var(--warn)", opacity: 0 }, "≈"));
+        K.svg(svg, "text", { x: 350, y: 236, "text-anchor": "middle", "font-size": 12, fill: "var(--warn)" }, "热损耗 + 待机自耗");
+        K.svg(svg, "text", { x: 360, y: 290, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "效率 = AC ÷ DC");
+        K.svg(svg, "text", { x: 360, y: 314, "text-anchor": "middle", "font-size": 12, fill: "var(--bad)" }, "⚠ 第 75 格把 AC、DC 分别排序后相除：配对的不是同一时刻");
+        out.style.opacity = 0;
+        (async () => {
+          for (let k = 0; k < 3; k++) {
+            if (!(await ctx.tween(900, (t) => heat.forEach((h, i) => { h.style.opacity = Math.sin(Math.PI * t); h.setAttribute("y", 100 - t * 30 - i * 4); })))) return;
+            out.style.opacity = Math.min(1, (k + 1) / 2);
+          }
+        })();
+      },
+    },
+    {
+      at: 78, title: "选特征：用 6 列预测交流功率", kicker: "第 78–82 格 · 建模准备",
+      html: `<p>进入预测。作者选了 6 列当线索 X：当日发电量、累计发电量、气温、组件温度、辐照度、<b>直流功率</b>；答案 y 是<b>交流功率</b>。<span data-cell="79">出处</span> 然后随机抽 20% 当测试集。<span data-cell="82">出处</span></p><p>这里有两点要想清楚：①交流功率 ≈ 直流功率 × 逆变器效率，把直流功率给模型，几乎等于把答案的“近亲”给了它；②数据按时间记录，随机切分时，测试集的时刻和训练集的时刻紧挨着，比真实“预测未来”容易得多。</p>`,
+      cells: [79, 82], highlight: ["'DC_POWER'", "AC_POWER", "train_test_split"],
+      draw(svg, ctx) {
+        const feats = ["DAILY_YIELD", "TOTAL_YIELD", "AMBIENT_TEMP", "MODULE_TEMP", "IRRADIATION", "DC_POWER"];
+        const gs = feats.map((f, i) => K.node(svg, 40, 24 + i * 46, 170, 36, f, { fs: 12, fill: f === "DC_POWER" ? "color-mix(in srgb, var(--warn) 22%, var(--panel))" : "var(--panel-2)", stroke: f === "DC_POWER" ? "var(--warn)" : "var(--line)" }));
+        const m = K.node(svg, 300, 120, 140, 70, "回归模型", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const y = K.node(svg, 530, 120, 150, 70, "AC_POWER\n（答案）", { bold: true, fill: "color-mix(in srgb, var(--good) 16%, var(--panel))", stroke: "var(--good)" });
+        const ar = feats.map((f, i) => K.arrow(svg, 210, 42 + i * 46, 298, 155, { color: f === "DC_POWER" ? "var(--warn)" : "var(--ink-3)" }));
+        K.arrow(svg, 440, 155, 528, 155);
+        const warn = K.svg(svg, "text", { x: 470, y: 250, "text-anchor": "middle", "font-size": 12, fill: "var(--warn)", "font-weight": 700 }, "DC × 效率 ≈ AC：这条线索几乎就是答案");
+        [...gs, ...ar, warn].forEach((e) => (e.style.opacity = 0));
+        (async () => {
+          for (let i = 0; i < feats.length; i++) if (!(await ctx.tween(250, (t) => { gs[i].style.opacity = t; ar[i].style.opacity = t; }))) return;
+          await ctx.wait(400); if (ctx.alive()) ctx.tween(500, (t) => (warn.style.opacity = t));
+        })();
+      },
+    },
+    {
+      at: 83, title: "三个回归模型：直线、树和森林", kicker: "第 83–89 格 · 建模",
+      html: `<p>作者训练了三个模型，都用 <code>r2_score</code> 打分（R² 越接近 1，说明预测越贴近真实值）：</p><ul class="tight"><li><b>线性回归</b>：给每条线索一个权重，加起来就是预测值。<span data-cell="85">出处</span></li><li><b>随机森林回归</b>：种很多棵决策树，每棵看一部分数据，最后取平均。<span data-cell="87">出处</span></li><li><b>决策树回归</b>：一层层提问“辐照度大于多少？”，把数据分到不同的格子，每格给一个平均值。<span data-cell="89">出处</span></li></ul><p class="callout warn" style="margin:8px 0">两处代码问题：第 89 格训练了决策树 <code>dtr</code>，打分时却用了 <code>rfr.predict</code>，所以“决策树”的分数其实是随机森林的；<code>r2_score(y_pred, y_test)</code> 把“预测”和“真实”顺序写反了，R² 不对称，算出来的数会偏离正确值。</p>`,
+      cells: [85, 87, 89], highlight: ["y_pred_dtr = rfr.predict(X_test)", "r2_score(y_pred_lr,y_test)", "RandomForestRegressor"],
+      notes: { 84: "第 84 格用 .score() 算的 R² 顺序是对的，第 85 格又用 r2_score 重算了一遍，顺序写反。" },
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 24, w: 620, h: 250 }, [0, 1], [0, 1.1], { xticks: 4, yticks: 0, xlabel: "辐照度（示意）", yfmt: (v) => v });
+        const r = K.rng(8), P = [];
+        for (let i = 0; i < 70; i++) { const x = r(); P.push([x, Math.max(0, Math.min(1.05, 0.95 * x - 0.15 * x * x + 0.1 + K.randn(r) * 0.05))]); }
+        P.forEach((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 3, fill: "var(--ink-3)", opacity: 0.6 }));
+        const line = K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0.12), x2: ax.sx(0), y2: ax.sy(0.12), stroke: "var(--c1)", "stroke-width": 2.5 });
+        const steps4 = [[0, 0.25, 0.2], [0.25, 0.5, 0.42], [0.5, 0.75, 0.62], [0.75, 1, 0.83]];
+        const tree = K.svg(svg, "path", { d: steps4.map((s, i) => (i ? "L" : "M") + ax.sx(s[0]) + "," + ax.sy(s[2]) + "L" + ax.sx(s[1]) + "," + ax.sy(s[2])).join(""), fill: "none", stroke: "var(--c2)", "stroke-width": 2.5, opacity: 0 });
+        const forest = K.svg(svg, "path", { d: pathOf(ax, Array.from({ length: 41 }, (_, i) => i / 40), (x) => 0.95 * x - 0.15 * x * x + 0.1), fill: "none", stroke: "var(--c3)", "stroke-width": 2.5, opacity: 0 });
+        const leg = [["线性回归：一条直线", "var(--c1)"], ["决策树：一级级台阶", "var(--c2)"], ["随机森林：很多台阶取平均，变平滑", "var(--c3)"]].map((l, i) => { const t = K.svg(svg, "text", { x: 70 + i * 210, y: 330, "font-size": 12, fill: l[1], "font-weight": 700 }, l[0]); t.style.opacity = 0; return t; });
+        (async () => {
+          leg[0].style.opacity = 1;
+          if (!(await ctx.tween(900, (t) => { line.setAttribute("x2", ax.sx(t)); line.setAttribute("y2", ax.sy(0.12 + 0.78 * t)); }))) return;
+          if (!(await ctx.tween(700, (t) => { tree.style.opacity = t; leg[1].style.opacity = t; }))) return;
+          await ctx.tween(900, (t) => { forest.style.opacity = t; leg[2].style.opacity = t; });
+        })();
+      },
+    },
+    {
+      at: 90, title: "抽查预测结果：误差表的陷阱", kicker: "第 90–94 格 · 结果",
+      html: `<p>作者用随机森林在测试集上预测，把“真实值、预测值、误差”排成一张表 <span data-cell="92">出处</span> <span data-cell="93">出处</span>，再筛出 <code>Error &lt;= 20</code> 的行随机展示 25 行。<span data-cell="94">出处</span></p><p>注意这个筛选条件只限制了误差的<b>上限</b>：误差 = 真实 − 预测，预测偏高很多时误差是很大的负数，同样满足 ≤ 20，会被留下；而预测偏低超过 20 的行被筛掉了。只看筛过的表，容易高估模型。正确做法是看误差的<b>绝对值</b>分布。</p>`,
+      cells: [93, 94], highlight: ["cross_checking['Error'] <= 20"],
+      draw(svg, ctx) {
+        const rows = [[512, 508], [130, 162], [740, 690], [0, 0.4], [305, 301], [620, 652], [88, 60]];
+        [[60, "真实"], [130, "预测"], [210, "误差=真实−预测"], [390, "Error ≤ 20 ?"], [540, "|误差| ≤ 20 ?"]].forEach((h) => K.svg(svg, "text", { x: h[0], y: 28, "font-size": 13, "font-weight": 700 }, h[1]));
+        K.svg(svg, "text", { x: 60, y: 326, "font-size": 12, class: "muted" }, "表中数字为示意");
+        const els = rows.map((r, i) => {
+          const e = r[0] - r[1], y = 58 + i * 36;
+          const g = K.svg(svg, "g"); g.style.opacity = 0;
+          K.svg(g, "text", { x: 60, y, "font-size": 13, "font-family": "var(--mono)" }, String(r[0]).padStart(4, " "));
+          K.svg(g, "text", { x: 130, y, "font-size": 13, "font-family": "var(--mono)" }, String(r[1]).padStart(5, " "));
+          K.svg(g, "text", { x: 210, y, "font-size": 13, "font-family": "var(--mono)", fill: Math.abs(e) > 20 ? "var(--bad)" : "var(--ink)" }, e.toFixed(1));
+          K.svg(g, "text", { x: 390, y, "font-size": 13, fill: e <= 20 ? "var(--good)" : "var(--bad)", "font-weight": 700 }, e <= 20 ? "保留" : "筛掉");
+          K.svg(g, "text", { x: 540, y, "font-size": 13, fill: Math.abs(e) <= 20 ? "var(--good)" : "var(--bad)", "font-weight": 700 }, Math.abs(e) <= 20 ? "保留" : "筛掉");
+          return g;
+        });
+        (async () => { for (const g of els) if (!(await ctx.tween(320, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      at: 95, title: "补充探索：逆变器之间、每天的累计发电量", kicker: "第 95–111 格 · 补充 EDA",
+      html: `<p>最后作者重新读一遍数据，用 Plotly 画了一组补充图：每个逆变器的平均累计发电量和平均当日发电量 <span data-cell="99">出处</span> <span data-cell="106">出处</span>，按天平均的直流功率和气温双轴图 <span data-cell="108">出处</span>，以及按周分组的当日发电量曲线。<span data-cell="110">出处</span></p><p><code>DAILY_YIELD</code> 是“当天到目前为止累计发了多少电”，所以每天从 0 开始爬升，傍晚到顶，第二天又归零，画出来像锯齿。逆变器之间柱子高低不同，可以用来找“偷懒”的那台。第 107 格还画了逆变器编号的词云，这对分析帮助不大。</p>`,
+      cells: [99, 106, 108], highlight: ["groupby('SOURCE_KEY')"],
+      draw(svg, ctx) {
+        const r = K.rng(3);
+        const vals = Array.from({ length: 10 }, (_, i) => 0.75 + r() * 0.25 - (i === 6 ? 0.3 : 0));
+        K.svg(svg, "text", { x: 30, y: 24, "font-size": 12, class: "muted" }, "各逆变器平均当日发电量（示意，第 7 台偏低）");
+        const bars = K.bars(svg, { x: 30, y: 40, w: 300, h: 230 }, vals.map((v, i) => ({ label: "#" + (i + 1), value: v, color: i === 6 ? "var(--bad)" : "var(--c1)" })), { max: 1.05, fmt: () => "" });
+        bars.forEach((b) => { b.rect.dataset.h = b.rect.getAttribute("height"); b.rect.dataset.y = b.rect.getAttribute("y"); b.rect.setAttribute("height", 0); b.rect.setAttribute("y", 270); });
+        const ax = K.axes(svg, { x: 390, y: 40, w: 300, h: 230 }, [0, 72], [0, 1.1], { xticks: 3, yticks: 0, xlabel: "小时（3 天）", xfmt: (v) => Math.round(v) });
+        K.svg(svg, "text", { x: 390, y: 24, "font-size": 12, class: "muted" }, "DAILY_YIELD：每天累计、次日归零（示意）");
+        const xs = Array.from({ length: 289 }, (_, i) => i / 4);
+        const cum = (x) => { const h = x % 24; let s = 0; for (let t = 5; t < h; t += 0.25) s += clearSky(t) * 0.25; return s / 8.2 * (1 - 0.15 * Math.floor(x / 24) % 2); };
+        const saw = K.svg(svg, "path", { d: pathOf(ax, xs, cum), fill: "none", stroke: "var(--c2)", "stroke-width": 2, "stroke-dasharray": 1600, "stroke-dashoffset": 1600 });
+        ctx.tween(1200, (t) => bars.forEach((b) => { const h = +b.rect.dataset.h * t; b.rect.setAttribute("height", h); b.rect.setAttribute("y", 270 - h); }))
+          .then((ok) => ok && ctx.tween(1800, (t) => (saw.style.strokeDashoffset = 1600 * (1 - t))));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：一天的发电曲线 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "cloud", label: "云量", min: 0, max: 90, step: 1, value: 30, fmt: (v) => v + "%" },
+      { id: "kind", label: "云的类型", value: "patchy", options: [["thin", "均匀薄云（整天都暗一点）"], ["patchy", "阵云（忽明忽暗）"], ["storm", "午后暴雨（像 06-11）"]] },
+      { id: "tamb", label: "中午气温", min: 15, max: 45, step: 1, value: 32, fmt: (v) => v + "℃" },
+      { id: "seed", label: "换一天", button: true },
+    ],
+    note: "按太阳高度算出晴天辐照度，再乘云的遮挡；组件温度 = 气温 + 辐照 × 30℃；直流功率 = 装机 1000 kW × 辐照 × (1 − 0.4%×(组件温度−25℃))。每 15 分钟算一个点，在浏览器里现场计算。",
+    render(svg, v) {
+      const ax = K.axes(svg, { x: 56, y: 16, w: 560, h: 250 }, [5, 19], [0, 1100], { xticks: 7, yticks: 4, xlabel: "时刻", ylabel: "直流功率 kW", xfmt: (x) => Math.round(x) + "点", yfmt: (y) => Math.round(y) });
+      const r = K.rng(11 + v.seed * 31);
+      const ph = [r() * 6, r() * 6, r() * 6], stormAt = 11.5 + r() * 2;
+      const c = v.cloud / 100;
+      const att = (t) => {
+        if (v.kind === "thin") return 1 - 0.75 * c;
+        if (v.kind === "patchy") { const s = 0.5 + 0.3 * Math.sin(t * 2.7 + ph[0]) + 0.2 * Math.sin(t * 6.3 + ph[1]); return K.clamp(1 - c * (s > 0.55 ? 1 : 0.15) * (0.7 + 0.3 * Math.sin(t * 11 + ph[2])), 0.05, 1); }
+        const inS = t > stormAt && t < stormAt + 2.5; return inS ? K.clamp(1 - Math.max(c, 0.5) * 1.05, 0.03, 1) : 1 - 0.2 * c;
+      };
+      let E = 0, Gsum = 0, peak = 0, prev = null, jumps = 0;
+      const clear = [], real = [];
+      hours.forEach((t) => {
+        const G0 = clearSky(t), G = G0 * att(t);
+        const tamb = v.tamb - 8 + 8 * Math.sin(Math.PI * (t - 8) / 12);
+        const tmod = tamb + G * 30;
+        const P = 1000 * G * (1 - 0.004 * (tmod - 25));
+        const P0 = 1000 * G0 * (1 - 0.004 * (tamb + G0 * 30 - 25));
+        clear.push([t, Math.max(0, P0)]); real.push([t, Math.max(0, P)]);
+        E += Math.max(0, P) * 0.25; Gsum += G * 0.25; peak = Math.max(peak, P);
+        if (prev != null) jumps += Math.abs(P - prev); prev = P;
+      });
+      const mk = (arr) => arr.map((p, i) => (i ? "L" : "M") + ax.sx(p[0]).toFixed(1) + "," + ax.sy(p[1]).toFixed(1)).join("");
+      K.svg(svg, "path", { d: mk(clear), fill: "none", stroke: "var(--ink-3)", "stroke-width": 1.5, "stroke-dasharray": "5 4" });
+      K.svg(svg, "path", { d: mk(real) + `L${ax.sx(19)},${ax.sy(0)}L${ax.sx(5)},${ax.sy(0)}Z`, fill: "var(--warn)", "fill-opacity": 0.18 });
+      K.svg(svg, "path", { d: mk(real), fill: "none", stroke: "var(--warn)", "stroke-width": 2.2 });
+      K.svg(svg, "text", { x: 70, y: 316, "font-size": 12, class: "muted" }, "虚线 = 同一天如果晴空万里；橙色 = 有云时的实际曲线；橙色面积 = 当天发电量");
+      const clearE = clear.reduce((s, p) => s + p[1] * 0.25, 0);
+      return { readout: [
+        { k: "当天辐照量（PSH）", v: Gsum.toFixed(2) + " 小时" },
+        { k: "当天发电量", v: Math.round(E).toLocaleString() + " kWh" },
+        { k: "比晴天少", v: ((1 - E / clearE) * 100).toFixed(0) + "%", color: E / clearE < 0.6 ? "var(--bad)" : "var(--ink)" },
+        { k: "波动程度（每 15 分钟变化之和）", v: Math.round(jumps).toLocaleString() + " kW", color: jumps > 4000 ? "var(--warn)" : "var(--ink)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：特征选择 + 模型 ---------- */
+  function solve(A, b) { // 高斯消元
+    const n = b.length, M = A.map((row, i) => row.concat([b[i]]));
+    for (let c = 0; c < n; c++) {
+      let p = c; for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+      [M[c], M[p]] = [M[p], M[c]];
+      if (Math.abs(M[c][c]) < 1e-12) M[c][c] = 1e-12;
+      for (let r = 0; r < n; r++) if (r !== c) { const f = M[r][c] / M[c][c]; for (let k = c; k <= n; k++) M[r][k] -= f * M[c][k]; }
+    }
+    return M.map((row, i) => row[n] / row[i]);
+  }
+  function fitLinear(X, y) {
+    const d = X[0].length + 1, A = Array.from({ length: d }, () => new Array(d).fill(0)), b = new Array(d).fill(0);
+    X.forEach((x, i) => { const z = [1].concat(x); for (let p = 0; p < d; p++) { b[p] += z[p] * y[i]; for (let q = 0; q < d; q++) A[p][q] += z[p] * z[q]; } });
+    for (let p = 1; p < d; p++) A[p][p] += 1e-6;
+    const w = solve(A, b);
+    return (x) => w[0] + x.reduce((s, v, j) => s + v * w[j + 1], 0);
+  }
+  function fitTree(X, y, idx, depth, minLeaf) {
+    const mean = idx.reduce((s, i) => s + y[i], 0) / idx.length;
+    if (depth === 0 || idx.length < 2 * minLeaf) return { v: mean };
+    let best = null;
+    for (let j = 0; j < X[0].length; j++) {
+      const s = idx.slice().sort((a, b) => X[a][j] - X[b][j]);
+      let sl = 0, sl2 = 0, st = 0, st2 = 0;
+      s.forEach((i) => { st += y[i]; st2 += y[i] * y[i]; });
+      for (let k = 0; k < s.length - 1; k++) {
+        const v = y[s[k]]; sl += v; sl2 += v * v;
+        const nl = k + 1, nr = s.length - nl;
+        if (nl < minLeaf || nr < minLeaf || X[s[k]][j] === X[s[k + 1]][j]) continue;
+        const sse = sl2 - sl * sl / nl + (st2 - sl2) - (st - sl) * (st - sl) / nr;
+        if (!best || sse < best.sse) best = { sse, j, thr: (X[s[k]][j] + X[s[k + 1]][j]) / 2 };
+      }
+    }
+    if (!best) return { v: mean };
+    const L = idx.filter((i) => X[i][best.j] <= best.thr), R = idx.filter((i) => X[i][best.j] > best.thr);
+    return { j: best.j, thr: best.thr, l: fitTree(X, y, L, depth - 1, minLeaf), r: fitTree(X, y, R, depth - 1, minLeaf) };
+  }
+  const predTree = (n, x) => (n.l ? predTree(x[n.j] <= n.thr ? n.l : n.r, x) : n.v);
+  function r2(yt, yp) { const m = yt.reduce((s, v) => s + v, 0) / yt.length; let ss = 0, st = 0; yt.forEach((v, i) => { ss += (v - yp[i]) ** 2; st += (v - m) ** 2; }); return 1 - ss / st; }
+
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "fs", label: "给模型的线索", value: "g", options: [["g", "只用辐照度"], ["gt", "辐照度 + 组件温度"], ["gtd", "再加直流功率 DC（作者的做法）"]] },
+      { id: "model", label: "模型", value: "tree", options: [["lin", "线性回归"], ["tree", "决策树回归"]] },
+      { id: "depth", label: "决策树深度（只对决策树有效）", min: 1, max: 8, step: 1, value: 4 },
+      { id: "split", label: "怎么切测试集", value: "rand", options: [["rand", "随机抽 20%（作者的做法）"], ["time", "最后 7 天当测试集"]] },
+      { id: "seed", label: "换一批模拟数据", button: true },
+    ],
+    note: "模拟 34 天、每天 9 点到 17 点每 30 分钟一条记录。组件会慢慢变脏（每天发电能力降一点），偶尔有逆变器小故障。交流功率 = 直流功率 × 效率。模型在浏览器里现场训练，R² 用正确顺序 r2(真实, 预测) 计算，同时给出作者写反顺序时的数值作对比。",
+    render(svg, v) {
+      const r = K.rng(500 + v.seed * 13), D = [];
+      for (let d = 0; d < 34; d++) for (let t = 9; t <= 17; t += 0.5) {
+        const G = clearSky(t) * K.clamp(1 - 0.6 * Math.max(0, K.randn(r) * 0.4), 0.1, 1);
+        const tmod = 28 + G * 30 + K.randn(r) * 2;
+        const soil = 1 - 0.006 * d, fault = r() < 0.04 ? 0.6 : 1;
+        const dc = 1000 * G * (1 - 0.004 * (tmod - 25)) * soil * fault * (1 + K.randn(r) * 0.03);
+        const eff = 0.965 - 0.04 * Math.exp(-dc / 120);
+        D.push({ d, G, tmod, dc, ac: dc * eff });
+      }
+      const feat = (o) => v.fs === "g" ? [o.G] : v.fs === "gt" ? [o.G, o.tmod] : [o.G, o.tmod, o.dc];
+      let tr, te;
+      if (v.split === "time") { tr = D.filter((o) => o.d < 27); te = D.filter((o) => o.d >= 27); }
+      else { const rr = K.rng(9 + v.seed), sh = D.slice().sort(() => rr() - 0.5); const n = Math.round(D.length * 0.8); tr = sh.slice(0, n); te = sh.slice(n); }
+      const Xtr = tr.map(feat), ytr = tr.map((o) => o.ac), Xte = te.map(feat), yte = te.map((o) => o.ac);
+      let f;
+      if (v.model === "lin") f = fitLinear(Xtr, ytr);
+      else { const tree = fitTree(Xtr, ytr, Xtr.map((_, i) => i), v.depth, 4); f = (x) => predTree(tree, x); }
+      const yp = Xte.map(f), ypTr = Xtr.map(f);
+      const ax = K.axes(svg, { x: 60, y: 16, w: 300, h: 290 }, [0, 1050], [0, 1050], { xticks: 3, yticks: 3, xlabel: "真实交流功率 kW", ylabel: "预测 kW", xfmt: (x) => Math.round(x), yfmt: (y) => Math.round(y) });
+      K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0), x2: ax.sx(1050), y2: ax.sy(1050), stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+      yte.forEach((y, i) => K.svg(svg, "circle", { cx: ax.sx(y), cy: ax.sy(K.clamp(yp[i], 0, 1050)), r: 2.8, fill: "var(--c1)", opacity: 0.6 }));
+      // 右：误差随日期
+      const bx = K.axes(svg, { x: 420, y: 16, w: 200, h: 290 }, [0, 34], [-300, 300], { xticks: 2, yticks: 2, xlabel: "第几天", xfmt: (x) => Math.round(x), yfmt: (y) => Math.round(y) });
+      K.svg(svg, "text", { x: 520, y: 30, "text-anchor": "middle", "font-size": 11, class: "muted" }, "测试集误差（真实−预测）");
+      te.forEach((o, i) => K.svg(svg, "circle", { cx: bx.sx(o.d + 0.5), cy: bx.sy(K.clamp(yte[i] - yp[i], -300, 300)), r: 2.2, fill: "var(--c6)", opacity: 0.6 }));
+      K.svg(svg, "line", { x1: bx.sx(0), y1: bx.sy(0), x2: bx.sx(34), y2: bx.sy(0), stroke: "var(--ink-3)" });
+      K.svg(svg, "text", { x: 60, y: 350, "font-size": 12, class: "muted" }, "左：每个点是测试集的一条记录，越靠近虚线越准。");
+      const R2 = r2(yte, yp), R2w = r2(yp, yte), R2tr = r2(ytr, ypTr);
+      return { readout: [
+        { k: "测试集 R²（正确顺序）", v: R2.toFixed(3), color: R2 > 0.9 ? "var(--good)" : R2 > 0.6 ? "var(--ink)" : "var(--bad)" },
+        { k: "训练集 R²", v: R2tr.toFixed(3) },
+        { k: "作者写法 r2(预测, 真实)", v: R2w.toFixed(3), color: "var(--ink-3)" },
+        { k: "测试集条数", v: String(te.length) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

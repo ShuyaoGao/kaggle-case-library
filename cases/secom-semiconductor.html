@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>半导体良率预测</title>
+<meta name="description" content="Kaggle 案例拆解：UCI SECOM 半导体产线数据，1567 片、591 个传感器、只有 104 片不合格。删高相关列、欠采样、SMOTE、PCA、异常检测——以及一份课程作业里值得逐条挑出来的错误。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格数据 · 高维不平衡二分类 · 良率分析</div>
+  <h1>半导体产线良率：591 个传感器里，找出不合格的那 6.6%</h1>
+  <p class="en">FMST Semiconductor manufacturing project</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">缺失值填 0</span><span class="tag method">删除高相关特征</span><span class="tag method">随机欠采样</span><span class="tag method">SMOTE</span>
+    <span class="tag method">XGBoost / 随机森林 / 逻辑回归 / Lasso</span><span class="tag method">PCA</span><span class="tag method">孤立森林 / LOF / 椭圆包络 / 单类 SVM</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Old Monk（saurabhbagchi）</b></span>
+    <span>Kaggle 点赞 <b>461</b>（2026-11 抓取）</span>
+    <span>数据集 <b>paresh2047/uci-semcom</b></span>
+    <span><a href="https://www.kaggle.com/code/saurabhbagchi/fmst-semiconductor-manufacturing-project" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">1567 个产品、每个 591 路传感器信号</div><p>半导体生产线上一直在监控大量信号，每一行是一个生产单元的测量值和它在厂内测试的结果。<span data-cell="2">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这个产品测试是合格（−1）还是不合格（1）</div><p>不合格只占 6.6%。<span data-cell="13">出处</span> 另一个目标：591 路信号是不是都需要，哪些最关键。</p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">什么都试一遍</div><p>删高相关列 → 原始 / 欠采样 / 过采样 / PCA 四种数据 × XGBoost、随机森林、逻辑回归、Lasso；再加四种异常检测算法，最后比召回率。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">作者：LOF 召回率最高（约 88%）</div><p>作者结论：局部离群因子 LOF 召回率最好，单类 SVM 最差。<span data-cell="188">出处</span> 但读代码会发现，异常检测的标签方向是反的（见第 13 章），这个结论站不住。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>UCI SECOM</b>（半导体制造过程数据，2008 年捐赠给 UCI 机器学习库）。以下数字来自 Kaggle 数据集说明和作者第 2、43、44 格。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">产品条数（行）</div><div class="v">1,567</div></div>
+        <div class="stat-tile"><div class="k">传感器特征（列）</div><div class="v">591</div></div>
+        <div class="stat-tile"><div class="k">不合格 / 合格</div><div class="v" style="color:var(--c6)">104 / 1,463</div></div>
+        <div class="stat-tile"><div class="k">删高相关列后剩</div><div class="v">306 列</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">行列数与不合格数见数据集说明和 <span data-cell="2">第 2 格</span>；104 / 1463 见 <span data-cell="43">第 43 格</span>、<span data-cell="44">第 44 格</span>；306 见 <span data-cell="20">第 20 格</span>代码。数据集说明：有缺失值；特征是“工程师手里信号的一部分”，含有用信息、无关信息和噪声。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>Time</code></td><td>这次测试的时间戳，作者删掉</td><td>时间</td></tr>
+        <tr><td><code>0</code> … <code>589</code></td><td>各路传感器 / 测量点的读数，<b>名字匿名</b>，只有编号；有不少缺失</td><td>数值</td></tr>
+        <tr><td><code>Pass/Fail</code></td><td><b>要预测的答案</b>：−1 = 合格，1 = 不合格（厂内产线测试结果）</td><td>二分类</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">注意：标签用的是 −1 / 1，不是常见的 0 / 1。作者第 11 格注释写成了 <code>[0, 1, 2]</code>，后面多处代码也因为这个约定出错。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="17">
+    <h3>动手试试 A · 相关性阈值：删掉“重复”的传感器，删多少合适 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="179">
+    <h3>动手试试 B · 异常检测的标签方向：−1 到底是谁 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论与数字</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>原始数据上 XGBoost 准确率 94.5%，但不合格品只认对 1 个；随机森林同样 94.5%，一个都没认对</td><td><span data-cell="27">第 27 格</span> <span data-cell="32">第 32 格</span></td></tr>
+        <tr><td>逻辑回归准确率 88%，认对 4 个不合格品，作者认为比前两个更可取</td><td><span data-cell="37">第 37 格</span></td></tr>
+        <tr><td>作者写在代码里的召回率（%）：原始数据 孤立森林 84.4、LOF 87.9、椭圆包络 81.3、逻辑回归 9.4、XGBoost/随机森林/Lasso 0</td><td><span data-cell="182">第 182 格</span></td></tr>
+        <tr><td>欠采样与过采样两张图用了<b>完全相同</b>的一组数：XGBoost 74.3、网格搜索 77.1、随机森林 71.4、逻辑回归 77.1、Lasso 71.4、单类 SVM 17.1</td><td><span data-cell="183">第 183 格</span> <span data-cell="184">第 184 格</span></td></tr>
+        <tr><td>PCA 数据：XGBoost 54.5、网格搜索 63.6、随机森林 48.5、逻辑回归 69.7、Lasso 51.5</td><td><span data-cell="185">第 185 格</span></td></tr>
+        <tr><td>LOF 召回率最高（88%），单类 SVM 最差；PCA 没有帮助；准确率与召回率此消彼长；第 72、74、45 号特征最重要</td><td><span data-cell="188">第 188 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">这些数字是作者手抄进代码或写在文字里的，源码没有运行输出可以核对。下面列出的问题会让其中不少数字失去意义，引用时务必小心。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">读代码发现的问题（原文未改）</h3>
+      <ol class="tight">
+        <li><b>异常检测标签方向反了</b>：孤立森林等算法输出 −1 = 异常、1 = 正常；数据里 −1 = 合格、1 = 不合格。直接拿来比，等于把“被判正常”当成“抓到不合格”。约 93% 的样本本来就会被判正常，所以“召回率 84–88%”很可能来自这个错位 <span data-cell="177">第 177 格</span> <span data-cell="182">第 182 格</span></li>
+        <li><b>SMOTE 做了却没用</b>：第 66 格生成了 <code>x_resample</code>，第 67 格切分时用的还是原始 <code>x, y</code> <span data-cell="67">第 67 格</span>；过采样那张召回率图又和欠采样完全一样</li>
+        <li><b>欠采样抽错了行</b>：<code>np.random.choice(1463, …)</code> 抽的是 0–1462 的序号，不是合格品的行号，还允许重复 <span data-cell="45">第 45 格</span></li>
+        <li><b>欠采样后再切测试集</b>：测试集变成 50:50，和真实的 6.6% 完全不同</li>
+        <li><b>XGBoost 参数写错</b>：<code>scale_pos_weights</code> 多了个 s 不会生效，权重算式 <code>(y==0)</code> 在 −1/1 标签下恒为 0；<code>cv</code> 也不是 XGBoost 的参数 <span data-cell="59">第 59 格</span></li>
+        <li><b>Lasso 当分类器</b>：回归输出取符号当类别，<code>lasso.score</code> 返回的是 R² 而不是准确率 <span data-cell="40">第 40 格</span></li>
+        <li><b>缺失值一律填 0</b>：0 可能是某个传感器的正常读数 <span data-cell="9">第 9 格</span></li>
+        <li><b>特征重要性对错了名字</b>：模型在 130 维 PCA 数据上训练，却拿原始列名去对应 <span data-cell="187">第 187 格</span></li>
+        <li>文字与数字不一致：“13 个里检出 11 个，召回率 85%”与代码里 LOF 的 87.9 对不上 <span data-cell="105">第 105 格</span></li>
+      </ol>
+    </div>
+  </div>
+  <div class="panel pad" style="margin-top:14px">
+    <h3 style="margin-top:0">这套问题能用在哪</h3>
+    <ul class="tight">
+      <li><b>能预测：</b>晶圆或芯片在出厂测试前，根据工艺过程中的几百路信号提前判断“可能不合格”，并找出最影响良率的几个工艺参数。</li>
+      <li><b>同类问题：</b>面板、锂电池、汽车零部件产线的良率分析；化工、制药批次质量预测——共同点是<b>特征多、样本少、不良品更少</b>。</li>
+      <li><b>可迁移的正确做法：</b>先锁住按真实比例切出的测试集 → 缺失值按传感器含义填补 → 只在训练集上做重采样 → 用召回率、精确率、平衡错误率（数据集说明用的就是 BER）评估 → 检查每个库函数的标签约定。</li>
+    </ul>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>孤立森林把“异常”标成 −1，而数据把“合格”标成 −1。你怎么在写代码之前就发现这种约定冲突？</li>
+      <li>欠采样后再切测试集，测试集变成一半合格一半不合格。用它算出的召回率、准确率，能代表产线上的真实表现吗？</li>
+      <li>传感器读数缺失，作者统一填 0，理由是“没测到就是没信号”。你还能想到哪些更合理的填法？</li>
+      <li>591 路信号里删掉了 285 路“高相关”的。工程师可能更想知道“哪几路信号决定良率”，删相关列会不会把真正的原因删掉？</li>
+      <li>这份 notebook 有 460 多个赞，却有这么多错误。点赞数能说明什么、不能说明什么？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Old Monk（Kaggle 用户 saurabhbagchi），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：UCI SECOM（M. McCann, A. Johnston, 2008）；Kaggle 版本 paresh2047/uci-semcom。
+</footer>
+</main>
+
+<script src="nb/secom-semiconductor.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* 混淆矩阵小组件 */
+  function cmat(svg, x, y, M, labels, title) {
+    K.svg(svg, "text", { x: x + 100, y: y - 8, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, title);
+    M.forEach((row, i) => row.forEach((v, j) => { K.node(svg, x + j * 100, y + i * 60, 96, 56, String(v), { fill: i === j ? "color-mix(in srgb, var(--good) 18%, var(--panel))" : "color-mix(in srgb, var(--bad) 14%, var(--panel))", fs: 18, bold: true }); }));
+    labels.forEach((l, i) => { K.svg(svg, "text", { x: x - 6, y: y + 34 + i * 60, "text-anchor": "end", "font-size": 11 }, "真" + l); K.svg(svg, "text", { x: x + 48 + i * 100, y: y + 136, "text-anchor": "middle", "font-size": 11 }, "判" + l); });
+  }
+
+  const steps = [
+    {
+      title: "半导体良率与 591 路传感器", kicker: "第 0–4 格 · 背景", at: 0, cells: [2], highlight: ["yield", "1567 examples each with 591 features"],
+      html: `<p>芯片是在硅<b>晶圆</b>上经过几百道工序做出来的：沉积、光刻、刻蚀、掺杂……每道工序都有大量传感器在监控温度、压力、气体流量等。</p><p><b>良率</b> = 合格产品数 ÷ 总产品数。良率差一个百分点，对大工厂就是巨大的损失。作者的目标：①用这些信号预测产品能不能通过测试；②看看是不是所有信号都需要。<span data-cell="2">出处</span></p>`,
+      draw(svg, ctx) {
+        const steps = ["沉积", "光刻", "刻蚀", "掺杂", "…", "测试"];
+        steps.forEach((s, i) => { const g = K.node(svg, 20 + i * 115, 40, 100, 44, s, { bold: i === 5 }); g.style.opacity = 0; ctx.wait(i * 200).then((ok) => ok && (g.style.opacity = 1)); if (i < 5) K.arrow(svg, 120 + i * 115, 62, 134 + i * 115, 62); });
+        const r = K.rng(2), sensors = [];
+        for (let i = 0; i < 120; i++) { const c = K.svg(svg, "circle", { cx: 30 + (i % 30) * 22, cy: 130 + Math.floor(i / 30) * 22, r: 5, fill: "var(--c1)", opacity: 0.15 }); sensors.push(c); }
+        K.svg(svg, "text", { x: 20, y: 240, "font-size": 13 }, "每个点代表一路传感器信号（示意画了 120 个，真实有 591 个）");
+        const wafer = []; for (let i = 0; i < 100; i++) { const x = i % 10, y = Math.floor(i / 10); wafer.push(K.svg(svg, "rect", { x: 520 + x * 14, y: 255 + y * 0 + 0, width: 0, height: 0, fill: "var(--good)" })); }
+        K.svg(svg, "text", { x: 20, y: 290, "font-size": 14, "font-weight": 700 }, "良率 = 合格 ÷ 总数");
+        K.svg(svg, "text", { x: 20, y: 314, "font-size": 13, class: "muted" }, "本数据：1567 个里 104 个不合格 → 良率约 93.4%");
+        ctx.tween(2000, (t) => sensors.forEach((s, i) => (s.style.opacity = 0.15 + 0.7 * Math.max(0, Math.sin(t * 8 + i * 0.7)))));
+      },
+    },
+    {
+      title: "读数据：缺失值一律填 0", kicker: "第 5–9 格 · 读入与缺失值", cells: [5, 6, 8, 9], highlight: ["data.replace(np.NaN, 0)"],
+      html: `<p>读入 CSV 后发现有很多缺失值（NaN）。作者的处理：<b>全部填 0</b>。理由写在注释里：“值不存在说明没测或没算，就当作没有信号”，所以不用均值、中位数。</p><p class="callout">问题：很多传感器的正常读数本身就不是 0（比如温度、压力），填 0 等于凭空造了一个极端值；而且“这个传感器这次没测”本身也可能是一个线索，可以单独加一列“是否缺失”。</p>`,
+      draw(svg, ctx) {
+        const cols = ["s0", "s1", "s2", "s3", "s4", "s5"], vals = [[3030, 2564, null, 1411, null, 100], [3095, null, 2198, 1081, 1.3, 100], [2932, 2559, 2186, null, 1.4, null], [null, 2479, 2199, 909, 1.3, 100]];
+        cols.forEach((c, j) => K.svg(svg, "text", { x: 90 + j * 100, y: 40, "text-anchor": "middle", "font-size": 13, "font-weight": 700, "font-family": "var(--mono)" }, c));
+        const nan = [];
+        vals.forEach((row, i) => row.forEach((v, j) => { K.svg(svg, "rect", { x: 45 + j * 100, y: 52 + i * 46, width: 90, height: 38, rx: 4, fill: "var(--panel-2)", stroke: v == null ? "var(--warn)" : "var(--line)" }); const t = K.svg(svg, "text", { x: 90 + j * 100, y: 76 + i * 46, "text-anchor": "middle", "font-size": 13, "font-family": "var(--mono)", fill: v == null ? "var(--warn)" : "var(--ink)" }, v == null ? "NaN" : v); if (v == null) nan.push(t); }));
+        K.svg(svg, "text", { x: 45, y: 260, "font-size": 12, class: "muted" }, "数值为示意（传感器名称在原数据里只有编号）");
+        const note = K.svg(svg, "text", { x: 45, y: 300, "font-size": 13, fill: "var(--bad)" }, "");
+        ctx.wait(900).then((ok) => ok && ctx.tween(600, (t) => nan.forEach((e) => { e.textContent = t > 0.5 ? "0" : "NaN"; K.set(e, { fill: t > 0.5 ? "var(--bad)" : "var(--warn)" }); }))).then((ok) => { if (ok) note.textContent = "温度一列突然出现 0：模型会以为这是一个极端读数"; });
+      },
+    },
+    {
+      title: "可视化：只有 6.6% 不合格", kicker: "第 10–14 格 · 探索", cells: [10, 11, 13, 14], highlight: ["6.6% failures", "[0, 1, 2]"],
+      html: `<p>作者画了前几个传感器的分布、合格/不合格的饼图和相关性热力图。最重要的一句在注释里：<b>只有 6.6% 不合格，93.4% 合格</b>，类别高度不平衡。<span data-cell="13">出处</span></p><p>注意第 11 格注释写的标签取值是 <code>[0, 1, 2]</code>，实际是 −1 和 1。这个小笔误预示了后面一连串和标签约定有关的错误。</p>`,
+      draw(svg, ctx) {
+        const n = 150, fail = Math.round(n * 0.066);
+        const dots = []; for (let i = 0; i < n; i++) dots.push(K.svg(svg, "rect", { x: 30 + (i % 25) * 16, y: 40 + Math.floor(i / 25) * 16, width: 12, height: 12, rx: 2, fill: "var(--ink-3)", opacity: 0 }));
+        const r = K.rng(5), failIdx = new Set(); while (failIdx.size < fail) failIdx.add(Math.floor(r() * n));
+        K.svg(svg, "text", { x: 470, y: 80, "font-size": 15, "font-weight": 700 }, "合格 93.4%");
+        K.svg(svg, "text", { x: 470, y: 106, "font-size": 15, "font-weight": 700, fill: "var(--c6)" }, "不合格 6.6%");
+        K.svg(svg, "text", { x: 470, y: 150, "font-size": 13 }, "全猜“合格”：");
+        K.svg(svg, "text", { x: 470, y: 176, "font-size": 20, "font-weight": 700, fill: "var(--warn)" }, "准确率 93.4%");
+        K.svg(svg, "text", { x: 470, y: 200, "font-size": 13 }, "一个不良品也抓不到");
+        K.svg(svg, "text", { x: 30, y: 170, "font-size": 12, class: "muted" }, "每格 = 一个产品（示意 150 个）");
+        ctx.tween(1500, (t) => dots.forEach((d, i) => { d.style.opacity = i < t * n ? 0.8 : 0; if (failIdx.has(i)) K.set(d, { fill: "var(--c6)" }); }));
+      },
+    },
+    {
+      title: "删除高相关列、切分、标准化", kicker: "第 15–22 格 · 预处理", cells: [15, 16, 17, 18, 20, 21, 22], highlight: ["remove_collinear_features(data,0.70)", "iloc[:,:306]", "test_size = 0.3"],
+      html: `<p>很多传感器测的是几乎同一件事（比如同一个腔体的两个温度计），它们高度相关，信息重复。作者写了一个函数：两两比较，<b>相关系数绝对值 ≥ 0.70</b> 的一对里删掉一个。删完、再去掉 Time 列，剩下 <b>306 列</b>特征。</p><p>然后按 7:3 随机切分训练集和测试集，再用 StandardScaler 标准化（在训练集上拟合，测试集只做变换，这一步是对的）。</p>`,
+      draw(svg, ctx) {
+        const N = 14, r = K.rng(9), grp = Array.from({ length: N }, (_, i) => Math.floor(i / 3.5));
+        const C = []; for (let i = 0; i < N; i++) { C.push([]); for (let j = 0; j < N; j++) C[i].push(i === j ? 1 : grp[i] === grp[j] ? 0.75 + 0.2 * r() : (r() - 0.5) * 0.5); }
+        for (let i = 0; i < N; i++) for (let j = 0; j < i; j++) C[i][j] = C[j][i];
+        const cs = 18, x0 = 40, y0 = 30, cells = [];
+        for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) cells.push({ i, j, e: K.svg(svg, "rect", { x: x0 + j * cs, y: y0 + i * cs, width: cs - 1, height: cs - 1, fill: K.heat(C[i][j], true) }) });
+        K.svg(svg, "text", { x: 40, y: 300, "font-size": 12, class: "muted" }, "相关矩阵（示意，14 路传感器）");
+        const keep = []; const drop = new Set(); for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) if (Math.abs(C[i][j]) >= 0.7) drop.add(j);
+        K.svg(svg, "text", { x: 340, y: 60, "font-size": 13 }, "|相关| ≥ 0.70 的一对里删一个");
+        const cnt = K.svg(svg, "text", { x: 340, y: 100, "font-size": 22, "font-weight": 700 }, "14 列");
+        K.svg(svg, "text", { x: 340, y: 150, "font-size": 13 }, "原数据：591 列 → 删后 + 去 Time → 306 列");
+        ctx.wait(800).then((ok) => ok && ctx.tween(1200, (t) => { cells.forEach((c) => { if (drop.has(c.i) || drop.has(c.j)) c.e.style.opacity = 1 - 0.85 * t; }); cnt.textContent = Math.round(14 - drop.size * t) + " 列"; }));
+      },
+    },
+    {
+      title: "原始数据上的模型：94.5% 准确率的假象", kicker: "第 23–41 格 · 第一轮建模", cells: [23, 24, 27, 29, 32, 34, 37, 38, 39, 40], highlight: ["94.5% accuracy", "4 observation classified correctly", "np.sign", "lasso.score"],
+      html: `<p>在不平衡的原始数据上，作者训练了 XGBoost、随机森林、逻辑回归和 Lasso：</p><ul class="tight"><li><b>XGBoost</b>：准确率 94.5%，不合格品只认对 1 个 <span data-cell="27">出处</span></li><li><b>随机森林</b>：准确率 94.5%，一个都没认对 <span data-cell="32">出处</span></li><li><b>逻辑回归</b>：准确率 88%，认对 4 个。作者认为它虽然准确率低，但更可取 <span data-cell="37">出处</span></li></ul><p>这正是“准确率陷阱”。另外，<b>Lasso</b> 是回归模型，作者把它的输出取正负号当作类别，而 <code>lasso.score</code> 返回的是 R²，不是准确率。</p>`,
+      draw(svg, ctx) {
+        const data = [["XGBoost", 94.5, 1], ["随机森林", 94.5, 0], ["逻辑回归", 88, 4]];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "准确率（作者文字）");
+        K.svg(svg, "text", { x: 400, y: 30, "font-size": 13, "font-weight": 700 }, "认对的不合格品个数（作者文字）");
+        const els = data.map((d, i) => { K.svg(svg, "text", { x: 30, y: 82 + i * 70, "font-size": 14 }, d[0]); return [K.svg(svg, "rect", { x: 120, y: 66 + i * 70, width: 0, height: 24, rx: 3, fill: "var(--c1)" }), K.svg(svg, "rect", { x: 400, y: 66 + i * 70, width: 0, height: 24, rx: 3, fill: "var(--c6)" }), K.svg(svg, "text", { x: 0, y: 84 + i * 70, "font-size": 13 }, ""), K.svg(svg, "text", { x: 0, y: 84 + i * 70, "font-size": 13 }, "")]; });
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 13, fill: "var(--warn)" }, "准确率最高的两个模型，几乎抓不到不合格品");
+        ctx.tween(1500, (t) => els.forEach((e, i) => { const a = (data[i][1] - 80) * 12 * t, b = data[i][2] * 50 * t; e[0].setAttribute("width", a); e[1].setAttribute("width", b); e[2].setAttribute("x", 126 + a); e[2].textContent = (80 + (data[i][1] - 80) * t).toFixed(1) + "%"; e[3].setAttribute("x", 406 + b); e[3].textContent = Math.round(data[i][2] * t) + " 个"; }));
+        K.svg(svg, "text", { x: 120, y: 280, "font-size": 11, class: "muted" }, "（准确率条从 80% 起画）");
+      },
+    },
+    {
+      title: "随机欠采样到 104 : 104", kicker: "第 42–50 格 · 欠采样", cells: [42, 43, 44, 45, 46, 48, 49], highlight: ["np.random.choice(no_normal_indices", "replace = True", "test_size = 0.3"],
+      html: `<p>不合格品 104 个、合格品 1463 个。作者想从合格品里随机挑 104 个，凑成 50:50 的小数据集。</p><p class="callout">这里有三个问题：①<code>np.random.choice(1463, 104)</code> 抽出的是 0 到 1462 之间的<b>数字</b>，被当成行号用，而这些行里也有不合格品；②<code>replace=True</code> 允许同一行被抽两次；③先欠采样、再切测试集，<b>测试集也是 50:50</b>，和真实产线的 6.6% 完全不同，在上面算出来的召回率、准确率都不能代表上线后的表现。</p>`,
+      draw(svg, ctx) {
+        const n = 120, r = K.rng(12), fails = new Set(); while (fails.size < 8) fails.add(Math.floor(r() * n));
+        const cells = []; for (let i = 0; i < n; i++) cells.push(K.svg(svg, "rect", { x: 20 + (i % 20) * 18, y: 40 + Math.floor(i / 20) * 18, width: 14, height: 14, rx: 2, fill: fails.has(i) ? "var(--c6)" : "var(--ink-3)", opacity: 0.6 }));
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 12 }, "每格一个产品，按行号排列（示意）");
+        K.svg(svg, "text", { x: 420, y: 60, "font-size": 13, "font-weight": 700 }, "作者想要：从合格品里抽");
+        K.svg(svg, "text", { x: 420, y: 84, "font-size": 13, "font-weight": 700, fill: "var(--bad)" }, "代码实际：从 0…N 的序号里抽");
+        const note = K.svg(svg, "text", { x: 420, y: 140, "font-size": 13 }, "");
+        (async () => {
+          let hitFail = 0, dup = 0; const seen = new Set();
+          for (let k = 0; k < 10; k++) { const i = Math.floor(r() * 100); const c = cells[i]; if (fails.has(i)) hitFail++; if (seen.has(i)) dup++; seen.add(i);
+            K.set(c, { stroke: "var(--warn)", "stroke-width": 3 }); c.style.opacity = 1; note.textContent = `抽到不合格品 ${hitFail} 次，重复 ${dup} 次`; if (!(await ctx.wait(300))) return; }
+        })();
+        K.svg(svg, "text", { x: 420, y: 200, "font-size": 12, class: "muted" }, "橙框 = 被抽中的“合格品”");
+      },
+    },
+    {
+      title: "XGBoost 网格搜索：一个多出来的 s", kicker: "第 51–64 格 · 调参", cells: [51, 52, 55, 57, 59, 62, 64], highlight: ["scale_pos_weights", "(y == 0)", "'cv' : [2,4,6,8,10]", "scoring = 'accuracy'"],
+      html: `<p>在欠采样数据上，作者训练 XGBoost（<b>梯度提升</b>：一棵接一棵地种浅树，每棵新树专门修正前面的错误），并用网格搜索挑 <code>max_depth</code>。</p><p class="callout">几处代码问题：①网格里放了 <code>cv</code>，这不是 XGBoost 的参数；②类别权重写成 <code>scale_pos_weights</code>（正确是 <code>scale_pos_weight</code>），不会生效；③权重算式 <code>(y == 0).sum() / (y == -1).sum()</code> 在 −1/1 标签下分子恒为 0；④第 55 格把在欠采样数据上训练的模型拿到原始测试集上算准确率，两边的缩放器也不同。</p>`,
+      draw(svg, ctx) {
+        const code = "XGBClassifier(max_depth=1, scale_pos_weights=w, cv=2)";
+        const t = K.svg(svg, "text", { x: 30, y: 70, "font-size": 16, "font-family": "var(--mono)" }, "");
+        const marks = [["scale_pos_weights", "多了个 s：被当成未知参数", 160], ["cv=2", "XGBoost 没有这个参数", 230]];
+        K.svg(svg, "text", { x: 30, y: 140, "font-size": 13 }, "w = (y == 0).sum() / (y == −1).sum()");
+        K.svg(svg, "text", { x: 30, y: 164, "font-size": 13, fill: "var(--bad)" }, "标签只有 −1 和 1 → 分子 = 0 → w = 0");
+        (async () => {
+          for (let i = 1; i <= code.length; i++) { t.textContent = code.slice(0, i); if (!(await ctx.wait(25))) return; }
+          for (const [w, msg, y] of marks) { const i = code.indexOf(w); K.svg(svg, "text", { x: 30, y: y + 20, "font-size": 13, fill: "var(--warn)" }, "⚠ " + w + "：" + msg); if (!(await ctx.wait(500))) return; }
+          K.svg(svg, "text", { x: 30, y: 310, "font-size": 12, class: "muted" }, "结果：这个模型其实就是一个 max_depth=1 的普通 XGBoost");
+        })();
+      },
+    },
+    {
+      title: "SMOTE：做了，却没用上", kicker: "第 65–68 格 · 过采样", cells: [65, 66, 67, 68], highlight: ["x_resample, y_resample", "train_test_split(x, y"],
+      html: `<p><b>SMOTE</b> 是另一种处理不平衡的方法：在两个相近的不合格品之间插值，“造”出新的不合格品，而不必扔掉合格品。</p><p>作者在第 66 格调用 SMOTE 得到了 <code>x_resample, y_resample</code>，但第 67 格切分训练/测试时用的仍然是原来的 <code>x, y</code>，<b>合成样本根本没进入训练</b>。所以后面所有“过采样”模型其实都是在没过采样的数据上训练的。（而且这时的 <code>x, y</code> 还是上一节欠采样后的小数据集。）</p>`,
+      draw(svg, ctx) {
+        const a = K.node(svg, 30, 60, 200, 60, "x, y\n（欠采样后的 208 行）", {}), b = K.node(svg, 300, 20, 200, 60, "x_resample, y_resample\nSMOTE 合成后", { fill: "color-mix(in srgb, var(--c3) 16%, var(--panel))", stroke: "var(--c3)" }), c = K.node(svg, 300, 140, 200, 60, "train_test_split(x, y)", { bold: true });
+        K.arrow(svg, 230, 80, 298, 55); const ar = K.arrow(svg, 230, 100, 298, 170, { color: "var(--bad)" });
+        K.svg(svg, "text", { x: 520, y: 55, "font-size": 13, fill: "var(--c3)" }, "← 造好了，没人用");
+        K.svg(svg, "text", { x: 520, y: 175, "font-size": 13, fill: "var(--bad)" }, "← 实际用的还是原数据");
+        const ghost = K.svg(svg, "text", { x: 400, y: 110, "font-size": 30, "text-anchor": "middle" }, "💤"); ghost.style.opacity = 0;
+        ctx.wait(700).then((ok) => ok && ctx.tween(600, (t) => (ghost.style.opacity = t)));
+        K.svg(svg, "text", { x: 30, y: 280, "font-size": 13 }, "第 183、184 格“欠采样”和“过采样”两张召回率图的数字一模一样，也印证了这一点。");
+      },
+    },
+    {
+      title: "各种模型轮番上阵：随机森林、逻辑回归、Lasso", kicker: "第 69–105 格 · 第二轮建模", cells: [69, 71, 73, 77, 78, 81, 82, 85, 86, 90, 91, 95, 99, 100, 105], highlight: ["RandomForestClassifier", "LogisticRegression", "np.sign(y_pred)", "11 defected items out of 13"],
+      html: `<p>作者在“过采样”（其实没过采样）和欠采样数据上，依次训练 XGBoost、<b>随机森林</b>（很多棵决策树投票）、<b>逻辑回归</b>（给每路信号打分加总，过线就判不合格）和 <b>Lasso</b>（带“瘦身”惩罚的线性回归，会把不重要的系数压成 0），每个都画混淆矩阵。</p><p>第 105 格写着“局部离群因子成功检出 13 个中的 11 个，召回率 85%”，但这段文字出现在 LOF 的代码（第 179 格）之前，与第 182 格代码里的 87.9 也对不上。</p>`,
+      draw(svg, ctx) {
+        const models = ["XGBoost", "随机森林", "逻辑回归", "Lasso"], data = ["原始", "欠采样", "过采样*", "PCA"];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "作者试过的组合（* 过采样实际没生效）");
+        data.forEach((d, j) => K.svg(svg, "text", { x: 200 + j * 120, y: 62, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, d));
+        const cells = [];
+        models.forEach((m, i) => { K.svg(svg, "text", { x: 30, y: 98 + i * 50, "font-size": 13 }, m); data.forEach((d, j) => { const c = K.svg(svg, "rect", { x: 150 + j * 120, y: 78 + i * 50, width: 100, height: 34, rx: 5, fill: j === 2 ? "var(--warn)" : "var(--c1)", opacity: 0 }); cells.push(c); }); });
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12, class: "muted" }, "每个格子 = 一次“训练 + 画混淆矩阵”，共十几次");
+        (async () => { for (const c of cells) if (!(await ctx.tween(110, (t) => (c.style.opacity = 0.55 * t)))) return; })();
+      },
+    },
+    {
+      title: "单类 SVM：只学“合格品长什么样”", kicker: "第 106–115 格 · 单类分类", cells: [106, 107, 108, 113], highlight: ["OneClassSVM", "nu=0.005", "fit_predict(x_test_us)"],
+      html: `<p><b>单类 SVM</b> 的思路：只用“正常”的样本训练，学出一个包住正常样本的边界，边界外的就是异常。作者在文字里解释得很清楚：异常本来就少，所以适合这种“只认识正常”的方法。<span data-cell="107">出处</span></p><p class="callout">但代码里：①训练时把合格、不合格一起喂进去了；②预测用的是 <code>fit_predict(x_test_us)</code>，等于在测试集上<b>重新训练</b>再预测；③它输出的 −1 表示“异常”，而数据里 −1 表示“合格”。作者结论是单类 SVM 最差（召回率 17.1）。</p>`,
+      draw(svg, ctx) {
+        const r = K.rng(16), P = []; for (let i = 0; i < 80; i++) P.push([300 + K.randn(r) * 70, 170 + K.randn(r) * 45, 0]); for (let i = 0; i < 7; i++) { const a = r() * 6.28; P.push([300 + Math.cos(a) * 190, 170 + Math.sin(a) * 120, 1]); }
+        P.forEach((p) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: p[2] ? 5 : 3.5, fill: p[2] ? "var(--c6)" : "var(--c1)", opacity: 0.75 }));
+        const ell = K.svg(svg, "ellipse", { cx: 300, cy: 170, rx: 0, ry: 0, fill: "none", stroke: "var(--good)", "stroke-width": 2.5, "stroke-dasharray": "6 4" });
+        K.svg(svg, "text", { x: 540, y: 80, "font-size": 13, fill: "var(--good)" }, "学到的“正常”边界");
+        K.svg(svg, "text", { x: 540, y: 104, "font-size": 13, fill: "var(--c6)" }, "边界外 = 异常");
+        K.svg(svg, "text", { x: 540, y: 150, "font-size": 12, class: "muted" }, "示意数据");
+        ctx.tween(1400, (t) => { ell.setAttribute("rx", 160 * t); ell.setAttribute("ry", 100 * t); });
+      },
+    },
+    {
+      title: "PCA：306 维压到 130 维", kicker: "第 116–140 格 · 降维", cells: [116, 117, 122, 123, 124, 126, 128, 131, 138, 139, 140], highlight: ["np.linalg.eig", "PCA(n_components=130)", "90% of the variance", "outlier_removal_max"],
+      html: `<p>作者先用 z 分数标准化，然后<b>手算了一遍 PCA</b>：求协方差矩阵 → 求特征值和特征向量 → 按特征值从大到小排序，算每个主成分解释了多少方差。再用 sklearn 的 PCA 一步完成：<b>130 个主成分大约保留 90% 的信息</b>。<span data-cell="128">出处</span></p><p>作者还试着把 PCA 后的离群值替换成中位数，结果发现会把不合格品的数据也“修正”掉，于是放弃了。<span data-cell="140">出处</span> 这是一个很好的判断：在找不良品的任务里，离群值往往就是线索。</p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [0, 306], [0, 100], { xlabel: "主成分个数", ylabel: "累计解释方差 %" });
+        const f = (k) => 100 * (1 - Math.exp(-k / 56));
+        const p = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const m = K.svg(svg, "line", { x1: ax.sx(130), x2: ax.sx(130), y1: ax.sy(0), y2: ax.sy(0), stroke: "var(--warn)", "stroke-dasharray": "4 3" });
+        const lab = K.svg(svg, "text", { x: ax.sx(134), y: ax.sy(86), "font-size": 13, fill: "var(--warn)" }, "");
+        ctx.tween(1600, (t) => { let d = ""; for (let k = 0; k <= 306 * t; k += 2) d += (d ? "L" : "M") + ax.sx(k) + "," + ax.sy(f(k)); p.setAttribute("d", d); })
+          .then((ok) => { if (!ok) return; m.setAttribute("y1", ax.sy(90)); lab.textContent = "130 个 ≈ 90%（作者注释）"; });
+        K.svg(svg, "text", { x: 360, y: 250, "font-size": 11, class: "muted" }, "曲线形状为示意");
+      },
+    },
+    {
+      title: "PCA 之后再欠采样建模", kicker: "第 141–170 格 · 第三轮建模", cells: [141, 142, 145, 146, 147, 148, 150, 155, 160, 163, 166], highlight: ["df_red4", "completed before PCA itself"],
+      html: `<p>在 130 维的 PCA 数据上，作者把“欠采样 → 切分 → XGBoost / 网格搜索 / 随机森林 / 逻辑回归 / Lasso”整个流程又跑了一遍（同样的抽样问题也一起复制过来了）。</p><p>作者写在第 185 格的召回率：XGBoost 54.5、网格搜索 63.6、随机森林 48.5、逻辑回归 69.7、Lasso 51.5，都比不做 PCA 的低。作者的解释：降维丢掉了信息。<span data-cell="188">出处</span></p>`,
+      draw(svg, ctx) {
+        const a = [74.3, 77.1, 71.4, 77.1, 71.4], b = [54.5, 63.6, 48.5, 69.7, 51.5], names = ["XGB", "XGB 网格", "随机森林", "逻辑回归", "Lasso"];
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [0, 5], [0, 100], { xticks: 0, ylabel: "召回率 %（作者写的数）" });
+        const els = names.map((nm, i) => { K.svg(svg, "text", { x: ax.sx(i + 0.5), y: 292, "text-anchor": "middle", "font-size": 12 }, nm); return [K.svg(svg, "rect", { x: ax.sx(i + 0.12), y: ax.sy(0), width: 34, height: 0, fill: "var(--c1)" }), K.svg(svg, "rect", { x: ax.sx(i + 0.5), y: ax.sy(0), width: 34, height: 0, fill: "var(--c2)" })]; });
+        K.svg(svg, "text", { x: 420, y: 50, "font-size": 12, fill: "var(--c1)" }, "■ 欠采样（第 183 格）");
+        K.svg(svg, "text", { x: 420, y: 70, "font-size": 12, fill: "var(--c2)" }, "■ PCA + 欠采样（第 185 格）");
+        ctx.tween(1300, (t) => els.forEach((e, i) => { [a[i], b[i]].forEach((v, k) => { const h = ax.sy(0) - ax.sy(v * t); e[k].setAttribute("y", ax.sy(v * t)); e[k].setAttribute("height", h); }); }));
+      },
+    },
+    {
+      title: "异常检测三件套：标签方向反了", kicker: "第 171–180 格 · 异常检测", cells: [171, 172, 173, 176, 179], highlight: ["outlier_fraction", "EllipticEnvelope", "IsolationForest", "LocalOutlierFactor"],
+      html: `<p>最后作者把不合格品当作“异常”，用三种无监督的异常检测算法，异常比例设为不合格/合格 ≈ 7%：</p><ul class="tight"><li><b>椭圆包络</b>：假设正常数据像一个椭圆形的云团，离中心太远的算异常</li><li><b>孤立森林</b>：随机切数据，越容易被“几刀就切出来”的点越可能是异常</li><li><b>局部离群因子 LOF</b>：看一个点周围有多“稀疏”，比邻居稀疏得多就是异常</li></ul><p class="callout">关键错误：这三种算法都输出 <b>−1 = 异常，1 = 正常</b>；而数据里 <b>−1 = 合格，1 = 不合格</b>。作者直接 <code>confusion_matrix(y_test, y_pred)</code>，于是“被判为正常（1）”的不合格品被算成了“抓到了”。约 93% 的样本都会被判正常，这就是“召回率 84–88%”的来源。下面的实验可以亲手对照。</p>`,
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 40, "font-size": 14, "font-weight": 700 }, "同一个数字，两套含义：");
+        const rows = [["−1", "数据标签：合格", "算法输出：异常（不合格？）"], ["1", "数据标签：不合格", "算法输出：正常"]];
+        rows.forEach((r0, i) => { K.node(svg, 30, 70 + i * 90, 70, 60, r0[0], { fs: 22, bold: true }); K.node(svg, 130, 70 + i * 90, 220, 60, r0[1], { stroke: "var(--c1)" }); K.node(svg, 400, 70 + i * 90, 260, 60, r0[2], { stroke: "var(--c6)" }); });
+        const x = K.svg(svg, "text", { x: 375, y: 160, "text-anchor": "middle", "font-size": 30, fill: "var(--bad)" }, "");
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 13, fill: "var(--bad)" }, "直接比较 → 把“判为正常的不合格品”当成“抓到了”");
+        ctx.wait(800).then((ok) => ok && ctx.tween(500, (t) => { x.textContent = "≠"; x.style.opacity = t; }));
+      },
+    },
+    {
+      title: "召回率汇总与作者结论", kicker: "第 181–188 格 · 总结", cells: [181, 182, 183, 184, 185, 187, 188], highlight: ["Recall = np.array", "72, 74 and 45", "Local Outlier Factor performed the best"],
+      html: `<p>作者把各模型的召回率<b>手写进数组</b>画成柱状图（第 182–185 格），最后总结：</p><ul class="tight"><li>单类 SVM 最差，LOF 最好（88%），而且“不需要采样”</li><li>准确率和召回率此消彼长</li><li>过采样的准确率比欠采样好，召回率差不多</li><li>PCA（130 维、约 90% 方差）没有帮助</li><li>第 72、74、45 号特征最重要</li></ul><p class="callout">按前面各章：LOF 的高召回率来自标签方向错误；“过采样”没生效、两张图数字相同；最重要特征是在 PCA 数据上训练的模型配上了原始列名（第 187 格），编号也不可信。这份 notebook 最大的教学价值，是一份“找错清单”。</p>`,
+      draw(svg, ctx) {
+        const R = [84.4, 87.9, 81.3, 9.4, 0, 0, 0], L = ["孤立森林", "LOF", "椭圆包络", "逻辑回归", "XGBoost", "随机森林", "Lasso"];
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 230 }, [0, 7], [0, 100], { xticks: 0, ylabel: "召回率 %" });
+        const bs = R.map((v, i) => { K.svg(svg, "text", { x: ax.sx(i + 0.5), y: 280, "text-anchor": "middle", "font-size": 11 }, L[i]); return K.svg(svg, "rect", { x: ax.sx(i + 0.15), y: ax.sy(0), width: 60, height: 0, fill: i < 3 ? "var(--warn)" : "var(--c1)" }); });
+        K.svg(svg, "text", { x: 60, y: 315, "font-size": 12 }, "第 182 格“原始数据”的数字；橙色三根受标签方向错误影响");
+        ctx.tween(1300, (t) => bs.forEach((b, i) => { b.setAttribute("y", ax.sy(R[i] * t)); b.setAttribute("height", ax.sy(0) - ax.sy(R[i] * t)); }));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：相关性阈值 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "thr", label: "相关系数阈值（作者用 0.70）", min: 0.3, max: 0.99, step: 0.01, value: 0.7, fmt: (v) => v.toFixed(2) },
+      { id: "grp", label: "传感器“小组”数（同组测的是同一件事）", min: 4, max: 20, step: 1, value: 10 },
+      { id: "seed", label: "换一批传感器", button: true },
+    ],
+    note: "现场模拟 60 路传感器、400 个产品：同组的传感器 = 同一个潜在工艺量 + 各自的噪声；只有第 1 组真正影响良率。按作者的规则两两算相关系数，|r| ≥ 阈值就删掉后一个。看阈值调低后，留下的列数和“关键的第 1 组是否还有代表”。",
+    render(svg, v) {
+      const r = K.rng(400 + v.seed * 7), S = 60, N = 400, G = v.grp;
+      const grp = Array.from({ length: S }, (_, i) => i % G);
+      const lat = Array.from({ length: G }, () => Array.from({ length: N }, () => K.randn(r)));
+      const noise = Array.from({ length: S }, () => 0.2 + r() * 0.9);
+      const X = Array.from({ length: S }, (_, s) => lat[grp[s]].map((z) => z + noise[s] * K.randn(r)));
+      const st = X.map((col) => { const m = col.reduce((a, b) => a + b, 0) / N; const sd = Math.sqrt(col.reduce((a, b) => a + (b - m) ** 2, 0) / N); return col.map((x) => (x - m) / sd); });
+      const corr = (a, b) => { let s = 0; for (let i = 0; i < N; i++) s += st[a][i] * st[b][i]; return s / N; };
+      const C = []; for (let i = 0; i < S; i++) { C.push(new Array(S).fill(0)); }
+      for (let i = 0; i < S; i++) for (let j = i; j < S; j++) { const c = i === j ? 1 : corr(i, j); C[i][j] = C[j][i] = c; }
+      const drop = new Set(); for (let i = 0; i < S; i++) for (let j = i + 1; j < S; j++) if (Math.abs(C[i][j]) >= v.thr) drop.add(j);
+      const order = Array.from({ length: S }, (_, i) => i).sort((a, b) => grp[a] - grp[b] || a - b);
+      const cs = 4.6, x0 = 20, y0 = 20;
+      order.forEach((i, a) => order.forEach((j, b) => K.svg(svg, "rect", { x: x0 + b * cs, y: y0 + a * cs, width: cs, height: cs, fill: K.heat(C[i][j], true), opacity: drop.has(i) || drop.has(j) ? 0.15 : 1 })));
+      K.svg(svg, "text", { x: 20, y: 310, "font-size": 11, class: "muted" }, "相关矩阵（按小组排序；变淡 = 被删）");
+      const kept = S - drop.size, keyKept = grp.filter((g, s) => g === 0 && !drop.has(s)).length;
+      const bx = 330; K.svg(svg, "text", { x: bx, y: 40, "font-size": 13, "font-weight": 700 }, "每个小组还剩几路：");
+      for (let g = 0; g < G; g++) { const k = grp.filter((gg, s) => gg === g && !drop.has(s)).length, tot = grp.filter((gg) => gg === g).length; const y = 56 + g * Math.min(24, 250 / G);
+        K.svg(svg, "text", { x: bx, y: y + 11, "font-size": 11, fill: g === 0 ? "var(--c6)" : "var(--ink)" }, (g === 0 ? "★ " : "") + "组 " + (g + 1));
+        K.svg(svg, "rect", { x: bx + 60, y, width: tot * 18, height: 12, fill: "var(--panel-2)", stroke: "var(--line)" });
+        K.svg(svg, "rect", { x: bx + 60, y, width: k * 18, height: 12, fill: g === 0 ? "var(--c6)" : "var(--c1)" }); }
+      return { readout: [
+        { k: "留下的传感器", v: `${kept} / ${S}` },
+        { k: "被删掉", v: String(drop.size) },
+        { k: "★ 关键组还剩", v: String(keyKept), color: keyKept ? "var(--good)" : "var(--bad)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：异常检测标签方向 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "cont", label: "设定的异常比例 contamination（作者 ≈ 7%）", min: 0.01, max: 0.3, step: 0.01, value: 0.07, fmt: (v) => (v * 100).toFixed(0) + "%" },
+      { id: "sep", label: "不合格品偏离正常的程度", min: 0, max: 4, step: 0.1, value: 1.5, fmt: (v) => v.toFixed(1) },
+      { id: "map", label: "怎么对照标签", value: "author", options: [["author", "作者的写法：直接比较 −1/1"], ["fixed", "正确写法：先把“异常”映射成“不合格”"]] },
+    ],
+    note: "现场生成 1000 个产品（6.6% 不合格），用“离中心的距离”做一个最简单的异常检测器：距离最大的 contamination 比例判为异常（输出 −1），其余输出 1。数据标签：−1 合格、1 不合格。切换“怎么对照标签”，比较同一个检测器算出的“召回率”。",
+    render(svg, v) {
+      const r = K.rng(77), N = 1000, P = [];
+      for (let i = 0; i < N; i++) { const bad = r() < 0.066; const a = r() * 6.283, d = bad ? v.sep + Math.abs(K.randn(r)) : Math.abs(K.randn(r)) * 0.9; P.push({ x: Math.cos(a) * d + 0.15 * K.randn(r), y: Math.sin(a) * d + 0.15 * K.randn(r), lab: bad ? 1 : -1 }); }
+      P.forEach((p) => (p.s = Math.hypot(p.x, p.y)));
+      const thr = P.map((p) => p.s).sort((a, b) => b - a)[Math.max(0, Math.floor(N * v.cont) - 1)];
+      P.forEach((p) => (p.out = p.s >= thr ? -1 : 1));
+      const ax = K.axes(svg, { x: 20, y: 15, w: 290, h: 290 }, [-5, 5], [-5, 5], { xticks: 0, yticks: 0 });
+      K.svg(svg, "circle", { cx: ax.sx(0), cy: ax.sy(0), r: ax.sx(thr) - ax.sx(0), fill: "none", stroke: "var(--warn)", "stroke-dasharray": "5 3", "stroke-width": 2 });
+      P.forEach((p) => K.svg(svg, "circle", { cx: ax.sx(p.x), cy: ax.sy(p.y), r: p.lab === 1 ? 3.6 : 2, fill: p.lab === 1 ? "var(--c6)" : "var(--c1)", opacity: p.lab === 1 ? 0.95 : 0.35 }));
+      K.svg(svg, "text", { x: 20, y: 322, "font-size": 11, class: "muted" }, "红=不合格 蓝=合格；虚线外 = 检测器判“异常”(−1)");
+      const pred = P.map((p) => (v.map === "fixed" ? (p.out === -1 ? 1 : -1) : p.out));
+      let tp = 0, fn = 0, fp = 0, tn = 0; P.forEach((p, i) => { if (p.lab === 1 && pred[i] === 1) tp++; else if (p.lab === 1) fn++; else if (pred[i] === 1) fp++; else tn++; });
+      cmat(svg, 400, 60, [[tn, fp], [fn, tp]], ["−1", "1"], v.map === "fixed" ? "正确对照后的混淆矩阵" : "作者写法的混淆矩阵");
+      const rec = tp / Math.max(1, tp + fn);
+      return { readout: [
+        { k: "算出的“不合格召回率”", v: (rec * 100).toFixed(1) + "%", color: v.map === "author" ? "var(--warn)" : rec > 0.5 ? "var(--good)" : "var(--bad)" },
+        { k: "被判“异常”的个数", v: String(P.filter((p) => p.out === -1).length) },
+        { k: "其中真不合格", v: String(P.filter((p) => p.out === -1 && p.lab === 1).length) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

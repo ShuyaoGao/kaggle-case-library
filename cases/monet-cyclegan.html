@@ -1,0 +1,587 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CycleGAN 莫奈风格</title>
+<meta name="description" content="Kaggle 案例拆解：用 CycleGAN 把普通照片变成莫奈风格的画——两个生成器、两个 PatchGAN 判别器、对抗损失、循环一致性损失与恒等损失，不需要成对的训练图片。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">图像 · 图像生成 / 风格转换 · 生成对抗网络</div>
+  <h1>CycleGAN：没有“标准答案”，也能把照片画成莫奈</h1>
+  <p class="en">Monet CycleGAN Tutorial</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">CycleGAN</span><span class="tag method">生成对抗网络 GAN</span><span class="tag method">U-Net 生成器</span><span class="tag method">PatchGAN 判别器</span>
+    <span class="tag method">实例归一化</span><span class="tag method">循环一致性损失</span><span class="tag method">恒等损失</span><span class="tag method">TPU + TFRecord</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Amy Jang</b></span>
+    <span>Kaggle 点赞 <b>4,261</b>（2026-11 抓取）</span>
+    <span>比赛 <b>I'm Something of a Painter Myself</b>（gan-getting-started）</span>
+    <span><a href="https://www.kaggle.com/code/amyjang/monet-cyclegan-tutorial" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">一堆莫奈的画 + 一堆风景照片</div><p>两组图<b>互不对应</b>：没有“这张照片对应的莫奈画”。全部是 256×256 的 RGB 图，作者把像素缩放到 [-1, 1]。<span data-cell="5">出处</span> 按比赛数据说明，莫奈画约 300 张、照片约 7000 张。</p></div>
+    <div class="card panel"><h3>要生成什么</h3><div class="big">把照片变成“像莫奈画的”图</div><p>比赛要求提交 7000–10000 张生成的莫奈风格图片（打包成 images.zip），由比赛方用一种基于 Inception 特征的距离（MiFID）打分。<span data-cell="43">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">两对“画家 + 鉴定师”互相较劲</div><p>生成器 G<sub>莫奈</sub>：照片 → 莫奈画；G<sub>照片</sub>：莫奈画 → 照片。两个判别器分别鉴定“真莫奈还是假莫奈”“真照片还是假照片”。再要求“照片 → 画 → 照片”能变回原样。<span data-cell="22">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一个可复用的 CycleGAN 教程模板</div><p>在 TPU 上训练 25 轮，展示 5 张“输入照片 / 莫奈风格”对照图并生成提交文件。<span data-cell="38">出处</span> <span data-cell="40">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛 <b>I'm Something of a Painter Myself</b>（gan-getting-started）提供两组图：莫奈的画和风景照片，各自打包成 TFRecord 文件（见第 4 格）。以下数量来自比赛数据说明。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">莫奈画作</div><div class="v">约 300 张</div></div>
+        <div class="stat-tile"><div class="k">风景照片</div><div class="v">约 7000 张</div></div>
+        <div class="stat-tile"><div class="k">图片尺寸</div><div class="v">256×256×3</div></div>
+        <div class="stat-tile"><div class="k">需提交</div><div class="v">7000–10000 张</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">尺寸与 [-1, 1] 缩放见 <span data-cell="5">第 5 格</span>；张数与提交要求来自比赛数据说明。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">TFRecord 里每条记录的字段</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>字段</th><th>含义</th><th>是否使用</th></tr>
+        <tr><td><code>image_name</code></td><td>图片名</td><td>不用</td></tr>
+        <tr><td><code>image</code></td><td>JPEG 编码的图片</td><td>使用，解码后缩放到 [-1, 1]</td></tr>
+        <tr><td><code>target</code></td><td>标签字段</td><td>不用（生成任务不需要标签）</td></tr>
+        <tr><td>输出：生成的图片</td><td><b>要“预测”的东西</b>：照片对应的莫奈风格图</td><td>JPG，打包成 images.zip</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">字段见 <span data-cell="6">第 6 格</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="30">
+    <h3>动手试试 B · 迷你 GAN：生成器和判别器对抗 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="21">
+    <h3>动手试试 A · PatchGAN：判别器的每个格子在看哪一块 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的设置与说明</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>图片已是 256×256，缩放到 [-1, 1]；只取图像，不要标签</td><td><span data-cell="5">第 5 格</span></td></tr>
+        <tr><td>生成器用 U-Net 结构，下采样用实例归一化而不是批归一化</td><td><span data-cell="14">第 14 格</span></td></tr>
+        <tr><td>判别器输出的不是一个数，而是一张小图（30×30），越大越像真</td><td><span data-cell="20">第 20 格</span> <span data-cell="21">第 21 格</span></td></tr>
+        <tr><td>循环一致性损失、恒等损失都用平均绝对差，权重 λ = 10（恒等损失再乘 0.5）</td><td><span data-cell="26">第 26 格</span> <span data-cell="32">第 32 格</span> <span data-cell="34">第 34 格</span></td></tr>
+        <tr><td>四个网络都用 Adam（学习率 2e-4，β<sub>1</sub> = 0.5），训练 25 轮</td><td><span data-cell="36">第 36 格</span> <span data-cell="38">第 38 格</span></td></tr>
+        <tr><td>未训练的生成器输出“不是我们想要的样子”</td><td><span data-cell="23">第 23 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">原 notebook 没有在文字里写比赛得分或训练损失的具体数值，效果图在运行输出里，源码不带输出，所以这里不列分数。GAN 的好坏本来就很难用单一数字衡量，比赛用的 MiFID 也只是其中一种。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>输入任意 256×256 照片，输出莫奈风格的版本；反方向的生成器也能把画“还原”成照片风格。</li>
+        <li><b>同类问题（都缺成对数据）：</b>马 ↔ 斑马、夏天 ↔ 冬天、白天 ↔ 夜晚、卫星图 ↔ 地图、医学影像 CT ↔ MRI 模态转换、合成数据 ↔ 真实数据的域适应、老照片上色。</li>
+        <li><b>可迁移的套路：</b>对抗损失负责“像目标风格”，循环一致性负责“内容别跑偏”，恒等损失负责“颜色别乱变”；判别器用 PatchGAN 关注局部纹理。</li>
+        <li><b>和神经风格迁移的区别：</b>风格迁移每张图都要优化一次；CycleGAN 训练好后一次前向就出图，而且学的是“一整类画”的风格。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>TFRecord 读取、[-1,1] 缩放 <span data-cell="6">第 6 格</span></li>
+        <li>下采样块 / 上采样块 <span data-cell="15">第 15 格</span> <span data-cell="17">第 17 格</span></li>
+        <li>U-Net 生成器（8 下 7 上 + 跳连，tanh 输出）<span data-cell="19">第 19 格</span></li>
+        <li>PatchGAN 判别器 <span data-cell="21">第 21 格</span></li>
+        <li>CycleGan 自定义 train_step <span data-cell="26">第 26 格</span></li>
+        <li>四种损失 <span data-cell="28">第 28 格</span> <span data-cell="30">第 30 格</span> <span data-cell="32">第 32 格</span> <span data-cell="34">第 34 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>如果只有对抗损失、没有循环一致性损失，生成器可能“作弊”成什么样？（提示：判别器只检查“像不像莫奈”。）</li>
+      <li>为什么作者说生成任务用实例归一化（每张图单独归一化）比批归一化更合适？batch 大小为 1 时批归一化会怎样？</li>
+      <li>判别器输出 30×30 而不是一个数，有什么好处？它更关注图像的什么特征？</li>
+      <li>λ<sub>cycle</sub> = 10 很大。如果设成 0.1 或 100，生成结果可能分别有什么问题？</li>
+      <li>莫奈的画只有约 300 张，照片有约 7000 张。每轮训练用 <code>Dataset.zip</code> 配对时，实际每轮能用到多少张照片？</li>
+      <li>GAN 生成的图“好不好”很难打分。除了比赛用的 MiFID，你还会怎样评估？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Amy Jang，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。CycleGAN 原论文：Zhu, Park, Isola &amp; Efros, 2017。比赛：Kaggle “I'm Something of a Painter Myself”。
+</footer>
+</main>
+
+<script src="nb/monet-cyclegan.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 用代码画“照片”和“莫奈画” ---------- */
+  const S = 64;
+  function photo(seed) {
+    const r = K.rng(seed), d = new Float32Array(S * S * 3);
+    const sunX = 14 + r() * 36, sunY = 10 + r() * 8, hill = 34 + r() * 8, ph = r() * 6;
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      let c;
+      const hy = hill + 6 * Math.sin(x / 9 + ph);
+      if (y < hy) { const t = y / hy; c = [0.35 + 0.3 * t, 0.55 + 0.25 * t, 0.9 - 0.1 * t]; const ds = Math.hypot(x - sunX, y - sunY); if (ds < 6) c = [1, 0.92, 0.6]; }
+      else if (y < 52) { const t = (y - hy) / 20; c = [0.2 + 0.1 * t, 0.5 - 0.15 * t, 0.2]; }
+      else { const w = 0.05 * Math.sin(x / 2 + y); c = [0.15 + w, 0.35 + w, 0.6 + w]; }
+      if (x > 44 && x < 48 && y > hy - 14 && y < hy + 2) c = [0.3, 0.2, 0.1];
+      if (Math.hypot(x - 46, y - (hy - 16)) < 6) c = [0.15, 0.4, 0.15];
+      d.set(c, (y * S + x) * 3);
+    }
+    return d;
+  }
+  /* “莫奈化”：颜色往暖色/柔和调偏移 + 短笔触涂抹（示意，不是神经网络） */
+  function monet(src, seed, amt) {
+    amt = amt == null ? 1 : amt;
+    const r = K.rng(seed), d = new Float32Array(src);
+    for (let i = 0; i < S * S; i++) {
+      const c = [d[i * 3], d[i * 3 + 1], d[i * 3 + 2]];
+      const m = [0.2 + 0.75 * c[0] + 0.05 * c[1], 0.12 + 0.8 * c[1], 0.18 + 0.65 * c[2] + 0.08 * c[0]];
+      for (let k = 0; k < 3; k++) d[i * 3 + k] = K.lerp(c[k], Math.round(m[k] * 6) / 6, amt);
+    }
+    const out = new Float32Array(d);
+    for (let n = 0; n < 900 * amt; n++) {
+      const x = Math.floor(r() * S), y = Math.floor(r() * S), a = r() * Math.PI, len = 2 + Math.floor(r() * 4);
+      const i0 = (y * S + x) * 3, jit = (r() - 0.5) * 0.12;
+      for (let t = 0; t < len; t++) {
+        const X = Math.round(x + Math.cos(a) * t), Y = Math.round(y + Math.sin(a) * t);
+        if (X < 0 || Y < 0 || X >= S || Y >= S) continue;
+        for (let k = 0; k < 3; k++) out[(Y * S + X) * 3 + k] = K.clamp(d[i0 + k] + jit, 0, 1);
+      }
+    }
+    return out;
+  }
+  function blur(src) {
+    const o = new Float32Array(src.length);
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) for (let k = 0; k < 3; k++) {
+      let s = 0, c = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const X = x + dx, Y = y + dy; if (X >= 0 && Y >= 0 && X < S && Y < S) { s += src[(Y * S + X) * 3 + k]; c++; } }
+      o[(y * S + x) * 3 + k] = s / c;
+    }
+    return o;
+  }
+  function img(svg, data, x, y, w, attrs) {
+    const cv = document.createElement("canvas"); cv.width = cv.height = S;
+    const g = cv.getContext("2d"), im = g.createImageData(S, S);
+    for (let i = 0; i < S * S; i++) { for (let k = 0; k < 3; k++) im.data[i * 4 + k] = Math.round(K.clamp(data[i * 3 + k], 0, 1) * 255); im.data[i * 4 + 3] = 255; }
+    g.putImageData(im, 0, 0);
+    const e = K.svg(svg, "image", Object.assign({ x, y, width: w, height: w, preserveAspectRatio: "none" }, attrs || {}));
+    e.setAttribute("href", cv.toDataURL());
+    return e;
+  }
+  const P0 = photo(1), M0 = monet(P0, 2);
+
+  const steps = [
+    {
+      title: "任务：没有成对数据的风格转换", at: 0, kicker: "第 0–1 格 · 问题",
+      html: `<p>目标是把普通风景照片变成莫奈风格的画。难点在于：<b>没有成对数据</b>。我们不知道“这张照片如果莫奈来画会是什么样”，只有一堆照片和一堆莫奈的画，两边互不对应。</p><p>CycleGAN 正是为这种“非配对图像翻译”设计的：只要两个领域各有一批图，就能学出两个方向的转换。</p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 170, y: 26, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "照片（约 7000 张）");
+        K.svg(svg, "text", { x: 550, y: 26, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "莫奈的画（约 300 张）");
+        const ph = [], mo = [];
+        for (let i = 0; i < 6; i++) { const e = img(svg, photo(10 + i), 40 + (i % 3) * 90, 44 + Math.floor(i / 3) * 90, 82); e.style.opacity = 0; ph.push(e); }
+        for (let i = 0; i < 6; i++) { const e = img(svg, monet(photo(30 + i), 50 + i), 420 + (i % 3) * 90, 44 + Math.floor(i / 3) * 90, 82); e.style.opacity = 0; mo.push(e); }
+        const q = K.svg(svg, "text", { x: 360, y: 140, "text-anchor": "middle", "font-size": 34, "font-weight": 700, fill: "var(--warn)" }, "？");
+        const t = K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 13 }, "两边没有一一对应关系：不能像普通监督学习那样“给输入、给答案”");
+        q.style.opacity = t.style.opacity = 0;
+        (async () => {
+          for (let i = 0; i < 6; i++) { if (!(await ctx.tween(160, (u) => { ph[i].style.opacity = u; mo[i].style.opacity = u; }))) return; }
+          await ctx.tween(500, (u) => { q.style.opacity = u; t.style.opacity = u; });
+        })();
+        K.svg(svg, "text", { x: 360, y: 326, "text-anchor": "middle", "font-size": 11, class: "muted" }, "图为代码生成的示意画面");
+      },
+    },
+    {
+      title: "读取 TFRecord，像素缩到 [-1, 1]", at: 2, kicker: "第 2–13 格 · 数据",
+      html: `<p>比赛数据以 TFRecord（TensorFlow 的二进制数据格式，适合在 TPU 上快速读取）提供，照片和莫奈画分开存放。<code>decode_image</code> 解码 JPEG，并用 <code>x / 127.5 − 1</code> 把 0~255 映射到 <b>[-1, 1]</b>。</p><p>为什么是 [-1, 1]？因为生成器最后一层用 <code>tanh</code>，它的输出范围正好是 (-1, 1)，输入输出尺度一致。显示时再用 <code>× 0.5 + 0.5</code> 换回 [0, 1]。</p>`,
+      cells: [6], highlight: ["/ 127.5) - 1", "IMAGE_SIZE = [256, 256]"],
+      draw(svg, ctx) {
+        const a1 = K.axes(svg, { x: 60, y: 60, w: 600, h: 30 }, [0, 255], [0, 1], { yticks: 0, xticks: 5 });
+        const a2 = K.axes(svg, { x: 60, y: 200, w: 600, h: 30 }, [-1, 1], [0, 1], { yticks: 0, xticks: 4 });
+        K.svg(svg, "text", { x: 60, y: 46, "font-size": 13, "font-weight": 700 }, "原始像素值 0 ~ 255");
+        K.svg(svg, "text", { x: 60, y: 186, "font-size": 13, "font-weight": 700 }, "x / 127.5 − 1  →  −1 ~ 1（与 tanh 输出同范围）");
+        const r = K.rng(3), vals = Array.from({ length: 30 }, () => Math.floor(r() * 256));
+        const dots = vals.map((v, i) => K.svg(svg, "circle", { cx: a1.sx(v), cy: 75, r: 5, fill: K.colors[i % 6] }));
+        let d = "";
+        for (let z = -3; z <= 3.001; z += 0.1) d += (d ? "L" : "M") + (500 + z * 40) + "," + (290 - Math.tanh(z) * 30);
+        K.svg(svg, "path", { d, fill: "none", stroke: "var(--c4)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 60, y: 295, "font-size": 12, fill: "var(--c4)" }, "紫色曲线是 tanh：不管输入多大，输出都在 −1 和 1 之间");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1600, (t) => dots.forEach((c, i) => { c.setAttribute("cx", K.lerp(a1.sx(vals[i]), a2.sx(vals[i] / 127.5 - 1), t)); c.setAttribute("cy", K.lerp(75, 215, t)); })));
+      },
+    },
+    {
+      title: "下采样块：步长 2 卷积 + 实例归一化", at: 14, kicker: "第 14–15 格 · 积木",
+      html: `<p><code>downsample</code>：4×4 卷积、步长 2（宽高减半）→ <b>实例归一化</b> → LeakyReLU。</p><p>实例归一化（Instance Norm）和批归一化的区别在于<b>对谁求均值方差</b>：批归一化把一批图的同一通道放在一起算；实例归一化<b>每张图、每个通道单独算</b>。风格转换里，每张图的整体亮度、对比度属于“风格”的一部分，单独归一化效果更好；而且这里 batch 只有 1。</p>`,
+      cells: [15, 14], highlight: ["strides=2", "InstanceNormalization", "LeakyReLU"],
+      draw(svg, ctx) {
+        const B = 4, C = 5, cs = 34;
+        const draw = (ox, title) => {
+          K.svg(svg, "text", { x: ox + (C * cs) / 2, y: 36, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, title);
+          K.svg(svg, "text", { x: ox + (C * cs) / 2, y: 230, "text-anchor": "middle", "font-size": 11, class: "muted" }, "列 = 通道，行 = 批里的第几张图");
+          const els = [];
+          for (let b = 0; b < B; b++) for (let c = 0; c < C; c++) els.push(K.svg(svg, "rect", { x: ox + c * cs, y: 50 + b * cs, width: cs - 4, height: cs - 4, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" }));
+          return els;
+        };
+        const bn = draw(60, "批归一化：同一通道、整批一起算"), inn = draw(440, "实例归一化：每张图每通道单独算");
+        const msg = K.svg(svg, "text", { x: 360, y: 290, "text-anchor": "middle", "font-size": 13 }, "");
+        (async () => {
+          for (let k = 0; k < 10; k++) {
+            const c = k % C, b = k % B;
+            bn.forEach((e, i) => (e.style.fill = i % C === c ? "color-mix(in srgb, var(--c1) 55%, var(--panel))" : "var(--panel-2)"));
+            inn.forEach((e, i) => (e.style.fill = i % C === c && Math.floor(i / C) === b ? "color-mix(in srgb, var(--c2) 65%, var(--panel))" : "var(--panel-2)"));
+            msg.textContent = `一次归一化用到的数：批归一化 ${B} 张图 × 整张特征图；实例归一化 1 张图 × 整张特征图`;
+            if (!(await ctx.wait(650))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "上采样块：转置卷积 + Dropout", at: 16, kicker: "第 16–17 格 · 积木",
+      html: `<p><code>upsample</code> 做相反的事：4×4 <b>转置卷积</b>、步长 2，宽高翻倍 → 实例归一化 → （前三个上采样块）Dropout 0.5 → ReLU。</p><p>转置卷积可以理解为“把每个输入像素按卷积核摊开，重叠部分相加”，放大方式是网络学出来的。Dropout 在这里也起到给生成器加一点随机性的作用。</p>`,
+      cells: [17], highlight: ["Conv2DTranspose", "Dropout(0.5)", "layers.ReLU()"],
+      draw(svg, ctx) {
+        const s1 = 48, s2 = 28, ox = 60, oy = 90, ox2 = 340, oy2 = 40;
+        const vals = [[0.9, 0.2], [0.4, 0.7]];
+        K.svg(svg, "text", { x: ox + s1, y: oy - 14, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "输入 2×2");
+        vals.forEach((row, y) => row.forEach((v, x) => K.node(svg, ox + x * s1, oy + y * s1, s1 - 4, s1 - 4, v.toFixed(1), { fs: 13, fill: K.heat(v) })));
+        K.svg(svg, "text", { x: ox2 + 4 * s2, y: oy2 - 12, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "输出 4×4（4×4 核、步长 2，重叠处相加）");
+        const out = new Float32Array(64), cells = [];
+        for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) cells.push(K.svg(svg, "rect", { x: ox2 + x * s2, y: oy2 + y * s2, width: s2 - 2, height: s2 - 2, rx: 3, fill: "var(--panel-2)" }));
+        const ker = (dx, dy) => (1 - Math.abs(dx - 1.5) / 2.5) * (1 - Math.abs(dy - 1.5) / 2.5);
+        const box = K.svg(svg, "rect", { x: 0, y: 0, width: 4 * s2 - 2, height: 4 * s2 - 2, fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        const hi = K.svg(svg, "rect", { x: 0, y: 0, width: s1 - 4, height: s1 - 4, fill: "none", stroke: "var(--accent)", "stroke-width": 3 });
+        K.svg(svg, "text", { x: ox2, y: oy2 + 8 * s2 + 22, "font-size": 11, class: "muted" }, "示意：4×4 输出区域画成 8×8 小格；中间重叠的格子颜色更深");
+        (async () => {
+          for (let k = 0; k < 4; k++) {
+            const x = k % 2, y = Math.floor(k / 2), v = vals[y][x];
+            hi.setAttribute("x", ox + x * s1); hi.setAttribute("y", oy + y * s1);
+            box.setAttribute("x", ox2 + x * 2 * s2 + s2); box.setAttribute("y", oy2 + y * 2 * s2 + s2);
+            const base = Array.from(out);
+            if (!(await ctx.tween(500, (t) => {
+              for (let dy = 0; dy < 4; dy++) for (let dx = 0; dx < 4; dx++) { const X = 1 + 2 * x + dx, Y = 1 + 2 * y + dy; if (X < 8 && Y < 8) { const i = Y * 8 + X; out[i] = base[i] + v * ker(dx, dy) * t; cells[i].style.fill = K.heat(out[i] / 1.2); } }
+            }))) return;
+            if (!(await ctx.wait(250))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "生成器：U-Net，从 256 压到 1 再放大", at: 18, kicker: "第 18–19 格 · 生成器",
+      html: `<p>生成器是一个 U-Net：8 个下采样块把 256×256 一路压到 <b>1×1×512</b>，再用 7 个上采样块放大，每次放大后都和下采样时同尺寸的特征<b>拼接</b>（跳跃连接），最后一个转置卷积 + <code>tanh</code> 输出 256×256×3 的图。</p><p>作者解释：跳跃连接让浅层信息直接传到后面，缓解梯度消失；对风格转换来说，它也让照片的轮廓、构图能原样保留下来，只改“画法”。</p>`,
+      cells: [19], highlight: ["skips.append(x)", "layers.Concatenate()([x, skip])", "activation='tanh'"],
+      draw(svg, ctx) {
+        const sz = [256, 128, 64, 32, 16, 8, 4, 2, 1];
+        const pos = (i) => ({ x: 30 + i * 40, y: 30 + i * 30 }), pos2 = (i) => ({ x: 690 - i * 40, y: 30 + i * 30 });
+        const enc = sz.map((n, i) => { const p = pos(i); const g = K.node(svg, p.x, p.y, 36, 24, String(n), { fs: 10, rx: 4, fill: "color-mix(in srgb, var(--c1) 25%, var(--panel))", stroke: "var(--c1)" }); g.style.opacity = 0; return g; });
+        const dec = sz.slice(0, 8).map((n, i) => { const p = pos2(i); const g = K.node(svg, p.x - 36, p.y, 36, 24, String(n), { fs: 10, rx: 4, fill: "color-mix(in srgb, var(--c3) 25%, var(--panel))", stroke: "var(--c3)" }); g.style.opacity = 0; return g; });
+        const sk = [];
+        for (let i = 1; i < 8; i++) { const a = pos(i), b = pos2(i); const e = K.svg(svg, "line", { x1: a.x + 38, y1: a.y + 12, x2: b.x - 38, y2: b.y + 12, stroke: "var(--c2)", "stroke-dasharray": "5 4", "stroke-width": 1.5 }); e.style.opacity = 0; sk.push(e); }
+        const pIn = img(svg, P0, 20, 270, 60), pOut = img(svg, M0, 640, 270, 60); pOut.style.opacity = 0;
+        K.svg(svg, "text", { x: 90, y: 300, "font-size": 11 }, "输入照片 256×256×3");
+        K.svg(svg, "text", { x: 630, y: 300, "text-anchor": "end", "font-size": 11 }, "tanh 输出 256×256×3");
+        K.svg(svg, "text", { x: 360, y: 326, "text-anchor": "middle", "font-size": 11, class: "muted" }, "数字 = 特征图边长；橙虚线 = 跳跃连接（共 7 条）");
+        (async () => {
+          for (let i = 0; i < 9; i++) if (!(await ctx.tween(140, (t) => (enc[i].style.opacity = t)))) return;
+          for (let i = 7; i >= 0; i--) if (!(await ctx.tween(180, (t) => { dec[i].style.opacity = t; if (i >= 1) sk[i - 1].style.opacity = t; }))) return;
+          await ctx.tween(500, (t) => (pOut.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "判别器：PatchGAN，一块一块地鉴定", at: 20, kicker: "第 20–21 格 · 判别器",
+      html: `<p>判别器要判断一张图是真莫奈还是生成的假货。作者的判别器<b>不输出一个数</b>，而是输出一张 <b>30×30</b> 的小图：每个格子只负责判断原图的一个局部小块（约 70×70 像素）像不像真的，数值越大越像真。</p><p>这种结构叫 PatchGAN。它关注的是笔触、纹理这些<b>局部风格</b>，参数也比整图判别少。实验 A 可以拖滑块看它对应的区域。</p>`,
+      cells: [21], highlight: ["ZeroPadding2D", "# (bs, 30, 30, 1)", "strides=1"],
+      draw(svg, ctx) {
+        img(svg, M0, 30, 40, 256);
+        K.svg(svg, "text", { x: 158, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "输入 256×256");
+        const n = 10, cs = 24, ox = 420, oy = 40;
+        K.svg(svg, "text", { x: ox + 120, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "输出 30×30（画成 10×10 示意）");
+        const r = K.rng(5), cells = [];
+        for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) cells.push(K.svg(svg, "rect", { x: ox + x * cs, y: oy + y * cs, width: cs - 2, height: cs - 2, fill: "var(--panel-2)" }));
+        const scores = cells.map(() => r());
+        const win = K.svg(svg, "rect", { x: 30, y: 40, width: 70, height: 70, fill: "var(--accent)", "fill-opacity": 0.15, stroke: "var(--accent)", "stroke-width": 2 });
+        const ln = K.svg(svg, "line", { stroke: "var(--accent)", "stroke-dasharray": "4 3" });
+        K.svg(svg, "text", { x: ox, y: oy + n * cs + 22, "font-size": 12, class: "muted" }, "深色 = 判为“真”的分高，浅色 = 判为“假”");
+        (async () => {
+          for (let k = 0; k < n * n; k += 1) {
+            const x = k % n, y = Math.floor(k / n);
+            const wx = 30 + (x / (n - 1)) * (256 - 70), wy = 40 + (y / (n - 1)) * (256 - 70);
+            win.setAttribute("x", wx); win.setAttribute("y", wy);
+            K.set(ln, { x1: wx + 70, y1: wy + 35, x2: ox + x * cs, y2: oy + y * cs + cs / 2 });
+            cells[k].style.fill = K.heat(scores[k]);
+            if (!(await ctx.wait(k < 12 ? 180 : 25))) return;
+          }
+          ln.style.opacity = 0;
+        })();
+      },
+    },
+    {
+      title: "四个网络各司其职", at: 22, kicker: "第 22–24 格 · 组装",
+      html: `<p>CycleGAN 一共有<b>四个网络</b>：</p><ul class="tight"><li><code>monet_generator</code>：照片 → 莫奈画</li><li><code>photo_generator</code>：莫奈画 → 照片</li><li><code>monet_discriminator</code>：鉴定真假莫奈画</li><li><code>photo_discriminator</code>：鉴定真假照片</li></ul><p>它们都在 <code>strategy.scope()</code> 里创建，这样会被分配到 TPU 的多个核心上。作者特意展示了一下<b>未训练</b>的生成器：输出还不是想要的样子。</p>`,
+      cells: [22, 23], highlight: ["monet_generator = Generator()", "photo_generator = Generator()", "Discriminator()"],
+      draw(svg, ctx) {
+        img(svg, P0, 30, 120, 90); img(svg, M0, 600, 120, 90);
+        K.svg(svg, "text", { x: 75, y: 112, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, "照片域");
+        K.svg(svg, "text", { x: 645, y: 112, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, "莫奈域");
+        const gm = K.node(svg, 270, 70, 180, 44, "monet_generator\n照片 → 莫奈", { fs: 12, fill: "color-mix(in srgb, var(--c2) 18%, var(--panel))", stroke: "var(--c2)" });
+        const gp = K.node(svg, 270, 220, 180, 44, "photo_generator\n莫奈 → 照片", { fs: 12, fill: "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: "var(--c1)" });
+        const dm = K.node(svg, 560, 20, 140, 40, "monet_discriminator", { fs: 11, fill: "color-mix(in srgb, var(--c4) 18%, var(--panel))", stroke: "var(--c4)" });
+        const dp = K.node(svg, 20, 280, 150, 40, "photo_discriminator", { fs: 11, fill: "color-mix(in srgb, var(--c4) 18%, var(--panel))", stroke: "var(--c4)" });
+        const a = [K.arrow(svg, 120, 150, 268, 95, { color: "var(--c2)" }), K.arrow(svg, 450, 95, 598, 150, { color: "var(--c2)" }), K.arrow(svg, 598, 185, 450, 242, { color: "var(--c1)" }), K.arrow(svg, 268, 242, 120, 190, { color: "var(--c1)" }), K.arrow(svg, 640, 118, 630, 62, { color: "var(--c4)" }), K.arrow(svg, 75, 212, 90, 278, { color: "var(--c4)" })];
+        const all = [gm, gp, dm, dp, ...a];
+        all.forEach((e) => (e.style.opacity = 0));
+        (async () => { for (const e of all) if (!(await ctx.tween(220, (t) => (e.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "循环一致性：照片 → 画 → 照片", at: 25, kicker: "第 25–26 格 · 核心思想",
+      html: `<p>只靠判别器，生成器可能“随便画一幅像莫奈的画”，和输入照片毫无关系，判别器也看不出来。CycleGAN 的关键约束是<b>循环一致性</b>：</p><p>照片 → <code>m_gen</code> → 假莫奈画 → <code>p_gen</code> → 再变回的照片，应该和原照片<b>几乎一样</b>。反方向（莫奈 → 照片 → 莫奈）也一样。两者差别（像素平均绝对差）就是循环一致性损失。</p><p>这保证了“风格变了，内容没变”。</p>`,
+      cells: [26], highlight: ["cycled_photo = self.p_gen(fake_monet", "cycled_monet = self.m_gen(fake_photo", "total_cycle_loss"],
+      draw(svg, ctx) {
+        const fake = M0, cyc = blur(monet(M0, 9, 0.0)).map((v, i) => K.lerp(v, P0[i], 0.6));
+        const w = 120;
+        const e1 = img(svg, P0, 20, 70, w), e2 = img(svg, fake, 200, 70, w), e3 = img(svg, cyc, 380, 70, w);
+        const diff = new Float32Array(P0.length); let L1 = 0;
+        for (let i = 0; i < S * S; i++) { let d = 0; for (let k = 0; k < 3; k++) d += Math.abs(P0[i * 3 + k] - cyc[i * 3 + k]); L1 += d / 3; const v = K.clamp(d * 2, 0, 1); diff[i * 3] = v; diff[i * 3 + 1] = v * 0.3; diff[i * 3 + 2] = v * 0.3; }
+        const e4 = img(svg, diff, 570, 70, w);
+        [["真照片", 80], ["假莫奈", 260], ["变回的照片", 440], ["|差| 热图", 630]].forEach((d) => K.svg(svg, "text", { x: d[1], y: 60, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, d[0]));
+        const ar = [K.arrow(svg, 142, 130, 196, 130, { color: "var(--c2)" }), K.arrow(svg, 322, 130, 376, 130, { color: "var(--c1)" }), K.arrow(svg, 502, 130, 566, 130, { color: "var(--bad)" })];
+        K.svg(svg, "text", { x: 169, y: 122, "text-anchor": "middle", "font-size": 10, fill: "var(--c2)" }, "m_gen");
+        K.svg(svg, "text", { x: 349, y: 122, "text-anchor": "middle", "font-size": 10, fill: "var(--c1)" }, "p_gen");
+        const loss = K.svg(svg, "text", { x: 360, y: 250, "text-anchor": "middle", "font-size": 15, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 360, y: 280, "text-anchor": "middle", "font-size": 13, "font-family": "var(--mono)" }, "cycle_loss = λ × mean(|真照片 − 变回的照片|)，λ = 10");
+        K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 11, class: "muted" }, "示意：图像由代码生成，差值是在这几张示意图上现场算的");
+        [e2, e3, e4, ...ar].forEach((e) => (e.style.opacity = 0));
+        (async () => {
+          for (const e of [ar[0], e2, ar[1], e3, ar[2], e4]) if (!(await ctx.tween(350, (t) => (e.style.opacity = t)))) return;
+          loss.textContent = `本例平均绝对差 = ${(L1 / (S * S)).toFixed(3)}  → × 10 = ${((10 * L1) / (S * S)).toFixed(2)}`;
+        })();
+      },
+    },
+    {
+      title: "四种损失怎么配合", at: 27, kicker: "第 27–34 格 · 损失函数",
+      html: `<ul class="tight"><li><b>判别器损失</b>：真图的输出要接近全 1、假图要接近全 0（二元交叉熵），两项取平均。</li><li><b>生成器对抗损失</b>：希望判别器把假图判成全 1，即“骗过鉴定师”。</li><li><b>循环一致性损失</b>：变过去再变回来要像原图，权重 λ = 10。</li><li><b>恒等损失</b>：把莫奈画喂给“照片 → 莫奈”的生成器，应该原样输出，权重 λ × 0.5，用来防止颜色乱变。</li></ul><p>生成器的总损失 = 对抗损失 + 两个方向的循环损失 + 恒等损失。</p>`,
+      cells: [28, 30, 32, 34], highlight: ["tf.ones_like(real)", "tf.zeros_like(generated)", "LAMBDA * loss1", "LAMBDA * 0.5 * loss"],
+      draw(svg, ctx) {
+        const items = [["对抗损失", "像不像莫奈？", "BCE(1, D(G(x)))", "var(--c4)", 1], ["循环一致性", "变回来还是原图吗？", "10 × |x − F(G(x))|", "var(--c2)", 10], ["恒等损失", "本来就是莫奈，别乱改", "5 × |y − G(y)|", "var(--c3)", 5]];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "monet_generator 的总损失 =");
+        const bars = items.map((d, i) => {
+          const y = 56 + i * 76;
+          K.svg(svg, "text", { x: 30, y: y + 18, "font-size": 14, "font-weight": 700, fill: d[3] }, d[0]);
+          K.svg(svg, "text", { x: 30, y: y + 38, "font-size": 12, class: "muted" }, d[1]);
+          K.svg(svg, "text", { x: 190, y: y + 28, "font-size": 13, "font-family": "var(--mono)" }, d[2]);
+          return K.svg(svg, "rect", { x: 400, y: y + 8, width: 0, height: 30, rx: 4, fill: d[3], "fill-opacity": 0.7 });
+        });
+        K.svg(svg, "text", { x: 400, y: 50, "font-size": 11, class: "muted" }, "条长 = 损失前的权重（1、10、5）");
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12 }, "判别器损失 = 0.5 × [ BCE(1, D(真图)) + BCE(0, D(假图)) ]：它和生成器的目标正好相反 → 对抗");
+        ctx.tween(1200, (t) => bars.forEach((b, i) => b.setAttribute("width", items[i][4] * 26 * t)));
+      },
+    },
+    {
+      title: "训练：交替更新，此消彼长", at: 35, kicker: "第 35–38 格 · 训练",
+      html: `<p>作者继承 <code>keras.Model</code> 重写了 <code>train_step</code>，于是可以直接 <code>fit</code>。每一步：用 <code>GradientTape</code> 同时记录四个网络的前向计算，分别求四组梯度，各自用 Adam（学习率 2e-4，β<sub>1</sub>=0.5，GAN 常用设置）更新。</p><p>数据用 <code>Dataset.zip((monet_ds, photo_ds))</code> 每次配一张莫奈画和一张照片（batch = 1），训练 <b>25 轮</b>。GAN 的损失不会单调下降，而是生成器和判别器此消彼长地拉锯。</p>`,
+      cells: [38, 36], highlight: ["epochs=25", "Adam(2e-4, beta_1=0.5)", "tf.data.Dataset.zip"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 150, w: 620, h: 150 }, [0, 25], [0, 2], { xlabel: "轮次（示意曲线，非原 notebook 数值）", ylabel: "损失" });
+        const r = K.rng(4), g = [], d = [];
+        for (let e = 0; e <= 100; e++) { const t = e / 4; g.push(1.3 + 0.35 * Math.sin(t * 1.3) + K.randn(r) * 0.08 - t * 0.012); d.push(0.62 - 0.22 * Math.sin(t * 1.3) + K.randn(r) * 0.05); }
+        const pg = K.svg(svg, "path", { fill: "none", stroke: "var(--c2)", "stroke-width": 2 }), pd = K.svg(svg, "path", { fill: "none", stroke: "var(--c4)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 560, y: 166, "font-size": 12, fill: "var(--c2)" }, "生成器损失");
+        K.svg(svg, "text", { x: 560, y: 184, "font-size": 12, fill: "var(--c4)" }, "判别器损失");
+        // 上方：生成器画的图逐渐变“莫奈”
+        const frames = [0, 0.25, 0.5, 0.75, 1].map((a, i) => { const e = img(svg, monet(P0, 2, a), 60 + i * 130, 20, 100); e.style.opacity = 0; return e; });
+        ctx.tween(3000, (t) => {
+          const m = Math.round(t * 100);
+          let a = "", b = "";
+          for (let e = 0; e <= m; e++) { a += (a ? "L" : "M") + ax.sx(e / 4) + "," + ax.sy(g[e]); b += (b ? "L" : "M") + ax.sx(e / 4) + "," + ax.sy(d[e]); }
+          pg.setAttribute("d", a); pd.setAttribute("d", b);
+          frames.forEach((f, i) => (f.style.opacity = t * 5 > i ? 1 : 0));
+        });
+      },
+    },
+    {
+      title: "出图与提交", at: 39, kicker: "第 39–44 格 · 生成",
+      html: `<p>训练完只需要 <code>monet_generator</code>：对每张照片前向一次（<code>training=False</code>），把输出 <code>× 127.5 + 127.5</code> 换回 0~255 的整数，保存成 JPG，最后打包成 <code>images.zip</code> 提交。</p><p>作者先并排画出 5 张“输入照片 / 莫奈风格”供肉眼检查。生成器的另一半（<code>photo_generator</code>）和两个判别器只是训练时的“陪练”。</p>`,
+      cells: [43, 40], highlight: ["prediction * 127.5 + 127.5", "make_archive", "training=False"],
+      draw(svg, ctx) {
+        const els = [];
+        for (let i = 0; i < 4; i++) {
+          const p = photo(70 + i), x = 30 + i * 172;
+          const a = img(svg, p, x, 40, 120), b = img(svg, monet(p, 80 + i), x, 190, 120);
+          K.arrow(svg, x + 90, 165, x + 90, 188, { color: "var(--c2)" });
+          a.style.opacity = b.style.opacity = 0; els.push(a, b);
+        }
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 12, "font-weight": 700 }, "Input Photo");
+        K.svg(svg, "text", { x: 30, y: 182, "font-size": 12, "font-weight": 700 }, "Monet-esque");
+        K.svg(svg, "text", { x: 360, y: 332, "text-anchor": "middle", "font-size": 11, class: "muted" }, "示意图：由代码模拟“莫奈化”效果，真实生成结果见原 notebook 的运行输出");
+        (async () => { for (const e of els) if (!(await ctx.tween(220, (t) => (e.style.opacity = t)))) return; })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：一维迷你 GAN ---------- */
+  function trainGAN(v) {
+    const r = K.rng(1 + v.seed * 31);
+    let a = 1, b = -2, w1 = 0, w2 = 0, c = 0; // G(z)=a z + b；D 的 logit = w1 u + w2 u² + c
+    const sc = 2 * v.sd, U = (x) => (x - v.mu) / sc; // 判别器输入先用真实数据的均值、标准差标准化
+    const B = 64, hist = [], cl = (x) => K.clamp(x, -60, 60);
+    for (let it = 0; it < v.steps; it++) {
+      for (let k = 0; k < v.k; k++) {
+        let g1 = 0, g2 = 0, gc = 0;
+        for (let i = 0; i < B; i++) {
+          const xr = U(v.mu + v.sd * K.randn(r)), xf = U(a * K.randn(r) + b);
+          const dr = K.sigmoid(w1 * xr + w2 * xr * xr + c) - 1, df = K.sigmoid(w1 * xf + w2 * xf * xf + c);
+          g1 += dr * xr + df * xf; g2 += dr * xr * xr + df * xf * xf; gc += dr + df;
+        }
+        w1 = cl(w1 - (v.lr * 0.5 * g1) / B); w2 = cl(w2 - (v.lr * 0.5 * g2) / B); c = cl(c - (v.lr * 0.5 * gc) / B);
+      }
+      let ga = 0, gb = 0, lg = 0, ld = 0;
+      for (let i = 0; i < B; i++) {
+        const z = K.randn(r), x = U(a * z + b), p = K.sigmoid(w1 * x + w2 * x * x + c);
+        const dfdx = (w1 + 2 * w2 * x) / sc;
+        ga += (p - 1) * dfdx * z; gb += (p - 1) * dfdx;
+        lg += -Math.log(Math.max(p, 1e-9));
+        const xr = U(v.mu + v.sd * K.randn(r)), pr = K.sigmoid(w1 * xr + w2 * xr * xr + c);
+        ld += 0.5 * (-Math.log(Math.max(pr, 1e-9)) - Math.log(Math.max(1 - p, 1e-9)));
+      }
+      a = cl(a - (v.lr * ga) / B); b = cl(b - (v.lr * gb) / B);
+      if (it % 5 === 0) hist.push([lg / B, ld / B]);
+    }
+    return { a, b, w1, w2, c, U, hist };
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 660, height: 380,
+    controls: [
+      { id: "steps", label: "训练步数", min: 0, max: 800, step: 10, value: 300 },
+      { id: "lr", label: "学习率", min: 0.02, max: 1.5, step: 0.02, value: 0.5, fmt: (v) => v.toFixed(2) },
+      { id: "k", label: "每步判别器更新几次", min: 1, max: 5, step: 1, value: 1 },
+      { id: "mu", label: "真实数据的均值", min: -2, max: 6, step: 0.1, value: 3, fmt: (v) => v.toFixed(1) },
+      { id: "sd", label: "真实数据的标准差", min: 0.3, max: 2, step: 0.1, value: 0.8, fmt: (v) => v.toFixed(1) },
+      { id: "seed", label: "换随机种子重训", button: true },
+    ],
+    note: "生成器 G(z) = a·z + b，把标准正态噪声 z 变成一维“假样本”；判别器 D(x) = sigmoid(w₁u + w₂u² + c)，u 是用真实数据均值、标准差标准化后的 x。每次拖动都从头训练：判别器用第 28 格的损失（真→1、假→0，取平均），生成器用第 30 格的损失（希望 D(假) → 1）。两条分布曲线各自按峰值缩放。试试把学习率调小（如 0.1）：生成器会先“缩成一条线”再慢慢张开，这就是 GAN 训练里常见的模式坍缩与振荡；学习率太大则会发散。",
+    render(svg, v) {
+      const m = trainGAN(v);
+      const ax = K.axes(svg, { x: 50, y: 16, w: 590, h: 200 }, [-6, 8], [0, 1], { xlabel: "样本值 x", yticks: 2 });
+      // 真实分布
+      const npdf = (x, mu, s) => Math.exp(-0.5 * ((x - mu) / s) ** 2) / (s * Math.sqrt(2 * Math.PI));
+      const sdG = Math.abs(m.a) + 1e-3;
+      const curve = (f, color, fillOp) => { let d = ""; for (let x = -6; x <= 8.001; x += 0.05) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(Math.min(1, f(x))); K.svg(svg, "path", { d: d + `L${ax.sx(8)},${ax.sy(0)}L${ax.sx(-6)},${ax.sy(0)}Z`, fill: color, "fill-opacity": fillOp, stroke: color, "stroke-width": 2 }); };
+      curve((x) => (npdf(x, v.mu, v.sd) / npdf(v.mu, v.mu, v.sd)) * 0.9, "var(--c3)", 0.25);
+      curve((x) => (npdf(x, m.b, sdG) / npdf(m.b, m.b, sdG)) * 0.9, "var(--c2)", 0.25);
+      let d = "";
+      for (let x = -6; x <= 8.001; x += 0.05) { const u = m.U(x); d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(K.sigmoid(m.w1 * u + m.w2 * u * u + m.c)); }
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--c4)", "stroke-width": 2.5, "stroke-dasharray": "6 3" });
+      K.svg(svg, "text", { x: 60, y: 30, "font-size": 12, fill: "var(--c3)", "font-weight": 700 }, "■ 真实数据分布");
+      K.svg(svg, "text", { x: 180, y: 30, "font-size": 12, fill: "var(--c2)", "font-weight": 700 }, "■ 生成器分布");
+      K.svg(svg, "text", { x: 300, y: 30, "font-size": 12, fill: "var(--c4)", "font-weight": 700 }, "--- 判别器 D(x)：认为是真的概率");
+      // 损失曲线
+      const H = m.hist;
+      if (H.length > 1) {
+        const bx = K.axes(svg, { x: 50, y: 262, w: 590, h: 90 }, [0, v.steps], [0, 2.5], { yticks: 2, xlabel: "训练步数" });
+        ["var(--c2)", "var(--c4)"].forEach((col, j) => { let p = ""; H.forEach((h, i) => (p += (p ? "L" : "M") + bx.sx(i * 5) + "," + bx.sy(Math.min(2.5, h[j])))); K.svg(svg, "path", { d: p, fill: "none", stroke: col, "stroke-width": 1.6 }); });
+        K.svg(svg, "text", { x: 470, y: 276, "font-size": 11, fill: "var(--c2)" }, "生成器损失");
+        K.svg(svg, "text", { x: 550, y: 276, "font-size": 11, fill: "var(--c4)" }, "判别器损失");
+        K.svg(svg, "line", { x1: 50, x2: 640, y1: bx.sy(Math.log(2)), y2: bx.sy(Math.log(2)), stroke: "var(--ink-3)", "stroke-dasharray": "2 3" });
+        K.svg(svg, "text", { x: 52, y: bx.sy(Math.log(2)) - 4, "font-size": 10, class: "muted" }, "ln2 ≈ 0.69：D 只能瞎猜时的损失");
+      }
+      const last = H.length ? H[H.length - 1] : [NaN, NaN];
+      return { readout: [
+        { k: "生成均值 / 真实均值", v: `${m.b.toFixed(2)} / ${v.mu.toFixed(1)}`, color: Math.abs(m.b - v.mu) < 0.5 ? "var(--good)" : "var(--warn)" },
+        { k: "生成标准差 / 真实", v: `${Math.abs(m.a).toFixed(2)} / ${v.sd.toFixed(1)}` },
+        { k: "最后 D 损失", v: isFinite(last[1]) ? last[1].toFixed(3) : "—" },
+        { k: "最后 G 损失", v: isFinite(last[0]) ? last[0].toFixed(3) : "—" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：PatchGAN 感受野 ---------- */
+  // 第 21 格的层：三次 downsample(k4,s2,'same')，ZeroPadding(1)，Conv k4 s1 valid，ZeroPadding(1)，Conv k4 s1 valid
+  const LAYERS = [
+    { name: "down1  Conv 4×4 s2 same", k: 4, s: 2, padL: 1 },
+    { name: "down2  Conv 4×4 s2 same", k: 4, s: 2, padL: 1 },
+    { name: "down3  Conv 4×4 s2 same", k: 4, s: 2, padL: 1 },
+    { name: "ZeroPad 1 + Conv 4×4 s1", k: 4, s: 1, padL: 1 },
+    { name: "ZeroPad 1 + Conv 4×4 s1 → 1 通道", k: 4, s: 1, padL: 1 },
+  ];
+  function rfOf(o) { // 输出下标 o → 输入像素区间 [lo, hi]
+    let lo = o, hi = o;
+    for (let i = LAYERS.length - 1; i >= 0; i--) { const L = LAYERS[i]; lo = lo * L.s - L.padL; hi = hi * L.s - L.padL + L.k - 1; }
+    return [lo, hi];
+  }
+  const outSize = (() => { let n = 256; [[2, 1, 4], [2, 1, 4], [2, 1, 4]].forEach(() => (n = n / 2)); n = n + 2 - 3; n = n + 2 - 3; return n; })();
+  K.lab(document.getElementById("lab2"), {
+    width: 660, height: 420,
+    controls: [
+      { id: "ox", label: "输出格子 列（0–29）", min: 0, max: 29, step: 1, value: 14 },
+      { id: "oy", label: "输出格子 行（0–29）", min: 0, max: 29, step: 1, value: 8 },
+      { id: "depth", label: "只算到第几层", min: 1, max: 5, step: 1, value: 5 },
+    ],
+    note: "按每层的卷积核大小 k、步长 s、左侧填充倒推：输入区间 = [lo·s − pad, hi·s − pad + k − 1]。5 层全算时，每个输出格子看到 70×70 的输入块，相邻格子的块大量重叠（步长共 8 像素）。",
+    render(svg, v) {
+      const sc = 300 / 256, ox = 12, oy = 14;
+      img(svg, M0, ox, oy, 300, { opacity: 0.85 });
+      K.svg(svg, "rect", { x: ox, y: oy, width: 300, height: 300, fill: "none", stroke: "var(--line)" });
+      const use = LAYERS.slice(0, v.depth);
+      const back = (o) => { let lo = o, hi = o; for (let i = use.length - 1; i >= 0; i--) { const L = use[i]; lo = lo * L.s - L.padL; hi = hi * L.s - L.padL + L.k - 1; } return [lo, hi]; };
+      const [x0, x1] = back(v.ox), [y0, y1] = back(v.oy);
+      const cx0 = K.clamp(x0, 0, 255), cx1 = K.clamp(x1, 0, 255), cy0 = K.clamp(y0, 0, 255), cy1 = K.clamp(y1, 0, 255);
+      K.svg(svg, "rect", { x: ox + cx0 * sc, y: oy + cy0 * sc, width: (cx1 - cx0 + 1) * sc, height: (cy1 - cy0 + 1) * sc, fill: "var(--accent)", "fill-opacity": 0.25, stroke: "var(--accent)", "stroke-width": 2.5 });
+      // 输出网格
+      let n = 256; use.forEach((L, i) => { n = i < 3 ? n / 2 : n + 2 - L.k + 1; });
+      const gx = 340, gy = 14, gs = Math.min(10, 300 / n);
+      for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+        const on = x === v.ox && y === v.oy;
+        if (n <= 40 || on) K.svg(svg, "rect", { x: gx + Math.min(x, n - 1) * gs, y: gy + Math.min(y, n - 1) * gs, width: gs - 1, height: gs - 1, fill: on ? "var(--accent)" : "var(--panel-2)" });
+      }
+      if (n > 40) K.svg(svg, "text", { x: gx, y: gy + 20, "font-size": 12, class: "muted" }, `该层输出 ${n}×${n}，太大不逐格画`);
+      K.svg(svg, "text", { x: gx, y: gy + Math.min(n, 30) * gs + 18, "font-size": 12 }, `第 ${v.depth} 层输出：${n}×${n}${v.ox >= n || v.oy >= n ? "（所选格子超出范围）" : ""}`);
+      use.forEach((L, i) => K.svg(svg, "text", { x: gx, y: gy + Math.min(n, 30) * gs + 40 + i * 16, "font-size": 11, "font-family": "var(--mono)", class: "muted" }, L.name));
+      return { readout: [
+        { k: "感受野大小", v: `${x1 - x0 + 1} × ${y1 - y0 + 1} 像素` },
+        { k: "对应输入区间 x", v: `${x0} ~ ${x1}` },
+        { k: "对应输入区间 y", v: `${y0} ~ ${y1}` },
+        { k: "完整判别器输出", v: `${outSize}×${outSize}` },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

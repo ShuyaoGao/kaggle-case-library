@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>巴西电商地理</title>
+<meta name="description" content="Kaggle 案例拆解：用 Olist 巴西电商 10 万笔订单和 32 万个邮编坐标，看邮编怎样一位位缩小范围，再把收入、客单价、运费占比、配送时间、评分和延误率画到地图上：北部和东北部运费高、等得久。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">邮编坐标 + 订单表 · 地理聚合 · 物流分析</div>
+  <h1>巴西电商：住得离圣保罗越远，快递越贵越慢吗</h1>
+  <p class="en">Geospatial Analysis of Brazilian E-Commerce</p>
+  <div class="tags">
+    <span class="tag dm">数据挖掘</span>
+    <span class="tag method">邮编层级</span><span class="tag method">边界框去离群</span><span class="tag method">墨卡托投影</span>
+    <span class="tag method">datashader 大规模点渲染</span><span class="tag method">多表合并</span><span class="tag method">按邮编前缀聚合</span><span class="tag method">分区指标地图</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Andre Sionek</b></span>
+    <span>Kaggle 点赞 <b>1,139</b>（2026-11 抓取）</span>
+    <span>数据集 <b>olistbr/brazilian-ecommerce</b></span>
+    <span><a href="https://www.kaggle.com/code/andresionek/geospatial-analysis-of-brazilian-e-commerce" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">巴西电商平台的 10 万笔订单</div><p>2016–2018 年 Olist 平台的订单，每笔带顾客邮编前几位；另有一张 32.3 万条“邮编 → 经纬度”的对照表。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>要回答什么</h3><div class="big">钱从哪里来？谁付更多运费、等更久？</div><p>先弄懂巴西邮编怎么对应地理位置，再把收入、客单价、运费占比、配送天数、评分、延误率、每单件数一一画到地图上。</p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">按邮编前缀聚合，再上地图</div><p>去掉巴西国界以外的坐标，经纬度转墨卡托坐标；把订单表按邮编前 3 位分组算指标，再贴回对应的几十万个坐标点，用 datashader 画图。</p></div>
+    <div class="card panel"><h3>发现了什么</h3><div class="big">北部、东北部运费高、等得久</div><p>收入集中在东南和南部 <span data-cell="40">出处</span>；北部和东北部客单价更高、运费占比更高、配送更慢 <span data-cell="54">出处</span>；里约富人区比贫民区早约 5 天收到货 <span data-cell="67">出处</span>。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>Brazilian E-Commerce Public Dataset by Olist</b>，由巴西电商平台 Olist 公开，包含多张可以互相关联的表。以下数字来自作者的文字。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">规模</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">订单</div><div class="v">约 10 万</div></div>
+        <div class="stat-tile"><div class="k">邮编坐标</div><div class="v">32.3 万</div></div>
+        <div class="stat-tile"><div class="k">不同的 5 位邮编前缀</div><div class="v">19,051</div></div>
+        <div class="stat-tile"><div class="k">每个前缀平均坐标数</div><div class="v">52.6</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">订单和坐标数见第 0 格 <span data-cell="0">出处</span>，前缀统计见第 2 格（坐标最多的一个前缀有 1,146 个点）<span data-cell="2">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">用到的表和字段</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>表</th><th>关键字段</th></tr>
+        <tr><td>geolocation</td><td>邮编前缀、纬度、经度、城市、州</td></tr>
+        <tr><td>orders</td><td>订单号、顾客号、交给承运商时间、送达时间、预计送达时间</td></tr>
+        <tr><td>order_items</td><td>订单号、商品价格 <code>price</code>、运费 <code>freight_value</code>（一单可有多行）</td></tr>
+        <tr><td>order_reviews</td><td>订单号、评分 <code>review_score</code>（1–5）</td></tr>
+        <tr><td>customers</td><td>顾客号、顾客邮编前缀</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">巴西邮编（CEP）共 8 位，如 12.345-678：前 5 位依次表示大区、子区、片区、子片区、细分，后 3 位是投递编号。<span data-cell="0">出处</span></p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="38">
+    <h3>动手试试 A · 像邮编一样一层层缩小：空间编码 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="58">
+    <h3>动手试试 B · 用“离发货中心多远”预测配送天数 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>邮编从圣保罗 01001 开始，按逆时针方向增大，到南里奥格兰德州结束</td><td><span data-cell="9">第 9 格</span></td></tr>
+        <tr><td>每多一位数字，范围缩小一层：2 → 里约州和圣埃斯皮里图州，22 → 里约市，220 → 科帕卡巴纳</td><td><span data-cell="29">第 29–37 格</span></td></tr>
+        <tr><td>收入主要来自东南和南部，大城市和首府占比大</td><td><span data-cell="40">第 40 格</span></td></tr>
+        <tr><td>东南、南部客单价反而更低，北部、东北部更高（可能因运费）</td><td><span data-cell="46">第 46 格</span></td></tr>
+        <tr><td>北部、东北部运费更高、等待更久</td><td><span data-cell="54">第 54 格</span></td></tr>
+        <tr><td>巴拉那州：大城市平均配送时间比小城市短</td><td><span data-cell="60">第 60 格</span></td></tr>
+        <tr><td>里约市中心富人区比贫民区约早 5 天收到货；圣保罗、阿雷格里港也是市中心更快</td><td><span data-cell="67">第 67 格</span></td></tr>
+        <tr><td>里约州和东北部顾客更容易给低分</td><td><span data-cell="74">第 74 格</span></td></tr>
+        <tr><td>“小城市一单买更多件”的假设不成立</td><td><span data-cell="94">第 94 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">地图都在运行输出里，源码不带输出。除了上面列出的文字结论，作者没有给出各地区的具体数值。这份 notebook 标着“未完成”，最后列了待做事项。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能回答：</b>哪里是主要市场、哪里物流成本高、哪里配送慢、哪里的顾客不满意，从而决定在哪建仓库、对哪里补贴运费。</li>
+        <li><b>同类问题：</b>外卖、快递、网约车、银行网点、医院可达性，只要有“地址 → 坐标”就能做。</li>
+        <li><b>要注意：</b>把订单按邮编前缀聚合再贴回坐标，每个前缀的值会被画很多遍；前缀太细样本少、太粗看不出差别（作者因此选了 3 位）。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>按国界经纬度极值去离群 <span data-cell="5">第 5 格</span></li>
+        <li>经纬度 → Web 墨卡托米制坐标 <span data-cell="6">第 6 格</span></li>
+        <li>datashader + holoviews 画几十万个点 <span data-cell="12">第 12 格</span></li>
+        <li>邮编前 1–5 位分层筛选 <span data-cell="30">第 30 格</span></li>
+        <li>订单、明细、顾客、评价四表合并 <span data-cell="42">第 42 格</span></li>
+        <li>运费占比、配送天数、延误率等指标 <span data-cell="51">第 51 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>第 42 格把订单、商品明细、评价三张表直接合并。一笔订单有 3 件商品、2 条评价时，会变成几行？这对“收入合计”和“每单件数”有什么影响？</li>
+      <li>作者算的配送天数是“送达时间 − 交给承运商时间”。如果改成“送达时间 − 下单时间”，结论会变吗？</li>
+      <li>北部的客单价更高。是因为那里的人更有钱，还是因为运费贵、大家只在买贵东西时才网购？怎样验证？</li>
+      <li>作者说“巴西的富人区通常在市中心，郊区更穷”，并把配送快慢和贫富联系起来。只凭配送时间的地图，能得出这个结论吗？还缺什么数据？</li>
+      <li>如果你是 Olist 的物流负责人，看完这些地图，第一个仓库会建在哪？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Andre Sionek，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意；巴西轮廓、城市位置为手绘近似。数据集：Brazilian E-Commerce Public Dataset by Olist（olistbr/brazilian-ecommerce）。
+</footer>
+</main>
+
+<script src="nb/brazil-ecommerce-geo.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 手绘巴西轮廓（经度, 纬度，近似） ---------- */
+  const BR = [[-73.9,-7.4],[-70,-4],[-69.5,1],[-66.8,1.2],[-64,4],[-60,5.2],[-51.6,4.2],[-50,1.7],[-48,-1],[-44,-2.5],[-38.5,-3.7],[-35,-5.5],[-35,-9],[-37.5,-12.5],[-39,-17.5],[-40.8,-22],[-44,-23],[-48.5,-26.5],[-48.7,-28.5],[-53.4,-33.7],[-57.6,-30.2],[-53.8,-27],[-54.6,-25.5],[-58,-24],[-57.8,-20],[-60,-16],[-65,-11],[-69.6,-11],[-73,-9]];
+  const BB = [-74.5, -34, -34, 5.5];
+  const CITY = { SP: [-46.63, -23.55, "圣保罗"], RJ: [-43.2, -22.9, "里约热内卢"], BH: [-43.94, -19.92, "贝洛奥里藏特"], CU: [-49.27, -25.43, "库里蒂巴"], PA: [-51.23, -30.03, "阿雷格里港"], SA: [-38.5, -12.97, "萨尔瓦多"], FO: [-38.54, -3.73, "福塔莱萨"], RE: [-34.9, -8.05, "累西腓"], BR: [-47.88, -15.79, "巴西利亚"], MA: [-60.02, -3.1, "马瑙斯"], BE: [-48.5, -1.45, "贝伦"] };
+  function proj(box, B) {
+    B = B || BB;
+    const k = Math.cos(((B[2] + B[3]) / 2) * Math.PI / 180), wD = (B[1] - B[0]) * k, hD = B[3] - B[2], s = Math.min(box.w / wD, box.h / hD);
+    const ox = box.x + (box.w - wD * s) / 2, oy = box.y + (box.h - hD * s) / 2;
+    return { x: (lon) => ox + (lon - B[0]) * k * s, y: (lat) => oy + (B[3] - lat) * s, ox, oy, w: wD * s, h: hD * s };
+  }
+  function inPoly(pt, poly) { let c = false; for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) { const a = poly[i], b = poly[j]; if ((a[1] > pt[1]) !== (b[1] > pt[1]) && pt[0] < ((b[0] - a[0]) * (pt[1] - a[1])) / (b[1] - a[1]) + a[0]) c = !c; } return c; }
+  function drawBR(svg, P, fill) { return K.svg(svg, "path", { d: BR.map((p, i) => (i ? "L" : "M") + P.x(p[0]).toFixed(1) + "," + P.y(p[1]).toFixed(1)).join("") + "Z", fill: fill || "var(--panel-2)", stroke: "var(--ink-3)" }); }
+  function km(lat1, lon1, lat2, lon2) { const p = Math.PI / 180, a = 0.5 - Math.cos((lat2 - lat1) * p) / 2 + Math.cos(lat1 * p) * Math.cos(lat2 * p) * (1 - Math.cos((lon2 - lon1) * p)) / 2; return 12742 * Math.asin(Math.sqrt(a)); }
+  // 模拟订单 / 邮编坐标：大量集中在东南、南部大城市，少量分布在北部、东北部
+  function simPts(seed, n) {
+    const r = K.rng(seed), out = [];
+    const w = [["SP", 0.32], ["RJ", 0.14], ["BH", 0.09], ["CU", 0.06], ["PA", 0.06], ["SA", 0.05], ["FO", 0.04], ["RE", 0.04], ["BR", 0.04], ["MA", 0.02], ["BE", 0.02]];
+    while (out.length < n) {
+      let lon, lat;
+      if (r() < 0.82) { let u = r() * 0.88, c = w[0]; for (const x of w) { u -= x[1]; if (u <= 0) { c = x; break; } } const p = CITY[c[0]]; lon = p[0] + K.randn(r) * 1.1; lat = p[1] + K.randn(r) * 0.9; }
+      else { lon = -73 + r() * 38; lat = -33 + r() * 37; }
+      if (inPoly([lon, lat], BR)) out.push([lon, lat]);
+    }
+    return out;
+  }
+  // 模拟“逆时针递增”的邮编：以巴西中部为圆心，从圣保罗方向开始逆时针计角度
+  const ZC = [-48, -14];
+  function zipOf(lon, lat) { const a0 = Math.atan2(CITY.SP[1] - ZC[1], (CITY.SP[0] - ZC[0]) * 0.97); let a = Math.atan2(lat - ZC[1], (lon - ZC[0]) * 0.97) - a0; if (a < 0) a += 2 * Math.PI; return Math.min(0.999, a / (2 * Math.PI)); }
+  const rainbow = (t) => `hsl(${Math.round(260 - 260 * t)}, 70%, 55%)`;
+  // 一个点到圣保罗的距离决定模拟的运费、配送天数、评分
+  function orderSim(r, p) {
+    const d = km(p[1], p[0], CITY.SP[1], CITY.SP[0]);
+    const days = 4 + d / 220 + Math.abs(K.randn(r)) * 3;
+    const price = 90 + d / 40 + K.randn(r) * 25;
+    const freight = 12 + d / 90 + K.randn(r) * 4;
+    const est = 18 + d / 180;
+    const late = days > est ? 1 : 0;
+    const score = K.clamp(4.4 - late * 1.8 - d / 3500 + K.randn(r) * 0.6, 1, 5);
+    return { d, days, price, freight, ratio: Math.max(0.02, freight / Math.max(20, price)), late, score };
+  }
+
+  const steps = [
+    {
+      at: 0, title: "开场：巴西的邮编 CEP", kicker: "第 0–3 格 · 邮编与坐标表",
+      html: `<p>Olist 公开了约 10 万笔订单，每笔只带着顾客邮编的前几位；另外还有一张 32.3 万条记录的“邮编 → 经纬度”对照表。作者先研究：<b>巴西的邮编和地理位置是什么关系？</b><span data-cell="0">第 0 格</span></p><p>巴西邮编叫 CEP，共 8 位：前 5 位一层层表示大区、子区、片区、子片区、细分，后 3 位是投递编号。作者把前 1、2、3、4 位分别取出来做成新列，后面要逐层看。统计结果：共有 19,051 个不同的 5 位前缀，平均每个前缀有 52.6 个坐标。<span data-cell="2">第 2 格</span></p>`,
+      cells: [1, 3], highlight: ["str[0:3]"],
+      draw(svg, ctx) {
+        const digits = "12345678".split(""), names = ["大区", "子区", "片区", "子片区", "细分", "投", "递", "号"];
+        const boxes = digits.map((d, i) => { const x = 90 + i * 66 + (i >= 5 ? 24 : 0); const g = K.node(svg, x, 80, 58, 70, d, { bold: true, fs: 26, fill: i < 5 ? `color-mix(in srgb, var(--c1) ${15 + i * 12}%, var(--panel))` : "var(--panel-2)" }); g.style.opacity = 0; K.svg(svg, "text", { x: x + 29, y: 172, "text-anchor": "middle", "font-size": 12 }, i < 5 ? names[i] : ""); return g; });
+        K.svg(svg, "text", { x: 90 + 5 * 66 + 2, y: 124, "font-size": 30, "font-weight": 700 }, "-");
+        K.svg(svg, "text", { x: 90 + 5 * 66 + 24, y: 172, "font-size": 12 }, "投递编号");
+        const lines = [["前 1 位：", "一大片地区（几个州）"], ["前 2 位：", "一座大城市"], ["前 3 位：", "一个街区（作者后面用这一级）"], ["前 5 位：", "几条街"]];
+        const ts = lines.map(([a, b], i) => { const t = K.svg(svg, "text", { x: 90, y: 220 + i * 26, "font-size": 14 }, a + b); t.style.opacity = 0; return t; });
+        (async () => { for (const b of boxes) if (!(await ctx.tween(180, (t) => (b.style.opacity = t)))) return; for (const t of ts) if (!(await ctx.tween(300, (u) => (t.style.opacity = u)))) return; })();
+      },
+    },
+    {
+      title: "去掉国界以外的点，换成墨卡托坐标", kicker: "第 4–8 格 · 清洗与投影",
+      html: `<p>有些坐标跑到了巴西国境以外。作者查了巴西最北、最西、最南、最东四个端点的经纬度（北纬 5°16′、西经 73°58′、南纬 33°45′、西经 34°47′），围成一个长方形，框外的点都删掉。</p><p>然后用 datashader 的 <code>lnglat_to_meters</code> 把经纬度换成 <b>Web 墨卡托</b>坐标（单位是米），这样才能叠在网上常用的地图瓦片上。墨卡托投影保持形状不变形，但越靠近两极面积放大越厉害。</p>`,
+      cells: [5, 6], highlight: ["5.27438888", "lnglat_to_meters"],
+      draw(svg, ctx) {
+        const P = proj({ x: 10, y: 10, w: 330, h: 320 }, [-80, -28, -38, 9]);
+        drawBR(svg, P);
+        const box = [-73.98, -34.79, -33.75, 5.27];
+        const r = K.rng(4), pts = simPts(2, 160);
+        for (let i = 0; i < 14; i++) pts.push([-79 + r() * 50, -37 + r() * 45]);
+        const dots = pts.map((p) => K.svg(svg, "circle", { cx: P.x(p[0]), cy: P.y(p[1]), r: 2.2, fill: "var(--c6)", opacity: 0.7 }));
+        const rect = K.svg(svg, "rect", { x: P.x(box[0]), y: P.y(box[3]), width: P.x(box[1]) - P.x(box[0]), height: 0, fill: "none", stroke: "var(--accent)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        // 右侧：墨卡托 y 随纬度的拉伸
+        const ax = K.axes(svg, { x: 420, y: 30, w: 270, h: 260 }, [-35, 5], [-4.2e6, 0.6e6], { xlabel: "纬度（度）", yfmt: (v) => (v / 1e6).toFixed(1) + "M", ylabel: "墨卡托 y（米）", xticks: 4 });
+        const merc = (lat) => 6378137 * Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360));
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c3)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 430, y: 22, "font-size": 12 }, "y = R·ln(tan(45° + 纬度/2))，浏览器现算");
+        ctx.tween(800, (t) => rect.setAttribute("height", (P.y(box[2]) - P.y(box[3])) * t))
+          .then((ok) => ok && ctx.tween(700, (t) => dots.forEach((d, i) => { const p = pts[i]; if (p[0] < box[0] || p[0] > box[1] || p[1] < box[2] || p[1] > box[3]) d.style.opacity = 0.7 * (1 - t); })))
+          .then((ok) => ok && ctx.tween(1000, (t) => { let d = ""; for (let la = -35; la <= -35 + 40 * t; la += 0.5) d += (d ? "L" : "M") + ax.sx(la) + "," + ax.sy(merc(la)); path.setAttribute("d", d); }));
+      },
+    },
+    {
+      title: "邮编在地图上“转一圈”", kicker: "第 9–15 格 · 用颜色表示邮编",
+      html: `<p>把 32 万个坐标画到地图上，颜色按邮编大小从紫到红。规律一目了然：<b>邮编从圣保罗的 01001 开始，按逆时针方向越来越大，最后到最南边的南里奥格兰德州</b>。<span data-cell="9">第 9 格</span></p><p>几十万个点用普通画图工具会很慢，作者用 <b>datashader</b>：先把点“落”到像素格里聚合（这里取每格邮编的最小值或平均值），再按格子上色，点再多也很快。<code>plot_map</code> 叠了在线底图并支持悬停查看，<code>create_map</code> 输出黑底静态图。</p>`,
+      cells: [10, 12, 13, 15], highlight: ["datashade(", "cvs.points"],
+      draw(svg, ctx) {
+        const P = proj({ x: 10, y: 10, w: 460, h: 320 });
+        drawBR(svg, P);
+        const pts = simPts(5, 900);
+        const dots = pts.map((p) => K.svg(svg, "circle", { cx: P.x(p[0]), cy: P.y(p[1]), r: 0, fill: rainbow(zipOf(p[0], p[1])), opacity: 0.85 }));
+        const sweep = K.svg(svg, "line", { x1: P.x(ZC[0]), y1: P.y(ZC[1]), x2: P.x(ZC[0]), y2: P.y(ZC[1]), stroke: "var(--ink)", "stroke-width": 2, "stroke-dasharray": "4 3" });
+        for (let i = 0; i <= 10; i++) K.svg(svg, "rect", { x: 520 + i * 16, y: 60, width: 16, height: 18, fill: rainbow(i / 10) });
+        K.svg(svg, "text", { x: 520, y: 52, "font-size": 12 }, "邮编小 → 大（示意）");
+        K.svg(svg, "text", { x: 520, y: 100, "font-size": 12 }, "01xxx 圣保罗起点");
+        K.svg(svg, "text", { x: 520, y: 120, "font-size": 12 }, "逆时针一圈，");
+        K.svg(svg, "text", { x: 520, y: 140, "font-size": 12 }, "9xxxx 南里奥格兰德州");
+        K.svg(svg, "text", { x: 520, y: 320, "font-size": 11, class: "muted" }, "模拟点，规律按作者描述绘制");
+        const order = pts.map((p, i) => [zipOf(p[0], p[1]), i]).sort((a, b) => a[0] - b[0]);
+        const a0 = Math.atan2(CITY.SP[1] - ZC[1], (CITY.SP[0] - ZC[0]) * 0.97);
+        ctx.tween(3000, (t) => {
+          order.forEach(([z, i]) => dots[i].setAttribute("r", z <= t ? 2.4 : 0));
+          const a = a0 + t * 2 * Math.PI, L = 140;
+          K.set(sweep, { x2: P.x(ZC[0]) + L * Math.cos(a), y2: P.y(ZC[1]) - L * Math.sin(a) });
+        });
+      },
+    },
+    {
+      title: "州、大城市、小城市", kicker: "第 16–28 格 · 放大三级",
+      html: `<p>写一个 <code>filter_data</code>：按州或城市筛选，并去掉 x、y 两端各 0.1% 的极端点。然后放大三次：</p><ul class="tight"><li><b>圣保罗州</b>：邮编 01001–19990；0 开头在首府大都市区，1 开头在州内地 <span data-cell="16">第 16 格</span></li><li><b>圣保罗市</b>：01001–09540，前缀大致对应城区和街坊 <span data-cell="21">第 21 格</span></li><li><b>小城市 Atibaia</b>：12940–12954，但邻近城市也共用这些前缀，要更细只能看第 4、5 位 <span data-cell="25">第 25 格</span></li></ul>`,
+      cells: [17, 18, 22, 26], highlight: ["def filter_data", "quantile(0.999)"],
+      draw(svg, ctx) {
+        const P = proj({ x: 10, y: 10, w: 300, h: 320 });
+        drawBR(svg, P);
+        const sp = CITY.SP;
+        K.svg(svg, "circle", { cx: P.x(sp[0]), cy: P.y(sp[1]), r: 5, fill: "var(--c6)" });
+        const zoom = [[330, 20, 170, 150, "圣保罗州 01001–19990"], [520, 20, 180, 150, "圣保罗市 01001–09540"], [330, 190, 370, 130, "Atibaia 12940–12954（和邻城共用）"]];
+        const r = K.rng(9);
+        const panels = zoom.map(([x, y, w, h, t], k) => {
+          const g = K.svg(svg, "g"); g.style.opacity = 0;
+          K.svg(g, "rect", { x, y, width: w, height: h, rx: 8, fill: "var(--panel-2)", stroke: "var(--line)" });
+          K.svg(g, "text", { x: x + 8, y: y + 16, "font-size": 12, "font-weight": 700 }, t);
+          for (let i = 0; i < 90; i++) { const u = r(), v = r(); const z = k === 0 ? (u < 0.35 ? 0.05 * v : 0.3 + 0.7 * u) : k === 1 ? 0.6 * u + 0.4 * v * 0.5 : 0.5 + 0.1 * u; K.svg(g, "circle", { cx: x + 12 + u * (w - 24), cy: y + 28 + v * (h - 40), r: 2.4, fill: rainbow(K.clamp(z, 0, 1)) }); }
+          return g;
+        });
+        const lines = [K.svg(svg, "line", { x1: P.x(sp[0]), y1: P.y(sp[1]), x2: 330, y2: 95, stroke: "var(--ink-3)", "stroke-dasharray": "3 3" })];
+        (async () => { for (const g of panels) if (!(await ctx.tween(500, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "每多一位数字，范围缩小一层", kicker: "第 29–39 格 · 邮编的层级",
+      html: `<p>作者从里约开始逐位加数字 <span data-cell="29">第 29–37 格</span>：</p><ul class="tight"><li><b>2</b>：里约热内卢州和圣埃斯皮里图州</li><li><b>22</b>：全在里约市，但包含很多街区（从右到左是 Leme、科帕卡巴纳、伊帕内玛、莱布隆、巴拉）</li><li><b>220</b>：全在科帕卡巴纳</li><li><b>2201</b>：科帕卡巴纳的几条街</li><li><b>22010</b>：更少的几条街</li></ul><p>结论：<b>邮编位数越多，选出的区域越小，是一层套一层的子集</b>。<span data-cell="39">第 39 格</span> 这种“前缀越长、范围越小”的编码思想，和地图软件里常用的 Geohash、四叉树空间索引是一样的。</p>`,
+      cells: [30, 32, 34, 36, 38],
+      draw(svg, ctx) {
+        const levels = [["2", 0, 0, 700, 330], ["22", 300, 80, 300, 180], ["220", 420, 130, 120, 80], ["2201", 455, 150, 50, 36], ["22010", 470, 158, 20, 16]];
+        const r = K.rng(3), pts = [];
+        for (let i = 0; i < 600; i++) { const u = r(); let x, y; if (u < 0.5) { x = 300 + r() * 300; y = 80 + r() * 180; } else if (u < 0.75) { x = 420 + r() * 120; y = 130 + r() * 80; } else if (u < 0.88) { x = 455 + r() * 50; y = 150 + r() * 36; } else { x = 10 + r() * 680; y = 10 + r() * 310; } pts.push([x, y]); }
+        pts.forEach((p) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 1.6, fill: "var(--ink-3)", opacity: 0.6 }));
+        const rects = levels.map(([n, x, y, w, h], i) => { const e = K.svg(svg, "rect", { x: x + 2, y: y + 2, width: w - 4, height: h - 4, fill: "none", stroke: K.colors[i % 6], "stroke-width": 2.5 }); e.style.opacity = 0; const t = K.svg(svg, "text", { x: x + 8, y: y + 18, "font-size": i < 3 ? 14 : 11, "font-weight": 700, fill: K.colors[i % 6] }, n); t.style.opacity = 0; return [e, t]; });
+        K.svg(svg, "text", { x: 20, y: 325, "font-size": 11, class: "muted" }, "示意：方框一层套一层，名字来自作者第 29–37 格");
+        (async () => { for (const [e, t] of rects) { if (!(await ctx.tween(500, (u) => { e.style.opacity = u; t.style.opacity = u; }))) return; if (!(await ctx.wait(300))) return; } })();
+      },
+    },
+    {
+      title: "收入从哪来：合并四张表，按 3 位邮编聚合", kicker: "第 40–45 格 · 收入地图",
+      html: `<p>5 位前缀太细，有些地区样本太少，作者改用<b>前 3 位</b>。把订单、商品明细、顾客、评价四张表按订单号和顾客号合并，再按顾客邮编前 3 位求商品价格之和（千雷亚尔），最后 <code>join</code> 回坐标表：同一个前缀的几十上百个坐标点，都贴上同一个收入值。</p><p>结论：收入主要来自<b>东南和南部</b>，大城市和州首府人多，贡献大。<span data-cell="40">第 40 格</span></p><p class="note">第 42 格把订单和<b>评价</b>直接合并：一笔订单若有多条评价，商品行会被复制，收入就被重复计算了。更稳妥的做法是先按订单汇总，再合并评价。</p>`,
+      cells: [41, 42, 43, 45], highlight: ["orders.merge(order_reviews, on='order_id')", "str[0:3]"],
+      draw(svg, ctx) {
+        const tabs = [["orders", 30, 40], ["order_items", 30, 110], ["customers", 30, 180], ["reviews", 30, 250]];
+        tabs.forEach(([n, x, y]) => K.node(svg, x, y, 140, 50, n, { fs: 13 }));
+        const m = K.node(svg, 230, 130, 140, 80, "合并后的大表\n（一行一件商品）", { fs: 12 }); m.style.opacity = 0;
+        const ar = tabs.map(([, x, y]) => K.arrow(svg, 172, y + 25, 228, 170)); ar.forEach((a) => (a.style.opacity = 0));
+        const P = proj({ x: 400, y: 10, w: 310, h: 320 });
+        drawBR(svg, P);
+        const pts = simPts(7, 500);
+        const dots = pts.map((p) => { const v = Math.exp(-km(p[1], p[0], CITY.SP[1], CITY.SP[0]) / 600); return K.svg(svg, "circle", { cx: P.x(p[0]), cy: P.y(p[1]), r: 0, fill: `color-mix(in srgb, var(--warn) ${Math.round(30 + 70 * v)}%, var(--c6))`, opacity: 0.4 + 0.6 * v }); });
+        K.svg(svg, "text", { x: 410, y: 330, "font-size": 11, class: "muted" }, "模拟：越亮 = 收入越高");
+        ctx.tween(500, (t) => ar.forEach((a) => (a.style.opacity = t))).then((ok) => ok && ctx.tween(400, (t) => (m.style.opacity = t))).then((ok) => ok && ctx.tween(1300, (t) => dots.forEach((d, i) => d.setAttribute("r", K.clamp(t * dots.length - i, 0, 1) * 2.5))));
+      },
+    },
+    {
+      title: "客单价：远方的顾客买得更贵", kicker: "第 46–49 格 · 平均每单金额",
+      html: `<p>先按订单号把商品价格加起来得到每单金额，再按邮编前缀求平均，就是<b>客单价</b>（平均一单花多少钱）。</p><p>作者觉得有点意外：<b>东南、南部的客单价反而更低，北部和东北部更高</b>。他猜测是因为远方运费贵，人们只有买较贵的东西时才觉得网购划算。<span data-cell="46">第 46 格</span> 下一章就去验证运费。</p>`,
+      cells: [47, 49],
+      draw(svg, ctx) {
+        const P = proj({ x: 10, y: 10, w: 420, h: 320 });
+        drawBR(svg, P);
+        const r = K.rng(4), pts = simPts(8, 600), dots = pts.map((p) => { const o = orderSim(r, p); return [K.svg(svg, "circle", { cx: P.x(p[0]), cy: P.y(p[1]), r: 0, fill: `color-mix(in srgb, var(--c3) ${Math.round(K.clamp((o.price - 80) / 80, 0, 1) * 100)}%, var(--c1))` }), o.price]; });
+        K.svg(svg, "text", { x: 460, y: 60, "font-size": 13 }, "颜色：蓝 = 客单价低，绿 = 高");
+        K.svg(svg, "text", { x: 460, y: 90, "font-size": 12, class: "muted" }, "模拟：离圣保罗越远，客单价越高");
+        K.svg(svg, "text", { x: 460, y: 140, "font-size": 13 }, "客单价 = 每单商品总价的平均");
+        ctx.tween(1400, (t) => dots.forEach(([d], i) => d.setAttribute("r", K.clamp(t * dots.length - i, 0, 1) * 2.6)));
+      },
+    },
+    {
+      title: "运费占比：谁为物流付得更多", kicker: "第 50–53 格 · 运费 ÷ 商品价",
+      html: `<p>作者定义<b>运费占比</b> = 运费 ÷ 商品价格。比如商品 50 雷亚尔、运费 10 雷亚尔，占比就是 20%。占比越高，越可能劝退顾客。</p><p>他事先的预期是：人口稠密的地方占比低，人口稀少的地方占比高，因为物流成本不一样。<span data-cell="50">第 50 格</span> 地图证实了这一点，北部和东北部偏高。</p><p class="note">代码先按订单求和再相除，然后对各订单的占比求平均。另一种算法是“各地区运费总和 ÷ 价格总和”，两者在小订单多的地区会差不少。</p>`,
+      cells: [51, 53], highlight: ["gp.freight_value / gp.price"],
+      draw(svg, ctx) {
+        const ex = [["商品 R$50", 50, "var(--c1)"], ["运费 R$10", 10, "var(--c6)"]];
+        let x = 40; ex.forEach(([t, v, c]) => { K.svg(svg, "rect", { x, y: 40, width: v * 5, height: 40, fill: c, rx: 4 }); K.svg(svg, "text", { x: x + 6, y: 65, "font-size": 12, fill: "var(--panel)" }, t); x += v * 5 + 4; });
+        K.svg(svg, "text", { x: 360, y: 66, "font-size": 15, "font-weight": 700 }, "运费占比 = 10 / 50 = 20%");
+        const ax = K.axes(svg, { x: 60, y: 120, w: 600, h: 180 }, [0, 3500], [0, 0.6], { xlabel: "离圣保罗的距离（公里，模拟）", ylabel: "运费占比", yfmt: (v) => Math.round(v * 100) + "%" });
+        const r = K.rng(5), pts = simPts(11, 400).map((p) => orderSim(r, p));
+        const dots = pts.map((o) => K.svg(svg, "circle", { cx: ax.sx(Math.min(o.d, 3500)), cy: ax.sy(Math.min(o.ratio, 0.6)), r: 0, fill: "var(--c6)", opacity: 0.5 }));
+        ctx.wait(500).then((ok) => ok && ctx.tween(1400, (t) => dots.forEach((d, i) => d.setAttribute("r", K.clamp(t * dots.length - i, 0, 1) * 2.6))));
+      },
+    },
+    {
+      title: "配送天数：北边等得更久", kicker: "第 54–62 格 · 时间差",
+      html: `<p>配送天数 = 送到顾客手里的时间 − 交给承运商的时间（取天数）。按邮编前缀求平均画到地图上：<b>北部和东北部的人不但运费更贵，还要等得更久</b>。<span data-cell="54">第 54 格</span></p><p>再放大到巴拉那州：大城市的平均配送时间比小城市短。<span data-cell="60">第 60 格</span></p><p class="note">这里算的是“承运商运输时间”，不包括卖家备货、发货前的等待，所以比顾客实际感受到的“下单到收货”要短。</p>`,
+      cells: [55, 56, 58, 61], highlight: ["order_delivered_customer_date - orders.order_delivered_carrier_date"],
+      draw(svg, ctx) {
+        const P = proj({ x: 10, y: 10, w: 420, h: 320 });
+        drawBR(svg, P);
+        const r = K.rng(6), pts = simPts(12, 600);
+        const dots = pts.map((p) => { const o = orderSim(r, p); return K.svg(svg, "circle", { cx: P.x(p[0]), cy: P.y(p[1]), r: 0, fill: `color-mix(in srgb, var(--c6) ${Math.round(K.clamp((o.days - 4) / 16, 0, 1) * 100)}%, var(--c3))` }); });
+        const tl = [["交给承运商", 460, "var(--c1)"], ["送到顾客", 650, "var(--c6)"]];
+        K.svg(svg, "line", { x1: 470, y1: 120, x2: 670, y2: 120, stroke: "var(--ink-3)", "stroke-width": 2 });
+        tl.forEach(([t, x, c]) => { K.svg(svg, "circle", { cx: x + 10, cy: 120, r: 6, fill: c }); K.svg(svg, "text", { x: x - 20, y: 145, "font-size": 12 }, t); });
+        K.svg(svg, "text", { x: 520, y: 108, "font-size": 12 }, "配送天数");
+        K.svg(svg, "text", { x: 460, y: 60, "font-size": 13 }, "颜色：绿 = 快，红 = 慢（模拟）");
+        ctx.tween(1400, (t) => dots.forEach((d, i) => d.setAttribute("r", K.clamp(t * dots.length - i, 0, 1) * 2.6)));
+      },
+    },
+    {
+      title: "城市内部：市中心快，郊区慢", kicker: "第 63–73 格 · 里约、圣保罗、阿雷格里港",
+      html: `<p>作者提到巴西和很多国家不同：<b>富人区通常在市中心，郊区更穷、治安更差</b>。他把配送天数地图放大到里约市。<span data-cell="63">第 63 格</span></p><p>结果：住在市中心、博塔弗戈、科帕卡巴纳、弗拉门戈等富人区的人，比住在上帝之城、邦古等贫困街区的人<b>早大约 5 天</b>收到货。圣保罗和阿雷格里港也一样，离市中心越近越快。<span data-cell="67">第 67 格</span></p><p class="note">“富 / 穷”是作者根据常识对街区的描述，数据里并没有收入字段；配送慢也可能有路网、安全限制等原因。地图只能说明“哪里慢”，不能直接说明“为什么慢”。</p>`,
+      cells: [64, 66, 69, 72],
+      draw(svg, ctx) {
+        const cx = 360, cy = 175;
+        const rings = [0, 1, 2, 3, 4].map((k) => K.svg(svg, "circle", { cx, cy, r: 30 + k * 30, fill: "none", stroke: "var(--line)", "stroke-dasharray": "3 4" }));
+        K.svg(svg, "text", { x: cx, y: cy + 4, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, "市中心");
+        const r = K.rng(7), dots = [];
+        for (let i = 0; i < 260; i++) { const a = r() * Math.PI * 2, d = Math.sqrt(r()) * 160; const days = 6 + d / 30 + K.randn(r) * 1.2; dots.push(K.svg(svg, "circle", { cx: cx + d * Math.cos(a) * 1.6, cy: cy + d * Math.sin(a) * 0.95, r: 0, fill: `color-mix(in srgb, var(--c6) ${Math.round(K.clamp((days - 6) / 6, 0, 1) * 100)}%, var(--c3))` })); }
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, "font-weight": 700 }, "一座城市（示意）：颜色 = 平均配送天数");
+        K.svg(svg, "text", { x: 20, y: 330, "font-size": 11, class: "muted" }, "绿 = 快，红 = 慢；作者原文：里约富人区约早 5 天");
+        ctx.tween(1500, (t) => dots.forEach((d, i) => d.setAttribute("r", K.clamp(t * dots.length - i, 0, 1) * 3.2)));
+      },
+    },
+    {
+      title: "评分：等得久的地方，分也低", kicker: "第 74–81 格 · 平均评分",
+      html: `<p>按邮编前缀求平均评分（1–5 星）：<b>里约州和东北部的顾客更容易打低分</b>。<span data-cell="74">第 74 格</span></p><p>作者又把里约市的评分地图和配送天数地图放在一起，请读者自己看两者有没有关系。<span data-cell="78">第 78 格</span> 这是一个很好的“空间对照”：同一批区域，两个指标的高低是不是对得上。</p>`,
+      cells: [75, 77, 79, 80],
+      draw(svg, ctx) {
+        const P1 = proj({ x: 10, y: 20, w: 340, h: 300 }), P2 = proj({ x: 370, y: 20, w: 340, h: 300 });
+        drawBR(svg, P1); drawBR(svg, P2);
+        K.svg(svg, "text", { x: 20, y: 16, "font-size": 12, "font-weight": 700 }, "配送天数（红 = 慢）");
+        K.svg(svg, "text", { x: 380, y: 16, "font-size": 12, "font-weight": 700 }, "平均评分（红 = 低分）");
+        const r = K.rng(8), pts = simPts(13, 450), os = pts.map((p) => orderSim(r, p)), ds = [];
+        pts.forEach((p, i) => {
+          ds.push(K.svg(svg, "circle", { cx: P1.x(p[0]), cy: P1.y(p[1]), r: 0, fill: `color-mix(in srgb, var(--c6) ${Math.round(K.clamp((os[i].days - 4) / 16, 0, 1) * 100)}%, var(--c3))` }));
+          ds.push(K.svg(svg, "circle", { cx: P2.x(p[0]), cy: P2.y(p[1]), r: 0, fill: `color-mix(in srgb, var(--c6) ${Math.round(K.clamp((4.6 - os[i].score) / 2.5, 0, 1) * 100)}%, var(--c3))` }));
+        });
+        K.svg(svg, "text", { x: 20, y: 336, "font-size": 11, class: "muted" }, "模拟数据：两张图的红色区域大致重合");
+        ctx.tween(1500, (t) => ds.forEach((d, i) => d.setAttribute("r", K.clamp(t * ds.length - i, 0, 1) * 2.3)));
+      },
+    },
+    {
+      title: "延误率：没按预计日期送到", kicker: "第 82–89 格 · 延误比例",
+      html: `<p>送达时间晚于“预计送达时间”就算延误。按邮编前缀算延误订单的比例，先看全国，再看里约。作者想看延误和评分的关系。<span data-cell="82">第 82 格</span></p><p>直觉上，延误的订单评分更低；把延误率地图和评分地图对照，可以找出“物流拖后腿”的地区。</p>`,
+      cells: [83, 85, 88], highlight: ["orders['order_delivered_customer_date'] > orders['order_estimated_delivery_date']"],
+      draw(svg, ctx) {
+        const r = K.rng(9), os = simPts(14, 600).map((p) => orderSim(r, p));
+        const lateScore = os.filter((o) => o.late).map((o) => o.score), okScore = os.filter((o) => !o.late).map((o) => o.score);
+        const hist = (a) => { const b = [0, 0, 0, 0, 0]; a.forEach((s) => b[Math.min(4, Math.round(s) - 1)]++); return b.map((x) => x / a.length); };
+        const hl = hist(lateScore), ho = hist(okScore);
+        const ax = K.axes(svg, { x: 70, y: 30, w: 580, h: 250 }, [0.5, 5.5], [0, 0.7], { xlabel: "评分（星，模拟数据）", yfmt: (v) => Math.round(v * 100) + "%", xticks: 5 });
+        const bars = [];
+        for (let k = 0; k < 5; k++) {
+          bars.push([K.svg(svg, "rect", { x: ax.sx(k + 1) - 32, y: ax.sy(0), width: 30, height: 0, fill: "var(--c3)" }), ho[k]]);
+          bars.push([K.svg(svg, "rect", { x: ax.sx(k + 1) + 2, y: ax.sy(0), width: 30, height: 0, fill: "var(--c6)" }), hl[k]]);
+        }
+        K.svg(svg, "text", { x: 90, y: 50, "font-size": 12, fill: "var(--c3)", "font-weight": 700 }, "■ 按时送达");
+        K.svg(svg, "text", { x: 190, y: 50, "font-size": 12, fill: "var(--c6)", "font-weight": 700 }, "■ 延误");
+        ctx.tween(1300, (t) => bars.forEach(([b, v]) => { const h = (ax.sy(0) - ax.sy(v)) * K.ease(t); K.set(b, { y: ax.sy(0) - h, height: h }); }));
+      },
+    },
+    {
+      title: "小城市一单买得更多吗？", kicker: "第 90–95 格 · 被否定的假设与待做事项",
+      html: `<p>作者猜：住得离大城市远的人，可能一次多买几件（攒单）。于是按邮编前缀算每单平均件数。</p><p>结果<b>假设不成立</b>：反而是大城市的顾客每单买得多一些，而且看不出清楚的地理规律，没法得出更多结论。<span data-cell="94">第 94 格</span></p><p>notebook 最后标着“未完成”，列了待做事项：哪些品类卖得最多、付款方式、分期数、具体城市的深入分析。</p><p class="note">每单件数是用合并后的大表数行数得到的；由于第 42 格并入了评价表，有多条评价的订单行数会被放大。</p>`,
+      cells: [91, 93],
+      draw(svg, ctx) {
+        const hyp = K.node(svg, 60, 50, 280, 80, "假设：小城市的人\n一单买更多件", { fs: 14 });
+        const res = K.node(svg, 400, 50, 280, 80, "结果：大城市反而略多\n没有清楚的地理规律", { fs: 14, fill: "color-mix(in srgb, var(--bad) 12%, var(--panel))", stroke: "var(--bad)" }); res.style.opacity = 0;
+        const x = K.svg(svg, "text", { x: 200, y: 175, "text-anchor": "middle", "font-size": 48, fill: "var(--bad)", "font-weight": 700 }, "✗"); x.style.opacity = 0;
+        const todo = ["品类销量", "付款方式", "分期数", "具体城市分析"];
+        const ts = todo.map((t, i) => { const g = K.node(svg, 60 + i * 160, 230, 145, 46, "待做：" + t, { fs: 12 }); g.style.opacity = 0; return g; });
+        ctx.wait(500).then((ok) => ok && ctx.tween(500, (t) => { res.style.opacity = t; x.style.opacity = t; })).then(async (ok) => { if (!ok) return; for (const g of ts) if (!(await ctx.tween(250, (t) => (g.style.opacity = t)))) return; });
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：四叉树空间编码 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "lon", label: "查询点经度", min: -73, max: -35, step: 0.1, value: -43.2, fmt: (v) => v.toFixed(1) + "°" },
+      { id: "lat", label: "查询点纬度", min: -33, max: 4, step: 0.1, value: -22.9, fmt: (v) => v.toFixed(1) + "°" },
+      { id: "digits", label: "编码位数（每多一位，格子边长缩小一半）", min: 1, max: 8, step: 1, value: 3 },
+    ],
+    note: "把巴西所在的方框不停地“田”字四等分，每一层用 0–3 记下点落在哪一格，连起来就是一串编码，前缀相同就在同一个大格里，和邮编“前缀越长、范围越小”是一个道理（地图软件里的 Geohash、四叉树索引都是这样）。浏览器现场计算 1500 个模拟订单点里，有多少和查询点共享这串前缀。",
+    render(svg, v) {
+      const P = proj({ x: 10, y: 10, w: 360, h: 360 });
+      drawBR(svg, P);
+      const pts = simPts(21, 1500);
+      const code = (lon, lat, n) => { let x0 = BB[0], x1 = BB[1], y0 = BB[2], y1 = BB[3], s = ""; const boxes = []; for (let i = 0; i < n; i++) { const xm = (x0 + x1) / 2, ym = (y0 + y1) / 2, e = lon >= xm, nn = lat >= ym; s += (nn ? 0 : 2) + (e ? 1 : 0); if (e) x0 = xm; else x1 = xm; if (nn) y0 = ym; else y1 = ym; boxes.push([x0, x1, y0, y1]); } return { s, boxes }; };
+      const q = code(v.lon, v.lat, v.digits);
+      let same = 0;
+      pts.forEach((p) => { const c = code(p[0], p[1], v.digits).s; const hit = c === q.s; if (hit) same++; K.svg(svg, "circle", { cx: P.x(p[0]), cy: P.y(p[1]), r: hit ? 2.4 : 1.4, fill: hit ? "var(--c6)" : "var(--ink-3)", opacity: hit ? 0.9 : 0.4 }); });
+      q.boxes.forEach((b, i) => K.svg(svg, "rect", { x: P.x(b[0]), y: P.y(b[3]), width: P.x(b[1]) - P.x(b[0]), height: P.y(b[2]) - P.y(b[3]), fill: "none", stroke: K.colors[i % 6], "stroke-width": 2 }));
+      K.svg(svg, "circle", { cx: P.x(v.lon), cy: P.y(v.lat), r: 5, fill: "var(--ink)", stroke: "var(--panel)", "stroke-width": 2 });
+      K.svg(svg, "text", { x: 390, y: 50, "font-size": 13 }, "每层编号：");
+      [["0", "左上"], ["1", "右上"], ["2", "左下"], ["3", "右下"]].forEach(([d, t], i) => K.svg(svg, "text", { x: 390 + (i % 2) * 110, y: 76 + Math.floor(i / 2) * 22, "font-size": 12 }, d + " = " + t));
+      K.svg(svg, "text", { x: 390, y: 150, "font-size": 13 }, "查询点的编码：");
+      K.svg(svg, "text", { x: 390, y: 182, "font-size": 26, "font-family": "var(--mono)", "font-weight": 700, fill: "var(--accent)" }, q.s);
+      const w = km(v.lat, q.boxes[v.digits - 1][0], v.lat, q.boxes[v.digits - 1][1]);
+      return { readout: [
+        { k: "编码", v: q.s },
+        { k: "最小格子宽约", v: Math.round(w) + " km" },
+        { k: "同一格里的订单", v: same + " / " + pts.length, color: "var(--c6)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：距离 → 配送天数 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "hub", label: "发货中心设在", value: "SP", options: [["SP", "圣保罗"], ["RE", "累西腓（东北部）"], ["BR", "巴西利亚（中部）"], ["MA", "马瑙斯（北部）"]] },
+      { id: "feat", label: "模型用的特征", value: "dist", options: [["lat", "只用纬度"], ["dist", "到发货中心的大圆距离"]] },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "模拟 600 笔订单：配送天数 ≈ 4 + 到“真实发货地”（圣保罗）的距离 / 220 公里 + 噪声。浏览器用最小二乘现场拟合一条直线，并算 R²（直线能解释多少变化，越接近 1 越好）。把发货中心换到别处，算出的“距离”就不再能解释配送天数；只用纬度也比距离差。这说明从坐标造特征时，选对“参照点”很关键。",
+    render(svg, v) {
+      const r = K.rng(40 + v.seed * 3), pts = simPts(30 + v.seed, 600), hub = CITY[v.hub];
+      const rows = pts.map((p) => { const o = orderSim(r, p); const x = v.feat === "lat" ? p[1] : km(p[1], p[0], hub[1], hub[0]); return [x, o.days]; });
+      const n = rows.length, mx = rows.reduce((s, a) => s + a[0], 0) / n, my = rows.reduce((s, a) => s + a[1], 0) / n;
+      let sxy = 0, sxx = 0, syy = 0; rows.forEach(([x, y]) => { sxy += (x - mx) * (y - my); sxx += (x - mx) ** 2; syy += (y - my) ** 2; });
+      const b = sxy / sxx, a = my - b * mx, r2 = (sxy * sxy) / (sxx * syy);
+      const xs = rows.map((q) => q[0]), x0 = Math.min(...xs), x1 = Math.max(...xs);
+      const ax = K.axes(svg, { x: 60, y: 20, w: 560, h: 290 }, [x0, x1], [0, 30], { xlabel: v.feat === "lat" ? "纬度（度）" : "到“" + hub[2] + "”的距离（公里）", ylabel: "配送天数", xticks: 5 });
+      rows.forEach(([x, y]) => K.svg(svg, "circle", { cx: ax.sx(x), cy: ax.sy(Math.min(30, y)), r: 2.4, fill: "var(--c1)", opacity: 0.5 }));
+      K.svg(svg, "line", { x1: ax.sx(x0), y1: ax.sy(a + b * x0), x2: ax.sx(x1), y2: ax.sy(a + b * x1), stroke: "var(--c6)", "stroke-width": 3 });
+      return { readout: [
+        { k: "R²（越接近 1 越好）", v: r2.toFixed(3), color: r2 > 0.6 ? "var(--good)" : "var(--warn)" },
+        { k: "斜率", v: v.feat === "lat" ? b.toFixed(2) + " 天/度" : (b * 1000).toFixed(2) + " 天/千公里" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

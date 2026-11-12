@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>出租车行程时长</title>
+<meta name="description" content="Kaggle 案例拆解：纽约出租车行程要开多久？从经纬度里造出距离、方向、聚类、拥堵速度等 50 多个特征，交给 XGBoost 预测。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格 + 地理时空数据 · 回归 · 特征工程</div>
+  <h1>纽约出租车：这一趟要开多久？</h1>
+  <p class="en">From EDA to the Top (LB 0.367)</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">对数目标</span><span class="tag method">PCA 坐标旋转</span><span class="tag method">球面距离 / 曼哈顿距离</span>
+    <span class="tag method">MiniBatchKMeans 聚类</span><span class="tag method">分组均值特征</span><span class="tag method">XGBoost</span><span class="tag method">特征消融</span><span class="tag method">参数搜索</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>beluga（gaborfodor）</b></span>
+    <span>Kaggle 点赞 <b>1,181</b>（2026-11 抓取）</span>
+    <span>数据集 <b>New York City Taxi Trip Duration</b>（Kaggle 竞赛）+ OSRM 路线数据</span>
+    <span><a href="https://www.kaggle.com/code/gaborfodor/from-eda-to-the-top-lb-0-367" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">2016 年上半年纽约黄色出租车的行程记录</div><p>每一趟有上车时间、上下车经纬度、乘客数、运营商。没有缺失值。作者还引入了一份外部的 OSRM 最快路线数据。<span data-cell="6">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这一趟要开多少秒（trip_duration）</div><p>回归问题，比赛按 RMSLE（对数误差）评分。最长的一趟记录约 1000 小时，明显是异常，好在对数评分不怕它。<span data-cell="11">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">在经纬度上“造”特征，再交给 XGBoost</div><p>PCA 旋转坐标、球面/曼哈顿距离、方向、时间特征、100 个地点聚类、按时段和地点统计的平均车速、外部路线距离，共约 59 个特征。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">单模型 0.371，融合 0.368，堆叠 0.367</div><p>作者写明：用这套特征的最好单模型排行榜 0.371，几个模型线性组合 0.368，再堆叠 0.367。<span data-cell="0">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">竞赛数据 <b>New York City Taxi Trip Duration</b> 来自纽约市出租车与豪华轿车委员会（NYC TLC）公开的 2016 年行程记录，经 Kaggle 抽样整理。行数来自竞赛数据说明；字段说明见作者第 6 格 <span data-cell="6">出处</span>。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">训练集行程数</div><div class="v">1,458,644</div></div>
+        <div class="stat-tile"><div class="k">测试集行程数</div><div class="v">625,134</div></div>
+        <div class="stat-tile"><div class="k">训练集字段</div><div class="v">11 列</div></div>
+        <div class="stat-tile"><div class="k">评估指标</div><div class="v" style="font-size:18px">RMSLE</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">测试集没有 dropoff_datetime 和 trip_duration 两列（作者第 6 格）。作者在第 8 格检查确认：id 唯一、训练和测试不重叠、没有缺失值 <span data-cell="8">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>id</code></td><td>行程编号</td><td>文本</td></tr>
+        <tr><td><code>vendor_id</code></td><td>出租车运营商（两家之一）</td><td>类别</td></tr>
+        <tr><td><code>pickup_datetime</code></td><td>打表时间（上车）</td><td>时间</td></tr>
+        <tr><td><code>dropoff_datetime</code></td><td>停表时间（下车），仅训练集</td><td>时间</td></tr>
+        <tr><td><code>passenger_count</code></td><td>乘客数（司机录入）</td><td>数值</td></tr>
+        <tr><td><code>pickup_longitude / latitude</code></td><td>上车点经度、纬度</td><td>数值</td></tr>
+        <tr><td><code>dropoff_longitude / latitude</code></td><td>下车点经度、纬度</td><td>数值</td></tr>
+        <tr><td><code>store_and_fwd_flag</code></td><td>车上断网时是否先存储后上传（Y/N）</td><td>类别</td></tr>
+        <tr><td><code>trip_duration</code></td><td><b>要预测的答案</b>：行程秒数，仅训练集</td><td>数值</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="19">
+    <h3>动手试试 A · 坐标旋转为什么能帮决策树 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="45">
+    <h3>动手试试 B · XGBoost 的学习率和早停 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>这套特征的最好单模型排行榜 RMSLE 0.371；几个模型线性组合 0.368；堆叠到 0.367</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>训练集和测试集在时间、地点上完全重叠，是随机划分，所以可以在全部数据上做聚类等无监督特征</td><td><span data-cell="16">第 16 格</span></td></tr>
+        <tr><td>训练、测试特征分布几乎一致：均值差最大也不到标准差的 1%；缺失比例也一样，XGBoost 能直接处理缺失</td><td><span data-cell="41">第 41 格</span></td></tr>
+        <tr><td>XGBoost 重要性高的位置类特征，单独删掉一个并不会让误差变大；vendor_id 用得很少，删掉却明显变差；方向 direction 两方面都重要</td><td><span data-cell="48">第 48 格</span></td></tr>
+        <tr><td>参数搜索：较小的学习率 eta 能明显改善；更大的 subsample、更小的 min_child_weight 也更好；lambda 影响不大</td><td><span data-cell="60">第 60 格</span></td></tr>
+        <tr><td>本地验证分数通常比排行榜低约 0.005；差距稳定就没问题，若差距变大要查泄漏或过拟合</td><td><span data-cell="63">第 63 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">本页“排行榜竞速”“特征消融”“参数搜索”“本地验证与排行榜”四张图的数字，都是作者亲手写进代码里的历史结果（第 3、47、57、62 格），浏览器只是把它们画出来。第 44 格本次训练的验证分数在运行输出里，源码不带输出，这里不列。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>输入上车时间和上下车坐标，在出发前估出行程时长，可用于网约车预估到达时间（ETA）、调度派单、动态定价。</li>
+        <li><b>同类问题：</b>外卖送达时间、快递配送时长、共享单车骑行时长、物流车辆到港时间。</li>
+        <li><b>可迁移的套路：</b>目标取对数 → 从坐标派生距离、方向、聚类 → 从时间派生小时、星期、周内小时 → 按时间/地点分组统计历史均值 → 检查训练测试分布 → 梯度提升树 + 早停 → 用消融实验判断特征真实价值。</li>
+        <li><b>注意：</b>本题测试集与训练集同一时期随机划分，所以“用同时段统计特征”是可行的；真实业务要预测未来，这些特征必须只用过去的数据计算。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>log(1+时长) 目标 <span data-cell="12">第 12 格</span></li>
+        <li>PCA 旋转经纬度 <span data-cell="18">第 18 格</span></li>
+        <li>Haversine、伪曼哈顿距离、方向角 <span data-cell="21">第 21 格</span></li>
+        <li>时间特征、平均车速 <span data-cell="23">第 23 格</span> <span data-cell="25">第 25 格</span></li>
+        <li>MiniBatchKMeans 100 簇 <span data-cell="28">第 28 格</span></li>
+        <li>分组均值、滑动窗口计数 <span data-cell="32">第 32 格</span> <span data-cell="33">第 33 格</span></li>
+        <li>OSRM 外部路线特征 <span data-cell="36">第 36 格</span></li>
+        <li>XGBoost + 早停 <span data-cell="44">第 44 格</span>、随机参数搜索 <span data-cell="55">第 55 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>平均车速 avg_speed = 距离 / 行程时长，用到了要预测的答案。作者没有把它直接当特征，却用它算“每个小时、每个聚类的平均车速”再合并回去。这算不算数据泄漏？什么条件下才安全？</li>
+      <li>作者说“训练测试是随机划分，所以可以用同时段的统计特征”。如果比赛改成“用 1–5 月预测 6 月”，哪些特征必须改，怎么改？</li>
+      <li>vendor_id 在 XGBoost 重要性里排倒数第二，删掉它误差却明显上升；一些位置特征重要性很高，删掉一个却没影响。这说明“特征重要性”有什么局限？</li>
+      <li>曼哈顿的街道不是正南正北，大约斜着 29 度。作者用 PCA 把坐标“转正”。为什么对决策树类模型有用，对线性回归是否也有用？</li>
+      <li>作者说真实项目里他喜欢变量少的模型，比赛里却宁可多放变量。你能说出这两种取舍背后的理由吗？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 beluga（Kaggle 用户 gaborfodor），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意（标明“作者代码中的数字”的图除外）。数据集：Kaggle 竞赛 New York City Taxi Trip Duration（数据源 NYC TLC）；外部数据：oscarleo 整理的 New York City Taxi with OSRM。
+</footer>
+</main>
+
+<script src="nb/nyc-taxi-trip-duration.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  function histo(vals, lo, hi, nb) { const c = new Array(nb).fill(0); vals.forEach((v) => { const k = Math.floor(((v - lo) / (hi - lo)) * nb); if (k >= 0 && k < nb) c[k]++; }); return c; }
+  function tcell(svg, x, y, w, h, txt, opt) {
+    opt = opt || {};
+    const r = K.svg(svg, "rect", { x, y, width: w, height: h, fill: opt.fill || "var(--panel)", stroke: "var(--line)" });
+    const t = K.svg(svg, "text", { x: x + w / 2, y: y + h / 2 + 4, "text-anchor": "middle", "font-size": opt.fs || 12, "font-family": "var(--mono)", "font-weight": opt.bold ? 700 : 400, fill: opt.color || "var(--ink)" }, txt);
+    return { r, t };
+  }
+  const rmse = (P, Y) => Math.sqrt(P.reduce((s, p, i) => s + (p - Y[i]) ** 2, 0) / Y.length);
+  /* 模拟一个斜着的“曼哈顿岛”：沿长轴方向的点 */
+  const ANG = (29 * Math.PI) / 180;
+  function island(seed, n) {
+    const r = K.rng(seed), P = [];
+    for (let i = 0; i < n; i++) { const u = (r() - 0.5) * 2.2, v = (r() - 0.5) * 0.5; P.push({ u, v, x: u * Math.cos(ANG) - v * Math.sin(ANG), y: u * Math.sin(ANG) + v * Math.cos(ANG) }); }
+    return P;
+  }
+
+  const steps = [
+    {
+      title: "开场：一场排行榜竞速", kicker: "第 0–3 格 · 背景", at: 0, cells: [0, 3],
+      highlight: ["0.371", "0.368", "0.367", "59 useful features"],
+      html: `<p>作者 beluga 开宗明义：目标是在 Kaggle Kernel 的资源限制下，<b>为 XGBoost 造出最好的特征集</b>。这本 notebook 提取了 59 个特征，做 80/20 训练-验证划分，训练 XGBoost，分析特征重要性，再给出参数搜索结果。</p><p>第 3 格他把自己比赛第一周的成绩和“其他人的最好成绩”手抄成数字画成了竞速图。右边的动画就是用这些数字画的。</p>`,
+      draw(svg, ctx) {
+        const bh = [8, 8, 20, 28, 37, 45, 85, 85, 100, 134, 134, 143, 148], bs = [0.4, 0.398, 0.393, 0.39, 0.383, 0.38, 0.379, 0.377, 0.376, 0.376, 0.375, 0.371, 0.368];
+        const oh = [], os = [], ov = [.452,.452,.452,.452,.452,.452,.421,.421,.421,.406,.398,.398,.398,.398,.394,.394,.394,.394,.391,.391,.390,.390,.390,.390,.389,.389,.389,.389,.389,.389,.389,.385,.385,.385,.385,.385,.385,.385,.385,.385,.385,.385,.385,.383,.383,.383,.383,.383,.383,.383,.383,.383,.383,.383,.378];
+        for (let h = 0; h <= 148; h++) { oh.push(h); os.push(h < ov.length ? ov[h] : h < 143 ? (h < 90 ? .378 : .377) : .373); }
+        const ax = K.axes(svg, { x: 70, y: 20, w: 600, h: 260 }, [0, 150], [0.36, 0.41], { xlabel: "比赛开始后的小时数", ylabel: "RMSLE（越低越好）", yticks: 5, yfmt: (v) => v.toFixed(2) });
+        const pO = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 3 });
+        const pB = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 3.5 });
+        K.svg(svg, "text", { x: 500, y: 60, "font-size": 13, fill: "var(--c1)", "font-weight": 700 }, "— 其他人的最好成绩");
+        K.svg(svg, "text", { x: 500, y: 82, "font-size": 13, fill: "var(--c6)", "font-weight": 700 }, "— beluga");
+        K.svg(svg, "text", { x: 70, y: 330, "font-size": 12, class: "muted" }, "数字取自作者第 3 格代码（其他人的曲线超出 0.41 的部分被截断）");
+        const path = (H, S, upto) => { let d = ""; for (let i = 0; i < H.length && H[i] <= upto; i++) { const y = ax.sy(Math.min(S[i], 0.41)); d += (d ? `L${ax.sx(H[i])},${d ? ax.sy(Math.min(S[i - 1], 0.41)) : y}L` : "M") + ax.sx(H[i]) + "," + y; } return d; };
+        ctx.tween(3000, (t) => { const up = 148 * t; pO.setAttribute("d", path(oh, os, up)); pB.setAttribute("d", path(bh, bs, up)); });
+      },
+    },
+    {
+      title: "认识数据：11 列、零缺失", kicker: "第 4–10 格 · 数据理解", at: 4, cells: [7, 8, 9],
+      highlight: ["check_trip_duration", "store_and_fwd_flag"],
+      html: `<p>读入训练集、测试集后，作者做了几项“健康检查”：id 是否唯一、训练和测试是否重叠、有没有缺失值、<code>store_and_fwd_flag</code> 是否只有两种取值。</p><p>他还用“下车时间 − 上车时间”重算了一遍行程时长，和给定的 <code>trip_duration</code> 对比，确认标签本身没错。最后查了最大时长：约 1000 小时。</p>`,
+      draw(svg, ctx) {
+        const hdr = ["pickup", "dropoff", "trip_duration", "重算", "一致？"];
+        const rows = [["17:24:55", "17:32:30", "455", "455"], ["00:43:35", "00:54:38", "663", "663"], ["11:35:24", "12:10:48", "2124", "2124"], ["19:32:31", "19:39:40", "429", "429"]];
+        const W = [120, 120, 130, 110, 90], X = [30, 150, 270, 400, 510];
+        hdr.forEach((h, j) => tcell(svg, X[j], 30, W[j], 32, h, { fill: j >= 3 ? "var(--accent-soft)" : "var(--panel-2)", bold: true, fs: 12 }));
+        const out = rows.map((r, i) => { r.slice(0, 3).forEach((v, j) => tcell(svg, X[j], 62 + i * 36, W[j], 36, v)); return [tcell(svg, X[3], 62 + i * 36, W[3], 36, ""), tcell(svg, X[4], 62 + i * 36, W[4], 36, "")]; });
+        const checks = ["✓ id 唯一", "✓ 训练与测试不重叠", "✓ 没有缺失值", "✓ 标记只有 Y / N 两种"];
+        const ct = checks.map((c, i) => { const t = K.svg(svg, "text", { x: 30, y: 230 + i * 24, "font-size": 13, fill: "var(--good)" }, c); t.style.opacity = 0; return t; });
+        K.svg(svg, "text", { x: 360, y: 250, "font-size": 12, class: "muted" }, "表中时间为示意");
+        (async () => {
+          for (let i = 0; i < rows.length; i++) { if (!(await ctx.wait(350))) return; out[i][0].t.textContent = rows[i][3]; out[i][1].t.textContent = "✓"; out[i][1].t.style.fill = "var(--good)"; }
+          for (const t of ct) if (!(await ctx.tween(250, (k) => (t.style.opacity = k)))) return;
+        })();
+      },
+    },
+    {
+      title: "目标取对数：1000 小时也不怕", kicker: "第 11–12 格 · 目标变换", at: 11, cells: [11, 12],
+      highlight: ["np.log(train['trip_duration'].values + 1)", "RMSLE"],
+      html: `<p>最长的一趟约 1000 小时，显然是记录错误（比如司机忘了停表）。作者没急着删：比赛的评分是 <b>RMSLE</b>（先取对数再算均方根误差），离群值的影响会小很多。</p><p>于是他把目标变成 log(时长 + 1)，训练时用普通 RMSE 损失，就等价于优化比赛指标。对数化之后，时长分布变成一个接近对称的小山。</p>`,
+      draw(svg, ctx) {
+        const r = K.rng(8), raw = [];
+        for (let i = 0; i < 1500; i++) raw.push(Math.exp(6.47 + K.randn(r) * 0.75));
+        const ax = K.axes(svg, { x: 60, y: 30, w: 620, h: 250 }, [0, 1], [0, 1], { xticks: 0, yticks: 0 });
+        const nb = 40, c1 = histo(raw, 0, 4000, nb), c2 = histo(raw.map((v) => Math.log(v + 1)), 3, 10, nb), mx = Math.max(...c1, ...c2);
+        const bw = 620 / nb;
+        const bars = c1.map((v, i) => K.svg(svg, "rect", { x: 60 + i * bw + 1, y: ax.sy(v / mx), width: bw - 2, height: ax.sy(0) - ax.sy(v / mx), fill: "var(--c1)", opacity: 0.8 }));
+        const xl = K.svg(svg, "text", { x: 370, y: 312, "text-anchor": "middle", "font-size": 12 }, "行程时长（秒，0–4000，更长的被截掉）");
+        const lab = K.svg(svg, "text", { x: 420, y: 60, "font-size": 14, "font-weight": 700, fill: "var(--warn)" }, "原始时长：长尾，最长约 1000 小时");
+        K.svg(svg, "text", { x: 420, y: 80, "font-size": 12, class: "muted" }, "模拟数据，仅示意形状");
+        ctx.wait(1300).then((ok) => ok && ctx.tween(1600, (t) => bars.forEach((b, i) => { const v = K.lerp(c1[i], c2[i], t) / mx; b.setAttribute("y", ax.sy(v)); b.setAttribute("height", ax.sy(0) - ax.sy(v)); })))
+          .then((ok) => { if (ok) { xl.textContent = "log(时长 + 1)，范围 3–10"; lab.textContent = "取对数后：近似对称的小山"; lab.style.fill = "var(--good)"; } });
+      },
+    },
+    {
+      title: "验证策略：训练和测试是怎么切的", kicker: "第 13–16 格 · 验证策略", at: 13, cells: [14, 15, 16],
+      highlight: ["groupby('pickup_date')", "complete overlap"],
+      html: `<p>建模前先弄清楚：测试集是“未来的行程”，还是和训练集“同一时期随机抽出来的”？作者画了每天的行程数和上车地点散点图，两者<b>在时间和空间上完全重叠</b>。</p><p>结论：这是随机划分。所以可以放心地在训练 + 测试的全部坐标上做 PCA、聚类这类不看答案的特征提取，验证集也可以随机切 20%。</p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 620, h: 240 }, [0, 182], [0, 10000], { xlabel: "2016 年 1 月 1 日起的天数", ylabel: "每天行程数", yticks: 2, yfmt: (v) => (v / 1000).toFixed(0) + "k" });
+        const r = K.rng(2), tr = [], te = [];
+        for (let d = 0; d < 182; d++) { const base = 8000 + 900 * Math.sin((d % 7) / 7 * 2 * Math.PI) + (d > 22 && d < 26 ? -4000 : 0) + K.randn(r) * 300; tr.push(base); te.push(base * 0.43 + K.randn(r) * 120); }
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2 }), p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c3)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 470, y: 50, "font-size": 13, fill: "var(--c1)", "font-weight": 700 }, "— 训练集");
+        K.svg(svg, "text", { x: 560, y: 50, "font-size": 13, fill: "var(--c3)", "font-weight": 700 }, "— 测试集");
+        const note = K.svg(svg, "text", { x: 70, y: 330, "font-size": 13, "font-weight": 700, fill: "var(--good)" }, "");
+        K.svg(svg, "text", { x: 470, y: 70, "font-size": 11, class: "muted" }, "示意曲线（1 月下旬的低谷对应暴雪）");
+        const mk = (A, n) => A.slice(0, n).map((v, d) => (d ? "L" : "M") + ax.sx(d) + "," + ax.sy(v)).join("");
+        ctx.tween(2200, (t) => { const n = Math.max(1, Math.round(182 * t)); p1.setAttribute("d", mk(tr, n)); p2.setAttribute("d", mk(te, n)); })
+          .then((ok) => { if (ok) note.textContent = "两条曲线覆盖同样的日期 → 随机划分，可以用 80/20 随机验证"; });
+      },
+    },
+    {
+      title: "PCA：把斜着的曼哈顿“转正”", kicker: "第 17–19 格 · 坐标特征", at: 17, cells: [17, 18],
+      highlight: ["PCA().fit(coords)", "pickup_pca0"],
+      html: `<p>作者把所有上下车坐标放一起做 <b>PCA</b>（主成分分析）。这里不是为了降维（2 维进、2 维出），而是为了<b>旋转</b>：PCA 会找到点云最“长”的方向，把它转成新的横轴。</p><p>曼哈顿岛和它的街道网格是斜着的。决策树每次只能“横切一刀”或“竖切一刀”，转正之后，一刀就能沿着大道方向切开，树更容易学。</p>`,
+      draw(svg, ctx) {
+        const P = island(5, 300), cx = 360, cy = 165, S = 130;
+        const dots = P.map((p) => K.svg(svg, "circle", { cx: cx + p.x * S, cy: cy - p.y * S, r: 2.6, fill: "var(--c1)", opacity: 0.6 }));
+        const axisL = K.svg(svg, "line", { x1: cx - 1.3 * S * Math.cos(ANG), y1: cy + 1.3 * S * Math.sin(ANG), x2: cx + 1.3 * S * Math.cos(ANG), y2: cy - 1.3 * S * Math.sin(ANG), stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        K.svg(svg, "line", { x1: 60, y1: cy, x2: 660, y2: cy, stroke: "var(--line)" });
+        K.svg(svg, "line", { x1: cx, y1: 20, x2: cx, y2: 310, stroke: "var(--line)" });
+        const lab = K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "原始经纬度：点云斜约 29°（示意）");
+        const cut = K.svg(svg, "line", { x1: cx + 0.4 * S, y1: 30, x2: cx + 0.4 * S, y2: 300, stroke: "var(--bad)", "stroke-width": 2.5 }); cut.style.opacity = 0;
+        const cl = K.svg(svg, "text", { x: cx + 0.4 * S + 6, y: 300, "font-size": 12, fill: "var(--bad)" }, "决策树的一刀"); cl.style.opacity = 0;
+        ctx.wait(800)
+          .then((ok) => ok && ctx.tween(1800, (t) => {
+            const a = -ANG * t;
+            dots.forEach((d, i) => { const p = P[i]; d.setAttribute("cx", cx + (p.x * Math.cos(a) - p.y * Math.sin(a)) * S); d.setAttribute("cy", cy - (p.x * Math.sin(a) + p.y * Math.cos(a)) * S); });
+            const b = ANG + a; axisL.setAttribute("x1", cx - 1.3 * S * Math.cos(b)); axisL.setAttribute("y1", cy + 1.3 * S * Math.sin(b)); axisL.setAttribute("x2", cx + 1.3 * S * Math.cos(b)); axisL.setAttribute("y2", cy - 1.3 * S * Math.sin(b));
+          }))
+          .then((ok) => { if (ok) lab.textContent = "PCA 之后：长轴变成横轴 pca0，短轴是 pca1"; return ok && ctx.tween(500, (t) => (cut.style.opacity = cl.style.opacity = t)); });
+      },
+    },
+    {
+      title: "距离和方向：出租车不会飞", kicker: "第 20–21 格 · 几何特征", at: 20, cells: [20, 21],
+      highlight: ["haversine_array", "dummy_manhattan_distance", "bearing_array", "pca_manhattan"],
+      html: `<p>行程时长最重要的线索当然是距离。作者算了几种：</p><ul class="tight"><li><b>Haversine 距离</b>：地球表面两点的球面直线距离</li><li><b>伪曼哈顿距离</b>：先横着走、再竖着走，比直线更像出租车在街道网格里的路线</li><li><b>PCA 曼哈顿距离</b>：在转正后的坐标上横竖走，更贴合斜着的街道</li><li><b>方向角</b>：从上车点指向下车点的方位</li><li><b>路程中点</b>的经纬度</li></ul><p>他还把函数改写成能整列向量化计算的版本，比逐行 <code>apply</code> 快得多。</p>`,
+      draw(svg, ctx) {
+        const g = K.svg(svg, "g"), cx = 300, cy = 170;
+        for (let i = -6; i <= 6; i++) {
+          const d = i * 30, c = Math.cos(ANG), s = Math.sin(ANG);
+          K.svg(g, "line", { x1: cx + d * -s - 220 * c, y1: cy - (d * c - 220 * s), x2: cx + d * -s + 220 * c, y2: cy - (d * c + 220 * s), stroke: "var(--line)" });
+          K.svg(g, "line", { x1: cx + d * c - 220 * -s, y1: cy - (d * s - 220 * c), x2: cx + d * c + 220 * -s, y2: cy - (d * s + 220 * c), stroke: "var(--line)" });
+        }
+        const toXY = (u, v) => [cx + u * Math.cos(ANG) - v * Math.sin(ANG), cy - (u * Math.sin(ANG) + v * Math.cos(ANG))];
+        const A = toXY(-120, -60), B = toXY(120, 60), M = toXY(120, -60);
+        K.svg(svg, "circle", { cx: A[0], cy: A[1], r: 7, fill: "var(--c3)" }); K.svg(svg, "text", { x: A[0] - 10, y: A[1] + 22, "font-size": 12 }, "上车");
+        K.svg(svg, "circle", { cx: B[0], cy: B[1], r: 7, fill: "var(--c6)" }); K.svg(svg, "text", { x: B[0] + 10, y: B[1] - 8, "font-size": 12 }, "下车");
+        const hv = K.svg(svg, "line", { x1: A[0], y1: A[1], x2: A[0], y2: A[1], stroke: "var(--c1)", "stroke-width": 3 });
+        const mp = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--warn)", "stroke-width": 3, "stroke-dasharray": "7 4" });
+        const lg = [["— Haversine：球面直线", "var(--c1)"], ["- - PCA 曼哈顿：沿街道走", "var(--warn)"], ["◠ 方向角 direction", "var(--c2)"]];
+        lg.forEach((l, i) => K.svg(svg, "text", { x: 540, y: 60 + i * 24, "font-size": 12, fill: l[1], "font-weight": 700 }, l[0]));
+        const arc = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c2)", "stroke-width": 2.5 });
+        ctx.tween(1000, (t) => { hv.setAttribute("x2", K.lerp(A[0], B[0], t)); hv.setAttribute("y2", K.lerp(A[1], B[1], t)); })
+          .then((ok) => ok && ctx.tween(1400, (t) => { const k = t * 2; const P1 = k < 1 ? [K.lerp(A[0], M[0], k), K.lerp(A[1], M[1], k)] : M; const P2 = k > 1 ? [K.lerp(M[0], B[0], k - 1), K.lerp(M[1], B[1], k - 1)] : null; mp.setAttribute("d", `M${A[0]},${A[1]}L${P1[0]},${P1[1]}` + (P2 ? `L${P2[0]},${P2[1]}` : "")); }))
+          .then((ok) => ok && ctx.tween(800, (t) => { const a0 = -Math.PI / 2, a1 = Math.atan2(B[1] - A[1], B[0] - A[0]), a = K.lerp(a0, a1, t), R = 50; arc.setAttribute("d", `M${A[0]},${A[1] - R}A${R},${R} 0 0 1 ${A[0] + R * Math.cos(a)},${A[1] + R * Math.sin(a)}`); }));
+      },
+    },
+    {
+      title: "时间与车速：高峰期开得慢", kicker: "第 22–26 格 · 时间特征", at: 22, cells: [23, 25],
+      highlight: ["pickup_week_hour", "avg_speed_h"],
+      html: `<p>从上车时间里拆出：星期几、一年中的第几周、小时、分钟、距数据起点的秒数，以及“周内小时”（星期 × 24 + 小时，0–167）。</p><p>作者再用 距离 ÷ 时长 算出<b>平均车速</b>，按小时、星期、周内小时画出来：早晚高峰车速明显下降。车速用到了答案（时长），所以它本身不进模型，只用来观察，以及在第 9 章里做分组统计。</p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 620, h: 240 }, [0, 23], [0, 1], { xlabel: "上车小时（0–23）", ylabel: "平均车速（示意）", yticks: 0 });
+        const sp = (h) => 0.55 + 0.3 * Math.exp(-((h - 5) ** 2) / 6) - 0.22 * Math.exp(-((h - 9) ** 2) / 3) - 0.25 * Math.exp(-((h - 17) ** 2) / 5) + 0.05 * Math.cos(h);
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 3 });
+        const dots = [];
+        for (let h = 0; h < 24; h++) dots.push(K.svg(svg, "circle", { cx: ax.sx(h), cy: ax.sy(sp(h)), r: 0, fill: "var(--c1)" }));
+        const ann = [[5, "凌晨：路最空"], [9, "早高峰"], [17, "晚高峰"]].map(([h, t]) => { const e = K.svg(svg, "text", { x: ax.sx(h), y: ax.sy(sp(h)) + (h === 5 ? -14 : 26), "text-anchor": "middle", "font-size": 12, "font-weight": 700, fill: h === 5 ? "var(--good)" : "var(--bad)" }, t); e.style.opacity = 0; return e; });
+        ctx.tween(1800, (t) => { const n = 24 * t; let d = ""; for (let h = 0; h <= n && h < 24; h++) { d += (d ? "L" : "M") + ax.sx(h) + "," + ax.sy(sp(h)); dots[h].setAttribute("r", 4); } path.setAttribute("d", d); })
+          .then((ok) => ok && ctx.tween(500, (t) => ann.forEach((a) => (a.style.opacity = t))));
+      },
+    },
+    {
+      title: "聚类：把纽约分成 100 个小区", kicker: "第 27–30 格 · 无监督特征", at: 27, cells: [28, 29],
+      highlight: ["MiniBatchKMeans(n_clusters=100", "pickup_cluster"],
+      html: `<p>作者从全部上下车坐标里随机抽 50 万个点，用 <b>MiniBatchKMeans</b> 分成 100 簇，然后给每趟行程标上“上车点属于第几簇、下车点属于第几簇”。</p><p><b>K-Means</b> 的过程：先随便放 K 个中心；每个点归到最近的中心；中心挪到自己那群点的平均位置；反复几轮直到稳定。MiniBatch 版本每次只用一小批点更新，适合几百万条数据。</p>`,
+      draw(svg, ctx) {
+        const r = K.rng(17), hubs = [[200, 120], [330, 200], [470, 110], [560, 240], [260, 270], [420, 290]], pts = [];
+        hubs.forEach((h) => { for (let i = 0; i < 45; i++) pts.push([h[0] + K.randn(r) * 32, h[1] + K.randn(r) * 26]); });
+        const k = 6, cols = K.colors;
+        let C = Array.from({ length: k }, (_, i) => [120 + 480 * r(), 50 + 260 * r()]);
+        const dots = pts.map((p) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 3, fill: "var(--ink-3)", opacity: 0.7 }));
+        const cen = C.map((c, i) => K.svg(svg, "path", { d: "", fill: cols[i], stroke: "var(--ink)", "stroke-width": 1.5 }));
+        const star = (e, c) => e.setAttribute("d", `M${c[0]},${c[1] - 9}L${c[0] + 8},${c[1] + 6}L${c[0] - 8},${c[1] + 6}Z`);
+        cen.forEach((e, i) => star(e, C[i]));
+        const it = K.svg(svg, "text", { x: 20, y: 28, "font-size": 13, "font-weight": 700 }, "第 0 轮（示意：6 个簇，作者用 100 个）");
+        (async () => {
+          for (let round = 1; round <= 6; round++) {
+            const asg = pts.map((p) => { let b = 0, bd = 1e9; C.forEach((c, j) => { const d = (p[0] - c[0]) ** 2 + (p[1] - c[1]) ** 2; if (d < bd) { bd = d; b = j; } }); return b; });
+            dots.forEach((d, i) => (d.style.fill = cols[asg[i]]));
+            if (!(await ctx.wait(450))) return;
+            const N = C.map((c, j) => { const m = pts.filter((_, i) => asg[i] === j); return m.length ? [m.reduce((s, p) => s + p[0], 0) / m.length, m.reduce((s, p) => s + p[1], 0) / m.length] : c; });
+            const O = C.map((c) => c.slice());
+            if (!(await ctx.tween(500, (t) => cen.forEach((e, j) => star(e, [K.lerp(O[j][0], N[j][0], t), K.lerp(O[j][1], N[j][1], t)]))))) return;
+            C = N; it.textContent = `第 ${round} 轮：点归到最近的中心 → 中心移到平均位置`;
+          }
+        })();
+      },
+    },
+    {
+      title: "分组统计：这个时段、这片区域平时多快", kicker: "第 31–34 格 · 聚合特征", at: 31, cells: [32, 33],
+      highlight: ["groupby(gby_col).mean()", "rolling('240min')", "count_60min"],
+      html: `<p>作者按“小时”“日期”“3 小时时段”“周内小时”“上车簇”“下车簇”等分组，算每组的<b>平均车速</b>和<b>平均 log 时长</b>，再按组合并回每一趟行程。还按（小时 × 区域）、（上车簇 × 下车簇）等组合统计车速，只保留样本超过 100 条的组。</p><p>另外统计“前后 60 分钟内全城有多少趟行程”“每个簇在 4 小时窗口内的平均进出车次”，作为当时拥堵程度的代理。作者提醒：如果测试集是按时间切的未来数据，就不能这样用时间统计特征。</p>`,
+      draw(svg, ctx) {
+        const rows = [["簇 7", "8 点", "3.1"], ["簇 7", "8 点", "2.7"], ["簇 42", "8 点", "6.0"], ["簇 7", "8 点", "3.4"], ["簇 42", "8 点", "5.6"], ["簇 42", "3 点", "8.9"]];
+        const X = [30, 120, 210], W = 90;
+        ["上车簇", "小时", "车速"].forEach((h, j) => tcell(svg, X[j], 30, W, 30, h, { fill: "var(--panel-2)", bold: true }));
+        const R = rows.map((r, i) => r.map((v, j) => tcell(svg, X[j], 60 + i * 34, W, 34, v)));
+        K.svg(svg, "text", { x: 330, y: 50, "font-size": 13, "font-weight": 700 }, "groupby(簇, 小时).mean()");
+        const grp = [["簇 7 · 8 点", [0, 1, 3], "var(--c1)"], ["簇 42 · 8 点", [2, 4], "var(--c2)"], ["簇 42 · 3 点", [5], "var(--c3)"]];
+        const out = grp.map((g, k) => { const m = (g[1].reduce((s, i) => s + +rows[i][2], 0) / g[1].length).toFixed(1); const n = K.node(svg, 340, 70 + k * 60, 170, 46, `${g[0]}\n平均车速 ${m}`, { stroke: g[2], fs: 12 }); n.style.opacity = 0; return { n, m }; });
+        const newc = tcell(svg, 560, 30, 130, 30, "新列：组均车速", { fill: "var(--accent-soft)", bold: true, fs: 11 });
+        const nc = rows.map((_, i) => tcell(svg, 560, 60 + i * 34, 130, 34, ""));
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12, class: "muted" }, "车速数字为示意。每趟行程拿到的是“它所在组的历史平均”，而不是它自己的车速。");
+        (async () => {
+          for (let k = 0; k < grp.length; k++) {
+            grp[k][1].forEach((i) => R[i].forEach((c) => (c.r.style.fill = `color-mix(in srgb, ${grp[k][2]} 22%, var(--panel))`)));
+            if (!(await ctx.tween(400, (t) => (out[k].n.style.opacity = t)))) return;
+          }
+          if (!(await ctx.wait(400))) return;
+          for (let k = 0; k < grp.length; k++) for (const i of grp[k][1]) { if (!(await ctx.wait(180))) return; nc[i].t.textContent = out[k].m; nc[i].t.style.fill = grp[k][2]; }
+        })();
+      },
+    },
+    {
+      title: "外部路线数据 + 上线前体检", kicker: "第 35–41 格 · OSRM 与特征检查", at: 35, cells: [36, 37, 39],
+      highlight: ["total_distance", "total_travel_time", "number_of_steps", "train_test_mean_diff"],
+      html: `<p>前面的距离都是“估算”。作者引入了另一位 Kaggler 用开源路线引擎 OSRM 算好的<b>最快路线</b>数据：路线总长、预计行驶时间、转弯步数，按 id 合并进来。</p><p>然后列出不能进模型的列（id、答案、时间戳、车速、分箱中间变量等），剩下的就是特征。建模前再做一次“体检”：比较每个特征在训练集和测试集上的均值、标准差、缺失率。作者的结论是最大均值差也不到标准差的 1%，缺失率一致。</p>`,
+      draw(svg, ctx) {
+        const feats = ["total_distance", "distance_haversine", "direction", "pickup_pca0", "pickup_cluster", "pickup_hour", "count_60min", "total_travel_time"];
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 13, "font-weight": 700 }, "训练集 vs 测试集：每个特征的均值（示意）");
+        const r = K.rng(4);
+        const rows = feats.map((f, i) => {
+          const y = 44 + i * 33, v = 0.4 + 0.5 * r();
+          K.svg(svg, "text", { x: 200, y: y + 17, "text-anchor": "end", "font-size": 11, "font-family": "var(--mono)" }, f);
+          const a = K.svg(svg, "rect", { x: 208, y, width: 0, height: 12, rx: 2, fill: "var(--c1)" });
+          const b = K.svg(svg, "rect", { x: 208, y: y + 13, width: 0, height: 12, rx: 2, fill: "var(--c3)" });
+          return { a, b, v, v2: v * (1 + (r() - 0.5) * 0.015) };
+        });
+        K.svg(svg, "text", { x: 520, y: 70, "font-size": 12, fill: "var(--c1)", "font-weight": 700 }, "■ 训练集");
+        K.svg(svg, "text", { x: 520, y: 92, "font-size": 12, fill: "var(--c3)", "font-weight": 700 }, "■ 测试集");
+        const v = K.svg(svg, "text", { x: 520, y: 150, "font-size": 13, "font-weight": 700, fill: "var(--good)" }, "");
+        const v2 = K.svg(svg, "text", { x: 520, y: 172, "font-size": 12, class: "muted" }, "");
+        ctx.tween(1500, (t) => rows.forEach((q) => { q.a.setAttribute("width", 290 * q.v * t); q.b.setAttribute("width", 290 * q.v2 * t); }))
+          .then((ok) => { if (ok) { v.textContent = "两两几乎一样长 ✓"; v2.textContent = "差异大 = 特征流程可能有 bug"; } });
+      },
+    },
+    {
+      title: "XGBoost：80/20 划分 + 早停", kicker: "第 42–45 格 · 建模", at: 42, cells: [43, 44],
+      highlight: ["test_size=0.2", "'eta': 0.3", "'max_depth': 10", "early_stopping_rounds=50"],
+      html: `<p>随机切 80% 训练、20% 验证，交给 <b>XGBoost</b>：一种梯度提升树，每棵新树专门学习前面所有树的预测误差。参数：学习率 eta 0.3、树深 10、每棵树只看 30% 的特征、80% 的样本，叶子最少 50 个样本。</p><p>训练时同时盯着训练集和验证集的 RMSE（<code>watchlist</code>）；如果验证误差 50 轮都没再下降就提前停（<b>早停</b>）。这里为了 Kernel 时限只训练 60 轮，作者注释说可以试更多轮。</p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 600, h: 240 }, [0, 60], [0.3, 0.8], { xlabel: "提升轮数（树的棵数）", ylabel: "RMSE（示意）", yticks: 5, yfmt: (v) => v.toFixed(1) });
+        const trc = (k) => 0.33 + 0.45 * Math.exp(-k / 6), vac = (k) => 0.39 + 0.39 * Math.exp(-k / 6.5) + 0.0004 * k;
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 }), p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 520, y: 60, "font-size": 13, fill: "var(--c1)", "font-weight": 700 }, "— 训练集 80%");
+        K.svg(svg, "text", { x: 520, y: 82, "font-size": 13, fill: "var(--c6)", "font-weight": 700 }, "— 验证集 20%");
+        const best = K.svg(svg, "line", { x1: 0, x2: 0, y1: 30, y2: 270, stroke: "var(--good)", "stroke-dasharray": "5 3", "stroke-width": 2 }); best.style.opacity = 0;
+        const bl = K.svg(svg, "text", { x: 0, y: 26, "font-size": 12, fill: "var(--good)", "font-weight": 700 }, "");
+        ctx.tween(2400, (t) => { const n = 60 * t; let a = "", b = ""; for (let k = 0; k <= n; k++) { a += (a ? "L" : "M") + ax.sx(k) + "," + ax.sy(trc(k)); b += (b ? "L" : "M") + ax.sx(k) + "," + ax.sy(vac(k)); } p1.setAttribute("d", a); p2.setAttribute("d", b); })
+          .then((ok) => { if (!ok) return; let bk = 0; for (let k = 0; k <= 60; k++) if (vac(k) < vac(bk)) bk = k; best.setAttribute("x1", ax.sx(bk)); best.setAttribute("x2", ax.sx(bk)); best.style.opacity = 1; bl.setAttribute("x", ax.sx(bk) - 150); bl.textContent = `验证误差最低点：第 ${bk} 轮`; });
+      },
+    },
+    {
+      title: "特征重要性 vs 删掉它试试", kicker: "第 46–50 格 · 特征分析", at: 46, cells: [47, 48],
+      highlight: ["rmse_wo_feature", "get_fscore"],
+      html: `<p>XGBoost 的“特征重要性”只是数某个特征被用来分裂了多少次。作者提醒：这<b>不等于</b>真的重要，相关特征多、取值多的特征会被高估。</p><p>他做了一轮<b>反向消融</b>：每次去掉一个特征重新训练，看验证误差涨多少。56 个模型太费时，他把离线结果手抄进第 47 格。发现：位置类特征重要性高但单删一个影响不大；vendor_id 用得少，删掉却明显变差；方向 direction 两方面都重要。</p>`,
+      draw(svg, ctx) {
+        const v = [0.39224, 0.38816, 0.38726, 0.38780, 0.38773, 0.38792, 0.38753, 0.38745, 0.38710, 0.38767, 0.38738, 0.38750, 0.38678, 0.39359, 0.38672, 0.38794, 0.38694, 0.38750, 0.38742, 0.38673, 0.38754, 0.38705, 0.38736, 0.38741, 0.38764, 0.38730, 0.38676, 0.38696, 0.38750, 0.38705, 0.38746, 0.38727, 0.38750, 0.38771, 0.38747, 0.38907, 0.38719, 0.38756, 0.38701, 0.38734, 0.38782, 0.38673, 0.38797, 0.38720, 0.38709, 0.38704, 0.38809, 0.38768, 0.38798, 0.38849, 0.38690, 0.38753, 0.38721, 0.38807, 0.38830, 0.38750];
+        const idx = v.map((x, i) => i).sort((a, b) => v[b] - v[a]);
+        const ax = K.axes(svg, { x: 80, y: 30, w: 590, h: 240 }, [0, 56], [0.386, 0.394], { xticks: 0, yticks: 4, yfmt: (x) => x.toFixed(3), ylabel: "删掉该特征后的验证 RMSE" });
+        const bw = 590 / 56;
+        const bars = idx.map((i, k) => K.svg(svg, "rect", { x: 80 + k * bw + 1, y: ax.sy(0.386), width: bw - 2, height: 0, fill: k < 3 ? "var(--c6)" : "var(--c1)", opacity: 0.85 }));
+        K.svg(svg, "text", { x: 80, y: 300, "font-size": 12 }, "56 个特征按“删掉后误差”从高到低排列；红色 = 删掉后误差涨得最多的 3 个");
+        K.svg(svg, "text", { x: 80, y: 320, "font-size": 12, class: "muted" }, "数字取自作者第 47 格代码（离线验证结果）；第 47 格里没有逐项写明特征名，这里不标名称");
+        ctx.tween(1600, (t) => bars.forEach((b, k) => { const val = v[idx[k]]; const h = (ax.sy(0.386) - ax.sy(val)) * K.clamp(t * 1.6 - k / 56 * 0.6, 0, 1); b.setAttribute("y", ax.sy(0.386) - h); b.setAttribute("height", h); }));
+      },
+    },
+    {
+      title: "提交前检查 + 参数搜索结果", kicker: "第 51–60 格 · 提交与调参", at: 51, cells: [52, 55, 57, 60],
+      highlight: ["np.exp(ytest) - 1", "lower eta", "paropt"],
+      html: `<p>预测测试集，用 exp(·) − 1 还原成秒数。提交前比较验证集预测和测试集预测的分布，两者应该一样（随机划分），作者确认“看起来完全相同”。</p><p>调参方面，作者偏爱<b>随机搜索</b>：在 min_child_weight、eta、colsample、max_depth、subsample、lambda 的网格里随机抽组合训练。结果太耗时，他把一部分手抄进第 57 格。结论：<b>更小的 eta 明显更好</b>；更大的 subsample、更小的 min_child_weight 也更好；lambda 基本无所谓。动画用第 57 格的数字现场算每个取值的平均 RMSE。</p>`,
+      width: 720, height: 340,
+      draw(svg, ctx) {
+        const D = {
+          lambda: [1.5,1.0,1.0,1.5,1.5,1.0,1.5,1.0,1.5,2.0,0.5,1.0,0.5,1.5,1.5,0.5,1.0,1.5,0.5,2.0,1.0,2.0,2.0,1.5,1.5,2.0,1.5,2.0,1.5,0.5,1.0,1.0,2.0,1.5,1.0,1.0,0.5,2.0,1.0,0.5,0.5,2.0,1.0,1.0,0.5,0.5,1.5,0.5,1.5,2.0,2.0,2.0,2.0,0.5,1.5,1.0,1.5,2.0,2.0,0.5,1.5,1.0,0.5,1.0,1.5,2.0,1.0,1.0,2.0,2.0,1.0,0.5,0.5,1.0,1.5,2.0,0.5,1.0,1.5,1.0,1.0,1.5,1.5,1.5,0.5,1.5,1.0,1.5,2.0,2.0,2.0,1.0,2.0,0.5,2.0,0.5,1.5,0.5,2.0,0.5,1.0,1.5,1.5,1.5,2.0,0.5,0.5,1.0,2.0],
+          eta: [.1,.1,.05,.05,.05,.15,.15,.1,.1,.05,.15,.15,.15,.1,.1,.1,.1,.05,.15,.05,.05,.05,.15,.15,.05,.05,.05,.05,.15,.15,.15,.15,.1,.05,.05,.1,.1,.1,.1,.1,.05,.15,.15,.15,.1,.1,.05,.05,.15,.15,.15,.1,.1,.05,.05,.05,.05,.05,.15,.1,.1,.15,.1,.1,.05,.15,.15,.15,.1,.05,.05,.05,.05,.15,.1,.1,.1,.1,.05,.05,.05,.15,.15,.1,.1,.1,.1,.05,.15,.15,.1,.1,.1,.05,.05,.1,.1,.1,.1,.1,.05,.15,.15,.15,.15,.05,.05,.15,.15],
+          min_child_weight: [50,50,20,100,10,50,100,100,75,10,10,50,50,100,75,100,50,10,20,10,75,20,50,75,100,100,10,20,75,75,75,20,10,75,10,100,100,10,20,20,50,50,100,20,50,100,100,75,20,75,20,50,20,10,20,20,20,75,20,75,100,10,10,20,10,20,100,75,75,10,100,50,100,100,50,10,75,75,50,10,75,75,50,75,20,100,100,50,20,20,50,50,75,20,50,100,75,75,100,75,10,10,20,20,10,10,75,50,20],
+          subsample: [.8,.9,.8,.6,.6,.6,.9,.6,.5,.9,.8,.9,.7,.5,.5,.9,.7,.7,.5,.8,.5,.9,.6,.6,.8,.8,.8,.7,.5,.5,.9,.9,.5,.6,.7,.8,.8,.6,.9,.7,.8,.6,.6,.9,.7,.7,.8,.6,.6,.5,.9,.8,.7,.6,.6,.6,.5,.9,.8,.5,.7,.6,.8,.6,.8,.8,.6,.7,.9,.5,.7,.5,.9,.7,.8,.9,.9,.7,.8,.5,.7,.8,.6,.8,.8,.5,.9,.5,.5,.7,.8,.6,.6,.8,.7,.6,.6,.6,.7,.7,.8,.6,.5,.9,.7,.6,.9,.5,.5],
+          rmse: [.380,.380,.377,.378,.378,.386,.382,.382,.383,.374,.386,.381,.385,.383,.383,.379,.381,.376,.389,.375,.381,.374,.385,.385,.378,.377,.375,.376,.385,.386,.382,.384,.384,.379,.376,.380,.380,.382,.380,.382,.378,.385,.384,.383,.383,.383,.379,.381,.386,.387,.381,.380,.380,.377,.377,.377,.379,.376,.382,.385,.382,.386,.380,.382,.375,.383,.385,.384,.379,.378,.380,.381,.378,.384,.380,.377,.379,.383,.380,.380,.380,.383,.385,.381,.379,.386,.380,.383,.387,.383,.382,.384,.385,.377,.380,.383,.383,.383,.382,.382,.377,.386,.388,.382,.384,.379,.378,.387,.388],
+        };
+        const pars = ["eta", "subsample", "min_child_weight", "lambda"], pw = 165;
+        const els = [];
+        pars.forEach((p, k) => {
+          const vals = [...new Set(D[p])].sort((a, b) => a - b);
+          const means = vals.map((v) => { const ix = D[p].map((x, i) => (x === v ? i : -1)).filter((i) => i >= 0); return ix.reduce((s, i) => s + D.rmse[i], 0) / ix.length; });
+          const x0 = 50 + k * (pw + 10);
+          const ax = K.axes(svg, { x: x0, y: 40, w: pw - 20, h: 220 }, [-0.5, vals.length - 0.5], [0.377, 0.385], { xticks: 0, yticks: k === 0 ? 4 : 0, yfmt: (v) => v.toFixed(3) });
+          K.svg(svg, "text", { x: x0 + (pw - 20) / 2, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700, "font-family": "var(--mono)" }, p);
+          vals.forEach((v, i) => {
+            K.svg(svg, "text", { x: ax.sx(i), y: 278, "text-anchor": "middle", "font-size": 11 }, String(v));
+            const c = K.svg(svg, "circle", { cx: ax.sx(i), cy: ax.sy(means[i]), r: 0, fill: K.heat((0.385 - means[i]) / 0.008) , stroke: "var(--c1)", "stroke-width": 2 });
+            els.push({ c, k });
+          });
+        });
+        K.svg(svg, "text", { x: 50, y: 306, "font-size": 12 }, "每个点 = 该参数取这个值时，所有试验的平均验证 RMSE（越低越好）");
+        K.svg(svg, "text", { x: 50, y: 326, "font-size": 12, class: "muted" }, "浏览器按作者第 57 格手抄的 109 组试验结果现场分组求平均");
+        (async () => { for (let k = 0; k < 4; k++) if (!(await ctx.tween(450, (t) => els.filter((e) => e.k === k).forEach((e) => e.c.setAttribute("r", 9 * t))))) return; })();
+      },
+    },
+    {
+      title: "本地验证和排行榜对得上吗", kicker: "第 61–63 格 · 验证可信度", at: 61, cells: [62, 63],
+      highlight: ["CV - LB Diff", "0.005"],
+      html: `<p>作者把自己历次提交的本地验证分数和排行榜分数都抄下来（第 62 格），画散点图并拟合回归线。</p><p>结论：本地验证一般比排行榜<b>低约 0.005</b>。差距稳定不是问题，说明本地验证可以用来比较方案好坏；如果差距开始变大，就要怀疑数据泄漏或过拟合。动画里的点和差值都由浏览器根据第 62 格的数字现场计算。</p>`,
+      draw(svg, ctx) {
+        const cv = [0.3604, 0.36056, 0.3614, 0.3618, 0.3623, 0.3626, 0.3646, 0.3696, 0.3702, 0.3706, 0.372, 0.3738, 0.37477, 0.37691, 0.3824, 0.3868, 0.3904];
+        const lb = [0.367, 0.367, 0.368, 0.368, 0.368, 0.368, 0.371, 0.375, 0.376, 0.376, 0.377, 0.377, 0.379, 0.381, 0.387, 0.39, 0.393];
+        const ax = K.axes(svg, { x: 80, y: 20, w: 420, h: 260 }, [0.358, 0.392], [0.364, 0.396], { xlabel: "本地验证 RMSLE", ylabel: "排行榜 RMSLE", xticks: 4, yticks: 4, xfmt: (v) => v.toFixed(3), yfmt: (v) => v.toFixed(3) });
+        K.svg(svg, "line", { x1: ax.sx(0.364), y1: ax.sy(0.364), x2: ax.sx(0.392), y2: ax.sy(0.392), stroke: "var(--ink-3)", "stroke-dasharray": "4 4" });
+        K.svg(svg, "text", { x: ax.sx(0.386), y: ax.sy(0.3885), "font-size": 11, class: "muted" }, "y = x");
+        const n = cv.length, mx = cv.reduce((s, v) => s + v, 0) / n, my = lb.reduce((s, v) => s + v, 0) / n;
+        let sxy = 0, sxx = 0; cv.forEach((x, i) => { sxy += (x - mx) * (lb[i] - my); sxx += (x - mx) ** 2; });
+        const b = sxy / sxx, a = my - b * mx, diff = lb.reduce((s, v, i) => s + v - cv[i], 0) / n;
+        const dots = cv.map((x, i) => K.svg(svg, "circle", { cx: ax.sx(x), cy: ax.sy(lb[i]), r: 0, fill: "var(--c1)", opacity: 0.8 }));
+        const fit = K.svg(svg, "line", { x1: ax.sx(0.358), y1: ax.sy(a + b * 0.358), x2: ax.sx(0.358), y2: ax.sy(a + b * 0.358), stroke: "var(--c6)", "stroke-width": 2.5 });
+        const t1 = K.svg(svg, "text", { x: 530, y: 120, "font-size": 14, "font-weight": 700 }, ""), t2 = K.svg(svg, "text", { x: 530, y: 146, "font-size": 12, class: "muted" }, "");
+        K.svg(svg, "text", { x: 80, y: 330, "font-size": 12, class: "muted" }, "17 次提交的数字取自作者第 62 格代码");
+        (async () => {
+          for (const d of dots) if (!(await ctx.tween(90, (t) => d.setAttribute("r", 6 * t)))) return;
+          if (!(await ctx.tween(700, (t) => { const x = K.lerp(0.358, 0.392, t); fit.setAttribute("x2", ax.sx(x)); fit.setAttribute("y2", ax.sy(a + b * x)); }))) return;
+          t1.textContent = `平均差 LB − CV = ${diff.toFixed(4)}`; t2.textContent = "点都在 y = x 上方：排行榜一贯略高";
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：回归树 + 坐标旋转 ---------- */
+  function treeFit(X, Y, depth, minLeaf) {
+    function build(idx, d) {
+      const m = idx.reduce((s, i) => s + Y[i], 0) / idx.length;
+      if (d === 0 || idx.length < 2 * minLeaf) return { leaf: true, v: m };
+      let best = null;
+      for (let f = 0; f < 2; f++) {
+        const s = idx.slice().sort((a, b) => X[a][f] - X[b][f]);
+        let sl = 0, ql = 0; const tot = s.reduce((t, i) => t + Y[i], 0), totq = s.reduce((t, i) => t + Y[i] * Y[i], 0);
+        for (let k = 0; k < s.length - 1; k++) {
+          const y = Y[s[k]]; sl += y; ql += y * y;
+          const nl = k + 1, nr = s.length - nl;
+          if (nl < minLeaf || nr < minLeaf || X[s[k]][f] === X[s[k + 1]][f]) continue;
+          const sse = ql - (sl * sl) / nl + (totq - ql) - ((tot - sl) ** 2) / nr;
+          if (!best || sse < best.sse) best = { sse, f, thr: (X[s[k]][f] + X[s[k + 1]][f]) / 2 };
+        }
+      }
+      if (!best) return { leaf: true, v: m };
+      return { f: best.f, thr: best.thr, l: build(idx.filter((i) => X[i][best.f] <= best.thr), d - 1), r: build(idx.filter((i) => X[i][best.f] > best.thr), d - 1) };
+    }
+    const root = build(X.map((_, i) => i), depth);
+    return (x) => { let n = root; while (!n.leaf) n = x[n.f] <= n.thr ? n.l : n.r; return n.v; };
+  }
+  /* 车速沿“大道”方向分段变化：沿长轴 u 的位置决定快慢，再叠加短轴的一条快速路 */
+  const speedOf = (p) => (p.u > 0.35 ? 3 : p.u < -0.4 ? 6 : 4.5) + (p.v > 0.12 ? 1.5 : 0);
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "coord", label: "给决策树的坐标", value: "raw", options: [["raw", "原始经纬度（斜着的）"], ["pca", "PCA 旋转后的坐标"]] },
+      { id: "depth", label: "树的最大深度", min: 1, max: 8, step: 1, value: 3 },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "模拟一个斜 29° 的“岛”：车速沿岛的长轴分三段，另有一条与长轴平行的快速路。浏览器现场训练一棵回归树（每次只能横切或竖切），背景色是树预测的车速，虚线是树切的每一刀。比较同样深度下两种坐标的测试误差。",
+    render(svg, v) {
+      const tr = island(100 + v.seed * 3, 500), te = island(5000, 1500), r = K.rng(7 + v.seed);
+      const feat = (p) => (v.coord === "pca" ? [p.u, p.v] : [p.x, p.y]);
+      const Ytr = tr.map((p) => speedOf(p) + K.randn(r) * 0.4), Yte = te.map((p) => speedOf(p) + K.randn(r) * 0.4);
+      const f = treeFit(tr.map(feat), Ytr, v.depth, 8);
+      const ext = 1.25, ax = K.axes(svg, { x: 30, y: 10, w: 340, h: 340 }, [-ext, ext], [-ext, ext], { xticks: 0, yticks: 0 });
+      const g = 0.06;
+      for (let gx = -ext; gx < ext; gx += g) for (let gy = -ext; gy < ext; gy += g) {
+        const q = v.coord === "pca" ? { u: gx + g / 2, v: gy + g / 2 } : { x: gx + g / 2, y: gy + g / 2 };
+        const val = f(v.coord === "pca" ? [q.u, q.v] : [q.x, q.y]);
+        K.svg(svg, "rect", { x: ax.sx(gx), y: ax.sy(gy + g), width: ax.sx(gx + g) - ax.sx(gx) + 0.5, height: ax.sy(gy) - ax.sy(gy + g) + 0.5, fill: K.heat((val - 3) / 4.5), "fill-opacity": 0.85 });
+      }
+      tr.forEach((p) => { const c = feat(p); K.svg(svg, "circle", { cx: ax.sx(c[0]), cy: ax.sy(c[1]), r: 1.6, fill: "var(--ink)", opacity: 0.35 }); });
+      K.svg(svg, "text", { x: 30, y: 370, "font-size": 12 }, v.coord === "pca" ? "横轴 pca0、纵轴 pca1（转正后）" : "横轴经度、纵轴纬度（岛是斜的）");
+      const pred = te.map((p) => f(feat(p))), e = rmse(pred, Yte);
+      // 右侧：两种坐标、各深度的误差曲线
+      const ax2 = K.axes(svg, { x: 430, y: 30, w: 190, h: 260 }, [1, 8], [0.3, 1.4], { xticks: 7, yticks: 3, xlabel: "树深度", yfmt: (x) => x.toFixed(1) });
+      K.svg(svg, "text", { x: 430, y: 20, "font-size": 12, "font-weight": 700 }, "测试 RMSE vs 深度");
+      [["raw", "var(--warn)", "原始"], ["pca", "var(--good)", "PCA"]].forEach(([c, col, nm], k) => {
+        const ff = (p) => (c === "pca" ? [p.u, p.v] : [p.x, p.y]);
+        let d = "";
+        for (let dp = 1; dp <= 8; dp++) { const m = treeFit(tr.map(ff), Ytr, dp, 8); const ee = rmse(te.map((p) => m(ff(p))), Yte); d += (d ? "L" : "M") + ax2.sx(dp) + "," + ax2.sy(K.clamp(ee, 0.3, 1.4)); }
+        K.svg(svg, "path", { d, fill: "none", stroke: col, "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 440 + k * 80, y: 340, "font-size": 12, fill: col, "font-weight": 700 }, "— " + nm);
+      });
+      K.svg(svg, "circle", { cx: ax2.sx(v.depth), cy: ax2.sy(K.clamp(e, 0.3, 1.4)), r: 5, fill: "var(--ink)" });
+      return { readout: [{ k: "测试 RMSE（车速）", v: e.toFixed(3), color: e < 0.55 ? "var(--good)" : "var(--bad)" }, { k: "噪声下限", v: "≈ 0.40" }] };
+    },
+  });
+
+  /* ---------- 实验 B：梯度提升 学习率 × 轮数 × 早停 ---------- */
+  const truef = (x) => Math.sin(2 * x) + 0.4 * x;
+  function data1d(seed, n) { const r = K.rng(seed), X = [], Y = []; for (let i = 0; i < n; i++) { const x = -3 + 6 * r(); X.push(x); Y.push(truef(x) + K.randn(r) * 0.35); } return { X, Y }; }
+  function gbCurve(tr, va, rounds, lr, depthTwo) {
+    const n = tr.X.length, base = tr.Y.reduce((s, v) => s + v, 0) / n, F = new Array(n).fill(base), G = new Array(va.X.length).fill(base);
+    const xs = tr.X.slice().sort((a, b) => a - b), trE = [], vaE = [];
+    const stump = (R, idx) => { let best = null; for (let k = 3; k < xs.length - 3; k += 3) { const thr = (xs[k] + xs[k + 1]) / 2; let sl = 0, cl = 0, sr = 0, cr = 0; idx.forEach((i) => { if (tr.X[i] <= thr) { sl += R[i]; cl++; } else { sr += R[i]; cr++; } }); if (cl < 3 || cr < 3) continue; const g = (sl * sl) / cl + (sr * sr) / cr; if (!best || g > best.g) best = { g, thr, l: sl / cl, r: sr / cr }; } return best; };
+    for (let m = 0; m < rounds; m++) {
+      const R = tr.Y.map((y, i) => y - F[i]), all = tr.X.map((_, i) => i);
+      const s = stump(R, all); if (!s) break;
+      let pred = (x) => (x <= s.thr ? s.l : s.r);
+      if (depthTwo) {
+        const L = all.filter((i) => tr.X[i] <= s.thr), Rr = all.filter((i) => tr.X[i] > s.thr);
+        const sL = stump(R, L), sR = stump(R, Rr);
+        pred = (x) => (x <= s.thr ? (sL && x > -9 ? (x <= sL.thr ? sL.l : sL.r) : s.l) : (sR ? (x <= sR.thr ? sR.l : sR.r) : s.r));
+      }
+      for (let i = 0; i < n; i++) F[i] += lr * pred(tr.X[i]);
+      for (let i = 0; i < G.length; i++) G[i] += lr * pred(va.X[i]);
+      trE.push(rmse(F, tr.Y)); vaE.push(rmse(G, va.Y));
+    }
+    return { trE, vaE };
+  }
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "eta", label: "学习率 eta（每棵树改多少）", min: 0.02, max: 1, step: 0.02, value: 0.3, fmt: (v) => v.toFixed(2) },
+      { id: "rounds", label: "最多训练轮数", min: 20, max: 300, step: 10, value: 150 },
+      { id: "es", label: "早停耐心（验证误差连续几轮不降就停）", min: 5, max: 100, step: 5, value: 50 },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "浏览器现场训练梯度提升（每轮一棵深度 2 的小树，80 条训练、200 条验证），画出训练误差和验证误差随轮数的变化。eta 大：下降快但容易很快过拟合；eta 小：需要更多轮，但验证误差往往更低。这正是作者参数搜索里“eta 越小越好”的原因（代价是训练更久）。",
+    render(svg, v) {
+      const tr = data1d(40 + v.seed * 5, 80), va = data1d(900 + v.seed, 200);
+      const c = gbCurve(tr, va, v.rounds, v.eta, true);
+      let best = 0, stop = c.vaE.length - 1;
+      for (let k = 0; k < c.vaE.length; k++) { if (c.vaE[k] < c.vaE[best]) best = k; if (k - best >= v.es) { stop = k; break; } }
+      const ax = K.axes(svg, { x: 60, y: 20, w: 560, h: 280 }, [0, v.rounds], [0, 1.4], { xlabel: "轮数", ylabel: "RMSE", yticks: 4, yfmt: (x) => x.toFixed(1) });
+      const line = (A, col, upto) => K.svg(svg, "path", { d: A.slice(0, upto + 1).map((e, k) => (k ? "L" : "M") + ax.sx(k + 1) + "," + ax.sy(Math.min(e, 1.4))).join(""), fill: "none", stroke: col, "stroke-width": 2.5 });
+      line(c.trE, "var(--c1)", c.trE.length - 1); line(c.vaE, "var(--c6)", c.vaE.length - 1);
+      K.svg(svg, "rect", { x: ax.sx(stop + 1), y: 20, width: Math.max(0, ax.sx(v.rounds) - ax.sx(stop + 1)), height: 280, fill: "var(--ink-3)", "fill-opacity": 0.12 });
+      K.svg(svg, "line", { x1: ax.sx(best + 1), x2: ax.sx(best + 1), y1: 20, y2: 300, stroke: "var(--good)", "stroke-dasharray": "5 3", "stroke-width": 2 });
+      K.svg(svg, "text", { x: 70, y: 344, "font-size": 12 }, "");
+      [["— 训练误差", "var(--c1)"], ["— 验证误差", "var(--c6)"], ["┊ 最佳轮", "var(--good)"], ["灰色 = 早停后没跑的轮", "var(--ink-3)"]].forEach((t, i) => K.svg(svg, "text", { x: 70 + i * 130, y: 344, "font-size": 12, fill: t[1], "font-weight": 700 }, t[0]));
+      return { readout: [
+        { k: "最佳轮数", v: String(best + 1) },
+        { k: "最佳验证 RMSE", v: c.vaE[best].toFixed(3), color: c.vaE[best] < 0.4 ? "var(--good)" : "var(--ink)" },
+        { k: "实际训练到", v: `${stop + 1} 轮${stop < c.vaE.length - 1 ? "（早停）" : ""}` },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

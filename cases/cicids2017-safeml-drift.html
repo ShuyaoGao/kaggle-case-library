@@ -1,0 +1,677 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>入侵检测模型自检</title>
+<meta name="description" content="Kaggle 案例拆解：SafeML 用 ECDF 统计距离比较训练数据和运行时数据，在没有标签的情况下判断入侵检测模型还能不能信（CICIDS2017 端口扫描流量）。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">网络流量表格 · 模型安全监控 · 统计距离</div>
+  <h1>入侵检测模型的“体检表”：没有标准答案时，怎么知道模型还靠得住</h1>
+  <p class="en">CICIDS2017 - SafeML</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span><span class="tag">统计分析</span>
+    <span class="tag method">ECDF 统计距离</span><span class="tag method">KS / Kuiper / CVM / AD / Wasserstein / DTS</span>
+    <span class="tag method">PCA 降维</span><span class="tag method">分层 K 折</span><span class="tag method">KNN</span><span class="tag method">MLP 神经网络</span><span class="tag method">LightGBM</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Koorosh Aslansefat</b>（代码由 William Bridges 编写）</span>
+    <span>Kaggle 点赞 <b>471</b>（2026-11 抓取）</span>
+    <span>数据集 <b>chethuhn/network-intrusion-dataset（CICIDS2017）</b></span>
+    <span><a href="https://www.kaggle.com/code/kooaslansefat/cicids2017-safeml" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">一个下午的网络流量记录</div><p>CICIDS2017 入侵检测数据集里“周五下午 · 端口扫描”那一份：每行是一条网络连接的统计特征，标签分“正常”和“端口扫描”两类。<span data-cell="40">出处</span> <span data-cell="121">出处</span></p></div>
+    <div class="card panel"><h3>要解决什么</h3><div class="big">模型上线后，判断它还可不可信</div><p>上线后的流量<b>没有标签</b>，算不了准确率。SafeML 的想法：把“现在看到的数据”和“训练时的数据”比一比，差得越多，越不能信。<span data-cell="7">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">六把“统计尺子”量分布差异</div><p>先 PCA 降到 7 维，再训练 KNN / MLP 分类器；然后对每一类、每个特征比较两份数据的经验累积分布（ECDF），用六种距离打分，重复 100 次看距离和准确率的关系。<span data-cell="112">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一份 SafeML 的 Python 复现</div><p>作者的目标是用 Python 复现此前 MATLAB 版的案例研究，并画出“距离—准确率”关系图；文字里没有写具体数值。<span data-cell="105">出处</span> 代码里还有几处值得讨论的问题（见第 04 节）。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>CICIDS2017</b>（加拿大网络安全研究所发布的入侵检测评测数据）。研究人员搭了一个模拟办公网络，录下五个工作日的流量，其中一部分时间段里加入了各类攻击，再把流量切成一条条“连接”，为每条连接算出几十个统计特征。这个 notebook 只用了其中<b>周五下午、含端口扫描</b>的那个文件。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">使用的文件</div><div class="v" style="font-size:15px">Friday-WorkingHours-Afternoon-PortScan</div></div>
+        <div class="stat-tile"><div class="k">原始特征数</div><div class="v">78</div></div>
+        <div class="stat-tile"><div class="k">类别数</div><div class="v">2</div></div>
+        <div class="stat-tile"><div class="k">降维后保留</div><div class="v">7 个主成分</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">文件名见第 40 格 <span data-cell="40">出处</span>；78 个特征见作者第 60 格文字 <span data-cell="60">出处</span>；“只有 2 类”见第 121 格 <span data-cell="121">出处</span>；7 个主成分见第 37 格 <span data-cell="37">出处</span>。总行数只出现在运行输出里，源码不带输出，这里不写。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列（类别）</th><th>白话含义</th><th>类型</th></tr>
+        <tr><td>连接时长、包数、字节数</td><td>这次连接持续多久、来回发了多少个数据包、多少字节</td><td>数值</td></tr>
+        <tr><td>包长度统计</td><td>每个包有多大：最大、最小、平均、标准差</td><td>数值</td></tr>
+        <tr><td>时间间隔统计（如 <code>idle_std</code>）</td><td>包与包之间隔多久、空闲时间的波动；作者特别指出 <code>idle_std</code> 的取值从 0 到百万量级 <span data-cell="54">出处</span></td><td>数值</td></tr>
+        <tr><td><code>label</code></td><td><b>要预测的答案</b>：正常流量还是端口扫描；第 74 格把它变成 0 / 1 <span data-cell="74">出处</span></td><td>类别</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">原始列名带空格和大小写混乱，作者在第 44 格统一成小写加下划线。<span data-cell="44">出处</span> 端口扫描就像有人沿着一栋楼挨个门牌敲门、看哪扇门会应答；检测它是网络防御的第一道哨。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead">这份 notebook 前半部分是一套“工具函数”，后半部分是正式运行。每章先看动画，再看作者代码。</p>
+  <div id="pipe"></div>
+  <div data-at="63">
+    <h3>动手试试 A · 先标准化还是不标准化：主成分要几个？ <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="102">
+    <h3>动手试试 B · 数据“漂移”了：两条 ECDF 与六把尺子 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="128">
+    <h3>动手试试 C · 重复很多次：距离能不能预测准确率？ <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论与说明</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>标准化之后，前 30 个主成分能解释约 99.9% 的方差（从 78 个特征降到 30 个）</td><td><span data-cell="60">第 60 格</span></td></tr>
+        <tr><td>不标准化时，只要 5 到 7 个主成分就能解释几乎全部方差；代码最终用 7 个</td><td><span data-cell="62">第 62 格</span> <span data-cell="37">第 37 格</span></td></tr>
+        <tr><td>SafeML 的期望：各次重复的准确率变化时，统计距离随之变化且高度相关，从而可以用距离估计准确率</td><td><span data-cell="105">第 105 格</span></td></tr>
+        <tr><td>作者认为图表显示了“可以根据统计距离预测准确率”，可用于在出错之前把控制权交还给人</td><td><span data-cell="125">第 125 格</span></td></tr>
+        <tr><td>本 notebook 的目的：用 Python 复现 MATLAB 版的案例研究，结果一致后合并进 SafeML 仓库</td><td><span data-cell="105">第 105 格</span></td></tr>
+        <tr><td>未来方向：加入特征重要性，并用贝叶斯方法（正态-逆伽马分布）建模距离</td><td><span data-cell="142">第 142 格</span> <span data-cell="145">第 145 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">原 notebook 的准确率、各距离数值和相关图都在运行输出里，Kaggle 下载的源码不带输出，作者的文字里也没写具体数值，所以这里不列分数。想看可以点上方链接在 Kaggle 上看作者的运行结果。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li>第 112 格每次重复都用 <code>train_test_split(..., random_state=114)</code>，100 次“重复”其实是<b>同一种切分</b>；本来用于打乱的函数被注释掉了。各次之间的差别只剩 MLP 随机初始化。<span data-cell="112">出处</span></li>
+        <li>第 21、23、84 格的 K 折循环里只保存了<b>最后一折</b>，<code>model.fit</code> 写在循环外面，等于只训练、评估了一次。<span data-cell="21">出处</span></li>
+        <li>第 28 格 MLP 设 <code>max_iter=2</code>，只训练 2 轮，模型很可能没训练充分。<span data-cell="28">出处</span></li>
+        <li>第 54 格文字说应该先标准化再做 PCA，第 66 格实际用的却是<b>未标准化</b>的数据，主成分会被 <code>idle_std</code> 这类数值巨大的列主导。<span data-cell="66">出处</span></li>
+        <li>标准化与 PCA 在切分训练/测试之前对全部数据拟合，测试数据的信息提前混进了预处理。</li>
+        <li>第 40 格变量名叫 <code>Friday_Morning_Data</code>，读的却是周五<b>下午</b>的文件；第 29 格 LightGBM 函数把 AUC 当“accuracy”返回（未被调用）。<span data-cell="40">出处</span></li>
+        <li>第 146 格算了 <code>alpha_x</code>、<code>beta_x</code> 等参数，但画等高线时用的是手写常数，没有用上算出的值。<span data-cell="146">出处</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>给已上线的入侵检测模型配一个“监视器”：每攒一批流量，就按模型的判断分组，和训练时的同类数据比分布；距离超过阈值就报警、转人工，或暂停自动封禁。</li>
+        <li><b>同类问题：</b>垃圾邮件过滤器遇到新型邮件、自动驾驶遇到没见过的天气、医疗影像模型换了一台新扫描仪、风控模型遇到新的欺诈手法：都是“数据变了，模型还按老经验判断”。</li>
+        <li><b>可迁移的套路：</b>训练时存下每类每个特征的分布 → 运行时按预测类别缓存一批数据 → 用 KS、Wasserstein 等距离比较 → 距离与准确率的关系事先在有标签的数据上标定 → 设报警阈值。</li>
+        <li><b>局限：</b>只比较单个特征的分布（逐列算再平均），看不到特征之间关系的变化；攻击者如果刻意让流量“长得像正常的”，分布距离也可能不变。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>六种 ECDF 距离：Cramér-von Mises、Anderson-Darling、Kolmogorov-Smirnov、Kuiper、Wasserstein、DTS <span data-cell="13">第 13 格</span></li>
+        <li>清洗：删除含 NaN / 无穷大的行 <span data-cell="17">第 17 格</span></li>
+        <li>标准化 StandardScaler 与 Scree 图 <span data-cell="59">第 59 格</span></li>
+        <li>PCA 降到 7 维 + LabelBinarizer <span data-cell="66">第 66 格</span></li>
+        <li>分层 K 折 StratifiedKFold <span data-cell="82">第 82 格</span></li>
+        <li>KNN（k=5）<span data-cell="88">第 88 格</span>、MLP（1 层 10 个神经元）<span data-cell="28">第 28 格</span>、LightGBM <span data-cell="29">第 29 格</span></li>
+        <li>100 次重复 + Seaborn 散点 / 折线 / 箱线图 <span data-cell="112">第 112 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>SafeML 在运行时是按<b>模型预测的类别</b>分组，而训练时是按<b>真实标签</b>分组。为什么运行时只能这样做？这会带来什么偏差？</li>
+      <li>第 112 格每次都用同一个 <code>random_state</code> 切分数据。这样得到的 100 个点，还能说明“数据变了，准确率跟着变”吗？应该怎样改实验，才能真正检验 SafeML 的想法？</li>
+      <li>如果攻击者故意把扫描流量伪装得和正常流量统计特征一样，统计距离还能发现问题吗？还需要哪些别的防线？</li>
+      <li>先标准化再 PCA，和不标准化直接 PCA，主成分个数差了好几倍（30 对 7）。你认为哪种做法更合理？为什么？</li>
+      <li>距离超过阈值后，系统可以“报警”“交给人工”“暂停自动封禁”。在一家公司的网络里，你会怎么设计这几档响应？报警太多会有什么后果？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Koorosh Aslansefat（代码由 William Bridges 编写，属 SafeML 项目），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：Canadian Institute for Cybersecurity, CICIDS2017（Kaggle 上传者 chethuhn）。
+</footer>
+</main>
+
+<script src="nb/cicids2017-safeml-drift.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 统计工具 ---------- */
+  function normals(r, n, m, s) { const a = []; for (let i = 0; i < n; i++) a.push(m + K.randn(r) * s); return a; }
+  // 两样本 ECDF 距离（本页的简化写法，与 SafeML 仓库实现可能差一个常数）
+  function ecdfDist(a, b) {
+    const A = a.slice().sort((x, y) => x - y), B = b.slice().sort((x, y) => x - y);
+    const n = A.length, m = B.length;
+    const P = A.concat(B).sort((x, y) => x - y);
+    let i = 0, j = 0, ks = 0, dp = 0, dn = 0, cvm = 0, ad = 0, ws = 0, dts = 0;
+    for (let k = 0; k < P.length; k++) {
+      const x = P[k];
+      while (i < n && A[i] <= x) i++;
+      while (j < m && B[j] <= x) j++;
+      const F = i / n, G = j / m, d = F - G, H = (i + j) / (n + m);
+      ks = Math.max(ks, Math.abs(d)); dp = Math.max(dp, d); dn = Math.max(dn, -d);
+      cvm += d * d;
+      if (H > 0 && H < 1) ad += (d * d) / (H * (1 - H));
+      if (k + 1 < P.length) {
+        const dx = P[k + 1] - x;
+        ws += Math.abs(d) * dx;
+        if (H > 0 && H < 1) dts += (Math.abs(d) / Math.sqrt(H * (1 - H))) * dx;
+      }
+    }
+    const c = (n * m) / ((n + m) * (n + m));
+    return { ks, kuiper: dp + dn, cvm: cvm * c, ad: ad * c, ws, dts };
+  }
+  function ecdfPath(arr, ax, lo, hi) {
+    const s = arr.slice().sort((x, y) => x - y);
+    let d = `M${ax.sx(lo)},${ax.sy(0)}`;
+    s.forEach((v, k) => { const x = ax.sx(K.clamp(v, lo, hi)); d += `L${x},${ax.sy(k / s.length)}L${x},${ax.sy((k + 1) / s.length)}`; });
+    return d + `L${ax.sx(hi)},${ax.sy(1)}`;
+  }
+  const fade = (els, ctx, ms) => { els.forEach((e) => (e.style.opacity = 0)); return ctx.tween(ms || 500, (t) => els.forEach((e) => (e.style.opacity = t))); };
+
+  const steps = [
+    {
+      at: 0, title: "开场：SafeML 想解决什么问题", kicker: "第 0–6 格 · 背景",
+      html: `<p>作者先介绍 SafeML 项目：机器学习越来越多地用在安全攸关的场合（自动驾驶、医疗、网络防御），可模型是个“黑盒子”，上线以后遇到的数据<b>没有标签</b>，我们无法实时知道它判得对不对。<span data-cell="5">第 5 格</span></p><p>SafeML 的回答是：不看答案，看<b>数据像不像</b>。动画里，上线后的流量不断涌进模型；监视器比较它们和训练数据的分布，指针越往右，说明差得越多、越不能信。</p>`,
+      cells: [2, 5],
+      draw(svg, ctx) {
+        K.node(svg, 260, 120, 170, 80, "入侵检测模型\n（黑盒子）", { bold: true });
+        K.svg(svg, "text", { x: 30, y: 40, "font-size": 13, class: "muted" }, "上线后的流量：没有标签");
+        const pk = [];
+        for (let i = 0; i < 9; i++) pk.push(K.svg(svg, "rect", { x: -20, y: 150 + ((i * 23) % 40) - 10, width: 22, height: 14, rx: 3, fill: i % 4 === 3 ? "var(--c6)" : "var(--c1)", opacity: 0.8 }));
+        const q = K.svg(svg, "text", { x: 470, y: 150, "font-size": 30, "font-weight": 700, fill: "var(--warn)" }, "?");
+        K.svg(svg, "text", { x: 470, y: 180, "font-size": 13 }, "这些判断还对吗？");
+        // 仪表
+        const cx = 600, cy = 300, R = 70;
+        [["var(--good)", 0, 0.45], ["var(--warn)", 0.45, 0.75], ["var(--bad)", 0.75, 1]].forEach(([c, a, b]) => {
+          const p = (t) => [cx - R * Math.cos(Math.PI * t), cy - R * Math.sin(Math.PI * t)];
+          const [x1, y1] = p(a), [x2, y2] = p(b);
+          K.svg(svg, "path", { d: `M${x1},${y1} A${R},${R} 0 0 1 ${x2},${y2}`, fill: "none", stroke: c, "stroke-width": 12 });
+        });
+        K.svg(svg, "text", { x: cx, y: cy - R - 18, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "SafeML 监视器：分布距离");
+        const needle = K.svg(svg, "line", { x1: cx, y1: cy, x2: cx - R + 8, y2: cy, stroke: "var(--ink)", "stroke-width": 3 });
+        (async () => {
+          for (let round = 0; round < 3; round++) {
+            if (!(await ctx.tween(1400, (t) => pk.forEach((p, i) => p.setAttribute("x", -20 + K.clamp(t * 1.6 - i * 0.07, 0, 1) * 280))))) return;
+            const lvl = [0.2, 0.55, 0.88][round];
+            if (!(await ctx.tween(600, (t) => { const a = Math.PI * K.lerp(round ? [0.2, 0.55][round - 1] : 0, lvl, t); needle.setAttribute("x2", cx - (R - 8) * Math.cos(a)); needle.setAttribute("y2", cy - (R - 8) * Math.sin(a)); }))) return;
+            q.style.opacity = round === 2 ? 1 : 0.4;
+          }
+        })();
+      },
+    },
+    {
+      title: "SafeML 的两个阶段", kicker: "第 7–16 格 · 思路与导入",
+      html: `<p><b>训练阶段</b>（离线）：用可信的数据训练分类器，同时把<b>每一类、每个特征的分布</b>（经验累积分布函数 ECDF）存下来。</p><p><b>应用阶段</b>（在线）：新数据没有标签，先让模型分类，再把“被判为同一类”的数据和训练时的同类数据比较，算出统计距离。距离小，就放心让系统自动运行；距离大，就交给人类专家，或者直接拒绝。<span data-cell="8">第 8 格</span></p><p>第 13 格从 SafeML 仓库导入了六种距离：Cramér-von Mises、Anderson-Darling、Kolmogorov-Smirnov、Kuiper、Wasserstein，以及前两者组合的 DTS。</p>`,
+      cells: [7, 13], highlight: ["Kolmogorov_Smirnov_Dist", "Wasserstein_Dist"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 20, y: 26, "font-size": 13, "font-weight": 700, fill: "var(--c1)" }, "训练阶段（离线，有标签）");
+        K.svg(svg, "text", { x: 20, y: 186, "font-size": 13, "font-weight": 700, fill: "var(--c3)" }, "应用阶段（在线，没有标签）");
+        const a = [K.node(svg, 20, 40, 130, 56, "可信数据\n（有标签）"), K.arrow(svg, 150, 68, 200, 68), K.node(svg, 200, 40, 120, 56, "训练分类器"), K.arrow(svg, 320, 68, 370, 68), K.node(svg, 370, 40, 160, 56, "存下每类的\nECDF 分布", { fill: "var(--accent-soft)", stroke: "var(--accent)" })];
+        const b = [K.node(svg, 20, 200, 130, 56, "新流量\n（缓存一批）"), K.arrow(svg, 150, 228, 200, 228), K.node(svg, 200, 200, 120, 56, "模型分类"), K.arrow(svg, 320, 228, 370, 228), K.node(svg, 370, 200, 160, 56, "按预测类别\n算 ECDF")];
+        const link = K.arrow(svg, 450, 100, 450, 196, { color: "var(--warn)" });
+        const lt = K.svg(svg, "text", { x: 458, y: 150, "font-size": 12, fill: "var(--warn)" }, "比较 → 统计距离");
+        const outs = [["距离小：自动运行", "var(--good)"], ["中等：交给专家", "var(--warn)"], ["很大：拒绝 / 报警", "var(--bad)"]].map(([t, c], i) => {
+          const g = K.svg(svg, "g");
+          K.svg(g, "rect", { x: 560, y: 160 + i * 52, width: 150, height: 40, rx: 8, fill: `color-mix(in srgb, ${c} 16%, var(--panel))`, stroke: c });
+          K.svg(g, "text", { x: 635, y: 185 + i * 52, "text-anchor": "middle", "font-size": 12 }, t);
+          return g;
+        });
+        const ar = K.arrow(svg, 530, 228, 558, 228);
+        [...a, ...b, link, lt, ...outs, ar].forEach((e) => (e.style.opacity = 0));
+        (async () => {
+          for (const e of a) if (!(await ctx.tween(260, (t) => (e.style.opacity = t)))) return;
+          for (const e of b) if (!(await ctx.tween(260, (t) => (e.style.opacity = t)))) return;
+          if (!(await ctx.tween(500, (t) => (link.style.opacity = lt.style.opacity = t)))) return;
+          if (!(await ctx.tween(300, (t) => (ar.style.opacity = t)))) return;
+          for (const e of outs) if (!(await ctx.tween(300, (t) => (e.style.opacity = t)))) return;
+        })();
+      },
+    },
+    {
+      title: "工具函数：清洗、训练与 K 折（循环里藏着一个坑）", kicker: "第 17–23 格 · 方法区",
+      html: `<p>作者把所有步骤写成函数放在前面：<code>clean_dataset</code> 删掉含 NaN 和无穷大的行（否则 PCA 会报错）；<code>train_model_predict</code> 用分层 K 折切数据、训练、预测，并画混淆矩阵。</p><p>仔细看第 21 格：<code>for</code> 循环把每一折都切了一遍，但<b>只留下了最后一折</b>，<code>model.fit</code> 写在循环外面。动画里十折依次亮起，真正被拿去训练的只有最后那一折。第 23 格的打乱版函数也是一样。</p>`,
+      cells: [17, 21, 23], highlight: ["model.fit(X_train, reshaped_y_train.ravel())", "dropna"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 34, "font-size": 13, class: "muted" }, "for train_index, test_index in skf.split(X, y):  ← 循环 10 次，每次覆盖上一次");
+        const fs = [];
+        for (let k = 0; k < 10; k++) {
+          const g = K.svg(svg, "g");
+          for (let j = 0; j < 10; j++) K.svg(g, "rect", { x: 40 + j * 64, y: 60 + k * 22, width: 60, height: 16, rx: 3, fill: j === k ? "var(--c3)" : "var(--c1)", opacity: 0.2 });
+          fs.push(g);
+        }
+        const fit = K.node(svg, 220, 290, 280, 40, "循环结束后才 model.fit：只用了第 10 折", { fill: "color-mix(in srgb, var(--warn) 18%, var(--panel))", stroke: "var(--warn)" });
+        fit.style.opacity = 0;
+        (async () => {
+          for (let k = 0; k < 10; k++) {
+            if (!(await ctx.tween(220, (t) => fs[k].querySelectorAll("rect").forEach((r) => (r.style.opacity = 0.2 + 0.7 * t))))) return;
+            if (k < 9) await ctx.tween(160, (t) => fs[k].querySelectorAll("rect").forEach((r) => (r.style.opacity = 0.9 - 0.75 * t)));
+          }
+          await ctx.tween(500, (t) => (fit.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "两个候选模型：只训练 2 轮的 MLP 与 LightGBM", kicker: "第 24–29 格 · 模型",
+      html: `<p>作者写了一大段多层感知机（MLP）的说明：输入约 7 个主成分，按经验法则隐藏层取 10 个神经元，用 Adam 优化、自适应学习率。<span data-cell="26">第 26 格</span></p><p>但第 28 格的 <code>max_iter=2</code> 意味着只把训练数据过 2 遍就停，动画里损失曲线还没降下来就被截断了。这可能是作者故意让每次结果有起伏，但文字里没有说明。第 29 格另写了 LightGBM 版本，在主循环里被注释掉了。</p>`,
+      cells: [28, 29], highlight: ["max_iter=2", "hidden_layer_sizes=(10,)"],
+      draw(svg, ctx) {
+        const xs = [60, 190, 300], L = [7, 10, 1];
+        const pos = L.map((n, li) => Array.from({ length: n }, (_, i) => [xs[li], 170 + (i - (n - 1) / 2) * 26]));
+        for (let li = 0; li < 2; li++) pos[li].forEach((a) => pos[li + 1].forEach((b) => K.svg(svg, "line", { x1: a[0], y1: a[1], x2: b[0], y2: b[1], stroke: "var(--line)" })));
+        pos.forEach((P) => P.forEach((p) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 8, fill: "var(--panel-2)", stroke: "var(--ink-3)" })));
+        ["7 个主成分", "10 个神经元", "正常 / 扫描"].forEach((t, i) => K.svg(svg, "text", { x: xs[i], y: 320, "text-anchor": "middle", "font-size": 12 }, t));
+        const ax = K.axes(svg, { x: 400, y: 50, w: 280, h: 200 }, [0, 30], [0, 1], { xlabel: "训练轮数（示意）", yticks: 0 });
+        K.svg(svg, "text", { x: 400, y: 38, "font-size": 12, class: "muted" }, "损失（示意曲线）");
+        const full = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+        const cut = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 3 });
+        const f = (e) => 0.1 + 0.85 * Math.exp(-e / 5);
+        const lab = K.svg(svg, "text", { x: ax.sx(2) + 8, y: ax.sy(f(2)) - 8, "font-size": 13, fill: "var(--c6)", "font-weight": 700 }, "");
+        ctx.tween(1600, (t) => {
+          let d = "", c = "";
+          for (let e = 0; e <= 30 * t; e += 0.5) { d += (d ? "L" : "M") + ax.sx(e) + "," + ax.sy(f(e)); if (e <= 2) c += (c ? "L" : "M") + ax.sx(e) + "," + ax.sy(f(e)); }
+          full.setAttribute("d", d); cut.setAttribute("d", c);
+        }).then((ok) => { if (ok) lab.textContent = "max_iter=2：在这里就停了"; });
+      },
+    },
+    {
+      title: "按类别、逐个特征量距离再取平均", kicker: "第 30–39 格 · SafeML 核心函数",
+      html: `<p><code>get_X_train_and_test_data_for_given_label</code> 把训练集里<b>真实标签</b>是某类的行，和测试集里<b>模型预测</b>为该类的行分别挑出来。<span data-cell="33">第 33 格</span></p><p><code>get_statistical_dist_measures_for_class_result</code> 对每个特征（每个主成分）分别算六种距离，再对所有特征取平均，作为这一类的距离。原因是当时的 Python 版距离函数只能处理一维数据。<span data-cell="30">第 30 格</span> 动画中七根柱子是七个主成分各自的 KS 距离（示意），虚线是平均值。</p>`,
+      cells: [31, 33], highlight: ["np.mean(Kolmogorov_Smirnov_distances", "pred_y == labels[label_index]"],
+      draw(svg, ctx) {
+        K.node(svg, 20, 40, 190, 60, "训练集中\n真实标签 = 正常的行", { fill: "color-mix(in srgb, var(--c1) 14%, var(--panel))", stroke: "var(--c1)" });
+        K.node(svg, 20, 130, 190, 60, "测试集中\n模型预测 = 正常的行", { fill: "color-mix(in srgb, var(--c3) 14%, var(--panel))", stroke: "var(--c3)" });
+        K.arrow(svg, 210, 70, 260, 110); K.arrow(svg, 210, 160, 260, 120);
+        K.svg(svg, "text", { x: 20, y: 230, "font-size": 12, class: "muted" }, "每个主成分单独比一次 → 7 个距离 → 求平均");
+        const ax = K.axes(svg, { x: 300, y: 40, w: 380, h: 240 }, [0, 7], [0, 0.4], { xticks: 0, ylabel: "KS 距离（示意）" });
+        const v = [0.12, 0.31, 0.08, 0.22, 0.05, 0.17, 0.1], mean = v.reduce((a, b) => a + b) / 7;
+        const bars = v.map((d, i) => { K.svg(svg, "text", { x: ax.sx(i + 0.5), y: 300, "text-anchor": "middle", "font-size": 11 }, "PC" + (i + 1)); return K.svg(svg, "rect", { x: ax.sx(i + 0.15), y: ax.sy(0), width: ax.sx(0.7) - ax.sx(0), height: 0, fill: "var(--c2)", rx: 3 }); });
+        const ml = K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(0), y1: ax.sy(mean), y2: ax.sy(mean), stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        const mt = K.svg(svg, "text", { x: ax.sx(7) - 4, y: ax.sy(mean) - 6, "text-anchor": "end", "font-size": 12, fill: "var(--warn)" }, "");
+        (async () => {
+          for (let i = 0; i < 7; i++) if (!(await ctx.tween(240, (t) => { bars[i].setAttribute("y", ax.sy(v[i] * t)); bars[i].setAttribute("height", ax.sy(0) - ax.sy(v[i] * t)); }))) return;
+          if (await ctx.tween(600, (t) => ml.setAttribute("x2", ax.sx(7 * t)))) mt.textContent = "平均 = 这一类的距离";
+        })();
+      },
+    },
+    {
+      title: "读入周五下午的流量，整理列名、清掉坏值", kicker: "第 40–58 格 · 读数据与清洗",
+      html: `<p>读入 <code>Friday-WorkingHours-Afternoon-PortScan</code> 这个文件（变量名却写成了 <code>Friday_Morning_Data</code>）。列名里有多余空格、大小写不统一，第 44 格统一成小写加下划线。</p><p>作者发现直接做 PCA 会报“输入含有 NaN 或无穷大”，于是调用 <code>clean_dataset</code> 删除这些行，再重置行号。<span data-cell="47">第 47 格</span> 动画里带 ∞ 和 NaN 的行被划掉。之后把标签列单独存起来，其余 78 列留作特征。</p>`,
+      cells: [40, 44, 49], highlight: ["Friday-WorkingHours-Afternoon-PortScan", "str.strip()"],
+      draw(svg, ctx) {
+        const raw = [" Flow Duration", " Total Fwd Packets", "Idle Std", " Label"], clean = ["flow_duration", "total_fwd_packets", "idle_std", "label"];
+        const hd = raw.map((t, i) => K.svg(svg, "text", { x: 60 + i * 160, y: 50, "font-size": 13, "font-family": "var(--mono)", fill: "var(--bad)" }, t));
+        K.svg(svg, "text", { x: 30, y: 24, "font-size": 12, class: "muted" }, "列名与数值均为示意");
+        const rows = [["1203", "4", "0", "正常"], ["88", "2", "∞", "扫描"], ["5561", "9", "1.2e6", "正常"], ["NaN", "1", "0", "扫描"], ["47", "1", "0", "扫描"], ["9032", "12", "3.4e5", "正常"]];
+        const lines = rows.map((r, k) => {
+          const g = K.svg(svg, "g");
+          r.forEach((t, i) => K.svg(g, "text", { x: 60 + i * 160, y: 90 + k * 34, "font-size": 13, "font-family": "var(--mono)", fill: /∞|NaN/.test(t) ? "var(--bad)" : "var(--ink)" }, t));
+          return g;
+        });
+        const strikes = [1, 3].map((k) => K.svg(svg, "line", { x1: 50, x2: 50, y1: 85 + k * 34, y2: 85 + k * 34, stroke: "var(--bad)", "stroke-width": 2 }));
+        ctx.wait(500).then((ok) => ok && ctx.tween(900, (t) => hd.forEach((h, i) => { if (t > 0.5) { h.textContent = clean[i]; K.set(h, { fill: "var(--good)" }); } h.style.opacity = Math.abs(1 - 2 * t) * 0.6 + 0.4; })))
+          .then((ok) => ok && ctx.tween(800, (t) => strikes.forEach((s) => s.setAttribute("x2", 50 + 600 * t))))
+          .then((ok) => ok && ctx.tween(600, (t) => [1, 3].forEach((k) => (lines[k].style.opacity = 1 - 0.85 * t))));
+      },
+    },
+    {
+      title: "标准化与 Scree 图：要几个主成分？", kicker: "第 59–64 格 · 降维前的检查",
+      html: `<p>主成分分析（PCA）把很多相关的列“压缩”成少数几个新方向。Scree 图（这里画的是累计解释方差）告诉我们：前几个主成分加起来保留了多少信息。</p><p>作者画了两张：<b>先标准化</b>时，大约要前 30 个主成分才能解释约 99.9% 的方差；<b>不标准化</b>时，只要 5 到 7 个。<span data-cell="60">第 60 格</span> <span data-cell="62">第 62 格</span> 后者“压缩率”高，其实是因为几个数值特别大的列（如 <code>idle_std</code>）几乎独占了方差。动画中两条曲线的形状是示意，数字来自作者文字。</p>`,
+      cells: [59, 61, 63], highlight: ["explained_variance_ratio_"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 580, h: 250 }, [0, 78], [0, 1], { xlabel: "主成分个数", ylabel: "累计解释方差", yfmt: (v) => Math.round(v * 100) + "%" });
+        const f1 = (k) => 1 - Math.exp(-k / 6.5), f2 = (k) => 1 - 0.6 * Math.exp(-k / 0.9) - 0.4 * Math.exp(-k / 1.6);
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 420, y: 230, "font-size": 13, fill: "var(--c1)" }, "先标准化：约 30 个到 99.9%");
+        K.svg(svg, "text", { x: 420, y: 254, "font-size": 13, fill: "var(--c6)" }, "不标准化：5–7 个就到顶");
+        ctx.tween(2000, (t) => {
+          let a = "", b = "";
+          for (let k = 1; k <= 78 * t; k++) { a += (a ? "L" : "M") + ax.sx(k) + "," + ax.sy(f1(k)); b += (b ? "L" : "M") + ax.sx(k) + "," + ax.sy(f2(k)); }
+          p1.setAttribute("d", a); p2.setAttribute("d", b);
+        });
+      },
+    },
+    {
+      title: "降到 7 个主成分，标签变成 0 / 1", kicker: "第 65–77 格 · 变换",
+      html: `<p>按环境变量 <code>dimensions_num_for_PCA = 7</code>，把（未标准化的）78 列投影成 7 个主成分，起名“Principal component 1…7”，再把标签列接回去。</p><p>标签原本是文字，模型读不懂。<code>LabelBinarizer</code> 把两类文字变成 0 和 1。作者提醒：如果超过两类，就要改用 <code>get_dummies</code>。<span data-cell="73">第 73 格</span></p>`,
+      cells: [66, 74], highlight: ["PCA(n_components=dimensions_num_for_PCA)", "LabelBinarizer"],
+      draw(svg, ctx) {
+        const cols = [];
+        for (let i = 0; i < 78; i++) cols.push(K.svg(svg, "rect", { x: 30 + i * 5.2, y: 60, width: 4, height: 150, fill: "var(--ink-3)", opacity: 0.5 }));
+        K.svg(svg, "text", { x: 30, y: 46, "font-size": 13 }, "78 个原始特征");
+        const pcs = [];
+        for (let i = 0; i < 7; i++) pcs.push(K.svg(svg, "rect", { x: 470 + i * 24, y: 60, width: 18, height: 0, fill: "var(--c2)", rx: 2 }));
+        K.svg(svg, "text", { x: 470, y: 46, "font-size": 13 }, "7 个主成分");
+        const ar = K.arrow(svg, 445, 135, 465, 135);
+        const lbA = K.svg(svg, "text", { x: 470, y: 260, "font-size": 14, "font-family": "var(--mono)" }, "正常 / 扫描");
+        const lbB = K.svg(svg, "text", { x: 470, y: 290, "font-size": 14, "font-family": "var(--mono)", fill: "var(--accent)" }, "");
+        ctx.tween(1400, (t) => { cols.forEach((c, i) => { c.style.opacity = 0.5 * (1 - t) + 0.08; c.setAttribute("height", 150 * (1 - 0.6 * t)); }); pcs.forEach((p, i) => p.setAttribute("height", 150 * t * (1 - i * 0.11))); })
+          .then((ok) => ok && ctx.wait(400)).then((ok) => { if (ok) lbB.textContent = "→   0   /   1"; });
+      },
+    },
+    {
+      title: "分层 K 折：每一折里两类的比例都一样", kicker: "第 78–84 格 · 切分",
+      html: `<p>作者用 10 折分层切分：把数据分成 10 份，每份里“正常”和“扫描”的比例和整体相同（这就是“分层”），轮流拿一份当测试、其余九份当训练。作者也列出了 K 折的好处和代价。<span data-cell="79">第 79 格</span></p><p>和第 21 格一样，第 84 格的循环只保留了最后一次的切分结果，打印出来的长度也只是第 10 折的。</p>`,
+      cells: [80, 82, 84], highlight: ["StratifiedKFold(n_splits=num_of_splits_for_skf, shuffle=False)"],
+      draw(svg, ctx) {
+        const r = K.rng(4), dots = [];
+        for (let i = 0; i < 200; i++) dots.push({ red: r() < 0.35, el: K.svg(svg, "circle", { cx: 40 + (i % 20) * 16, cy: 60 + Math.floor(i / 20) * 24, r: 5, fill: "var(--c1)" }) });
+        dots.forEach((d) => d.red && K.set(d.el, { fill: "var(--c6)" }));
+        K.svg(svg, "text", { x: 40, y: 34, "font-size": 12, class: "muted" }, "蓝 = 正常，红 = 扫描（示意比例）");
+        const reds = dots.filter((d) => d.red), blues = dots.filter((d) => !d.red);
+        const order = [];
+        for (let k = 0; k < 10; k++) { reds.filter((_, i) => i % 10 === k).forEach((d) => order.push([d, k])); blues.filter((_, i) => i % 10 === k).forEach((d) => order.push([d, k])); }
+        const cnt = Array(10).fill(0);
+        const tgt = order.map(([d, k]) => [d, k, cnt[k]++]);
+        for (let k = 0; k < 10; k++) K.svg(svg, "text", { x: 400 + k * 30, y: 322, "text-anchor": "middle", "font-size": 11 }, "折" + (k + 1));
+        ctx.wait(500).then((ok) => ok && ctx.tween(1600, (t) => tgt.forEach(([d, k, j]) => {
+          const x0 = 40 + (dots.indexOf(d) % 20) * 16, y0 = 60 + Math.floor(dots.indexOf(d) / 20) * 24;
+          d.el.setAttribute("cx", K.lerp(x0, 400 + k * 30, t)); d.el.setAttribute("cy", K.lerp(y0, 300 - j * 11, t)); d.el.setAttribute("r", K.lerp(5, 4, t));
+        })));
+      },
+    },
+    {
+      title: "先跑一个 KNN 基线", kicker: "第 85–90 格 · 建模",
+      html: `<p>K 近邻（KNN）的想法是“近朱者赤”：一条新流量离哪些已知流量最近，就跟它们中的多数投票。作者用默认的 k = 5，并解释了 k 太小会不稳、太大会模糊边界。<span data-cell="87">第 87 格</span></p><p>训练和预测后输出分类报告、混淆矩阵和准确率（在运行输出里）。这个模型的预测结果 <code>pred_y</code> 会在下一章被用来给测试数据分组。</p>`,
+      cells: [88, 90], highlight: ["n_neighbors=5"],
+      draw(svg, ctx) {
+        const r = K.rng(12), P = [];
+        for (let i = 0; i < 40; i++) P.push([200 + K.randn(r) * 70, 170 + K.randn(r) * 60, 0]);
+        for (let i = 0; i < 26; i++) P.push([450 + K.randn(r) * 60, 160 + K.randn(r) * 55, 1]);
+        P.forEach((p) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 5, fill: p[2] ? "var(--c6)" : "var(--c1)", opacity: 0.75 }));
+        const q = [345, 175];
+        const nn = P.map((p) => [Math.hypot(p[0] - q[0], p[1] - q[1]), p]).sort((a, b) => a[0] - b[0]).slice(0, 5);
+        const ring = K.svg(svg, "circle", { cx: q[0], cy: q[1], r: 0, fill: "none", stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+        const qd = K.svg(svg, "circle", { cx: q[0], cy: q[1], r: 8, fill: "var(--panel)", stroke: "var(--ink)", "stroke-width": 2 });
+        const votes = nn.filter((d) => d[1][2] === 1).length;
+        const lab = K.svg(svg, "text", { x: 30, y: 320, "font-size": 13 }, "");
+        const lines = nn.map((d) => K.svg(svg, "line", { x1: q[0], y1: q[1], x2: q[0], y2: q[1], stroke: "var(--warn)", "stroke-width": 1.5 }));
+        ctx.tween(900, (t) => ring.setAttribute("r", nn[4][0] * t))
+          .then((ok) => ok && ctx.tween(800, (t) => lines.forEach((l, i) => { l.setAttribute("x2", K.lerp(q[0], nn[i][1][0], t)); l.setAttribute("y2", K.lerp(q[1], nn[i][1][1], t)); })))
+          .then((ok) => { if (ok) { lab.textContent = `最近的 5 个邻居：${votes} 个扫描、${5 - votes} 个正常 → 判为“${votes >= 3 ? "扫描" : "正常"}”（示意）`; K.set(qd, { fill: votes >= 3 ? "var(--c6)" : "var(--c1)" }); } });
+      },
+    },
+    {
+      title: "试跑一次：六把尺子量两条 ECDF", kicker: "第 91–104 格 · SafeML 演示",
+      html: `<p>ECDF（经验累积分布函数）是一条台阶线：横轴是某个特征的取值，纵轴是“不超过这个值的样本占几成”。两份数据分布一样，两条台阶线就几乎重合。</p><ul class="tight"><li><b>KS</b>：两条线上下最大的那一段差距</li><li><b>Kuiper</b>：向上最大差距 + 向下最大差距</li><li><b>Cramér-von Mises</b>：所有差距平方后加总</li><li><b>Anderson-Darling</b>：同上，但在两头（极端值处）加大权重</li><li><b>Wasserstein</b>：两条线之间夹的面积，可理解为“把一堆土搬成另一堆的最小搬运量”</li><li><b>DTS</b>：作者注释说是 AD 与 CVM 的组合</li></ul><p>作者在一次切分上对“正常”这一类、每个特征各算一遍，画成六个箱线图。<span data-cell="103">第 103 格</span></p>`,
+      cells: [93, 96, 98, 102, 104], highlight: ["X_test.loc[pred_y == labels[0]]"],
+      draw(svg, ctx) {
+        const r = K.rng(31), a = normals(r, 60, 0, 1), b = normals(r, 60, 0.8, 1.2);
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [-3.5, 4.5], [0, 1], { xlabel: "某个主成分的取值（示意）", ylabel: "累计比例" });
+        const pa = K.svg(svg, "path", { d: ecdfPath(a, ax, -3.5, 4.5), fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+        const pb = K.svg(svg, "path", { d: ecdfPath(b, ax, -3.5, 4.5), fill: "none", stroke: "var(--c3)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 70, y: 50, "font-size": 12, fill: "var(--c1)" }, "训练时的“正常”");
+        K.svg(svg, "text", { x: 70, y: 68, "font-size": 12, fill: "var(--c3)" }, "测试中被判为“正常”");
+        // 找 KS 位置
+        const P = a.concat(b).sort((x, y) => x - y);
+        let best = 0, bx = 0, fa = 0, fb = 0;
+        P.forEach((x) => { const F = a.filter((v) => v <= x).length / a.length, G = b.filter((v) => v <= x).length / b.length; if (Math.abs(F - G) > best) { best = Math.abs(F - G); bx = x; fa = F; fb = G; } });
+        const ks = K.svg(svg, "line", { x1: ax.sx(bx), x2: ax.sx(bx), y1: ax.sy(fa), y2: ax.sy(fa), stroke: "var(--bad)", "stroke-width": 4 });
+        const kt = K.svg(svg, "text", { x: ax.sx(bx) + 8, y: ax.sy((fa + fb) / 2), "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "");
+        // Wasserstein 面积
+        let area = "";
+        const grid = []; for (let x = -3.5; x <= 4.5; x += 0.05) grid.push(x);
+        const Fa = (x) => a.filter((v) => v <= x).length / a.length, Fb = (x) => b.filter((v) => v <= x).length / b.length;
+        area = "M" + grid.map((x) => ax.sx(x) + "," + ax.sy(Fa(x))).join("L") + "L" + grid.slice().reverse().map((x) => ax.sx(x) + "," + ax.sy(Fb(x))).join("L") + "Z";
+        const ar = K.svg(svg, "path", { d: area, fill: "var(--warn)", "fill-opacity": 0 });
+        const at = K.svg(svg, "text", { x: 470, y: 260, "font-size": 13, fill: "var(--warn)", "font-weight": 700 }, "");
+        [pa, pb].forEach((p) => { const L = p.getTotalLength ? p.getTotalLength() : 2000; p.style.strokeDasharray = L; p.style.strokeDashoffset = L; });
+        ctx.tween(1600, (t) => [pa, pb].forEach((p) => (p.style.strokeDashoffset = (1 - t) * parseFloat(p.style.strokeDasharray))))
+          .then((ok) => ok && ctx.tween(700, (t) => ks.setAttribute("y2", ax.sy(K.lerp(fa, fb, t)))))
+          .then((ok) => { if (ok) kt.textContent = "KS = " + best.toFixed(2); return ok && ctx.wait(500); })
+          .then((ok) => ok && ctx.tween(800, (t) => K.set(ar, { "fill-opacity": 0.3 * t })))
+          .then((ok) => { if (ok) at.textContent = "阴影面积 = Wasserstein"; });
+      },
+    },
+    {
+      title: "正式跑 100 次（但切分其实没变）", kicker: "第 105–121 格 · 主循环",
+      html: `<p>SafeML 想证明的是：<b>不同的数据切分会带来不同的准确率，而统计距离会跟着一起变</b>，这样就能用距离预测准确率。<span data-cell="105">第 105 格</span></p><p>第 112 格的主循环重复 100 次：切分 → 训练 MLP → 对两类分别算六种距离，存进结果表。问题是切分用了固定的 <code>random_state=114</code>，100 次拿到的是<b>同一份</b>训练集和测试集；原本用来每次重新打乱的那一行被注释掉了（<code>#koo</code>）。各次之间唯一的差别是 MLP 的随机初始化。动画里切分图标一直不变，只有骰子在转。</p>`,
+      cells: [109, 111, 112], highlight: ["random_state=114", "#koo #X_train, X_test, y_train, y_test = get_shuffled_stratifiedKFold_train_test_split(X, y)"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 32, "font-size": 13, class: "muted" }, "for current_permutation in range(100):");
+        const it = K.svg(svg, "text", { x: 30, y: 70, "font-size": 30, "font-weight": 700, "font-family": "var(--mono)" }, "第 0 次");
+        const split = K.svg(svg, "g");
+        for (let i = 0; i < 12; i++) K.svg(split, "rect", { x: 40 + i * 22, y: 110, width: 18, height: 30, rx: 3, fill: i % 3 === 2 ? "var(--c3)" : "var(--c1)", opacity: 0.8 });
+        K.svg(svg, "text", { x: 40, y: 162, "font-size": 12 }, "切分：random_state=114 → 每次都一样");
+        const die = K.svg(svg, "g");
+        K.svg(die, "rect", { x: 360, y: 100, width: 50, height: 50, rx: 8, fill: "var(--panel-2)", stroke: "var(--ink)" });
+        const dn = K.svg(die, "text", { x: 385, y: 133, "text-anchor": "middle", "font-size": 22, "font-weight": 700 }, "1");
+        K.svg(svg, "text", { x: 330, y: 172, "font-size": 12 }, "MLP 随机初始化：每次不同");
+        const ax = K.axes(svg, { x: 470, y: 50, w: 220, h: 230 }, [0.9, 1], [0, 0.3], { xlabel: "准确率（示意）", ylabel: "距离", xticks: 2, yticks: 0 });
+        const r = K.rng(8);
+        (async () => {
+          for (let k = 1; k <= 30; k++) {
+            if (!(await ctx.tween(70, (t) => { die.setAttribute("transform", `rotate(${t * 90} 385 125)`); }))) return;
+            dn.textContent = 1 + Math.floor(r() * 6);
+            it.textContent = "第 " + Math.round(k * 100 / 30) + " 次";
+            const acc = 0.955 + K.randn(r) * 0.012, d = 0.12 + K.randn(r) * 0.015;
+            K.svg(svg, "circle", { cx: ax.sx(K.clamp(acc, 0.9, 1)), cy: ax.sy(K.clamp(d, 0, 0.3)), r: 4, fill: "var(--c2)", opacity: 0.7 });
+          }
+          K.svg(svg, "text", { x: 470, y: 320, "font-size": 12, fill: "var(--warn)" }, "点挤在一团：数据没变，距离也很难变");
+        })();
+      },
+    },
+    {
+      title: "把距离和准确率画在一起", kicker: "第 122–140 格 · 画结果",
+      html: `<p>把两类的结果表拼成一张（加一列 <code>dataset</code> 区分 class0 / class1），用 Seaborn 画：横轴准确率、纵轴某种距离，每个点是一次重复。<span data-cell="123">第 123 格</span></p><p>作者期望看到“准确率越低、距离越大”的趋势，并设想这样的关系可以用在自动驾驶等场合：距离突然变大时，系统把控制权交还给人。<span data-cell="125">第 125 格</span> 动画中的散点和趋势线是示意，不是作者的结果。</p>`,
+      cells: [124, 126, 128, 130], highlight: ["x='Accuracy', y='Anderson_Darling_dist'"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 580, h: 250 }, [0.7, 1], [0, 1], { xlabel: "准确率", ylabel: "统计距离（示意）", xfmt: (v) => Math.round(v * 100) + "%" });
+        const r = K.rng(21), pts = [];
+        for (let i = 0; i < 50; i++) { const acc = 0.72 + r() * 0.27, d = 0.9 - (acc - 0.7) * 2.6 + K.randn(r) * 0.07; pts.push([acc, K.clamp(d, 0.02, 0.98), i % 2]); }
+        const els = pts.map((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 0, fill: p[2] ? "var(--c6)" : "var(--c1)", opacity: 0.75 }));
+        const tl = K.svg(svg, "line", { x1: ax.sx(0.7), y1: ax.sy(0.9), x2: ax.sx(0.7), y2: ax.sy(0.9), stroke: "var(--ink)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        K.svg(svg, "text", { x: 470, y: 50, "font-size": 12, fill: "var(--c1)" }, "● class0");
+        K.svg(svg, "text", { x: 540, y: 50, "font-size": 12, fill: "var(--c6)" }, "● class1");
+        ctx.tween(1500, (t) => els.forEach((e, i) => e.setAttribute("r", K.clamp(t * 50 - i, 0, 1) * 5)))
+          .then((ok) => ok && ctx.tween(800, (t) => { tl.setAttribute("x2", ax.sx(0.7 + 0.3 * t)); tl.setAttribute("y2", ax.sy(0.9 - 0.78 * t)); }));
+      },
+    },
+    {
+      title: "展望：用贝叶斯方法描述距离的不确定性", kicker: "第 141–151 格 · 未来方向与参考文献",
+      html: `<p>最后一部分是“未来方向”：作者想用<b>正态-逆伽马（NIG）分布</b>同时描述“距离的平均值”和“它有多不确定”，第 143 格写了它的密度函数和后验更新公式，第 145 格拿 class0 的 KS 距离做了一次后验更新。</p><p>贝叶斯更新可以理解为：先有一个比较宽的猜测，每看到一批数据就把猜测收窄一点。动画里先验曲线随着数据点进来变得越来越尖（示意）。第 146 格算出的参数没有被用上，画图时用的是手写常数。</p>`,
+      cells: [143, 145, 146], highlight: ["get_posterior_nig"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [0, 0.4], [0, 1], { xlabel: "class0 的 KS 距离（示意）", yticks: 0 });
+        const path = K.svg(svg, "path", { d: "", fill: "color-mix(in srgb, var(--c2) 25%, transparent)", stroke: "var(--c2)", "stroke-width": 2 });
+        const lab = K.svg(svg, "text", { x: 470, y: 60, "font-size": 13 }, "");
+        const r = K.rng(5), data = normals(r, 40, 0.15, 0.03);
+        const draw = (n) => {
+          const mu0 = 0.25, k0 = 1, mean = n ? data.slice(0, n).reduce((a, b) => a + b) / n : mu0;
+          const mu = (k0 * mu0 + n * mean) / (k0 + n), sd = 0.09 / Math.sqrt(k0 + n * 0.6);
+          let d = `M${ax.sx(0)},${ax.sy(0)}`;
+          for (let x = 0; x <= 0.4; x += 0.004) d += `L${ax.sx(x)},${ax.sy(Math.exp(-0.5 * ((x - mu) / sd) ** 2) * Math.min(1, 0.25 / (sd * 4)))}`;
+          path.setAttribute("d", d + `L${ax.sx(0.4)},${ax.sy(0)}Z`);
+          lab.textContent = n ? `看过 ${n} 次结果后` : "先验：很宽的猜测";
+        };
+        draw(0);
+        (async () => {
+          for (let n = 1; n <= 40; n++) {
+            if (!(await ctx.wait(80))) return;
+            K.svg(svg, "circle", { cx: ax.sx(data[n - 1]), cy: ax.sy(0) - 6, r: 3, fill: "var(--c6)" });
+            draw(n);
+          }
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：标准化与 PCA ---------- */
+  function jacobiEig(A) {
+    const n = A.length, a = A.map((r) => r.slice());
+    for (let sweep = 0; sweep < 60; sweep++) {
+      let off = 0;
+      for (let p = 0; p < n; p++) for (let q = p + 1; q < n; q++) off += a[p][q] * a[p][q];
+      if (off < 1e-18) break;
+      for (let p = 0; p < n; p++) for (let q = p + 1; q < n; q++) {
+        if (Math.abs(a[p][q]) < 1e-300) continue;
+        const th = (a[q][q] - a[p][p]) / (2 * a[p][q]);
+        const t = Math.sign(th || 1) / (Math.abs(th) + Math.sqrt(th * th + 1)), c = 1 / Math.sqrt(t * t + 1), s = t * c;
+        for (let k = 0; k < n; k++) { const akp = a[k][p], akq = a[k][q]; a[k][p] = c * akp - s * akq; a[k][q] = s * akp + c * akq; }
+        for (let k = 0; k < n; k++) { const apk = a[p][k], aqk = a[q][k]; a[p][k] = c * apk - s * aqk; a[q][k] = s * apk + c * aqk; }
+      }
+    }
+    return a.map((r, i) => Math.max(0, r[i])).sort((x, y) => y - x);
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "std", label: "做 PCA 之前", value: "raw", options: [["raw", "不标准化（第 66 格的做法）"], ["std", "先标准化（第 54 格建议的做法）"]] },
+      { id: "big", label: "“空闲时间波动”这一列的数值放大倍数", min: 0, max: 6, step: 0.5, value: 4, fmt: (v) => (v === 0 ? "×1" : "×10^" + v) },
+      { id: "seed", label: "重新生成数据", button: true },
+    ],
+    note: "模拟 12 个流量特征（由 3 个隐藏因素加噪声生成），其中一列的单位特别大。浏览器里现场算协方差矩阵和特征值（Jacobi 法），柱子 = 每个主成分解释的方差比例，折线 = 累计。",
+    render(svg, v) {
+      const r = K.rng(50 + v.seed * 13), N = 300, D = 12, big = Math.pow(10, v.big);
+      const W = Array.from({ length: D }, () => [K.randn(r), K.randn(r), K.randn(r)]);
+      const X = [];
+      for (let i = 0; i < N; i++) {
+        const z = [K.randn(r), K.randn(r) * 0.8, K.randn(r) * 0.6];
+        X.push(W.map((w, j) => (w[0] * z[0] + w[1] * z[1] + w[2] * z[2] + K.randn(r) * 0.5) * (j === 0 ? big : 1 + j * 0.3)));
+      }
+      const mu = Array(D).fill(0); X.forEach((x) => x.forEach((val, j) => (mu[j] += val / N)));
+      const sd = Array(D).fill(0); X.forEach((x) => x.forEach((val, j) => (sd[j] += (val - mu[j]) ** 2 / (N - 1)))); for (let j = 0; j < D; j++) sd[j] = Math.sqrt(sd[j]);
+      const Z = X.map((x) => x.map((val, j) => (v.std === "std" ? (val - mu[j]) / sd[j] : val - mu[j])));
+      const C = Array.from({ length: D }, () => Array(D).fill(0));
+      Z.forEach((z) => { for (let a = 0; a < D; a++) for (let b = a; b < D; b++) C[a][b] += (z[a] * z[b]) / (N - 1); });
+      for (let a = 0; a < D; a++) for (let b = 0; b < a; b++) C[a][b] = C[b][a];
+      const ev = jacobiEig(C), tot = ev.reduce((s, x) => s + x, 0), ratio = ev.map((x) => x / tot);
+      const ax = K.axes(svg, { x: 60, y: 20, w: 550, h: 280 }, [0, D], [0, 1], { xticks: 0, ylabel: "解释方差比例", yfmt: (x) => Math.round(x * 100) + "%" });
+      let cum = 0, line = "", need99 = D;
+      ratio.forEach((p, i) => {
+        K.svg(svg, "rect", { x: ax.sx(i + 0.15), y: ax.sy(p), width: ax.sx(0.7) - ax.sx(0), height: ax.sy(0) - ax.sy(p), fill: i === 0 ? "var(--c6)" : "var(--c1)", rx: 2, opacity: 0.8 });
+        cum += p; line += (line ? "L" : "M") + ax.sx(i + 0.5) + "," + ax.sy(cum);
+        if (cum >= 0.99 && need99 === D && i < D) need99 = i + 1;
+        K.svg(svg, "text", { x: ax.sx(i + 0.5), y: 318, "text-anchor": "middle", "font-size": 11 }, "PC" + (i + 1));
+      });
+      K.svg(svg, "path", { d: line, fill: "none", stroke: "var(--warn)", "stroke-width": 2.5 });
+      K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(D), y1: ax.sy(0.99), y2: ax.sy(0.99), stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+      K.svg(svg, "text", { x: ax.sx(D) - 4, y: ax.sy(0.99) + 14, "text-anchor": "end", "font-size": 11, class: "muted" }, "99%");
+      K.svg(svg, "text", { x: 60, y: 346, "font-size": 12, class: "muted" }, "橙线 = 累计解释方差；红柱 = 第 1 主成分");
+      return { readout: [
+        { k: "第 1 主成分占比", v: (ratio[0] * 100).toFixed(1) + "%", color: ratio[0] > 0.9 ? "var(--bad)" : "var(--ink)" },
+        { k: "到 99% 需要几个主成分", v: String(need99) },
+        { k: "做法", v: v.std === "std" ? "先标准化" : "不标准化" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：漂移与六种距离 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "shift", label: "运行时流量整体偏移（单位：标准差）", min: -3, max: 3, step: 0.1, value: 0.8, fmt: (v) => v.toFixed(1) },
+      { id: "spread", label: "运行时流量的离散程度（训练时 = 1）", min: 0.4, max: 2.5, step: 0.05, value: 1, fmt: (v) => "×" + v.toFixed(2) },
+      { id: "n", label: "每类缓存多少条再检查", min: 20, max: 400, step: 10, value: 150 },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "一维示意：训练时“正常”的特征值 ~ N(0,1)，“扫描” ~ N(3,1)，分类阈值取两类均值的中点。运行时两类一起发生偏移。像 SafeML 一样，用训练集里真实为“正常”的样本，和运行时被模型判为“正常”的样本比较 ECDF（红竖线 = KS 位置）。准确率要用到运行时的真实标签，现实中拿不到，这里只是“上帝视角”用来对照。距离公式为教科书写法的简化版，和 SafeML 仓库的实现可能差一个常数。",
+    render(svg, v) {
+      const r = K.rng(900 + v.seed * 7);
+      const tr0 = normals(r, 400, 0, 1), tr1 = normals(r, 400, 3, 1);
+      const thr = (tr0.reduce((a, b) => a + b) / 400 + tr1.reduce((a, b) => a + b) / 400) / 2;
+      const rt0 = normals(r, v.n, v.shift, v.spread), rt1 = normals(r, v.n, 3 + v.shift, v.spread);
+      let correct = 0; const pred0 = [];
+      rt0.forEach((x) => { if (x < thr) { correct++; pred0.push(x); } });
+      rt1.forEach((x) => { if (x >= thr) correct++; else pred0.push(x); });
+      const acc = correct / (2 * v.n);
+      const d = pred0.length >= 2 ? ecdfDist(tr0, pred0) : { ks: 1, kuiper: 1, cvm: NaN, ad: NaN, ws: NaN, dts: NaN };
+      const lo = -5, hi = 6;
+      const ax = K.axes(svg, { x: 55, y: 20, w: 560, h: 290 }, [lo, hi], [0, 1], { xlabel: "某个主成分的取值", ylabel: "累计比例" });
+      K.svg(svg, "line", { x1: ax.sx(thr), x2: ax.sx(thr), y1: ax.sy(0), y2: ax.sy(1), stroke: "var(--ink-3)", "stroke-dasharray": "3 4" });
+      K.svg(svg, "text", { x: ax.sx(thr) + 4, y: ax.sy(0.04), "font-size": 11, class: "muted" }, "分类阈值");
+      K.svg(svg, "path", { d: ecdfPath(tr0, ax, lo, hi), fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+      if (pred0.length) K.svg(svg, "path", { d: ecdfPath(pred0, ax, lo, hi), fill: "none", stroke: "var(--c3)", "stroke-width": 2 });
+      // KS 位置
+      const P = tr0.concat(pred0).sort((x, y) => x - y), A = tr0.slice().sort((x, y) => x - y), B = pred0.slice().sort((x, y) => x - y);
+      let i = 0, j = 0, best = -1, bx = 0, fa = 0, fb = 0;
+      P.forEach((x) => { while (i < A.length && A[i] <= x) i++; while (j < B.length && B[j] <= x) j++; const g = Math.abs(i / A.length - j / Math.max(1, B.length)); if (g > best) { best = g; bx = x; fa = i / A.length; fb = j / Math.max(1, B.length); } });
+      K.svg(svg, "line", { x1: ax.sx(K.clamp(bx, lo, hi)), x2: ax.sx(K.clamp(bx, lo, hi)), y1: ax.sy(fa), y2: ax.sy(fb), stroke: "var(--bad)", "stroke-width": 4 });
+      K.svg(svg, "text", { x: 65, y: 40, "font-size": 12, fill: "var(--c1)" }, "训练时的“正常”");
+      K.svg(svg, "text", { x: 65, y: 58, "font-size": 12, fill: "var(--c3)" }, `运行时被判为“正常”的 ${pred0.length} 条`);
+      const f = (x, k) => (isFinite(x) ? x.toFixed(k) : "—");
+      return { readout: [
+        { k: "准确率（上帝视角）", v: (acc * 100).toFixed(1) + "%", color: acc < 0.85 ? "var(--bad)" : "var(--good)" },
+        { k: "KS", v: f(d.ks, 3), color: d.ks > 0.2 ? "var(--bad)" : "var(--ink)" },
+        { k: "Kuiper", v: f(d.kuiper, 3) },
+        { k: "Cramér-von Mises", v: f(d.cvm, 3) },
+        { k: "Anderson-Darling", v: f(d.ad, 2) },
+        { k: "Wasserstein", v: f(d.ws, 3) },
+        { k: "DTS（简化）", v: f(d.dts, 3) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：重复多次，距离 vs 准确率 ---------- */
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "mode", label: "每次重复之间变的是什么", value: "drift", options: [["drift", "每次来一批漂移程度不同的新流量"], ["same", "像第 112 格：同一切分，只有模型随机性"]] },
+      { id: "maxd", label: "漂移幅度上限（向“扫描”一侧偏移，单位：标准差）", min: 0, max: 3, step: 0.1, value: 2, fmt: (v) => v.toFixed(1) },
+      { id: "runs", label: "重复次数", min: 20, max: 200, step: 10, value: 100 },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "每次重复：按设定生成一批运行时数据（每类 120 条），用阈值分类器判别（“模型随机性”= 阈值随机抖动），记录准确率和“正常”类的 KS 距离，画一个点。右上角是皮尔逊相关系数 r，越接近 −1 说明“距离越大、准确率越低”越明显。在“同一切分”模式下，漂移滑块不起作用。",
+    render(svg, v) {
+      const r = K.rng(4000 + v.seed * 11);
+      const tr0 = normals(r, 300, 0, 1);
+      const pts = [];
+      const base0 = normals(r, 120, 0, 1), base1 = normals(r, 120, 3, 1);
+      for (let k = 0; k < v.runs; k++) {
+        let s0, s1;
+        if (v.mode === "drift") { const sh = r() * v.maxd, sp = 1 + r() * v.maxd * 0.2; s0 = normals(r, 120, sh, sp); s1 = normals(r, 120, 3 + sh, sp); }
+        else { s0 = base0; s1 = base1; }
+        const thr = 1.5 + K.randn(r) * 0.25;
+        let c = 0; const p0 = [];
+        s0.forEach((x) => { if (x < thr) { c++; p0.push(x); } });
+        s1.forEach((x) => { if (x >= thr) c++; else p0.push(x); });
+        if (p0.length < 2) continue;
+        pts.push([c / 240, ecdfDist(tr0, p0).ks]);
+      }
+      const accs = pts.map((p) => p[0]), kss = pts.map((p) => p[1]);
+      const xmin = Math.min(0.5, ...accs), ymax = Math.max(0.3, ...kss);
+      const ax = K.axes(svg, { x: 60, y: 20, w: 560, h: 300 }, [xmin, 1], [0, ymax], { xlabel: "准确率", ylabel: "KS 距离（正常类）", xfmt: (x) => Math.round(x * 100) + "%", yfmt: (y) => y.toFixed(2) });
+      pts.forEach((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 4, fill: "var(--c2)", opacity: 0.7 }));
+      const n = pts.length, mx = accs.reduce((a, b) => a + b, 0) / n, my = kss.reduce((a, b) => a + b, 0) / n;
+      let sxy = 0, sxx = 0, syy = 0; pts.forEach(([x, y]) => { sxy += (x - mx) * (y - my); sxx += (x - mx) ** 2; syy += (y - my) ** 2; });
+      const rr = sxx > 0 && syy > 0 ? sxy / Math.sqrt(sxx * syy) : NaN;
+      if (sxx > 0) { const b = sxy / sxx, a0 = my - b * mx; K.svg(svg, "line", { x1: ax.sx(xmin), y1: ax.sy(K.clamp(a0 + b * xmin, 0, ymax)), x2: ax.sx(1), y2: ax.sy(K.clamp(a0 + b, 0, ymax)), stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "6 4" }); }
+      return { readout: [
+        { k: "相关系数 r", v: isFinite(rr) ? rr.toFixed(2) : "—", color: rr < -0.6 ? "var(--good)" : "var(--warn)" },
+        { k: "准确率范围", v: `${(Math.min(...accs) * 100).toFixed(1)}%–${(Math.max(...accs) * 100).toFixed(1)}%` },
+        { k: "KS 范围", v: `${Math.min(...kss).toFixed(3)}–${Math.max(...kss).toFixed(3)}` },
+        { k: "有效点数", v: String(n) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

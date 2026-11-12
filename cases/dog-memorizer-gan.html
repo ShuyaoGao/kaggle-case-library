@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>记忆型 GAN</title>
+<meta name="description" content="Kaggle 案例拆解：Chris Deotte 的“背诵狗狗”GAN。先让判别器背下一万张狗，再教给记性不好的生成器，用 70%+30% 的混合造新狗；讨论“生成”和“抄袭”的边界。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">图像 · 生成模型 · 记忆与泛化</div>
+  <h1>先背一万张狗，再“混”出新狗：记忆型 GAN 与抄袭的边界</h1>
+  <p class="en">Dog Memorizer GAN</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">记忆型判别器</span><span class="tag method">独热编码当“索引”</span><span class="tag method">瓶颈生成器</span>
+    <span class="tag method">标注框裁剪</span><span class="tag method">图像混合</span><span class="tag method">MiFID 记忆惩罚</span><span class="tag method">Keras</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Chris Deotte</b></span>
+    <span>Kaggle 点赞 <b>750</b>（2026-11 抓取）</span>
+    <span>比赛 <b>Generative Dog Images</b></span>
+    <span><a href="https://www.kaggle.com/code/cdeotte/dog-memorizer-gan" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">比赛给的狗狗照片 + 标注框</div><p>和“GAN 画狗狗”案例同一场比赛。这次作者用标注框把狗单独裁出来，取其中 1 万张。<span data-cell="1">出处</span> <span data-cell="6">出处</span></p></div>
+    <div class="card panel"><h3>要做什么</h3><div class="big">交 1 万张“新狗”，但不能抄</div><p>比赛规定不能交“改动过的训练图”。作者想试一种新思路：先背下来，再靠“记性差”逼出概括能力。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">判别器先背书，再教生成器</div><p>判别器其实是一张“编号 → 图片”的记忆表；生成器被故意加了瓶颈（记性差）去学这张表，最后输出“70% 一只 + 30% 另一只”的混合。<span data-cell="4">出处</span> <span data-cell="11">出处</span> <span data-cell="16">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">排行榜约 100 分（越低越好）</div><p>作者写：目前约 LB 100；如果给它完美记忆、交 99.9% 的原图混合，可以到 LB 7，但那就是在交“改过的训练图”，违反规则。<span data-cell="19">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛 <b>Generative Dog Images</b> 提供两样东西：<code>all-dogs</code> 文件夹里的狗狗照片，和 <code>Annotation</code> 文件夹里按犬种存放的标注文件（每只狗的位置框）<span data-cell="1">第 1 格</span>。数据来自 Stanford Dogs。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">照片总数（代码里写死）</div><div class="v">20,579 张</div></div>
+        <div class="stat-tile"><div class="k">裁剪后尺寸</div><div class="v">64×64×3</div></div>
+        <div class="stat-tile"><div class="k">让判别器背下</div><div class="v" style="color:var(--c1)">10,000 张</div></div>
+        <div class="stat-tile"><div class="k">每张图展开成</div><div class="v" style="color:var(--c3)">12,288 个数</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">20,579 来自第 1 格随机裁剪分支里的 <code>np.arange(20579)</code> <span data-cell="1">第 1 格</span>；1 万张和 12,288（= 64×64×3）见 <span data-cell="6">第 6 格</span>。一张照片里有几只狗就会裁出几张，所以裁剪后的数量可能多于照片数（数组预留了 25,000 个位置）。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">标注文件里用到的字段</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>字段</th><th>含义</th></tr>
+        <tr><td><code>object</code></td><td>图里的一只狗（可能有多只）</td></tr>
+        <tr><td><code>xmin</code> <code>ymin</code> <code>xmax</code> <code>ymax</code></td><td>这只狗所在矩形框的左上角、右下角坐标</td></tr>
+        <tr><td>文件夹名</td><td>犬种，作者存进 <code>namesIn</code>（后面没有用到）</td></tr>
+      </table></div>
+      <p class="note">这个任务没有“答案列”。特别的是：判别器的“输入”是图片编号（第几张），“答案”是这张图本身，所以它学的是<b>按编号背图</b>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="6">
+    <h3>动手试试 A · 用独热编码“背图”：一张记忆表 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="16">
+    <h3>动手试试 B · 记性好坏与“抄袭距离” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>免责声明：这可能不是一个合规的比赛方案</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>判别器背下了所有训练图，之后删掉训练图，生成器从没见过真图</td><td><span data-cell="7">第 7 格</span></td></tr>
+        <tr><td>当前得分约 <b>LB 100</b>（MiFID，越低越好）</td><td><span data-cell="19">第 19 格</span></td></tr>
+        <tr><td>如果给完美记忆并交 99.9% + 0.1% 的混合，可以到 <b>LB 7</b>，但那等于交“改过的训练图”，违反比赛规则</td><td><span data-cell="19">第 19 格</span></td></tr>
+      </table></div>
+      <p class="callout">这是一个“边做边反思”的实验 notebook：作者自己点明了它游走在规则边缘。它最大的教学价值是说明 <b>“生成”和“记忆 / 抄袭”的区别</b>，以及评分指标为什么要专门惩罚“离训练图太近”。</p>
+      <p class="callout">读代码发现的问题：<br>① 训练判别器的循环跑了 5 × 10 = 50 轮，打印却写着“/30” <span data-cell="6">第 6 格</span>。<br>② <code>DogGenerator.getDog(seed)</code> 接收一个 100 维随机向量，但函数里根本没用它，输出只取决于内部计数器和一个随机编号 <span data-cell="16">第 16 格</span>。<br>③ 名为“判别器”的网络其实从不判断真假：它是一张按编号查图的表，“GAN”训练实际上是让生成器用均方误差去贴合这张表的图（本质是有监督回归）<span data-cell="12">第 12 格</span>。<br>④ 裁剪时以框的左上角为起点、取较短边为边长，框不是正方形时会偏向一侧，不是居中裁 <span data-cell="1">第 1 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能学到什么：</b>“用编号查图”（独热编码 + 全连接层 = 查找表）；瓶颈能逼出概括；混合两张图的输入，在不同网络里会得到“像素叠加”或“概念混合”。</li>
+        <li><b>延伸到现实：</b>大模型和 AI 绘画也有“背下训练数据”的风险：能被诱导吐出训练集里的原文、原图。版权和隐私讨论里，这叫<b>记忆化</b>。</li>
+        <li><b>评估启示：</b>只看“像不像真的”的指标（如 FID）会奖励抄袭；所以 MiFID 加了“离训练图最近距离”的惩罚。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>数据：读 XML 标注框，裁出狗、缩到 64×64 <span data-cell="1">第 1 格</span></li>
+        <li>记忆表：独热编号 10000 → Dense 12288（sigmoid），卷积权重固定为 [−1, 1] <span data-cell="4">第 4 格</span></li>
+        <li>背书：交叉熵，学习率 0.5 → 0.1，50 轮 <span data-cell="6">第 6 格</span></li>
+        <li>坏记性生成器：Dense 2048 → 8×8×32 → 3 次（卷积 + 上采样）→ 64×64×3 <span data-cell="11">第 11 格</span></li>
+        <li>教学：卷积权重改为 [−1, 255]，均方误差，轮数逐次翻倍 <span data-cell="12">第 12 格</span> <span data-cell="14">第 14 格</span></li>
+        <li>出图：70% + 30% 混合，打包 1 万张 <span data-cell="16">第 16 格</span> <span data-cell="20">第 20 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>交“99.9% 一张原图 + 0.1% 另一张”能拿高分，却违反规则。“混合 70% + 30%”就不算抄袭吗？界线应该划在哪里？</li>
+      <li>作者故意让生成器“记性差”，希望它学会概括。在实验 B 里，瓶颈越小，生成图离训练图越远，但也越模糊。这是一种怎样的取舍？</li>
+      <li>这个网络叫“判别器”，却从不判断真假。你觉得它还能算 GAN 吗？</li>
+      <li>评分指标 FID 只看“整体像不像真狗”，会被“背答案”骗到。你还能想到哪些“指标被钻空子”的例子（考试、体育、网站点击量……）？</li>
+      <li>如果一个 AI 绘画模型能原样吐出训练集里某位摄影师的照片，这会带来什么问题？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Chris Deotte（Kaggle Grandmaster），评分代码来自比赛官方的 MiFID 示例。版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的“狗”都是程序生成的示意图案，不是比赛图片。比赛：Generative Dog Images（数据来自 Stanford Dogs Dataset）。
+</footer>
+</main>
+
+<script src="nb/dog-memorizer-gan.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* 程序生成的 12 只“狗”（12×12 灰度示意） */
+  const S = 12;
+  function dog(k) {
+    const r = K.rng(100 + k * 17), a = new Float64Array(S * S);
+    const ear = 0.08 + r() * 0.1, fw = 0.26 + r() * 0.1, fh = 0.26 + r() * 0.12, eye = 0.08 + r() * 0.06, droop = r() < 0.5, fur = 0.45 + r() * 0.4, dx = (r() - 0.5) * 0.12;
+    for (let i = 0; i < S; i++) for (let j = 0; j < S; j++) {
+      const x = (j + 0.5) / S - 0.5 - dx, y = (i + 0.5) / S - 0.5;
+      let v = 0.05;
+      if (Math.hypot(x / fw, (y - 0.05) / fh) < 1) v = fur;
+      const ey = droop ? -0.05 : -0.28;
+      if (Math.hypot((x + fw * 0.9) / ear, (y - ey) / (ear * 1.6)) < 1 || Math.hypot((x - fw * 0.9) / ear, (y - ey) / (ear * 1.6)) < 1) v = fur * 0.7;
+      if (Math.hypot(x + eye, y + 0.02) < 0.045 || Math.hypot(x - eye, y + 0.02) < 0.045) v = 1;
+      if (Math.hypot(x, y - 0.16) < 0.05) v = 1;
+      a[i * S + j] = v;
+    }
+    return a;
+  }
+  const DOGS = []; for (let k = 0; k < 12; k++) DOGS.push(dog(k));
+  function pix(svg, x, y, size, arr, color) {
+    const n = Math.round(Math.sqrt(arr.length)), s = size / n, g = K.svg(svg, "g");
+    K.svg(g, "rect", { x, y, width: size, height: size, fill: "var(--panel-2)", stroke: "var(--line)" });
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) { const v = arr[i * n + j]; if (v > 0.03) K.svg(g, "rect", { x: x + j * s, y: y + i * s, width: s + 0.3, height: s + 0.3, fill: color || "var(--c2)", "fill-opacity": K.clamp(v, 0, 1) }); }
+    return g;
+  }
+  const dist = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += (a[i] - b[i]) ** 2; return Math.sqrt(s / a.length); };
+
+  const steps = [
+    {
+      at: 0, title: "一个大胆的设想：先背书，再教人", kicker: "第 0 格 · 作者的介绍与免责声明",
+      html: `<p>作者开头就写了<b>免责声明</b>：“这可能不是一个合规的比赛方案” <span data-cell="0">第 0 格</span>。</p><p>普通 GAN 里，判别器和生成器同时从零学起。作者反过来：</p><ol class="tight"><li>先让判别器把所有训练图<b>背下来</b>；</li><li>再让判别器把这些图“教”给生成器；</li><li>故意给生成器一个“坏记性”（瓶颈），希望它背不全、只能学个大概，从而学会概括；</li><li>交卷时让生成器输出两只狗的混合。</li></ol><p>他还特意说明：生成器始终没见过真图，只被判别器“辅导”。</p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        const D = K.node(svg, 60, 120, 160, 80, "判别器\n📖 先背下所有狗", { bold: true, fill: "color-mix(in srgb, var(--c1) 16%, var(--panel))", stroke: "var(--c1)" });
+        const G = K.node(svg, 480, 120, 180, 80, "生成器\n🧠 记性故意差", { bold: true, fill: "color-mix(in srgb, var(--c2) 16%, var(--panel))", stroke: "var(--c2)" });
+        const a = K.arrow(svg, 222, 160, 476, 160); a.style.opacity = 0;
+        K.svg(svg, "text", { x: 350, y: 145, "text-anchor": "middle", "font-size": 13 }, "一张张“教”");
+        const books = DOGS.slice(0, 6).map((d, k) => { const g = K.svg(svg, "g"); pix(g, 0, 0, 34, d); g.setAttribute("transform", `translate(${70 + (k % 3) * 46},${30 + Math.floor(k / 3) * 42})`); return g; });
+        const outs = [];
+        K.svg(svg, "text", { x: 360, y: 310, "text-anchor": "middle", "font-size": 12, class: "muted" }, "生成器学到的是“大概的样子”，不是一模一样的复印件（示意）");
+        (async () => {
+          if (!(await ctx.tween(500, (t) => (a.style.opacity = t)))) return;
+          for (let k = 0; k < 6; k++) {
+            const g = K.svg(svg, "g"); pix(g, 0, 0, 34, DOGS[k].map((v, i) => v * 0.6 + 0.2 * DOGS[(k + 1) % 6][i]));
+            if (!(await ctx.tween(450, (t) => g.setAttribute("transform", `translate(${K.lerp(160, 480 + (k % 3) * 46, t)},${K.lerp(130, 220 + Math.floor(k / 3) * 42, t)})`)))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "用标注框把狗单独裁出来", kicker: "第 1–2 格 · 读图与裁剪",
+      html: `<p><code>DogsOnly = True</code> 时，作者逐个读取每个犬种的标注文件，找到每只狗的框 <code>xmin, ymin, xmax, ymax</code>，以框的左上角为起点、取较短边为边长裁一个正方形，缩到 64×64 <span data-cell="1">第 1 格</span>。一张图有几只狗就裁几张。</p><p>另一个分支（不用标注框）是把整张照片居中裁成正方形，那里写死了照片总数 20,579。最后随机打乱，抽 25 张看看。</p><p>这一步正好绕开了“GAN 画狗狗”案例里提到的坑：人、文字、狗太小……</p>`,
+      cells: [1], highlight: ["DogsOnly = True", "img.crop((xmin, ymin, xmin+w, ymin+w))"],
+      draw(svg, ctx) {
+        K.svg(svg, "rect", { x: 40, y: 40, width: 320, height: 240, rx: 6, fill: "var(--panel-2)", stroke: "var(--line)" });
+        pix(svg, 170, 110, 120, DOGS[2]);
+        K.svg(svg, "text", { x: 80, y: 80, "font-size": 28 }, "🧍");
+        K.svg(svg, "text", { x: 60, y: 270, "font-size": 12, class: "muted" }, "原照片（示意：狗 + 背景里的人）");
+        const box = K.svg(svg, "rect", { x: 170, y: 110, width: 0, height: 0, fill: "none", stroke: "var(--warn)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 168, y: 104, "font-size": 11, fill: "var(--warn)" }, "(xmin, ymin)");
+        const out = K.svg(svg, "g"); pix(out, 450, 90, 160, DOGS[2]); out.style.opacity = 0;
+        K.svg(svg, "text", { x: 530, y: 275, "text-anchor": "middle", "font-size": 12 }, "裁剪 + 缩放到 64×64");
+        ctx.tween(1000, (t) => K.set(box, { width: 135 * t, height: 120 * t })).then((ok) => ok && ctx.tween(700, (t) => (out.style.opacity = t)));
+      },
+    },
+    {
+      title: "“判别器”其实是一张记忆表", kicker: "第 3–5 格 · 搭判别器",
+      html: `<p>这个判别器很特别 <span data-cell="4">第 4 格</span>：</p><ul class="tight"><li>输入一：一张狗图，展开成 12,288 个数；</li><li>输入二：狗的“名字”，其实是<b>编号的独热编码</b>：长度 10,000，只有第 i 位是 1；</li><li>独热编码经过一个 <code>Dense(12288, sigmoid)</code>，等于从权重矩阵里<b>取出第 i 列</b>：这一列就是它记住的第 i 张图；</li><li>再用一个固定权重 [−1, 1] 的卷积，算出“记住的图 − 输入的图”。</li></ul><p>换句话说，它不判断真假，只是一张“编号 → 图片”的查找表。</p>`,
+      cells: [3, 4], highlight: ["Dense(12288, activation='sigmoid')(dogName)", "set_weights([np.array([[[[-1.0 ]]],[[[1.0]]]])])"],
+      draw(svg, ctx) {
+        const oh = []; for (let k = 0; k < 12; k++) oh.push(K.svg(svg, "rect", { x: 40, y: 30 + k * 22, width: 30, height: 18, fill: "var(--panel-2)", stroke: "var(--line)" }));
+        const ohT = []; for (let k = 0; k < 12; k++) ohT.push(K.svg(svg, "text", { x: 55, y: 44 + k * 22, "text-anchor": "middle", "font-size": 11, "font-family": "var(--mono)" }, "0"));
+        K.svg(svg, "text", { x: 55, y: 310, "text-anchor": "middle", "font-size": 11 }, "独热编号");
+        const cols = DOGS.map((d, k) => { const g = K.svg(svg, "g"); pix(g, 140 + (k % 6) * 46, 60 + Math.floor(k / 6) * 120, 40, d); g.style.opacity = 0.35; return g; });
+        K.svg(svg, "text", { x: 270, y: 300, "text-anchor": "middle", "font-size": 12 }, "Dense 层的权重：每一列存着一张图");
+        const out = K.svg(svg, "g");
+        K.svg(svg, "text", { x: 600, y: 230, "text-anchor": "middle", "font-size": 12 }, "取出来的图");
+        (async () => {
+          for (let s = 0; s < 6; s++) {
+            const i = (s * 5 + 3) % 12;
+            oh.forEach((o, k) => K.set(o, { fill: k === i ? "var(--accent)" : "var(--panel-2)" })); ohT.forEach((o, k) => (o.textContent = k === i ? "1" : "0"));
+            cols.forEach((c, k) => (c.style.opacity = k === i ? 1 : 0.25));
+            while (out.firstChild) out.firstChild.remove(); pix(out, 540, 90, 120, DOGS[i]);
+            if (!(await ctx.wait(800))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "让判别器背下 1 万张狗", kicker: "第 6–7 格 · 背书",
+      html: `<p>训练数据很巧妙 <span data-cell="6">第 6 格</span>：</p><ul class="tight"><li>输入图片全设成 0，编号是第 i 张的独热编码；</li><li>因为卷积权重是 [−1, 1]，输出 = 记住的图 − 0 = 记住的图；</li><li>目标就是第 i 张真图（像素缩到 0–1）。</li></ul><p>于是网络被逼着把每张图逐像素写进权重里。学习率从 0.5 开始，损失低于 0.533 后降到 0.1，一共 5 × 10 = 50 轮（打印里写成了“/30”）。作者说明：一般 GAN 不会提前训练判别器，“但这个 GAN 很特别” <span data-cell="5">第 5 格</span>。</p>`,
+      cells: [6], highlight: ["train_X[i,i] = 1", "zeros = np.zeros((10000,12288))", "'/30 - loss ='"],
+      draw(svg, ctx) {
+        const r = K.rng(4), g = K.svg(svg, "g"), i = 5;
+        pix(svg, 460, 70, 160, DOGS[i]);
+        K.svg(svg, "text", { x: 540, y: 255, "text-anchor": "middle", "font-size": 12 }, "目标：第 5 张真图");
+        K.svg(svg, "text", { x: 170, y: 255, "text-anchor": "middle", "font-size": 12 }, "记忆表里第 5 列（随训练变化）");
+        const ep = K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 14, "font-family": "var(--mono)" }, "");
+        const noise = DOGS[i].map(() => r());
+        ctx.tween(2600, (t) => {
+          while (g.firstChild) g.firstChild.remove();
+          pix(g, 90, 70, 160, DOGS[i].map((v, k) => K.lerp(noise[k], v, Math.min(1, t * 1.2))));
+          ep.textContent = `epoch ${Math.round(t * 50)} / 50   （代码打印成 “/30”）`;
+        });
+      },
+    },
+    {
+      title: "删掉训练图，让判别器“回忆”", kicker: "第 8–10 格 · 检查记忆",
+      html: `<p>背完以后，作者把训练图、训练标签<b>全部删掉</b> <span data-cell="8">第 8 格</span>：“生成器永远看不到训练图，只能由判别器辅导” <span data-cell="7">第 7 格</span>。</p><p>然后随机挑 25 个编号，让判别器把记住的图“默写”出来 <span data-cell="9">第 9 格</span>。如果默写得和原图几乎一样，说明这张表已经背熟了。</p>`,
+      cells: [8, 9], highlight: ["del train_X, train_y, imagesIn", "Discriminator Recalls from Memory Dogs"],
+      draw(svg, ctx) {
+        const trash = K.svg(svg, "text", { x: 60, y: 120, "font-size": 40 }, "🗑️");
+        K.svg(svg, "text", { x: 40, y: 160, "font-size": 12 }, "训练图已删除");
+        const gs = DOGS.slice(0, 10).map((d, k) => { const g = K.svg(svg, "g"); pix(g, 180 + (k % 5) * 100, 40 + Math.floor(k / 5) * 110, 88, d); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 420, y: 290, "text-anchor": "middle", "font-size": 12 }, "判别器凭记忆默写（示意）");
+        (async () => { for (const g of gs) if (!(await ctx.tween(200, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "故意给生成器一个“坏记性”", kicker: "第 11 格 · 瓶颈生成器",
+      html: `<p>生成器的输入也是 1 万位的独热编号 <span data-cell="11">第 11 格</span>。<code>BadMemory = True</code> 时：</p><ul class="tight"><li>先压成 2048 个数（相比 1 万张 × 12,288 像素，这是巨大的压缩），改成 8×8×32；</li><li>再用三次“卷积 + 上采样”放大到 64×64×3。</li></ul><p>2048 个数根本存不下 1 万张图的所有细节，只能找到它们共同的规律，这就是作者说的“用坏记性逼出概括” <span data-cell="10">第 10 格</span>。<code>BadMemory = False</code> 时则是一个直接的大 Dense 层，可以一模一样地背下所有图。</p>`,
+      cells: [11], highlight: ["BadMemory = True", "Dense(2048, activation='elu')", "UpSampling2D"],
+      draw(svg, ctx) {
+        const L = [["独热编号\n10,000", 160], ["Dense\n2,048", 70], ["8×8×32", 50], ["16×16", 70], ["32×32", 100], ["64×64×3", 140]];
+        const els = L.map((l, i) => { const e = K.node(svg, 20 + i * 117, 170 - l[1] / 2, 90, l[1], l[0], { fill: i === 1 ? "color-mix(in srgb, var(--warn) 25%, var(--panel))" : "var(--panel-2)", stroke: i === 1 ? "var(--warn)" : "var(--ink-3)" }); e.style.opacity = 0; return e; });
+        K.svg(svg, "text", { x: 182, y: 290, "text-anchor": "middle", "font-size": 12, fill: "var(--warn)" }, "↑ 瓶颈：记性就差在这里");
+        (async () => { for (const e of els) if (!(await ctx.tween(280, (t) => (e.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "把两者接起来：改一下卷积权重", kicker: "第 12–13 格 · 组装 GAN",
+      html: `<p>把生成器的输出接到（冻结的）判别器上 <span data-cell="12">第 12 格</span>。关键一步：把判别器里那个卷积的权重从 [−1, 1] 改成 <b>[−1, 255]</b>。此时输出 = 255 × 记住的图 − 生成器的图，目标全是 0。</p><p>也就是说：生成器要画出“和判别器记住的第 i 张图（0–255 的像素）一模一样”的图。损失用均方误差。</p><p>严格说，这已经不是“对抗”了：判别器不判断真假，只是一个固定的“标准答案库”；生成器在做的是有监督的回归。</p>`,
+      cells: [12], highlight: ["set_weights([np.array([[[[-1 ]]],[[[255.]]]])])", "loss='mean_squared_error'"],
+      draw(svg, ctx) {
+        K.node(svg, 30, 140, 110, 50, "编号 i", { bold: true });
+        K.node(svg, 180, 120, 130, 90, "生成器\n（可训练）", { bold: true, fill: "color-mix(in srgb, var(--c2) 16%, var(--panel))", stroke: "var(--c2)" });
+        K.node(svg, 380, 120, 150, 90, "判别器\n🔒 冻结", { bold: true, fill: "color-mix(in srgb, var(--c1) 16%, var(--panel))", stroke: "var(--c1)" });
+        K.arrow(svg, 142, 165, 178, 165); K.arrow(svg, 312, 165, 378, 165);
+        const eq = K.svg(svg, "text", { x: 360, y: 260, "text-anchor": "middle", "font-size": 15, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 600, y: 160, "font-size": 13 }, "目标：0");
+        K.arrow(svg, 532, 165, 592, 165);
+        (async () => {
+          eq.textContent = "卷积 [−1, 1]：输出 = 记住的图 − 输入";
+          if (!(await ctx.wait(1500))) return;
+          await ctx.tween(600, (t) => (eq.style.opacity = 1 - t));
+          eq.textContent = "改成 [−1, 255]：255 × 记住的图 − 生成图 → 0";
+          K.set(eq, { fill: "var(--warn)" });
+          await ctx.tween(600, (t) => (eq.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "判别器教生成器：轮数越来越多", kicker: "第 14–15 格 · 训练",
+      html: `<p>训练 9 次 <span data-cell="14">第 14 格</span>：每次拿 1 万个独热编号当输入、全 0 当目标，让生成器去贴合判别器记住的图；每次结束随机画 5 张看看进度。</p><p><code>BadMemory</code> 时，每一次的训练轮数翻倍（1, 2, 4, …，最多 256），轮数到 32 以后学习率从 0.005 降到 0.001。这是一种手工的“越练越久、步子越来越小”的安排。</p>`,
+      cells: [14], highlight: ["ep *= 2", "lr = 0.001"],
+      draw(svg, ctx) {
+        const eps = []; let ep = 1; for (let k = 0; k < 9; k++) { eps.push(ep); ep = Math.min(256, ep * 2); }
+        const ax = K.axes(svg, { x: 60, y: 30, w: 380, h: 240 }, [0, 9], [0, 9], { xticks: 0, yticks: 0, xlabel: "第几次 fit", ylabel: "本次轮数（对数）" });
+        const bars = eps.map((e, k) => K.svg(svg, "rect", { x: ax.sx(k) + 4, y: ax.sy(0), width: 34, height: 0, fill: e >= 32 ? "var(--c6)" : "var(--c1)" }));
+        eps.forEach((e, k) => K.svg(svg, "text", { x: ax.sx(k) + 21, y: 290, "text-anchor": "middle", "font-size": 11 }, String(e)));
+        K.svg(svg, "text", { x: 470, y: 80, "font-size": 12, fill: "var(--c1)" }, "■ 学习率 0.005");
+        K.svg(svg, "text", { x: 470, y: 104, "font-size": 12, fill: "var(--c6)" }, "■ 轮数 ≥ 32 后学习率 0.001");
+        const g = K.svg(svg, "g");
+        ctx.tween(2400, (t) => {
+          bars.forEach((b, k) => { const h = Math.log2(eps[k] + 1) * Math.min(1, t * 9 - k); K.set(b, { y: ax.sy(Math.max(0, h)), height: ax.sy(0) - ax.sy(Math.max(0, h)) }); });
+          while (g.firstChild) g.firstChild.remove(); pix(g, 520, 140, 120, DOGS[7].map((v, i) => K.lerp(0.4, v, t * 0.85)));
+        });
+      },
+    },
+    {
+      title: "70% 一只 + 30% 另一只 = “新狗”", kicker: "第 16–19 格 · 生成",
+      html: `<p>交卷用的生成方式 <span data-cell="16">第 16 格</span>：不是给独热编码，而是把第 i 位设成 <b>0.70</b>、随机另一位设成 <b>0.30</b>，让生成器画出“两只狗的混合”。作者的期待：图存在卷积网络里，混出来的会是“概念上的混合”，而不是两张图的像素简单叠加 <span data-cell="15">第 15 格</span>。</p><p>小问题：<code>getDog(seed)</code> 接收了一个 100 维随机向量，但完全没用它。第 18 格画出 15 张示例。下面实验 B 可以对比“好记性 / 坏记性”在混合时的差别，以及离原图有多近。</p>`,
+      cells: [16, 18], highlight: ["xx[self.index] = 0.70", "xx[np.random.randint(10000)] = 0.30", "def getDog(self,seed)"],
+      draw(svg, ctx) {
+        const A = DOGS[1], B = DOGS[8];
+        pix(svg, 40, 80, 130, A); K.svg(svg, "text", { x: 105, y: 230, "text-anchor": "middle", "font-size": 13 }, "第 i 只 × 0.70");
+        K.svg(svg, "text", { x: 200, y: 150, "font-size": 26 }, "+");
+        pix(svg, 240, 80, 130, B); K.svg(svg, "text", { x: 305, y: 230, "text-anchor": "middle", "font-size": 13 }, "随机一只 × 0.30");
+        K.svg(svg, "text", { x: 405, y: 150, "font-size": 26 }, "→");
+        const g = K.svg(svg, "g");
+        const lab = K.svg(svg, "text", { x: 550, y: 230, "text-anchor": "middle", "font-size": 13 }, "");
+        ctx.tween(1600, (t) => { while (g.firstChild) g.firstChild.remove(); const w = 0.7 + 0.3 * (1 - t); pix(g, 485, 80, 130, A.map((v, k) => w * v + (1 - w) * B[k])); lab.textContent = `像素混合（示意）`; });
+      },
+    },
+    {
+      title: "打包 1 万张，得分与规则", kicker: "第 20–21 格 · 提交",
+      html: `<p>作者的总结 <span data-cell="19">第 19 格</span>：这是一个实验性的 GAN，目前得分<b>约 LB 100</b>（MiFID，越低越好）。他特别提醒：如果给它<b>完美记忆</b>，再交“99.9% 一张 + 0.1% 另一张”，可以拿到 <b>LB 7</b>，但那就是返回“改过的训练图”，违反比赛规则。</p><p>然后循环 1 万次调用 <code>getDog</code>，每张存成 png 写进 <code>images.zip</code> <span data-cell="20">第 20 格</span>。</p>`,
+      cells: [20], highlight: ["for k in range(10000)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 80, y: 40, w: 520, h: 220 }, [0, 120], [0, 2], { xticks: 6, yticks: 0, xlabel: "MiFID 排行榜分数（越低越好）" });
+        const pts = [[100, 1.3, "坏记性 + 70/30 混合：约 100", "var(--c1)", "合规"], [7, 0.6, "完美记忆 + 99.9% 原图：约 7", "var(--c6)", "违规"]];
+        const els = pts.map((p) => { const g = K.svg(svg, "g"); g.style.opacity = 0; K.svg(g, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 9, fill: p[3] }); K.svg(g, "text", { x: ax.sx(p[0]) + (p[0] > 50 ? -14 : 14), y: ax.sy(p[1]) - 14, "text-anchor": p[0] > 50 ? "end" : "start", "font-size": 13, fill: p[3] }, p[2]); K.svg(g, "text", { x: ax.sx(p[0]) + (p[0] > 50 ? -14 : 14), y: ax.sy(p[1]) + 26, "text-anchor": p[0] > 50 ? "end" : "start", "font-size": 12 }, p[4]); return g; });
+        K.svg(svg, "text", { x: 80, y: 320, "font-size": 12, class: "muted" }, "两个数字都来自作者第 19 格的文字");
+        (async () => { for (const e of els) if (!(await ctx.tween(500, (t) => (e.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "自己算一下 MiFID", kicker: "第 22–23 格 · 评分",
+      html: `<p>如果在第一格把 <code>ComputeLB</code> 设为 True 并加上评分数据集，就能在 notebook 里自己算分 <span data-cell="21">第 21 格</span>。评分代码 <span data-cell="22">第 22 格</span> 用 Inception 网络提取特征，算两部分：</p><ul class="tight"><li><b>FID</b>：生成图和真图的特征分布有多接近；</li><li><b>记忆距离</b>：每张生成图和最像它的训练图之间的余弦距离；小于阈值 0.1 就当成“抄的”。</li></ul><p>最终分数 = FID ÷ 记忆距离 <span data-cell="23">第 23 格</span>。所以“抄得越像”，分母越小，分数越差，这正是为抓“记忆型”方案设计的。</p>`,
+      cells: [22, 23], highlight: ["cosine_distance_eps", "fid_value_public /(distance_public + fid_epsilon)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 230 }, [0, 0.5], [0, 1], { xticks: 5, yticks: 0, xlabel: "生成图到最近训练图的距离", xfmt: (v) => v.toFixed(1) });
+        K.svg(svg, "rect", { x: ax.sx(0), y: 30, width: ax.sx(0.1) - ax.sx(0), height: 230, fill: "var(--bad)", opacity: 0.12 });
+        K.svg(svg, "text", { x: ax.sx(0.05), y: 50, "text-anchor": "middle", "font-size": 12, fill: "var(--bad)" }, "< 0.1：算抄袭");
+        const dot = K.svg(svg, "circle", { cx: ax.sx(0.45), cy: 150, r: 9, fill: "var(--c2)" });
+        const lab = K.svg(svg, "text", { x: 400, y: 110, "font-size": 13 }, "");
+        ctx.tween(2600, (t) => { const d = 0.45 - 0.43 * t; K.set(dot, { cx: ax.sx(d) }); lab.textContent = `距离 ${d.toFixed(2)} → ${d < 0.1 ? "惩罚！分数变差" : "正常"}`; K.set(lab, { fill: d < 0.1 ? "var(--bad)" : "var(--ink)" }); });
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 网络工具 ---------- */
+  const D = S * S, NI = DOGS.length;
+  function adamStep(P, G, st, lr, t) { for (const k in P) { const p = P[k], g = G[k], m = st.m[k], v = st.v[k]; for (let i = 0; i < p.length; i++) { m[i] = 0.9 * m[i] + 0.1 * g[i]; v[i] = 0.999 * v[i] + 0.001 * g[i] * g[i]; p[i] -= (lr * m[i] / (1 - Math.pow(0.9, t))) / (Math.sqrt(v[i] / (1 - Math.pow(0.999, t))) + 1e-8); } } }
+  function newState(P) { const m = {}, v = {}; for (const k in P) { m[k] = new Float64Array(P[k].length); v[k] = new Float64Array(P[k].length); } return { m, v }; }
+  /* 记忆表：独热(NI) → Dense(D, sigmoid)，即作者的判别器 */
+  function trainTable(epochs, lr) {
+    const r = K.rng(1), P = { W: new Float64Array(D * NI).map(() => K.randn(r) * 0.1), b: new Float64Array(D) }, st = newState(P);
+    let loss = 0;
+    for (let e = 1; e <= epochs; e++) {
+      const G = { W: new Float64Array(D * NI), b: new Float64Array(D) }; loss = 0;
+      for (let i = 0; i < NI; i++) for (let p = 0; p < D; p++) { const y = K.sigmoid(P.W[p * NI + i] + P.b[p]), t = DOGS[i][p]; loss -= t * Math.log(y + 1e-7) + (1 - t) * Math.log(1 - y + 1e-7); const g = (y - t) / NI; G.W[p * NI + i] += g; G.b[p] += g; }
+      adamStep(P, G, st, lr, e);
+    }
+    return { out: (x) => { const o = new Float64Array(D); for (let p = 0; p < D; p++) { let a = P.b[p]; for (let i = 0; i < NI; i++) a += P.W[p * NI + i] * x[i]; o[p] = K.sigmoid(a); } return o; }, loss: loss / (NI * D) };
+  }
+  /* 瓶颈生成器：独热(NI) → Dense(k, elu) → Dense(D, sigmoid) */
+  function trainBottleneck(k, epochs, seed) {
+    const r = K.rng(seed), P = { W1: new Float64Array(k * NI).map(() => K.randn(r) * 0.5), b1: new Float64Array(k), W2: new Float64Array(D * k).map(() => K.randn(r) * 0.3), b2: new Float64Array(D) }, st = newState(P);
+    const elu = (a) => (a > 0 ? a : Math.exp(a) - 1), delu = (a) => (a > 0 ? 1 : Math.exp(a));
+    const fwd = (x) => { const a1 = new Float64Array(k), h = new Float64Array(k); for (let q = 0; q < k; q++) { let a = P.b1[q]; for (let i = 0; i < NI; i++) a += P.W1[q * NI + i] * x[i]; a1[q] = a; h[q] = elu(a); } const o = new Float64Array(D); for (let p = 0; p < D; p++) { let a = P.b2[p]; for (let q = 0; q < k; q++) a += P.W2[p * k + q] * h[q]; o[p] = K.sigmoid(a); } return { a1, h, o }; };
+    for (let e = 1; e <= epochs; e++) {
+      const G = { W1: new Float64Array(k * NI), b1: new Float64Array(k), W2: new Float64Array(D * k), b2: new Float64Array(D) };
+      for (let i = 0; i < NI; i++) {
+        const x = new Float64Array(NI); x[i] = 1;
+        const f = fwd(x), dh = new Float64Array(k);
+        for (let p = 0; p < D; p++) { const g = (f.o[p] - DOGS[i][p]) / NI; G.b2[p] += g; for (let q = 0; q < k; q++) { G.W2[p * k + q] += g * f.h[q]; dh[q] += g * P.W2[p * k + q]; } }
+        for (let q = 0; q < k; q++) { const g = dh[q] * delu(f.a1[q]); G.b1[q] += g; for (let j = 0; j < NI; j++) G.W1[q * NI + j] += g * x[j]; }
+      }
+      adamStep(P, G, st, 0.03, e);
+    }
+    return { out: (x) => fwd(x).o };
+  }
+
+  /* ---------- 实验 A：记忆表 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 660, height: 300,
+    controls: [
+      { id: "ep", label: "背书轮数", value: "200", options: [["0", "0（还没背）"], ["20", "20"], ["80", "80"], ["200", "200"]] },
+      { id: "i", label: "查第几张（独热编码里哪一位是 1）", min: 0, max: 11, step: 1, value: 3 },
+    ],
+    note: "12 张程序画的 12×12“狗脸”（示意，不是比赛图片）。网络和作者的判别器一样：独热编号 → 一个全连接层（sigmoid），用交叉熵训练它在“输入全 0 + 编号 i”时输出第 i 张图。全部在浏览器里用 Adam 现场训练。注意它完全没有“概括”：每张图各占权重矩阵的一列，互不相干。",
+    render(svg, v) {
+      const m = trainTable(+v.ep, 0.1);
+      DOGS.forEach((d, k) => { pix(svg, 20 + (k % 6) * 52, 20 + Math.floor(k / 6) * 52, 46, d, k === v.i ? "var(--accent)" : "var(--c2)"); });
+      K.svg(svg, "text", { x: 20, y: 135, "font-size": 12, class: "muted" }, "训练用的 12 张图（高亮 = 当前查询的那张）");
+      const x = new Float64Array(NI); x[v.i] = 1;
+      const o = m.out(x);
+      pix(svg, 380, 20, 120, DOGS[v.i]); K.svg(svg, "text", { x: 440, y: 160, "text-anchor": "middle", "font-size": 12 }, "原图");
+      pix(svg, 520, 20, 120, o, "var(--c3)"); K.svg(svg, "text", { x: 580, y: 160, "text-anchor": "middle", "font-size": 12 }, "记忆表默写出来的");
+      const z = new Float64Array(NI); const o0 = m.out(z);
+      pix(svg, 20, 170, 100, o0, "var(--ink-3)"); K.svg(svg, "text", { x: 130, y: 220, "font-size": 12 }, "← 编号全 0 时的输出：只剩“偏置”，什么都没有");
+      return { readout: [
+        { k: "默写误差（均方根）", v: dist(o, DOGS[v.i]).toFixed(3), color: dist(o, DOGS[v.i]) < 0.1 ? "var(--good)" : "var(--bad)" },
+        { k: "参数个数", v: (D * NI + D).toLocaleString() + "（= 图数 × 像素数 + 像素数）", color: "var(--ink-3)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：记性好坏与抄袭距离 ---------- */
+  const cache = {};
+  K.lab(document.getElementById("lab2"), {
+    width: 660, height: 340,
+    controls: [
+      { id: "mem", label: "生成器的记性", value: "2", options: [["perfect", "完美记忆（BadMemory = False）"], ["8", "瓶颈 8 维"], ["3", "瓶颈 3 维"], ["2", "瓶颈 2 维（很差的记性）"]] },
+      { id: "mix", label: "主图占比（作者用 70%）", min: 50, max: 99.9, step: 0.1, value: 70, fmt: (v) => v.toFixed(1) + "%" },
+      { id: "seed", label: "换一批组合", button: true },
+    ],
+    note: "先在浏览器里训练生成器去“背”这 12 张图（完美记忆 = 一张查找表；瓶颈 = 先压到 k 个数再展开），再按作者的方法输入“主图 × 占比 + 另一张 × 剩余”。每张生成图下面写着它到最近训练图的距离（均方根）。距离很小 = 几乎就是某张原图的复印件，就是比赛规则禁止的情况。试试把占比拉到 99.9%。",
+    render(svg, v) {
+      const key = v.mem;
+      if (!cache[key]) cache[key] = key === "perfect" ? trainTable(300, 0.1) : trainBottleneck(+key, 400, 7);
+      const g = cache[key], r = K.rng(50 + v.seed * 13), w = v.mix / 100;
+      let sumD = 0, nClose = 0;
+      for (let s = 0; s < 6; s++) {
+        const a = Math.floor(r() * NI); let b = Math.floor(r() * NI); if (b === a) b = (b + 1) % NI;
+        const x = new Float64Array(NI); x[a] = w; x[b] = 1 - w;
+        const o = g.out(x);
+        let best = 1e9; DOGS.forEach((d) => (best = Math.min(best, dist(o, d))));
+        sumD += best; if (best < 0.06) nClose++;
+        const x0 = 20 + s * 108;
+        pix(svg, x0, 20, 96, DOGS[a]); pix(svg, x0, 130, 96, o, "var(--c3)");
+        K.svg(svg, "text", { x: x0 + 48, y: 245, "text-anchor": "middle", "font-size": 12, fill: best < 0.06 ? "var(--bad)" : "var(--ink)" }, "距离 " + best.toFixed(3));
+        K.svg(svg, "text", { x: x0 + 48, y: 262, "text-anchor": "middle", "font-size": 10, class: "muted" }, `#${a} ${Math.round(w * 100)}% + #${b}`);
+      }
+      K.svg(svg, "text", { x: 20, y: 300, "font-size": 12, class: "muted" }, "上排：主图（训练图）；下排：生成器按混合编号画出的图");
+      K.svg(svg, "text", { x: 20, y: 320, "font-size": 12, class: "muted" }, "红色距离 < 0.06：和某张训练图几乎一样（本实验自定的阈值，示意 MiFID 的“记忆惩罚”）");
+      return { readout: [
+        { k: "平均“离最近原图”的距离", v: (sumD / 6).toFixed(3) },
+        { k: "像复印件的张数", v: `${nClose} / 6`, color: nClose ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

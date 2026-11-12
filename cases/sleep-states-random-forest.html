@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>手环测睡眠</title>
+<meta name="description" content="Kaggle 案例拆解：用手腕加速度计的两路信号，做滑动窗口特征，随机森林判断每一刻是睡着还是醒着，再平滑、切段，找出入睡和醒来的时刻。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">可穿戴传感器 · 时间序列分类 · 事件检测</div>
+  <h1>手环怎么知道你几点睡着？随机森林读懂手腕的动静</h1>
+  <p class="en">Zzzs: Random Forest model starter（Child Mind Institute — Detect Sleep States）</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">加速度计</span><span class="tag method">滑动窗口特征</span><span class="tag method">差分</span>
+    <span class="tag method">随机森林</span><span class="tag method">概率平滑</span><span class="tag method">事件切分</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Carl McBride Ellis</b></span>
+    <span>Kaggle 点赞 <b>795</b>（2026-11 抓取）</span>
+    <span>比赛 <b>child-mind-institute-detect-sleep-states</b></span>
+    <span><a href="https://www.kaggle.com/code/carlmcbrideellis/zzzs-random-forest-model-starter" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">孩子手腕上的加速度计记录</div><p>每一刻两路信号：手臂的倾斜角 <code>anglez</code> 和动作强度 <code>enmo</code>，连续记录很多天。<span data-cell="4">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">什么时候入睡、什么时候醒来</div><p>先判断每一刻“醒着 / 睡着”，再把连续睡着的一段的开头记为 <code>onset</code>（入睡）、结尾记为 <code>wakeup</code>（醒来）。<span data-cell="11">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">窗口特征 + 随机森林 + 平滑</div><p>每个时刻前后取 20 步算均值、最大值、标准差和差分，共 15 个特征；50 棵树的随机森林打分；再用 460 步的窗口平滑，切出睡眠段。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一个简洁的入门基线</div><p>作者没有在文字里写分数，源码不带运行输出，这里不列分数。作者附上了同一思路的学术论文作参考。<span data-cell="14">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛 <b>Child Mind Institute — Detect Sleep States</b>。为了让入门者跑得动，作者自己做了一个精简版训练集 <b>Zzzs: Lightweight training dataset + target</b>，下面的规模来自这个数据集的说明页。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">原始比赛的记录序列</div><div class="v">277 条</div></div>
+        <div class="stat-tile"><div class="k">精简版选用</div><div class="v">35 条</div></div>
+        <div class="stat-tile"><div class="k">多类别版另加“没戴”序列</div><div class="v">8 条</div></div>
+        <div class="stat-tile"><div class="k">构造的特征数</div><div class="v">15</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">277、35、8 来自数据集说明；一条“序列”是一位参与者连续多天的记录。15 个特征见第 4 格 <span data-cell="4">出处</span>。每一行多长时间、总行数，作者 notebook 里没写，这里不写。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">用到的列</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>白话含义</th><th>类型</th></tr>
+        <tr><td><code>series_id</code></td><td>哪一位参与者的哪一段记录</td><td>编号</td></tr>
+        <tr><td><code>step</code></td><td>这段记录里的第几个时间点</td><td>整数</td></tr>
+        <tr><td><code>timestamp</code></td><td>具体日期和时间（作者只取了“几点”）</td><td>时间</td></tr>
+        <tr><td><code>anglez</code></td><td>手臂相对竖直方向的倾斜角，作者取了绝对值</td><td>数值（度）</td></tr>
+        <tr><td><code>enmo</code></td><td>动作强度：加速度大小扣掉重力后的部分，越大越在动（可穿戴研究的常用指标）</td><td>数值</td></tr>
+        <tr><td><code>awake</code></td><td><b>要预测的答案</b>：0 睡着、1 醒着；多类别版里 2 表示“手环没戴”</td><td>类别</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)"><code>awake=2</code> 的含义来自精简数据集说明；最终提交的是 <code>series_id, step, event, score</code> 四列（第 13 格）。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="4">
+    <h3>动手试试 A · 滑动窗口：从“抖动的原始信号”到“稳定的特征” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="7">
+    <h3>动手试试 B · 随机森林：叶子里至少几个样本？ <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="11">
+    <h3>动手试试 C · 平滑多长，才能切出干净的睡眠段？ <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">这个基线做了什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th style="white-space:nowrap">步骤</th><th>关键设置</th><th>出处</th></tr>
+        <tr><td style="white-space:nowrap">特征</td><td>小时 + anglez / enmo 的原值、20 步差分、20 步滚动均值 / 最大 / 标准差</td><td><span data-cell="4">第 4 格</span></td></tr>
+        <tr><td style="white-space:nowrap">模型</td><td>随机森林 50 棵树，每片叶子至少 300 个样本</td><td><span data-cell="7">第 7 格</span></td></tr>
+        <tr><td style="white-space:nowrap">平滑</td><td>460 步居中滑动平均，再四舍五入成 0 / 1</td><td><span data-cell="11">第 11 格</span></td></tr>
+        <tr><td style="white-space:nowrap">事件</td><td>每段连续“睡着”的开头 = onset，结尾 = wakeup；score = 平滑后的“醒着”概率</td><td><span data-cell="11">第 11 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">作者没有在文字里写比赛分数，Kaggle 下载的源码也不带运行输出，所以这里不列分数。</p>
+      <p class="callout">读代码时注意到的几点：① 第 4 格的差分按 <code>series_id</code> 分组算，但滚动均值 / 最大 / 标准差没有分组，两段不同记录接缝处的窗口会跨到别人的数据。② 训练用的是含“没戴手环”（类别 2）的多类别版本，但第 9 格只取前两列概率，“没戴”的概率被丢掉了。③ 没有留出验证集，训练完直接预测测试集，看不到模型好坏。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一段手环记录，标出每晚的入睡和醒来时间，算睡了多久、醒了几次。</li>
+        <li><b>同类问题：</b>运动手表识别跑步 / 走路 / 骑车、老人跌倒检测、工人疲劳监测、帕金森震颤识别。</li>
+        <li><b>可迁移的套路：</b>原始信号 → 滑动窗口统计特征 → 逐时刻分类 → 概率平滑 → 连续段切分成“事件”。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>读取精简训练集（多类别版）<span data-cell="2">第 2 格</span></li>
+        <li><code>make_features</code>：差分、滚动统计、小时 <span data-cell="4">第 4 格</span></li>
+        <li><code>RandomForestClassifier(n_estimators=50, min_samples_leaf=300)</code> <span data-cell="7">第 7 格</span></li>
+        <li><code>predict_proba</code> 取“睡着 / 醒着”的概率 <span data-cell="9">第 9 格</span></li>
+        <li>滚动平均平滑 + <code>groupby</code> 切连续段 <span data-cell="11">第 11 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>手腕不动，就一定是睡着了吗？哪些情况会让模型把“醒着”误判成“睡着”？</li>
+      <li>为什么要用前后一段时间的平均值、最大值，而不是只看这一刻的数值？</li>
+      <li>平滑窗口取 460 步。如果有人半夜醒了 10 分钟，平滑后还看得出来吗？窗口长短各有什么代价？</li>
+      <li>“几点钟”（hour）也被当成特征。这对上夜班的人公平吗？</li>
+      <li>手环没戴的时间，手腕也是一动不动的。模型该怎么区分“没戴”和“睡着”？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Carl McBride Ellis，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。比赛数据：Child Mind Institute — Detect Sleep States（Kaggle）；精简数据集：carlmcbrideellis/zzzs-lightweight-training-dataset-target。
+</footer>
+</main>
+
+<script src="nb/sleep-states-random-forest.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* 自查开关：网址带 ?fast 时动画直接跳到最后一帧（无界面截图用） */
+  if (/[?&]fast/.test(location.search)) { K.tween = (ms, fn, c) => { fn(1, 1); return Promise.resolve(!c || c.alive()); }; K.wait = (ms, c) => Promise.resolve(!c || c.alive()); }
+  const fade = (els, ctx, ms) => ctx.tween(ms || 500, (t) => els.forEach((e) => (e.style.opacity = t)));
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+
+  /* 模拟一晚：T 个时间步，sleepFrom..sleepTo 之间睡着，中间可能短暂醒来 */
+  function night(seed, T, opts) {
+    opts = opts || {};
+    const r = K.rng(seed), awake = [], ang = [], enm = [];
+    const s0 = Math.round(T * 0.28), s1 = Math.round(T * 0.82), w0 = Math.round(T * 0.55), w1 = w0 + Math.round(T * (opts.wakeLen || 0.03));
+    for (let t = 0; t < T; t++) {
+      let a = t < s0 || t >= s1 || (t >= w0 && t < w1) ? 1 : 0;
+      awake.push(a);
+      const turn = !a && r() < 0.02 ? 1 : 0; // 睡觉时偶尔翻身
+      enm.push(Math.max(0, a ? 0.04 + Math.abs(K.randn(r)) * 0.05 : 0.004 + Math.abs(K.randn(r)) * 0.004 + turn * 0.06));
+      ang.push(Math.abs(a ? 35 + K.randn(r) * 22 : 12 + K.randn(r) * 4 + turn * 30));
+    }
+    return { awake, ang, enm, s0, s1, w0, w1 };
+  }
+  const roll = (arr, w, f) => arr.map((_, i) => { const a = Math.max(0, i - Math.floor(w / 2)), b = Math.min(arr.length, i + Math.ceil(w / 2)); return f(arr.slice(a, b)); });
+  const mean = (a) => a.reduce((s, x) => s + x, 0) / a.length;
+  const std = (a) => { const m = mean(a); return Math.sqrt(a.reduce((s, x) => s + (x - m) * (x - m), 0) / a.length); };
+  const max = (a) => Math.max(...a);
+  function lineOf(svg, arr, ax, x0, col, sw, fn) { let d = ""; arr.forEach((v, i) => (d += (i ? "L" : "M") + ax.sx(x0 + i).toFixed(1) + "," + ax.sy(fn ? fn(v) : v).toFixed(1))); return K.svg(svg, "path", { d, fill: "none", stroke: col, "stroke-width": sw || 1.2 }); }
+
+  const steps = [
+    {
+      at: 0, title: "用手环判断睡着还是醒着", kicker: "第 0 格 · 任务与数据",
+      html: `<p>这个比赛由美国儿童心智研究所主办：参与的孩子手腕上戴着加速度计，连续记录好多天，比赛要找出每一晚<b>入睡</b>和<b>醒来</b>的时刻。睡眠和孩子的情绪、注意力关系很大，靠问卷回忆往往不准，手环能客观地记录。</p><p>原始数据很大，作者先做了一个精简训练集（35 条记录序列），这里用的是它的“多类别”版本：除了睡着 / 醒着，还加了 8 条“手环没戴”的序列。</p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        const T = 240, n = night(3, T);
+        const ax = K.axes(svg, { x: 40, y: 30, w: 640, h: 120 }, [0, T], [0, 0.25], { xticks: 0, yticks: 0 });
+        K.svg(svg, "text", { x: 40, y: 22, "font-size": 12, "font-weight": 700 }, "一晚的动作强度 enmo（模拟）");
+        const p = lineOf(svg, n.enm, ax, 0, "var(--c1)", 1.3);
+        const len = p.getTotalLength ? p.getTotalLength() : 2000; p.style.strokeDasharray = len; p.style.strokeDashoffset = len;
+        const band = K.svg(svg, "rect", { x: ax.sx(n.s0), y: 175, width: ax.sx(n.s1) - ax.sx(n.s0), height: 40, rx: 6, fill: "var(--c3)", "fill-opacity": 0.35 });
+        const lab = K.svg(svg, "text", { x: (ax.sx(n.s0) + ax.sx(n.s1)) / 2, y: 200, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "睡着");
+        const on = K.svg(svg, "g", {}), off = K.svg(svg, "g", {});
+        K.svg(on, "line", { x1: ax.sx(n.s0), x2: ax.sx(n.s0), y1: 30, y2: 240, stroke: "var(--accent)", "stroke-width": 2.5 }); K.svg(on, "text", { x: ax.sx(n.s0), y: 260, "text-anchor": "middle", "font-size": 13, fill: "var(--accent)", "font-weight": 700 }, "onset 入睡");
+        K.svg(off, "line", { x1: ax.sx(n.s1), x2: ax.sx(n.s1), y1: 30, y2: 240, stroke: "var(--warn)", "stroke-width": 2.5 }); K.svg(off, "text", { x: ax.sx(n.s1), y: 260, "text-anchor": "middle", "font-size": 13, fill: "var(--warn)", "font-weight": 700 }, "wakeup 醒来");
+        K.svg(svg, "text", { x: 40, y: 310, "font-size": 12, class: "muted" }, "模拟数据：醒着时手腕动得多、睡着时几乎不动，偶尔翻身");
+        hide([band, lab, on, off]);
+        ctx.tween(1800, (t) => (p.style.strokeDashoffset = len * (1 - t))).then((ok) => ok && fade([band, lab], ctx, 400)).then((ok) => ok && fade([on, off], ctx, 400));
+      },
+    },
+    {
+      at: 1, title: "读入精简版训练集", kicker: "第 1–2 格 · 读数据",
+      html: `<p>导入 numpy、pandas、<code>itertools.groupby</code>（后面用来切连续段）和 <code>gc</code>（手动回收内存）。</p><p>读入 parquet 格式的训练文件。代码里还留着一行被注释掉的“二分类版本”，作者选用的是多类别版：<code>awake</code> 有 0（睡着）、1（醒着）、2（没戴）三种值。parquet 是一种按列压缩存储的表格格式，读起来比 CSV 快得多。</p>`,
+      cells: [2], highlight: ["Zzzs_train_multi.parquet"],
+      draw(svg, ctx) {
+        const full = K.node(svg, 40, 110, 200, 110, "比赛原始训练集\n277 条序列", { fill: "var(--panel-2)" });
+        const small = K.node(svg, 320, 70, 160, 80, "精简版\n35 条序列");
+        const extra = K.node(svg, 320, 190, 160, 70, "+ 8 条“没戴”\nawake = 2", { fill: "color-mix(in srgb, var(--warn) 16%, var(--panel))", stroke: "var(--warn)" });
+        const out = K.node(svg, 540, 120, 150, 90, "Zzzs_train_multi\n.parquet", { fill: "color-mix(in srgb, var(--accent) 14%, var(--panel))", stroke: "var(--accent)", bold: true });
+        const a = [K.arrow(svg, 242, 150, 318, 110), K.arrow(svg, 482, 110, 538, 150), K.arrow(svg, 482, 225, 538, 185)];
+        hide([small, extra, out, ...a]);
+        K.svg(svg, "text", { x: 40, y: 310, "font-size": 12, class: "muted" }, "数字来自精简数据集的说明页");
+        (async () => { for (const g of [[a[0], small], [extra], [a[1], a[2], out]]) { if (!(await fade(g, ctx, 450))) return; } })();
+      },
+    },
+    {
+      at: 3, title: "特征工程：前后看一段时间", kicker: "第 3–4 格 · 滑动窗口特征",
+      html: `<p>只看某一刻手腕动没动，很容易被偶然的翻身或短暂静止骗到。作者给每一刻构造了 15 个特征：</p><ul class="tight"><li><b>hour</b>：几点钟（晚上更可能在睡觉）；</li><li><b>anglez、enmo</b>：倾斜角（取绝对值）和动作强度本身；</li><li><b>差分 diff</b>：和 20 步之前比变了多少（按序列分组算）；</li><li><b>滚动均值 / 最大值 / 标准差</b>：以这一刻为中心、前后共 20 步的窗口里的统计量；差分也再做一次滚动均值和最大值。</li></ul><p>为节省内存，新列都存成 16 位小数 <code>float16</code>。实验 A 可以调窗口长度，看特征怎么变平稳。</p>`,
+      cells: [4], highlight: ["periods = 20", "diff(periods=periods)", "rolling(periods,center=True)"],
+      draw(svg, ctx) {
+        const T = 120, n = night(7, T), w = 20;
+        const ax = K.axes(svg, { x: 50, y: 30, w: 620, h: 130 }, [0, T], [0, 0.2], { xticks: 0, yticks: 0 });
+        K.svg(svg, "text", { x: 50, y: 22, "font-size": 12, "font-weight": 700 }, "enmo 原始值（灰）和 20 步滚动均值（彩色）");
+        lineOf(svg, n.enm, ax, 0, "var(--ink-3)", 1);
+        const win = K.svg(svg, "rect", { x: ax.sx(0), y: 30, width: ax.sx(w) - ax.sx(0), height: 130, fill: "var(--accent)", "fill-opacity": 0.12, stroke: "var(--accent)" });
+        const rm = roll(n.enm, w, mean);
+        const pathEl = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        const feats = ["hour", "anglez", "enmo", "anglez_diff", "enmo_diff", "…_rolling_mean", "…_rolling_max", "…_rolling_std", "diff_rolling_mean", "diff_rolling_max"];
+        const fs = feats.map((f, i) => { const g = K.node(svg, 50 + (i % 5) * 126, 200 + Math.floor(i / 5) * 46, 118, 36, f); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 50, y: 310, "font-size": 11, class: "muted" }, "anglez、enmo 各一套 → 共 15 个特征（模拟数据）");
+        (async () => {
+          if (!(await ctx.tween(2200, (t) => { const c = Math.round(t * (T - 1)); win.setAttribute("x", ax.sx(Math.max(0, c - w / 2))); let d = ""; for (let i = 0; i <= c; i++) d += (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(rm[i]); pathEl.setAttribute("d", d); }))) return;
+          for (const g of fs) { if (!(await ctx.tween(120, (t) => (g.style.opacity = t)))) return; }
+        })();
+      },
+    },
+    {
+      at: 5, title: "准备特征表 X 和答案 y", kicker: "第 5–6 格 · 训练数据",
+      html: `<p>对训练集调用 <code>make_features</code>，取出 15 个特征列当 <code>X_train</code>，<code>awake</code> 列当答案 <code>y_train</code>。然后马上 <code>del train</code> 并手动回收内存。</p><p>这在 Kaggle 上很常见：数据有几千万行，内存只有十几 GB，用完的大表要及时删掉。</p>`,
+      cells: [6], highlight: ["y_train = train[\"awake\"]", "gc.collect()"],
+      draw(svg, ctx) {
+        const cols = ["hour", "anglez", "…", "enmo_std", "awake"];
+        cols.forEach((c, j) => K.svg(svg, "text", { x: 70 + j * 110, y: 40, "text-anchor": "middle", "font-size": 12, "font-weight": 700, fill: j === 4 ? "var(--accent)" : "var(--ink)" }, c));
+        const r = K.rng(2), cells = [];
+        for (let i = 0; i < 7; i++) cols.forEach((c, j) => cells.push({ j, el: K.svg(svg, "text", { x: 70 + j * 110, y: 70 + i * 26, "text-anchor": "middle", "font-size": 12, fill: j === 4 ? "var(--accent)" : "var(--ink-3)" }, j === 4 ? String(r() < 0.5 ? 0 : 1) : j === 0 ? String(20 + (i % 4)) : j === 2 ? "…" : (r() * 40).toFixed(1)) }));
+        const bx = K.svg(svg, "rect", { x: 20, y: 24, width: 430, height: 200, rx: 8, fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+        const by = K.svg(svg, "rect", { x: 470, y: 24, width: 70, height: 200, rx: 8, fill: "none", stroke: "var(--accent)", "stroke-width": 2 });
+        const tx = K.svg(svg, "text", { x: 235, y: 250, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--c1)" }, "X_train：15 个特征");
+        const ty = K.svg(svg, "text", { x: 505, y: 250, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--accent)" }, "y_train");
+        const del = K.svg(svg, "text", { x: 600, y: 140, "font-size": 13, fill: "var(--bad)" }, "del train 🗑");
+        K.svg(svg, "text", { x: 20, y: 310, "font-size": 11, class: "muted" }, "表格数字为示意");
+        hide([bx, by, tx, ty, del]);
+        (async () => { for (const g of [[bx, tx], [by, ty], [del]]) { if (!(await fade(g, ctx, 450))) return; } })();
+      },
+    },
+    {
+      at: 7, title: "随机森林：50 棵树投票", kicker: "第 7 格 · 训练",
+      html: `<p><b>随机森林</b>是很多棵决策树的集合：每棵树用随机抽的一部分数据、随机挑的一部分特征来学，最后大家投票。单棵树容易“钻牛角尖”，一群树的平均意见就稳得多。</p><p>作者的设置：<code>n_estimators=50</code>（50 棵树）、<code>min_samples_leaf=300</code>（每片叶子至少 300 个样本，防止树长得太细、死记训练数据）、<code>n_jobs=-1</code>（用上所有 CPU 核）。实验 B 可以亲手调这个“叶子至少几个样本”。</p>`,
+      cells: [7], highlight: ["n_estimators=50", "min_samples_leaf=300"],
+      draw(svg, ctx) {
+        const trees = [];
+        for (let k = 0; k < 5; k++) {
+          const g = K.svg(svg, "g", {}); g.style.opacity = 0;
+          const x = 70 + k * 135;
+          K.node(g, x - 45, 30, 90, 30, k % 2 ? "enmo_mean<?" : "hour<?");
+          K.svg(g, "line", { x1: x, y1: 60, x2: x - 30, y2: 90, stroke: "var(--ink-3)" }); K.svg(g, "line", { x1: x, y1: 60, x2: x + 30, y2: 90, stroke: "var(--ink-3)" });
+          K.node(g, x - 62, 90, 60, 28, "…"); K.node(g, x + 2, 90, 60, 28, "…");
+          const vote = k === 3 ? 1 : 0;
+          K.svg(g, "text", { x, y: 150, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: vote ? "var(--warn)" : "var(--c3)" }, vote ? "醒着" : "睡着");
+          trees.push(g);
+        }
+        K.svg(svg, "text", { x: 360, y: 190, "text-anchor": "middle", "font-size": 12, class: "muted" }, "（图里画 5 棵代表 50 棵）");
+        const res = K.svg(svg, "text", { x: 360, y: 240, "text-anchor": "middle", "font-size": 18, "font-weight": 700 }, "");
+        const res2 = K.svg(svg, "text", { x: 360, y: 270, "text-anchor": "middle", "font-size": 13 }, "");
+        (async () => { for (const g of trees) { if (!(await ctx.tween(280, (t) => (g.style.opacity = t)))) return; } res.textContent = "4 票睡着 : 1 票醒着"; res2.textContent = "predict_proba → 睡着 0.8、醒着 0.2"; })();
+      },
+    },
+    {
+      at: 8, title: "对测试集打分", kicker: "第 8–9 格 · 预测",
+      html: `<p>读入测试数据，用同一个 <code>make_features</code> 构造特征，然后 <code>predict_proba</code> 给每一刻算出各类别的概率。作者取第 0 列当“睡着”概率 <code>not_awake</code>，第 1 列当“醒着”概率 <code>awake</code>。</p><p>注意：训练用的是三类别数据（多了“没戴”），模型实际会输出三列概率，第 2 列“没戴”在这里没有用上。另外 <code>predict_proba</code> 被调用了两次，算了两遍同样的东西，多花了一倍时间。</p>`,
+      cells: [9], highlight: ["predict_proba(X_test)[:,0]", "predict_proba(X_test)[:,1]"],
+      draw(svg, ctx) {
+        const T = 200, n = night(11, T), r = K.rng(5);
+        const p = n.awake.map((a) => K.clamp((a ? 0.75 : 0.18) + K.randn(r) * 0.2, 0, 1));
+        const ax = K.axes(svg, { x: 50, y: 30, w: 620, h: 220 }, [0, T], [0, 1], { xticks: 0, yticks: 2, xlabel: "时间（模拟一晚）" });
+        K.svg(svg, "text", { x: 50, y: 22, "font-size": 12, "font-weight": 700 }, "每一刻的“醒着”概率：抖得很厉害");
+        const dots = p.map((v, i) => K.svg(svg, "circle", { cx: ax.sx(i), cy: ax.sy(v), r: 0, fill: v > 0.5 ? "var(--warn)" : "var(--c3)" }));
+        K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(T), y1: ax.sy(0.5), y2: ax.sy(0.5), stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+        K.svg(svg, "text", { x: 50, y: 300, "font-size": 12, class: "muted" }, "橙 = 判为醒着，绿 = 判为睡着；直接按 0.5 切，会切出很多碎片");
+        ctx.tween(1500, (t) => dots.forEach((d, i) => d.setAttribute("r", K.clamp(t * T * 1.1 - i, 0, 1) * 2.6)));
+      },
+    },
+    {
+      at: 10, title: "平滑，再切出入睡和醒来", kicker: "第 10–11 格 · 后处理",
+      html: `<p>逐刻的概率抖动很大，直接用会切出成百上千个碎片。作者的后处理：</p><ul class="tight"><li><b>平滑</b>：以每一刻为中心取 460 步（<code>2*230</code>）的滑动平均，“醒着”的平滑概率当作 <code>score</code>（置信度）；</li><li>把“睡着”的平滑概率<b>四舍五入</b>成 0 / 1；</li><li><b>切段</b>：用 <code>groupby</code> 找出连续为 1 的段，段首记 <code>onset</code>，段尾记 <code>wakeup</code>，只有 1 步长的段不记。</li></ul><p>实验 C 可以调平滑窗口，看事件数怎么变。</p>`,
+      cells: [11], highlight: ["smoothing_length = 2*230", ".round()", "['onset']+(llg-2)*[0]+['wakeup']"],
+      draw(svg, ctx) {
+        const T = 200, n = night(11, T), r = K.rng(5);
+        const p = n.awake.map((a) => K.clamp((a ? 0.75 : 0.18) + K.randn(r) * 0.2, 0, 1));
+        const sm = roll(p, 30, mean);
+        const ax = K.axes(svg, { x: 50, y: 30, w: 620, h: 180 }, [0, T], [0, 1], { xticks: 0, yticks: 2 });
+        p.forEach((v, i) => K.svg(svg, "circle", { cx: ax.sx(i), cy: ax.sy(v), r: 2, fill: "var(--ink-3)", opacity: 0.4 }));
+        const line = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--accent)", "stroke-width": 3 });
+        const seg = [];
+        let st = null;
+        sm.forEach((v, i) => { const s = v < 0.5; if (s && st === null) st = i; if ((!s || i === T - 1) && st !== null) { seg.push([st, i]); st = null; } });
+        const bars = seg.map((s) => { const g = K.svg(svg, "g", {}); g.style.opacity = 0; K.svg(g, "rect", { x: ax.sx(s[0]), y: 235, width: ax.sx(s[1]) - ax.sx(s[0]), height: 26, rx: 5, fill: "var(--c3)", "fill-opacity": 0.5 }); K.svg(g, "text", { x: ax.sx(s[0]), y: 280, "text-anchor": "middle", "font-size": 11, fill: "var(--accent)" }, "onset"); K.svg(g, "text", { x: ax.sx(s[1]), y: 280, "text-anchor": "middle", "font-size": 11, fill: "var(--warn)" }, "wakeup"); return g; });
+        K.svg(svg, "text", { x: 50, y: 310, "font-size": 12, class: "muted" }, "灰点 = 原始概率；蓝线 = 平滑后（示意窗口）；绿条 = 判为睡着的连续段");
+        ctx.tween(1600, (t) => { const c = Math.round(t * (T - 1)); let d = ""; for (let i = 0; i <= c; i++) d += (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(sm[i]); line.setAttribute("d", d); }).then((ok) => ok && fade(bars, ctx, 500));
+      },
+    },
+    {
+      at: 12, title: "写出提交文件", kicker: "第 12–13 格 · 提交",
+      html: `<p>只保留 <code>event</code> 不为 0 的行，也就是每个 onset 和 wakeup，取 <code>series_id, step, event, score</code> 四列，加上行号写成 <code>submission.csv</code>。</p><p>比赛按“预测的事件时刻离真实时刻有多近”来打分，<code>score</code> 是这个事件的置信度。这里直接用平滑后的“醒着”概率当 score，入睡事件和醒来事件用的是同一个数，比较粗糙，是后来者可以改进的地方。</p>`,
+      cells: [13], highlight: ["test[\"event\"] != 0", "[\"series_id\",\"step\",\"event\",\"score\"]"],
+      draw(svg, ctx) {
+        const hdr = ["row_id", "series_id", "step", "event", "score"];
+        hdr.forEach((h, j) => K.svg(svg, "text", { x: 80 + j * 130, y: 50, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, h));
+        const rows = [["0", "（序列 A）", "（步号）", "onset", "0.xx"], ["1", "（序列 A）", "（步号）", "wakeup", "0.xx"], ["2", "（序列 A）", "（步号）", "onset", "0.xx"], ["3", "（序列 A）", "（步号）", "wakeup", "0.xx"]];
+        const els = rows.map((r, i) => { const g = K.svg(svg, "g", {}); g.style.opacity = 0; r.forEach((c, j) => K.svg(g, "text", { x: 80 + j * 130, y: 90 + i * 34, "text-anchor": "middle", "font-size": 13, fill: j === 3 ? (c === "onset" ? "var(--accent)" : "var(--warn)") : "var(--ink)" }, c)); return g; });
+        K.svg(svg, "text", { x: 40, y: 270, "font-size": 12, class: "muted" }, "只演示格式：每晚一对 onset / wakeup，括号里的值不是真实数据");
+        (async () => { for (const g of els) { if (!(await ctx.tween(300, (t) => (g.style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      at: 14, title: "延伸阅读：这个思路有论文依据", kicker: "第 14 格 · 参考文献",
+      html: `<p>作者最后附上了一篇论文：Sundararajan 等人 2021 年发表在 <i>Scientific Reports</i> 上的《用手腕加速度计数据和随机森林做睡眠分类》，以及它的补充材料。</p><p>这说明这份入门 notebook 的路子（加速度计 → 窗口特征 → 随机森林）不是随手拼的，而是有研究基础的经典做法。比赛里的高分方案后来多用深度学习做序列建模，但这条基线清楚、可解释，很适合入门。</p>`,
+      cells: [14],
+      draw(svg, ctx) {
+        const st = ["手腕加速度计", "滑动窗口特征", "随机森林", "平滑 + 切段", "入睡 / 醒来时刻"];
+        const ns = st.map((s, i) => { const n = K.node(svg, 20 + i * 140, 130, 125, 60, s, i === 4 ? { fill: "color-mix(in srgb, var(--accent) 14%, var(--panel))", stroke: "var(--accent)", bold: true } : {}); n.style.opacity = 0; return n; });
+        const ar = st.slice(1).map((s, i) => { const a = K.arrow(svg, 145 + i * 140, 160, 158 + i * 140, 160); a.style.opacity = 0; return a; });
+        K.svg(svg, "text", { x: 360, y: 260, "text-anchor": "middle", "font-size": 13 }, "参考：Sundararajan et al., Scientific Reports 11, 24 (2021)");
+        (async () => { for (let i = 0; i < 5; i++) { if (i) await fade([ar[i - 1]], ctx, 150); if (!(await fade([ns[i]], ctx, 300))) return; } })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+  if (/[?&]fold/.test(location.search)) { const st = document.createElement("style"); st.textContent = "#pipe .ch-cells > .cell, #pipe .ch-cells > .cell-note { display: none; }"; document.head.appendChild(st); }
+
+  /* ---------- 实验 A：滑动窗口特征 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "w", label: "窗口长度（步）", min: 1, max: 60, step: 1, value: 20 },
+      { id: "sig", label: "看哪一路信号", value: "enmo", options: [["enmo", "enmo 动作强度"], ["ang", "anglez 倾斜角"]] },
+      { id: "stat", label: "窗口统计量", value: "mean", options: [["mean", "均值 rolling_mean"], ["max", "最大值 rolling_max"], ["std", "标准差 rolling_std"]] },
+      { id: "seed", label: "换一晚", button: true },
+    ],
+    note: "浏览器里模拟一晚 300 步的手环信号（中间有一段短暂醒来），按作者的方式以每一步为中心取窗口算统计量。右边的数字是这个特征在“睡着”和“醒着”两类时刻上的平均差距除以波动（越大越好区分）。",
+    render(svg, v) {
+      const T = 300, n = night(21 + v.seed * 5, T, { wakeLen: 0.05 }), raw = v.sig === "enmo" ? n.enm : n.ang;
+      const f = { mean, max, std }[v.stat], feat = roll(raw, v.w, f);
+      const hi = v.sig === "enmo" ? 0.2 : 90;
+      const ax1 = K.axes(svg, { x: 50, y: 20, w: 570, h: 110 }, [0, T], [0, hi], { xticks: 0, yticks: 2 });
+      n.awake.forEach((a, i) => { if (a) K.svg(svg, "rect", { x: ax1.sx(i), y: 20, width: ax1.sx(1) - ax1.sx(0) + 0.3, height: 110, fill: "var(--warn)", "fill-opacity": 0.08 }); });
+      lineOf(svg, raw, ax1, 0, "var(--ink-3)", 1, (z) => Math.min(z, hi));
+      K.svg(svg, "text", { x: 56, y: 34, "font-size": 11 }, "原始 " + (v.sig === "enmo" ? "enmo" : "anglez") + "（浅橙底色 = 醒着）");
+      const fhi = Math.max(...feat) * 1.1 || 1;
+      const ax2 = K.axes(svg, { x: 50, y: 170, w: 570, h: 120 }, [0, T], [0, fhi], { xticks: 0, yticks: 2, xlabel: "时间步", yfmt: (z) => (fhi < 1 ? z.toFixed(2) : z.toFixed(0)) });
+      n.awake.forEach((a, i) => { if (a) K.svg(svg, "rect", { x: ax2.sx(i), y: 170, width: ax2.sx(1) - ax2.sx(0) + 0.3, height: 120, fill: "var(--warn)", "fill-opacity": 0.08 }); });
+      lineOf(svg, feat, ax2, 0, "var(--c6)", 2);
+      K.svg(svg, "text", { x: 56, y: 184, "font-size": 11 }, `窗口 ${v.w} 步的 ${{ mean: "均值", max: "最大值", std: "标准差" }[v.stat]}`);
+      const A = feat.filter((_, i) => n.awake[i]), S = feat.filter((_, i) => !n.awake[i]);
+      const sep = Math.abs(mean(A) - mean(S)) / (Math.sqrt((std(A) ** 2 + std(S) ** 2) / 2) || 1);
+      const rs = Math.abs(mean(raw.filter((_, i) => n.awake[i])) - mean(raw.filter((_, i) => !n.awake[i]))) / (Math.sqrt((std(raw.filter((_, i) => n.awake[i])) ** 2 + std(raw.filter((_, i) => !n.awake[i])) ** 2) / 2) || 1);
+      return { readout: [
+        { k: "原始信号的区分度", v: rs.toFixed(2), color: "var(--ink-3)" },
+        { k: "这个特征的区分度", v: sep.toFixed(2), color: sep > rs ? "var(--good)" : "var(--warn)" },
+        { k: "窗口覆盖", v: v.w + " 步" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：随机森林（决策桩组成的小森林） ---------- */
+  function makeSet(seed, n) {
+    const r = K.rng(seed), X = [], y = [];
+    for (let i = 0; i < n; i++) {
+      const awake = r() < 0.45 ? 1 : 0;
+      const hour = awake ? (r() < 0.75 ? 8 + r() * 14 : r() * 24) : (r() < 0.8 ? (22 + r() * 9) % 24 : r() * 24);
+      const act = awake ? 0.05 + Math.abs(K.randn(r)) * 0.05 : 0.005 + Math.abs(K.randn(r)) * 0.02 + (r() < 0.1 ? 0.06 : 0);
+      X.push([hour, Math.min(act, 0.2)]); y.push(awake);
+    }
+    return { X, y };
+  }
+  function growTree(X, y, idx, depth, minLeaf, r) {
+    const n = idx.length, pos = idx.reduce((s, i) => s + y[i], 0), p = n ? pos / n : 0.5;
+    if (depth === 0 || n < 2 * minLeaf || pos === 0 || pos === n) return { p };
+    let best = null;
+    const feats = [0, 1].sort(() => r() - 0.5).slice(0, 1 + Math.floor(r() * 2));
+    feats.forEach((f) => {
+      const vals = idx.map((i) => X[i][f]).sort((a, b) => a - b);
+      for (let q = 1; q < 12; q++) {
+        const thr = vals[Math.floor((q / 12) * (n - 1))];
+        const L = idx.filter((i) => X[i][f] <= thr), R = idx.filter((i) => X[i][f] > thr);
+        if (L.length < minLeaf || R.length < minLeaf) continue;
+        const g = (S) => { const pp = S.reduce((s, i) => s + y[i], 0) / S.length; return S.length * pp * (1 - pp); };
+        const score = g(L) + g(R);
+        if (!best || score < best.score) best = { f, thr, L, R, score };
+      }
+    });
+    if (!best) return { p };
+    return { f: best.f, thr: best.thr, l: growTree(X, y, best.L, depth - 1, minLeaf, r), r: growTree(X, y, best.R, depth - 1, minLeaf, r) };
+  }
+  const predT = (t, x) => (t.f == null ? t.p : x[t.f] <= t.thr ? predT(t.l, x) : predT(t.r, x));
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "trees", label: "树的棵数", min: 1, max: 30, step: 1, value: 10 },
+      { id: "leaf", label: "每片叶子至少几个样本（min_samples_leaf）", min: 1, max: 80, step: 1, value: 15 },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "浏览器里生成 400 个训练时刻（两个特征：几点钟、窗口内平均动作强度），每棵树用有放回抽样的数据、最多 6 层；底色是森林给出的“醒着”概率。在另外 1000 个模拟时刻上计算准确率。叶子太小会把个别翻身的点也单独圈出来。",
+    render(svg, v) {
+      const tr = makeSet(300 + v.seed * 11, 400), te = makeSet(900 + v.seed * 11, 1000), r = K.rng(77 + v.seed);
+      const forest = [];
+      for (let k = 0; k < v.trees; k++) { const idx = Array.from({ length: tr.X.length }, () => Math.floor(r() * tr.X.length)); forest.push(growTree(tr.X, tr.y, idx, 6, v.leaf, r)); }
+      const prob = (x) => forest.reduce((s, t) => s + predT(t, x), 0) / forest.length;
+      const ax = K.axes(svg, { x: 50, y: 14, w: 560, h: 290 }, [0, 24], [0, 0.2], { xticks: 6, yticks: 4, xlabel: "几点钟（hour）", xfmt: (z) => String(Math.round(z)), yfmt: (z) => z.toFixed(2) });
+      for (let gx = 0; gx < 24; gx += 0.75) for (let gy = 0; gy < 0.2; gy += 0.01) { const p = prob([gx + 0.375, gy + 0.005]); K.svg(svg, "rect", { x: ax.sx(gx), y: ax.sy(gy + 0.01), width: ax.sx(gx + 0.75) - ax.sx(gx) + 0.5, height: ax.sy(gy) - ax.sy(gy + 0.01) + 0.5, fill: p > 0.5 ? "var(--warn)" : "var(--c3)", "fill-opacity": 0.08 + Math.abs(p - 0.5) * 0.4 }); }
+      tr.X.forEach((x, i) => K.svg(svg, "circle", { cx: ax.sx(x[0]), cy: ax.sy(x[1]), r: 2.6, fill: tr.y[i] ? "var(--warn)" : "var(--c3)", stroke: "var(--panel)", "stroke-width": 0.5 }));
+      K.svg(svg, "text", { x: 14, y: 170, "font-size": 11, class: "muted", transform: "rotate(-90 14 170)" }, "平均动作强度");
+      let tr_ok = 0, te_ok = 0;
+      tr.X.forEach((x, i) => (tr_ok += (prob(x) > 0.5 ? 1 : 0) === tr.y[i] ? 1 : 0));
+      te.X.forEach((x, i) => (te_ok += (prob(x) > 0.5 ? 1 : 0) === te.y[i] ? 1 : 0));
+      K.svg(svg, "text", { x: 60, y: 334, "font-size": 11 }, "橙点 = 醒着，绿点 = 睡着（模拟）");
+      return { readout: [
+        { k: "训练集准确率", v: ((tr_ok / tr.X.length) * 100).toFixed(1) + "%" },
+        { k: "新数据准确率", v: ((te_ok / te.X.length) * 100).toFixed(1) + "%", color: "var(--good)" },
+        { k: "两者差距", v: (((tr_ok / tr.X.length) - (te_ok / te.X.length)) * 100).toFixed(1) + " 个百分点" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：平滑长度与事件 ---------- */
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "w", label: "平滑窗口长度（步）", min: 1, max: 120, step: 1, value: 40 },
+      { id: "noise", label: "模型逐刻概率的噪声", min: 0, max: 0.35, step: 0.01, value: 0.2, fmt: (z) => z.toFixed(2) },
+      { id: "wake", label: "半夜醒来的时长（步）", min: 0, max: 40, step: 1, value: 12 },
+      { id: "seed", label: "换一晚", button: true },
+    ],
+    note: "浏览器里模拟一晚 400 步：真实情况是睡一段、半夜醒一会儿、再睡一段（两对入睡 / 醒来）。模型逐刻给出带噪声的“睡着”概率，按作者的方法做居中滑动平均、四舍五入、找连续段。",
+    render(svg, v) {
+      const T = 400, r = K.rng(41 + v.seed * 9), s0 = 90, s1 = 340, w0 = 210, w1 = 210 + v.wake;
+      const truth = Array.from({ length: T }, (_, t) => (t >= s0 && t < s1 && !(t >= w0 && t < w1) ? 1 : 0));
+      const p = truth.map((s) => K.clamp((s ? 0.8 : 0.2) + K.randn(r) * v.noise * 1.6, 0, 1));
+      const sm = roll(p, v.w, mean).map((z) => Math.round(z));
+      const segs = []; let st = null;
+      sm.forEach((z, i) => { if (z === 1 && st === null) st = i; if ((z !== 1 || i === T - 1) && st !== null) { if (i - st > 1) segs.push([st, z === 1 ? i : i - 1]); st = null; } });
+      const ax = K.axes(svg, { x: 50, y: 20, w: 570, h: 150 }, [0, T], [0, 1], { xticks: 0, yticks: 2 });
+      p.forEach((z, i) => K.svg(svg, "circle", { cx: ax.sx(i), cy: ax.sy(z), r: 1.6, fill: "var(--ink-3)", opacity: 0.5 }));
+      lineOf(svg, roll(p, v.w, mean), ax, 0, "var(--accent)", 2.5);
+      K.svg(svg, "text", { x: 56, y: 34, "font-size": 11 }, "灰点 = 逐刻“睡着”概率；蓝线 = 平滑后");
+      const row = (y, label, segList, col) => { K.svg(svg, "text", { x: 46, y: y + 15, "text-anchor": "end", "font-size": 11 }, label); segList.forEach((s) => K.svg(svg, "rect", { x: ax.sx(s[0]), y, width: Math.max(2, ax.sx(s[1]) - ax.sx(s[0])), height: 20, rx: 4, fill: col, "fill-opacity": 0.6 })); };
+      const trueSegs = v.wake > 0 ? [[s0, w0], [w1, s1]] : [[s0, s1]];
+      row(200, "真实", trueSegs, "var(--c3)");
+      row(235, "切出", segs, "var(--c1)");
+      K.svg(svg, "text", { x: 50, y: 290, "font-size": 12 }, `真实有 ${trueSegs.length} 段睡眠（${trueSegs.length * 2} 个事件）；切出 ${segs.length} 段（${segs.length * 2} 个事件）`);
+      K.svg(svg, "text", { x: 50, y: 312, "font-size": 12, class: "muted" }, "窗口太短 → 碎成很多段；太长 → 半夜醒来那一下被抹平");
+      return { readout: [
+        { k: "切出的睡眠段", v: String(segs.length), color: segs.length === trueSegs.length ? "var(--good)" : "var(--bad)" },
+        { k: "真实睡眠段", v: String(trueSegs.length) },
+        { k: "平滑窗口", v: v.w + " 步" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>发动机剩余寿命</title>
+<meta name="description" content="Kaggle 案例拆解：用 NASA C-MAPSS 涡扇发动机传感器数据预测剩余寿命 RUL，对比线性回归、SVR、随机森林、XGBoost，再改成三档风险分类。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">多元时间序列 · 回归 + 分类 · 预测性维护</div>
+  <h1>航空发动机还能飞多久：从 21 个传感器预测剩余寿命</h1>
+  <p class="en">Nasa predictive Maintenance (RUL)</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">剩余寿命 RUL</span><span class="tag method">MinMax 缩放</span><span class="tag method">RUL 截断</span>
+    <span class="tag method">滚动平均特征</span><span class="tag method">线性回归（手写梯度下降）</span><span class="tag method">SVR</span>
+    <span class="tag method">随机森林 / XGBoost</span><span class="tag method">分箱转分类</span><span class="tag method">KNN / 朴素贝叶斯 / SVC</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Wassim derbel</b></span>
+    <span>Kaggle 点赞 <b>537</b>（2026-11 抓取）</span>
+    <span>数据集 <b>behrad3d/nasa-cmaps</b></span>
+    <span><a href="https://www.kaggle.com/code/wassimderbel/nasa-predictive-maintenance-rul" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">100 台涡扇发动机从新到坏的运行记录</div><p>NASA 用仿真软件 C-MAPSS 生成。每一行是某台发动机某一个运行周期的快照：3 个工况设置 + 21 个传感器读数。作者用的是 FD001 子集（高压压气机 HPC 故障）。<span data-cell="11">出处</span> <span data-cell="17">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">剩余寿命 RUL：离坏掉还有几个周期</div><p>训练数据里每台发动机都一直跑到坏，所以 RUL = 这台的最后周期 − 当前周期。<span data-cell="32">出处</span> 测试数据在坏掉之前就截断了，要猜它还能跑多久。</p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">三轮回归 + 一轮分类</div><p>①全部特征；②去掉不变的传感器、把 RUL 封顶 195；③加 10 个周期的滚动平均。模型有手写线性回归、SVR、随机森林、XGBoost。最后把 RUL 分成三档风险，用 SVC、随机森林、朴素贝叶斯、KNN 做分类。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">SVR 最好，测试 RMSE 约 31 个周期</div><p>作者写道：SVR 在全数据上比其他模型好，测试 RMSE 为 31。<span data-cell="134">出处</span> 也就是说平均会差三十来个周期。作者结论是 SVR 最好。<span data-cell="166">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>NASA C-MAPSS</b>（Commercial Modular Aero-Propulsion System Simulation，商用涡扇发动机仿真）。作者只用了其中的 <code>train_FD001</code>、<code>test_FD001</code>、<code>RUL_FD001</code> 三个文件。<span data-cell="13">出处</span> 下面的规模都来自作者在 notebook 里的文字。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况（FD001 训练集）</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">行数（运行周期快照）</div><div class="v">20,631</div></div>
+        <div class="stat-tile"><div class="k">发动机台数</div><div class="v">100</div></div>
+        <div class="stat-tile"><div class="k">最短寿命</div><div class="v" style="color:var(--c6)">128 周期</div></div>
+        <div class="stat-tile"><div class="k">最长寿命</div><div class="v" style="color:var(--c3)">362 周期</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">行数、台数、寿命范围见第 22 格作者说明 <span data-cell="22">出处</span>；“100 台、21 个传感器、3 个设置”见第 17 格 <span data-cell="17">出处</span>。作者还写到平均寿命在 199–206 周期之间，标准差约 46。没有缺失值 <span data-cell="20">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>unit_number</code></td><td>第几台发动机（1–100）</td><td>编号</td></tr>
+        <tr><td><code>time_cycles</code></td><td>这台发动机已经运行了第几个周期（可以理解为第几次飞行）</td><td>整数</td></tr>
+        <tr><td><code>setting_1–3</code></td><td>工况设置（如高度、马赫数、油门），FD001 里基本只有一种工况</td><td>数值</td></tr>
+        <tr><td><code>s_1–s_21</code></td><td>21 个传感器：各部位温度、压力、风扇和核心转速、燃油流量比、引气焓等 <span data-cell="41">出处</span></td><td>数值</td></tr>
+        <tr><td><code>RUL</code></td><td><b>要预测的答案</b>：剩余寿命 = 最后周期 − 当前周期（作者自己算出来加上的）</td><td>整数</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">测试文件 <code>test_FD001</code> 的每台发动机只记录到某个时刻为止，<code>RUL_FD001</code> 给出每台的真实剩余寿命。作者取每台测试发动机的<b>最后一行</b>去预测 <span data-cell="55">出处</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="82">
+    <h3>动手试试 A · RUL 截断：要不要给“寿命还很长”封个顶 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="95">
+    <h3>动手试试 B · 滚动平均：窗口越大越好吗 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>传感器 1、5、10、16、18、19 基本不变，可以去掉（代码里实际还多去了 s_6）</td><td><span data-cell="48">第 48 格</span></td></tr>
+        <tr><td>第一轮（全部特征）随机森林会高估 RUL</td><td><span data-cell="77">第 77 格</span></td></tr>
+        <tr><td>加滚动平均后 SVR 没有过拟合；随机森林和 XGBoost 在训练/测试上过拟合</td><td><span data-cell="107">第 107 格</span> <span data-cell="110">第 110 格</span> <span data-cell="116">第 116 格</span></td></tr>
+        <tr><td>s_9、s_11、s_12、s_7 对 RUL 影响明显，如核心转速 s_9 升高时 RUL 下降</td><td><span data-cell="132">第 132 格</span></td></tr>
+        <tr><td>SVR 在全数据上表现最好，测试 RMSE 为 31</td><td><span data-cell="134">第 134 格</span></td></tr>
+        <tr><td>按等频分箱，把 RUL 分成 0–68 危险、69–137 中等风险、138–361 无风险三档</td><td><span data-cell="137">第 137 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">除了第 134 格写明的“测试 RMSE 31”，其他模型的 RMSE、R²、分类准确率都在运行输出里，Kaggle 下载的源码不带输出，这里不列。</p>
+      <p class="callout">读代码时发现的问题（原文未改）：①开头说“最后用 LSTM”，全文并没有 LSTM <span data-cell="4">第 4 格</span>；②训练/测试按<b>行</b>随机切分，同一台发动机的前后周期同时出现在两边，测试分数偏乐观 <span data-cell="53">第 53 格</span>；③测试集和验证集都用 <code>scaler.fit_transform</code> 重新拟合缩放器，应该只 <code>transform</code> <span data-cell="55">第 55 格</span>；④第二轮 SVR 用没截断的 <code>y_train</code> 训练，却和截断后的标签比 <span data-cell="86">第 86 格</span>；⑤分档条件写成 <code>k&gt;69</code>，RUL 恰好等于 69 的样本会被分进“无风险” <span data-cell="141">第 141 格</span>；⑥对类别编号 1/2/3 算“平均百分比误差”没有意义 <span data-cell="151">第 151 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一台在役发动机最近的传感器读数，估计它还能安全运行多少个周期，或者直接给出“危险 / 中等 / 安全”三档。</li>
+        <li><b>同类问题：</b>机床主轴、风机齿轮箱、高铁轴承、电梯、锂电池的剩余寿命估计；任何“从新用到坏、中间一直有传感器记录”的设备。</li>
+        <li><b>可迁移的套路：</b>先从“跑到坏”的数据倒推 RUL 标签 → 去掉不变的传感器 → 给 RUL 封顶（早期看不出退化）→ 用滚动窗口平滑噪声 → <b>按设备</b>而不是按行切分训练/测试 → 按维修决策需要改成分档分类。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>标签构造：RUL = 最大周期 − 当前周期 <span data-cell="32">第 32 格</span></li>
+        <li>预处理：MinMaxScaler <span data-cell="55">第 55 格</span>；去常数传感器、RUL 截断到 195 <span data-cell="82">第 82 格</span></li>
+        <li>特征工程：10 周期滚动平均 <span data-cell="95">第 95 格</span></li>
+        <li>回归：手写梯度下降线性回归 <span data-cell="61">第 61 格</span>、SVR(rbf) <span data-cell="63">第 63 格</span>、随机森林 <span data-cell="65">第 65 格</span>、XGBoost <span data-cell="89">第 89 格</span>、GridSearchCV <span data-cell="112">第 112 格</span>、4 折交叉验证 <span data-cell="120">第 120 格</span></li>
+        <li>分类：等宽/等频分箱 <span data-cell="136">第 136 格</span>；线性 SVC、随机森林、高斯朴素贝叶斯、KNN(k=100) <span data-cell="161">第 161 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者按“行”随机切训练集和测试集。同一台发动机第 100 周期在训练集、第 101 周期在测试集，这时测试分数还可信吗？应该怎么切？</li>
+      <li>把 RUL 封顶到 195，等于告诉模型“寿命还很长的时候，具体多长不重要”。这对航空公司的维修计划有什么好处？有没有坏处？</li>
+      <li>同样差 30 个周期，“高估寿命 30”和“低估寿命 30”后果一样吗？如果要设计一个评价指标，你会怎么惩罚高估？</li>
+      <li>作者最后改成三档分类。对机务人员来说，“还剩 52 个周期”和“危险区”，哪种输出更好用？</li>
+      <li>FD001 只有一种工况、一种故障。真实机队里飞行高度、航线、气候都不同，这个模型能直接搬过去用吗？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Wassim derbel，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：NASA Prognostics Center of Excellence，C-MAPSS Turbofan Engine Degradation Simulation（Kaggle 镜像 behrad3d/nasa-cmaps）。
+</footer>
+</main>
+
+<script src="nb/turbofan-rul-svr.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* 模拟一台发动机：寿命 life，健康度在 onset 之后开始下降；传感器 = 基线 + 退化 + 噪声 */
+  function engine(r, life, noise) {
+    const onset = life * (0.35 + r() * 0.25), out = [];
+    for (let t = 0; t < life; t++) {
+      const d = t < onset ? 0 : Math.pow((t - onset) / (life - onset), 1.6);
+      out.push({ t, rul: life - 1 - t, s: d + K.randn(r) * noise });
+    }
+    return out;
+  }
+  function linfit(xs, ys) {
+    const n = xs.length; let mx = 0, my = 0; for (let i = 0; i < n; i++) { mx += xs[i]; my += ys[i]; } mx /= n; my /= n;
+    let sxy = 0, sxx = 0; for (let i = 0; i < n; i++) { sxy += (xs[i] - mx) * (ys[i] - my); sxx += (xs[i] - mx) * (xs[i] - mx); }
+    const a = sxx ? sxy / sxx : 0; return { a, b: my - a * mx };
+  }
+
+  const steps = [
+    {
+      title: "问题：发动机还能转多少圈", kicker: "第 0–8 格 · 背景", at: 0, cells: [4], highlight: ["RUL", "HPC failure", "LSTM"],
+      html: `<p>涡扇发动机就是大型客机翼下那个“大风扇”。用久了，压气机叶片会磨损、结垢，效率慢慢下降，最后出故障。作者关注的是 <b>HPC（高压压气机）故障</b>。</p><p>目标是预测<b>剩余寿命 RUL</b>（Remaining Useful Life）：从现在算起，还能安全运行多少个周期。作者特别强调要把<b>RUL 很低</b>的情况抓准，因为那时最危险。</p><p>动画对比三种维修思路。注意：作者在第 4 格说最后会用 LSTM，但 notebook 里其实没有 LSTM。</p>`,
+      draw(svg, ctx) {
+        const rows = [["坏了再修", "事后维修", "var(--bad)"], ["定期大修", "到点就修，不管好坏", "var(--warn)"], ["预测性维护", "看传感器，快坏了才修", "var(--good)"]];
+        const ax0 = 170, ax1 = 680;
+        rows.forEach((r0, i) => {
+          const y = 60 + i * 95;
+          K.svg(svg, "text", { x: 20, y: y + 4, "font-size": 15, "font-weight": 700, fill: r0[2] }, r0[0]);
+          K.svg(svg, "text", { x: 20, y: y + 24, "font-size": 12, class: "muted" }, r0[1]);
+          K.svg(svg, "line", { x1: ax0, y1: y, x2: ax1, y2: y, stroke: "var(--line)", "stroke-width": 8, "stroke-linecap": "round" });
+        });
+        K.svg(svg, "text", { x: ax0, y: 330, "font-size": 12, class: "muted" }, "新发动机");
+        K.svg(svg, "text", { x: ax1, y: 330, "font-size": 12, class: "muted", "text-anchor": "end" }, "真正坏掉的时刻 →");
+        const failX = 600;
+        K.svg(svg, "line", { x1: failX, y1: 30, x2: failX, y2: 310, stroke: "var(--bad)", "stroke-dasharray": "4 3" });
+        const bars = rows.map((r0, i) => K.svg(svg, "line", { x1: ax0, y1: 60 + i * 95, x2: ax0, y2: 60 + i * 95, stroke: r0[2], "stroke-width": 8, "stroke-linecap": "round" }));
+        const marks = [];
+        ctx.tween(2200, (t) => bars.forEach((b) => b.setAttribute("x2", K.lerp(ax0, failX, t)))).then((ok) => {
+          if (!ok) return;
+          marks.push(K.svg(svg, "text", { x: failX + 8, y: 64, "font-size": 13, fill: "var(--bad)" }, "💥 停飞、损失大"));
+          [300, 450].forEach((x) => K.svg(svg, "text", { x, y: 160, "font-size": 16, "text-anchor": "middle" }, "🔧"));
+          K.svg(svg, "text", { x: 375, y: 182, "font-size": 12, "text-anchor": "middle", class: "muted" }, "还好好的也拆，浪费寿命");
+          K.svg(svg, "text", { x: 560, y: 254, "font-size": 16, "text-anchor": "middle" }, "🔧");
+          K.svg(svg, "text", { x: 470, y: 280, "font-size": 12, fill: "var(--good)" }, "RUL 预测：还剩约 40 周期时安排检修");
+        });
+      },
+    },
+    {
+      title: "读入 C-MAPSS：100 台发动机的运行日志", kicker: "第 9–23 格 · 读数据", cells: [9, 13], highlight: ["sensor_names", "train_FD001", "RUL_FD001"],
+      html: `<p>原始文件没有表头，作者先自己起好 26 个列名：2 个编号列、3 个工况设置、21 个传感器 <code>s_1…s_21</code>。</p><p>再读三个文件：训练集（每台都跑到坏）、测试集（中途截断）、测试集的真实答案 RUL。训练集一共 20,631 行，100 台发动机，最短的 128 周期就坏了，最长的撑了 362 周期。<span data-cell="22">出处</span></p>`,
+      draw(svg, ctx) {
+        const cols = ["unit", "cycle", "set1", "set2", "set3", "s_1", "s_2", "…", "s_21"];
+        cols.forEach((c, i) => {
+          K.svg(svg, "rect", { x: 40 + i * 72, y: 30, width: 68, height: 30, rx: 4, fill: i < 2 ? "color-mix(in srgb, var(--c4) 22%, var(--panel))" : i < 5 ? "color-mix(in srgb, var(--c2) 20%, var(--panel))" : "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: "var(--line)" });
+          K.svg(svg, "text", { x: 74 + i * 72, y: 50, "text-anchor": "middle", "font-size": 12, "font-family": "var(--mono)" }, c);
+        });
+        const lines = [];
+        for (let k = 0; k < 8; k++) {
+          const unit = k < 4 ? 1 : 2, cyc = k < 4 ? k + 1 : k - 3;
+          const g = K.svg(svg, "g"); g.style.opacity = 0;
+          K.svg(g, "text", { x: 74, y: 86 + k * 26, "text-anchor": "middle", "font-size": 12, "font-family": "var(--mono)" }, unit);
+          K.svg(g, "text", { x: 146, y: 86 + k * 26, "text-anchor": "middle", "font-size": 12, "font-family": "var(--mono)" }, cyc);
+          for (let i = 2; i < 9; i++) K.svg(g, "text", { x: 74 + i * 72, y: 86 + k * 26, "text-anchor": "middle", "font-size": 12, class: "muted" }, i === 7 ? "…" : "·");
+          lines.push(g);
+        }
+        K.svg(svg, "text", { x: 40, y: 312, "font-size": 12, class: "muted" }, "示意：每一行 = 一台发动机的一个运行周期；同一台的行连起来就是一条时间序列（具体数值见原数据，这里不编）");
+        (async () => { for (const g of lines) if (!(await ctx.tween(220, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "每台发动机的寿命，倒数出 RUL 标签", kicker: "第 24–35 格 · 构造答案", cells: [24, 27, 32], highlight: ["max_time_cycle", "merged[\"RUL\"]"],
+      html: `<p>作者先画出 100 台发动机各自的寿命，发现大多数在 190–210 个周期之间坏掉。<span data-cell="29">出处</span></p><p>训练集里没有现成的“答案列”，作者用一个小函数自己算：<b>RUL = 这台发动机的最大周期 − 当前周期</b>。所以每台发动机的 RUL 都是从“寿命−1”一路倒数到 0，像倒计时。</p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 620, h: 250 }, [0, 360], [0, 360], { xlabel: "已运行周期 time_cycles", ylabel: "RUL" });
+        const lifes = [150, 200, 205, 260, 340], cols = ["var(--c6)", "var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)"];
+        const ls = lifes.map((L, i) => K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(L - 1), x2: ax.sx(0), y2: ax.sy(L - 1), stroke: cols[i], "stroke-width": 2.5 }));
+        const lab = lifes.map((L, i) => { const t = K.svg(svg, "text", { x: ax.sx(L) + 4, y: ax.sy(0) - 6 - i * 13, "font-size": 11, fill: cols[i] }, "寿命 " + L); t.style.opacity = 0; return t; });
+        K.svg(svg, "text", { x: 380, y: 56, "font-size": 13 }, "每条线：一台发动机的 RUL 倒计时（示意）");
+        ctx.tween(2400, (t) => ls.forEach((l, i) => {
+          const c = Math.min(t * 360, lifes[i] - 1);
+          l.setAttribute("x2", ax.sx(c)); l.setAttribute("y2", ax.sy(lifes[i] - 1 - c));
+          if (t * 360 >= lifes[i] - 1) lab[i].style.opacity = 1;
+        }));
+      },
+    },
+    {
+      title: "21 个传感器：谁在跟着退化变化", kicker: "第 36–51 格 · 探索", cells: [36, 41, 44, 47], highlight: ["Physical core speed", "i % 10 == 0"],
+      html: `<p>作者把每个传感器编号对上真实含义（风扇进口温度、HPC 出口压力、核心转速……），然后把传感器读数对着 RUL 画曲线、画箱线图。</p><p>发现两件事：①有些传感器从头到尾几乎是一条直线（1、5、10、16、18、19 号），对预测没用，后面会删掉；②其他传感器尺度不一、离群值多，需要缩放。<span data-cell="48">出处</span></p><p>动画里，随着 RUL 走向 0，有用的传感器开始“抬头”，不变的传感器一直是平的。</p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [250, 0], [0, 1.2], { xlabel: "RUL（越往右越接近坏掉）", yticks: 0 });
+        const r = K.rng(4), series = [];
+        for (let k = 0; k < 4; k++) {
+          const e = engine(r, 250, 0.05).reverse();
+          series.push({ pts: e.map((p) => [p.rul, 0.25 + p.s * 0.8]), color: K.colors[k] });
+        }
+        const flat = { pts: Array.from({ length: 250 }, (_, i) => [249 - i, 1.0 + K.randn(r) * 0.004]), color: "var(--ink-3)" };
+        const all = series.concat([flat]).map((s) => ({ s, p: K.svg(svg, "path", { d: "", fill: "none", stroke: s.color, "stroke-width": 1.6 }) }));
+        K.svg(svg, "text", { x: 70, y: 52, "font-size": 12, fill: "var(--ink-3)" }, "灰线：常数传感器（如 s_1），一直不动 → 删掉");
+        K.svg(svg, "text", { x: 70, y: 268, "font-size": 12 }, "彩线：同一个“会退化”的传感器在 4 台发动机上的读数（示意）");
+        ctx.tween(2600, (t) => all.forEach(({ s, p }) => {
+          const n = Math.max(2, Math.floor(s.pts.length * t));
+          p.setAttribute("d", s.pts.slice(s.pts.length - n).map((q, i) => (i ? "L" : "M") + ax.sx(q[0]) + "," + ax.sy(q[1])).join(""));
+        }));
+      },
+    },
+    {
+      title: "切分训练/测试，MinMax 缩放", kicker: "第 52–58 格 · 预处理", cells: [52, 53, 55], highlight: ["train_test_split", "fit_transform", "last()"],
+      html: `<p>作者去掉编号和工况设置列，把训练数据按 7:3 随机切成训练和测试；再用 <b>MinMaxScaler</b> 把每个传感器压到 0–1 之间。测试文件则只取每台发动机的<b>最后一行</b>，跟 <code>RUL_FD001</code> 一一对应。</p><p class="callout">两处值得讨论：①按<b>行</b>随机切，同一台发动机相邻两个周期可能一个在训练、一个在测试，模型等于“见过”测试题；②测试集和验证集也调用了 <code>fit_transform</code>，各自用自己的最大最小值缩放，尺子不统一。动画演示第二个问题。</p>`,
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 14, "font-weight": 700 }, "同一个读数 642，用两把不同的“尺子”量：");
+        const rowY = [110, 230], labels = ["训练集的尺子：min 641 · max 645", "验证集自己的尺子：min 642 · max 644"], mm = [[641, 645], [642, 644]];
+        rowY.forEach((y, i) => {
+          K.svg(svg, "line", { x1: 80, y1: y, x2: 640, y2: y, stroke: "var(--ink-3)", "stroke-width": 2 });
+          K.svg(svg, "text", { x: 80, y: y - 40, "font-size": 13, fill: i ? "var(--warn)" : "var(--c1)" }, labels[i]);
+          [0, 0.5, 1].forEach((v) => { K.svg(svg, "line", { x1: 80 + v * 560, y1: y - 6, x2: 80 + v * 560, y2: y + 6, stroke: "var(--ink-3)" }); K.svg(svg, "text", { x: 80 + v * 560, y: y + 24, "font-size": 12, "text-anchor": "middle", class: "muted" }, v.toFixed(1)); });
+        });
+        const dots = rowY.map((y, i) => K.svg(svg, "circle", { cx: 80, cy: y, r: 8, fill: i ? "var(--warn)" : "var(--c1)" }));
+        const vals = mm.map(([a, b]) => (642 - a) / (b - a));
+        const txt = rowY.map((y, i) => K.svg(svg, "text", { x: 0, y: y - 14, "font-size": 13, "font-weight": 700, "text-anchor": "middle" }, ""));
+        ctx.tween(1500, (t) => dots.forEach((d, i) => { const x = 80 + vals[i] * 560 * t; d.setAttribute("cx", x); txt[i].setAttribute("x", x); txt[i].textContent = (vals[i] * t).toFixed(2); }))
+          .then((ok) => ok && K.svg(svg, "text", { x: 30, y: 320, "font-size": 13, fill: "var(--bad)" }, "同一个读数被缩成 0.25 和 0.00：模型看到的已经不是同一个东西了（数字为示意）"));
+      },
+    },
+    {
+      title: "第一轮：线性回归、SVR、随机森林", kicker: "第 59–77 格 · 回归建模", cells: [59, 61, 63, 65, 67], highlight: ["weight_updater", "SVR(kernel='rbf')", "RandomForestRegressor", "rmse"],
+      html: `<p>作者准备了三种回归器：</p><ul class="tight"><li><b>线性回归</b>：作者自己手写了梯度下降，每轮算一下误差往哪边，就把权重往那边挪一点，迭代 150 轮。</li><li><b>SVR</b>（支持向量回归，rbf 核）：允许预测落在一条“管子”里不算错，只惩罚出了管子的点；rbf 核让管子可以弯。</li><li><b>随机森林</b>：很多棵决策树各自估一个 RUL，取平均。</li></ul><p>评价用 <b>RMSE</b>（均方根误差，平均差了几个周期）和 <b>R²</b>（解释了多少变化）。第一轮用全部传感器，作者发现随机森林<b>高估 RUL</b>。<span data-cell="77">出处</span></p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [0, 1], [0, 300], { xlabel: "健康指标（示意）", ylabel: "RUL" });
+        const r = K.rng(8), P = [];
+        for (let i = 0; i < 70; i++) { const x = r(); P.push([x, K.clamp(290 * Math.pow(1 - x, 1.4) + K.randn(r) * 18, 0, 300)]); }
+        P.forEach((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 3.2, fill: "var(--ink-3)", opacity: 0.6 }));
+        let w = 0, b = 150;
+        const line = K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(b), x2: ax.sx(1), y2: ax.sy(b + w), stroke: "var(--c1)", "stroke-width": 2.5 });
+        const it = K.svg(svg, "text", { x: 420, y: 52, "font-size": 13, "font-family": "var(--mono)", fill: "var(--c1)" }, "梯度下降 第 0 轮");
+        const tube = K.svg(svg, "path", { d: "", fill: "var(--c3)", "fill-opacity": 0.15, stroke: "var(--c3)", "stroke-dasharray": "4 3" });
+        (async () => {
+          for (let e = 1; e <= 60; e++) {
+            let gw = 0, gb = 0; P.forEach(([x, y]) => { const d = w * x + b - y; gw += d * x; gb += d; });
+            w -= 0.9 * gw / P.length * 2; b -= 0.9 * gb / P.length;
+            if (!(await ctx.tween(40, () => {}))) return;
+            line.setAttribute("y1", ax.sy(b)); line.setAttribute("y2", ax.sy(b + w)); it.textContent = "梯度下降 第 " + e + " 轮";
+          }
+          if (!(await ctx.wait(400))) return;
+          let up = "", dn = "";
+          for (let x = 0; x <= 1.0001; x += 0.02) { const y = 290 * Math.pow(1 - x, 1.4); up += (up ? "L" : "M") + ax.sx(x) + "," + ax.sy(Math.min(300, y + 25)); dn = "L" + ax.sx(x) + "," + ax.sy(Math.max(0, y - 25)) + dn; }
+          tube.setAttribute("d", up + dn.replace(/^L/, "L") + "Z");
+          K.svg(svg, "text", { x: 420, y: 74, "font-size": 13, fill: "var(--c3)" }, "SVR：弯曲的“容忍管”");
+        })();
+      },
+    },
+    {
+      title: "第二轮：删掉常数传感器，把 RUL 封顶 195", kicker: "第 78–90 格 · 改进", cells: [78, 79, 82, 89], highlight: ["clip(upper=195)", "drop_labels2", "XGBRegressor"],
+      html: `<p>作者删掉 7 个几乎不变的传感器（代码里是 1、5、6、10、16、18、19），再做一件很关键的事：<b>RUL 截断</b>。凡是 RUL 大于 195 的，一律当作 195。<span data-cell="79">出处</span></p><p>理由：发动机刚出厂那一段，传感器根本看不出“还剩 300”和“还剩 250”的差别，硬让模型去区分只会增加误差；而 195 已经是“很健康”了，不影响维修决策。这一轮还加了 <b>XGBoost</b>。</p><p class="callout">第 86 格的 SVR 用的是没截断的 <code>y_train</code> 训练，和其他模型口径不一致。</p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [0, 320], [0, 320], { xlabel: "已运行周期", ylabel: "RUL 标签" });
+        const L = 320;
+        const raw = K.svg(svg, "path", { d: `M${ax.sx(0)},${ax.sy(L)}L${ax.sx(L)},${ax.sy(0)}`, fill: "none", stroke: "var(--ink-3)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+        const cap = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 3 });
+        const capLine = K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(L), y1: ax.sy(195), y2: ax.sy(195), stroke: "var(--warn)", "stroke-dasharray": "3 3" });
+        K.svg(svg, "text", { x: ax.sx(200), y: ax.sy(195) - 8, "font-size": 12, fill: "var(--warn)" }, "上限 195");
+        K.svg(svg, "text", { x: ax.sx(10), y: ax.sy(300), "font-size": 12, class: "muted" }, "虚线：原始 RUL，直线倒数");
+        K.svg(svg, "text", { x: ax.sx(10), y: ax.sy(170), "font-size": 12, fill: "var(--c1)" }, "实线：截断后，前期是平台");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1800, (t) => {
+          const xe = L * t; let d = "";
+          for (let x = 0; x <= xe; x += 4) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(Math.min(195, L - x));
+          cap.setAttribute("d", d);
+        }));
+      },
+    },
+    {
+      title: "第三轮：加上 10 个周期的滚动平均", kicker: "第 91–101 格 · 历史特征", cells: [91, 92, 95, 101], highlight: ["rolling(10).mean()", "_rm"],
+      html: `<p>单个周期的读数噪声很大。作者给每个传感器加一个新列 <code>_rm</code>：<b>最近 10 个周期的平均值</b>，让模型看到“趋势”而不只是“这一刻”。每台发动机分开算，前 10 行不够 10 个，就直接用原值。</p><p>这就是作者说的“加入历史数据”。动画里，灰色是原始抖动的读数，彩色是 10 点滑动窗口算出的平均线。</p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [0, 200], [-0.3, 1.3], { xlabel: "周期", yticks: 0 });
+        const r = K.rng(15), e = engine(r, 200, 0.12), ys = e.map((p) => p.s);
+        K.svg(svg, "path", { d: ys.map((y, i) => (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(y)).join(""), fill: "none", stroke: "var(--ink-3)", "stroke-width": 1, opacity: 0.6 });
+        const rm = ys.map((y, i) => (i < 10 ? y : ys.slice(i - 9, i + 1).reduce((a, b) => a + b, 0) / 10));
+        const p = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const win = K.svg(svg, "rect", { x: 0, y: 30, width: ax.sx(10) - ax.sx(0), height: 250, fill: "var(--accent)", "fill-opacity": 0.12 });
+        ctx.tween(3000, (t) => {
+          const n = Math.max(1, Math.floor(200 * t));
+          p.setAttribute("d", rm.slice(0, n).map((y, i) => (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(y)).join(""));
+          win.setAttribute("x", ax.sx(Math.max(0, n - 10)));
+        });
+      },
+    },
+    {
+      title: "调参与过拟合：随机森林、XGBoost", kicker: "第 102–116 格 · 调参", cells: [102, 104, 109, 112, 115], highlight: ["GridSearchCV", "max_depth", "Bayesian Optimisation"],
+      html: `<p>有了滚动平均特征，作者重新跑四个模型，并给随机森林做了网格搜索（树的数量 50/90/120 × 最大深度 8/9/10），XGBoost 则用了“贝叶斯优化找到的参数”。</p><p>作者的判断：SVR“泛化好、没过拟合”<span data-cell="107">出处</span>；随机森林和 XGBoost 在训练/测试上<b>过拟合</b> <span data-cell="110">出处</span>。<b>过拟合</b>就是把训练题背得滚瓜烂熟，换一套题就不会了。动画用训练误差和验证误差两条线示意：模型越复杂，训练误差一直降，验证误差先降后升。</p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [1, 20], [0, 60], { xlabel: "模型复杂度（如树的深度）", ylabel: "RMSE" });
+        const tr = (d) => 48 * Math.exp(-d / 5) + 4, va = (d) => 44 * Math.exp(-d / 4) + 16 + 0.08 * d * d;
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 }), p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 470, y: 250, "font-size": 13, fill: "var(--c1)" }, "训练误差");
+        K.svg(svg, "text", { x: 470, y: 70, "font-size": 13, fill: "var(--c6)" }, "验证误差（示意）");
+        const mark = K.svg(svg, "line", { x1: 0, x2: 0, y1: 30, y2: 280, stroke: "var(--good)", "stroke-dasharray": "4 3" }); mark.style.opacity = 0;
+        ctx.tween(2200, (t) => {
+          const e = 1 + 19 * t; let a = "", b = "";
+          for (let d = 1; d <= e; d += 0.2) { a += (a ? "L" : "M") + ax.sx(d) + "," + ax.sy(tr(d)); b += (b ? "L" : "M") + ax.sx(d) + "," + ax.sy(va(d)); }
+          p1.setAttribute("d", a); p2.setAttribute("d", b);
+        }).then((ok) => {
+          if (!ok) return; let best = 1; for (let d = 1; d <= 20; d += 0.1) if (va(d) < va(best)) best = d;
+          mark.setAttribute("x1", ax.sx(best)); mark.setAttribute("x2", ax.sx(best)); mark.style.opacity = 1;
+          K.svg(svg, "text", { x: ax.sx(best) + 6, y: 120, "font-size": 12, fill: "var(--good)" }, "最合适");
+          K.svg(svg, "text", { x: ax.sx(15), y: 150, "font-size": 12, fill: "var(--bad)", "text-anchor": "middle" }, "过拟合区");
+        });
+      },
+    },
+    {
+      title: "交叉验证、特征重要性与最佳模型", kicker: "第 117–134 格 · 评估", cells: [117, 120, 122, 132, 134], highlight: ["KFold(n_splits=4", "feature_importances_", "RMSE obtained is 31"],
+      html: `<p>作者对“目前最好”的 SVR 做 <b>4 折交叉验证</b>：把数据分成 4 份，轮流拿 1 份考试、3 份学习，看分数稳不稳。再画出 XGBoost、线性回归、随机森林眼里的<b>特征重要性</b>。</p><p>结论：s_9（核心转速）、s_11、s_12、s_7 对 RUL 影响最明显 <span data-cell="132">出处</span>；SVR 在全数据上最好，<b>测试 RMSE 为 31</b> <span data-cell="134">出处</span>。</p><p class="callout">交叉验证里同样每折都重新 <code>fit_transform</code>，并且仍按行切分，同一台发动机会跨折出现。</p>`,
+      draw(svg, ctx) {
+        for (let k = 0; k < 4; k++) for (let j = 0; j < 4; j++) {
+          const isT = j === k;
+          const r0 = K.svg(svg, "rect", { x: 40 + j * 80, y: 50 + k * 56, width: 74, height: 42, rx: 5, fill: isT ? "color-mix(in srgb, var(--c3) 22%, var(--panel))" : "color-mix(in srgb, var(--c1) 14%, var(--panel))", stroke: isT ? "var(--c3)" : "var(--c1)" });
+          K.svg(svg, "text", { x: 77 + j * 80, y: 76 + k * 56, "text-anchor": "middle", "font-size": 12 }, isT ? "考试" : "学习");
+          r0.style.opacity = 0; ctx.wait(k * 350).then((ok) => ok && (r0.style.opacity = 1));
+        }
+        K.svg(svg, "text", { x: 40, y: 34, "font-size": 13, "font-weight": 700 }, "4 折交叉验证");
+        K.svg(svg, "text", { x: 420, y: 34, "font-size": 13, "font-weight": 700 }, "作者点名的重要传感器");
+        const names = [["s_9 核心转速", 0.9], ["s_11 HPC 出口静压", 0.75], ["s_12 燃油流量比", 0.68], ["s_7 HPC 出口压力", 0.6]];
+        const bs = names.map((n, i) => { K.svg(svg, "text", { x: 420, y: 70 + i * 50, "font-size": 12 }, n[0]); return K.svg(svg, "rect", { x: 420, y: 76 + i * 50, width: 0, height: 14, rx: 3, fill: "var(--c2)" }); });
+        K.svg(svg, "text", { x: 420, y: 290, "font-size": 11, class: "muted" }, "条长仅表示作者文字里的排序，不是原图数值");
+        ctx.wait(1400).then((ok) => ok && ctx.tween(1000, (t) => bs.forEach((b, i) => b.setAttribute("width", 250 * names[i][1] * t))));
+      },
+    },
+    {
+      title: "换个问法：把 RUL 分成三档风险", kicker: "第 135–149 格 · 回归转分类", cells: [135, 136, 137, 141], highlight: ["equalObs", "k<=68", "k>69"],
+      html: `<p>作者把 RUL 切成几个区间，变成分类问题。先试了等宽分箱（区间一样宽）和<b>等频分箱</b>（每个区间样本一样多），最后选了样本均衡的三档：</p><ul class="tight"><li>RUL 0–68：<b style="color:var(--bad)">危险区</b></li><li>RUL 69–137：<b style="color:var(--warn)">中等风险</b></li><li>RUL 138–361：<b style="color:var(--good)">无风险</b></li></ul><p>出处 <span data-cell="137">第 137 格</span>。注意第 141 格的条件写成 <code>k&gt;69</code>，RUL 恰好 69 的样本会掉进第三档。</p>`,
+      draw(svg, ctx) {
+        const r = K.rng(30), vals = [];
+        for (let e = 0; e < 60; e++) { const L = Math.round(K.clamp(205 + K.randn(r) * 46, 128, 362)); for (let t = 0; t < L; t += 3) vals.push(L - 1 - t); }
+        vals.sort((a, b) => a - b);
+        const q = (p) => vals[Math.floor(p * (vals.length - 1))], q1 = q(1 / 3), q2 = q(2 / 3);
+        const ax = K.axes(svg, { x: 60, y: 40, w: 600, h: 220 }, [0, 362], [0, 1], { xlabel: "RUL（示意分布）", yticks: 0 });
+        const bins = 36, hist = new Array(bins).fill(0); vals.forEach((v) => hist[Math.min(bins - 1, Math.floor(v / 362 * bins))]++);
+        const mx = Math.max(...hist);
+        const rects = hist.map((h, i) => K.svg(svg, "rect", { x: ax.sx(i * 362 / bins) + 1, y: ax.sy(0), width: 600 / bins - 2, height: 0, fill: "var(--ink-3)", opacity: 0.6 }));
+        ctx.tween(1000, (t) => rects.forEach((rc, i) => { const h = 200 * hist[i] / mx * t; rc.setAttribute("y", ax.sy(0) - h); rc.setAttribute("height", h); }))
+          .then((ok) => ok && ctx.tween(900, (t) => rects.forEach((rc, i) => {
+            const c = (i + 0.5) * 362 / bins; rc.style.fill = c <= q1 ? "var(--bad)" : c <= q2 ? "var(--warn)" : "var(--good)"; rc.style.opacity = 0.35 + 0.5 * t;
+          })))
+          .then((ok) => { if (!ok) return; [q1, q2].forEach((v) => K.svg(svg, "line", { x1: ax.sx(v), x2: ax.sx(v), y1: 40, y2: 260, stroke: "var(--ink)", "stroke-dasharray": "4 3" }));
+            K.svg(svg, "text", { x: 70, y: 300, "font-size": 12 }, `等频三分：每档样本一样多。模拟数据的切点 ≈ ${q1}、${q2}（作者在真实数据上得到 68、137）`); });
+      },
+    },
+    {
+      title: "四个分类器对比：SVC、随机森林、朴素贝叶斯、KNN", kicker: "第 150–166 格 · 分类建模", cells: [150, 151, 155, 158, 161, 165], highlight: ["confusion_matrix", "GaussianNB", "n_neighbors=100", "classification_report"],
+      html: `<p>同样的特征（含滚动平均），换成四个分类器：</p><ul class="tight"><li><b>线性 SVC</b>：在特征空间里找一块“隔板”把三档分开</li><li><b>随机森林</b>：很多棵树投票</li><li><b>高斯朴素贝叶斯</b>：假设每个传感器各自独立地服从正态分布，按概率算“最像哪一档”</li><li><b>KNN（k=100）</b>：找最像的 100 个历史时刻，看它们多数属于哪档</li></ul><p>每个都画<b>混淆矩阵</b>，看危险区有没有被错判成安全。最后又对 SVC 做了 4 折交叉验证。作者最后一句写的是“SVR 是最好的模型”<span data-cell="166">出处</span>，前文语境是回归部分的结论。</p>`,
+      draw(svg, ctx) {
+        const labs = ["危险", "中等", "安全"], M = [[0.86, 0.13, 0.01], [0.12, 0.7, 0.18], [0.01, 0.15, 0.84]];
+        K.svg(svg, "text", { x: 200, y: 26, "text-anchor": "middle", "font-size": 13, class: "muted" }, "混淆矩阵（示意比例，非原文结果）");
+        K.svg(svg, "text", { x: 30, y: 180, "font-size": 12, class: "muted", transform: "rotate(-90 30 180)", "text-anchor": "middle" }, "真实档");
+        labs.forEach((l, i) => { K.svg(svg, "text", { x: 120 + i * 86 + 40, y: 48, "text-anchor": "middle", "font-size": 12 }, "判" + l); K.svg(svg, "text", { x: 112, y: 100 + i * 86, "text-anchor": "end", "font-size": 12 }, l); });
+        const cells = [];
+        M.forEach((row, i) => row.forEach((v, j) => {
+          const g = K.svg(svg, "rect", { x: 120 + j * 86, y: 56 + i * 86, width: 80, height: 80, rx: 4, fill: i === j ? "var(--good)" : (i === 0 && j === 2) ? "var(--bad)" : "var(--warn)", "fill-opacity": 0 });
+          const t = K.svg(svg, "text", { x: 160 + j * 86, y: 101 + i * 86, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "");
+          cells.push({ g, t, v });
+        }));
+        ctx.tween(1400, (t) => cells.forEach((c) => { K.set(c.g, { "fill-opacity": 0.15 + c.v * 0.7 * t }); c.t.textContent = Math.round(c.v * 100 * t) + "%"; }))
+          .then((ok) => { if (!ok) return;
+            K.svg(svg, "text", { x: 420, y: 100, "font-size": 14, "font-weight": 700, fill: "var(--bad)" }, "最怕的格子：真危险 → 判安全");
+            K.svg(svg, "text", { x: 420, y: 124, "font-size": 12 }, "（右上角）漏报会让快坏的发动机继续飞");
+            K.svg(svg, "text", { x: 420, y: 180, "font-size": 14, "font-weight": 700, fill: "var(--warn)" }, "相邻档之间的混淆");
+            K.svg(svg, "text", { x: 420, y: 204, "font-size": 12 }, "68 和 69 本来就差不多，分错可以理解");
+          });
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：RUL 截断上限 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "cap", label: "RUL 截断上限（拖到最右 = 不截断）", min: 60, max: 360, step: 5, value: 195 },
+      { id: "noise", label: "传感器噪声", min: 0.02, max: 0.25, step: 0.01, value: 0.08, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "换一批发动机", button: true },
+    ],
+    note: "模拟 40 台训练发动机 + 40 台测试发动机：每台在寿命前 35%–60% 健康度不变，之后传感器开始上升。现场训练一个最简单的回归器：把传感器读数分成 14 个区间，每个区间取训练样本（截断后）RUL 标签的平均值作为预测，再在测试发动机上和真实 RUL 比，算 RMSE。重点看“RUL < 60 的危险段”误差。",
+    render(svg, v) {
+      const r = K.rng(500 + v.seed * 13), mk = (n) => { const E = []; for (let i = 0; i < n; i++) E.push(engine(r, Math.round(K.clamp(205 + K.randn(r) * 46, 128, 362)), v.noise)); return E; };
+      const tr = mk(40).flat(), te = mk(40).flat();
+      const cap = v.cap >= 360 ? Infinity : v.cap;
+      // 按传感器读数分箱，每箱的平均（截断后的）RUL 作为预测：简单的非参数回归
+      const B = 14, lo = -0.3, hi = 1.3, sum = new Array(B).fill(0), cnt = new Array(B).fill(0);
+      const bi = (s) => K.clamp(Math.floor((s - lo) / (hi - lo) * B), 0, B - 1);
+      tr.forEach((p) => { const k = bi(p.s); sum[k] += Math.min(p.rul, cap); cnt[k]++; });
+      const pred = sum.map((s, k) => (cnt[k] ? s / cnt[k] : NaN));
+      for (let k = 0; k < B; k++) if (isNaN(pred[k])) pred[k] = k ? pred[k - 1] : 200;
+      let se = 0, n = 0, seL = 0, nL = 0;
+      const ax = K.axes(svg, { x: 55, y: 20, w: 560, h: 280 }, [0, 362], [0, 362], { xlabel: "真实 RUL", ylabel: "预测 RUL" });
+      te.forEach((p, i) => {
+        const yh = pred[bi(p.s)], e = yh - p.rul;
+        se += e * e; n++; if (p.rul < 60) { seL += e * e; nL++; }
+        if (i % 6 === 0) K.svg(svg, "circle", { cx: ax.sx(p.rul), cy: ax.sy(K.clamp(yh, 0, 362)), r: 2.2, fill: p.rul < 60 ? "var(--c6)" : "var(--c1)", opacity: 0.5 });
+      });
+      K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0), x2: ax.sx(362), y2: ax.sy(362), stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+      if (cap < 360) K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(362), y1: ax.sy(cap), y2: ax.sy(cap), stroke: "var(--warn)", "stroke-dasharray": "3 3" });
+      K.svg(svg, "text", { x: 60, y: 345, "font-size": 12, class: "muted" }, "虚线对角线 = 完美预测；红点 = RUL<60 的危险段；橙线 = 截断上限");
+      const rmse = Math.sqrt(se / n), rmseL = Math.sqrt(seL / nL);
+      return { readout: [
+        { k: "全部测试点 RMSE（按真实 RUL）", v: rmse.toFixed(1) },
+        { k: "危险段（RUL<60）RMSE", v: rmseL.toFixed(1), color: rmseL > 30 ? "var(--bad)" : "var(--good)" },
+        { k: "截断上限", v: cap === Infinity ? "不截断" : String(cap) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：滚动平均窗口 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "w", label: "滚动平均窗口（周期数，作者用 10）", min: 1, max: 60, step: 1, value: 10 },
+      { id: "noise", label: "传感器噪声", min: 0.02, max: 0.3, step: 0.01, value: 0.12, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "换一台发动机", button: true },
+    ],
+    note: "现场生成一台发动机的传感器序列（真实退化 = 黑色虚线），按作者的做法算滚动平均（前 w 个点直接用原值）。读数卡：平滑线和真实退化之间的平均偏差，以及“最后 30 个周期”里平滑线落后真实值多少。窗口太小去不掉噪声，太大会反应迟钝。",
+    render(svg, v) {
+      const r = K.rng(900 + v.seed * 7), e = engine(r, 220, v.noise), ys = e.map((p) => p.s);
+      const r2 = K.rng(900 + v.seed * 7), clean = engine(r2, 220, 0).map((p) => p.s);
+      const w = v.w, rm = ys.map((y, i) => (i < w ? y : ys.slice(i - w + 1, i + 1).reduce((a, b) => a + b, 0) / w));
+      const ax = K.axes(svg, { x: 50, y: 20, w: 570, h: 270 }, [0, 220], [-0.4, 1.4], { xlabel: "周期", yticks: 0 });
+      const path = (arr) => arr.map((y, i) => (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(y)).join("");
+      K.svg(svg, "path", { d: path(ys), fill: "none", stroke: "var(--ink-3)", "stroke-width": 1, opacity: 0.5 });
+      K.svg(svg, "path", { d: path(clean), fill: "none", stroke: "var(--ink)", "stroke-width": 1.5, "stroke-dasharray": "5 3" });
+      K.svg(svg, "path", { d: path(rm), fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+      K.svg(svg, "text", { x: 60, y: 325, "font-size": 12, class: "muted" }, "灰：原始读数   黑虚线：真实退化   蓝：滚动平均");
+      let dev = 0, lag = 0;
+      for (let i = 0; i < 220; i++) dev += Math.abs(rm[i] - clean[i]);
+      for (let i = 190; i < 220; i++) lag += clean[i] - rm[i];
+      return { readout: [
+        { k: "平滑线与真实退化的平均偏差", v: (dev / 220).toFixed(3) },
+        { k: "最后 30 周期平均落后", v: (lag / 30).toFixed(3), color: lag / 30 > 0.08 ? "var(--bad)" : "var(--good)" },
+        { k: "原始读数的噪声", v: v.noise.toFixed(2) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

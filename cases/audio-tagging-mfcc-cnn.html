@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>环境声音分类</title>
+<meta name="description" content="Kaggle 案例拆解：Freesound 41 类通用声音标注，对比“原始波形 + 一维卷积”和“MFCC + 二维卷积”，再做 10 折与跨模型几何平均集成。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">音频 · 41 类多分类 · 声音事件标注</div>
+  <h1>小号、猫叫还是掌声？41 类声音的两种听法</h1>
+  <p class="en">Beginner's Guide to Audio Data（Freesound General-Purpose Audio Tagging Challenge）</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">PCM 采样</span><span class="tag method">随机裁剪 / 补零</span><span class="tag method">原始波形 Conv1D</span>
+    <span class="tag method">MFCC</span><span class="tag method">Conv2D + BatchNorm</span><span class="tag method">10 折交叉验证</span><span class="tag method">几何平均集成</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Zafar（fizzbuzz）</b></span>
+    <span>Kaggle 点赞 <b>1,760</b>（2026-11 抓取）</span>
+    <span>比赛 <b>freesound-audio-tagging</b></span>
+    <span><a href="https://www.kaggle.com/code/fizzbuzz/beginner-s-guide-to-audio-data" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">Freesound 社区上传的短音频</div><p>乐器、人声、动物、机器等真实声音，16 位 PCM、44.1 kHz 采样。部分标签经过人工核验（manually_verified），其余是“弱标注”，可能有错。<span data-cell="11">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">每段音频属于 41 类中的哪一类</div><p>例如 Trumpet、Squeak、Meow、Applause、Finger_snapping。比赛允许每段给出 3 个候选标签（按 MAP@3 计分，见比赛说明）。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">两条路线 + 集成</div><p>路线 1：原始波形直接进<b>一维卷积</b>；路线 2：先算 <b>MFCC</b>（模仿人耳的频谱特征）再进<b>二维卷积</b>。各自做 10 折训练，用几何平均合并，最后两条路线再合并。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">集成后公榜 0.895</div><p>1D 波形 0.809，2D MFCC 0.844，二者集成 0.895；只用人工核验标签训练的 2D 模型反而只有 0.785。<span data-cell="66">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">Kaggle 比赛 Freesound General-Purpose Audio Tagging Challenge 的数据：一批来自 Freesound 网站的短音频文件，加上两张 CSV 表。下面的信息来自 notebook 文字与代码；训练集、测试集的具体条数在运行输出里，这里不列。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">声音类别</div><div class="v">41 类</div></div>
+        <div class="stat-tile"><div class="k">每类样本数</div><div class="v">94 – 300</div></div>
+        <div class="stat-tile"><div class="k">采样率</div><div class="v">44.1 kHz</div></div>
+        <div class="stat-tile"><div class="k">位深</div><div class="v">16 位 PCM</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">41 类见第 30 格 <span data-cell="30">出处</span>；每类最少 94、最多 300 条，以及采样率、位深见第 11 格 <span data-cell="11">出处</span>。提交时每段音频给 3 个候选标签（第 45 格）<span data-cell="45">出处</span>，按比赛规则以 MAP@3 计分。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">train.csv 每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>fname</code></td><td>音频文件名，如 <code>00044347.wav</code>（作者示例中的踩镲声）</td><td>文本</td></tr>
+        <tr><td><code>label</code></td><td><b>要预测的答案</b>：41 类之一，如 Trumpet、Squeak、Meow、Applause、Finger_snapping、Hi-hat</td><td>类别</td></tr>
+        <tr><td><code>manually_verified</code></td><td>1 = 人工核验过；0 = 未核验，可能标错（弱标注）</td><td>0/1</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">测试集的 <code>sample_submission.csv</code> 只有 fname 和待填写的 label。每个 .wav 本身是一串整数：一秒 44100 个，3.2 秒就是 141120 个（作者第 11 格的例子）。<span data-cell="11">出处</span></p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="45">
+    <h3>动手试试 A · 几何平均 vs 算术平均集成 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="49">
+    <h3>动手试试 B · 一段声音如何变成 MFCC 图 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+</section>
+
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结果（公榜分数）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>模型</th><th>可训练参数</th><th>公榜分数</th><th>出处</th></tr>
+        <tr><td>1D 卷积 · 原始波形</td><td>360,513</td><td>0.809</td><td><span data-cell="66">第 66 格</span></td></tr>
+        <tr><td>2D 卷积 · MFCC（只用人工核验标签）</td><td>168,361</td><td>0.785</td><td><span data-cell="66">第 66 格</span></td></tr>
+        <tr><td>2D 卷积 · MFCC</td><td>168,361</td><td>0.844</td><td><span data-cell="66">第 66 格</span></td></tr>
+        <tr><td>1D + 2D 集成</td><td>—</td><td>0.895</td><td><span data-cell="66">第 66 格</span></td></tr>
+      </table></div>
+      <p>作者结论：MFCC 上的二维卷积比原始波形上的一维卷积效果好，参数还少一半多。<span data-cell="66">第 66 格</span></p>
+      <p class="callout warn">Kaggle 上这个 notebook 默认 <code>COMPLETE_RUN = False</code>，只跑一个调试用的“哑模型”；正式的 10 折模型是作者在本地训练后把预测结果作为数据集上传的。<span data-cell="25">第 25 格</span></p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一段 2 秒左右的声音，输出最可能的 3 个类别。</li>
+        <li><b>同类问题：</b>城市噪声监测、设备异响报警、野生动物声学调查（鸟鸣、蛙鸣）、智能音箱识别玻璃破碎/婴儿哭声、视频自动打标签。</li>
+        <li><b>可迁移套路：</b>统一采样率与长度 → 两种输入（波形 / 频谱类“图像”）各训一个 CNN → K 折出多份预测 → 几何平均集成。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>统一配置 Config：采样率、时长、类别数 41、折数 <span data-cell="30">第 30 格</span></li>
+        <li>DataGenerator：读入、重采样、随机裁剪/补零 <span data-cell="33">第 33 格</span></li>
+        <li>归一化 audio_norm <span data-cell="35">第 35 格</span></li>
+        <li>1D 卷积网络（原始波形）<span data-cell="37">第 37 格</span></li>
+        <li>10 折 + ModelCheckpoint + EarlyStopping <span data-cell="43">第 43 格</span></li>
+        <li>MFCC（librosa）<span data-cell="48">第 48 格</span>；2D 卷积网络 <span data-cell="52">第 52 格</span></li>
+        <li>几何平均集成 <span data-cell="64">第 64 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>只用人工核验过的“干净”标签训练，分数反而从 0.844 掉到 0.785。为什么更多但带噪声的数据会更好？什么情况下结论会反过来？</li>
+      <li>1D 模型把采样率降到 16 kHz，2D 模型用 44.1 kHz 算 MFCC。降采样丢掉了哪些频率？对“踩镲”和“低音提琴”影响一样吗？</li>
+      <li>训练时随机截取 2 秒。如果一段 10 秒的录音里，真正的声音只在第 8 秒出现，会发生什么？有什么改进办法？</li>
+      <li>几何平均和算术平均有什么区别？为什么“只要有一个模型很确定地说不是”，几何平均就会把这个类别压下去？</li>
+      <li>两个参数量更少、单独分数更低的模型集成后反而大幅领先。集成起作用的前提是什么？</li>
+    </ol>
+  </div>
+</section>
+
+
+<footer class="foot">
+  原 notebook 作者 Zafar（Kaggle: fizzbuzz），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Freesound General-Purpose Audio Tagging Challenge（Kaggle 比赛，音频来自 Freesound.org）。
+</footer>
+</main>
+
+<script src="nb/audio-tagging-mfcc-cnn.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 页面自用 DSP：FFT、STFT、梅尔滤波器组、DCT ---------- */
+  function fft(re, im) {
+    const n = re.length;
+    for (let i = 1, j = 0; i < n; i++) { let bit = n >> 1; for (; j & bit; bit >>= 1) j ^= bit; j ^= bit; if (i < j) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; } }
+    for (let len = 2; len <= n; len <<= 1) {
+      const ang = (-2 * Math.PI) / len, wr = Math.cos(ang), wi = Math.sin(ang);
+      for (let i = 0; i < n; i += len) { let cr = 1, ci = 0; for (let j = 0; j < len / 2; j++) { const a = i + j, b = a + len / 2; const xr = re[b] * cr - im[b] * ci, xi = re[b] * ci + im[b] * cr; re[b] = re[a] - xr; im[b] = im[a] - xi; re[a] += xr; im[a] += xi; const t = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = t; } }
+    }
+  }
+  function power(x, N, hop) {
+    const out = [];
+    for (let s = 0; s + N <= x.length; s += hop) {
+      const re = new Float64Array(N), im = new Float64Array(N);
+      for (let i = 0; i < N; i++) re[i] = x[s + i] * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1)));
+      fft(re, im);
+      const p = new Float64Array(N / 2 + 1);
+      for (let k = 0; k <= N / 2; k++) p[k] = (re[k] * re[k] + im[k] * im[k]) / N;
+      out.push(p);
+    }
+    return out;
+  }
+  const hz2mel = (f) => 2595 * Math.log10(1 + f / 700), mel2hz = (m) => 700 * (Math.pow(10, m / 2595) - 1);
+  function melBank(nMels, N, sr) {
+    const mMax = hz2mel(sr / 2), pts = [];
+    for (let i = 0; i < nMels + 2; i++) pts.push(mel2hz((mMax * i) / (nMels + 1)));
+    const bins = pts.map((f) => (f * N) / sr), F = [];
+    for (let m = 1; m <= nMels; m++) {
+      const w = new Float64Array(N / 2 + 1);
+      for (let k = 0; k <= N / 2; k++) {
+        if (k >= bins[m - 1] && k <= bins[m]) w[k] = (k - bins[m - 1]) / (bins[m] - bins[m - 1] || 1);
+        else if (k > bins[m] && k <= bins[m + 1]) w[k] = (bins[m + 1] - k) / (bins[m + 1] - bins[m] || 1);
+      }
+      F.push(w);
+    }
+    return { F, edges: pts };
+  }
+  function dct(v, n) { const N = v.length, out = []; for (let k = 0; k < n; k++) { let s = 0; for (let i = 0; i < N; i++) s += v[i] * Math.cos((Math.PI * k * (2 * i + 1)) / (2 * N)); out.push(s); } return out; }
+  function synthSound(type, sr, dur, seed) {
+    const n = Math.floor(sr * dur), x = new Float64Array(n), r = K.rng(seed || 1);
+    let ph = 0, lp = 0;
+    for (let i = 0; i < n; i++) {
+      const t = i / sr;
+      if (type === "whistle") { const f = 1500 + 60 * Math.sin(2 * Math.PI * 5 * t); ph += (2 * Math.PI * f) / sr; x[i] = Math.sin(ph) * Math.min(1, t * 20, (dur - t) * 20); }
+      else if (type === "trumpet") { const f = 349; ph += (2 * Math.PI * f) / sr; let v = 0; for (let k = 1; k <= 10; k++) if (k * f < sr / 2) v += Math.sin(k * ph) * (k < 5 ? 1 : 0.6); x[i] = v * Math.min(1, t * 15) * (0.8 + 0.2 * Math.sin(2 * Math.PI * 4 * t)); }
+      else if (type === "meow") { const u = t / dur, f = 500 + 350 * Math.sin(Math.PI * u) - 120 * u; ph += (2 * Math.PI * f) / sr; let v = 0; for (let k = 1; k <= 6; k++) if (k * f < sr / 2) v += Math.sin(k * ph) / k; x[i] = v * Math.pow(Math.sin(Math.PI * u), 1.5); }
+      else if (type === "applause") { const nz = K.randn(r); lp = 0.3 * lp + 0.7 * nz; const clap = Math.exp(-((t * 13) % 1) * 18) * (0.5 + r()); x[i] = (nz - lp) * clap; }
+      else if (type === "hihat") { const nz = K.randn(r); x[i] = (nz - lp) * Math.exp(-((t * 4) % 1) * 30); lp = nz; }
+    }
+    let mx = 0; for (let i = 0; i < n; i++) mx = Math.max(mx, Math.abs(x[i]));
+    for (let i = 0; i < n; i++) x[i] /= mx || 1;
+    return x;
+  }
+  function mfccOf(x, sr, N, hop, nMels, nMfcc) {
+    const P = power(x, N, hop), bank = melBank(nMels, N, sr);
+    const M = P.map((p) => bank.F.map((w) => { let s = 0; for (let k = 0; k < w.length; k++) s += w[k] * p[k]; return s; }));
+    const L = M.map((m) => m.map((v) => 10 * Math.log10(v + 1e-10)));
+    const C = L.map((l) => dct(l, nMfcc));
+    return { P, M, L, C, bank };
+  }
+  function heatMap(svg, mat, box, opt) {
+    opt = opt || {};
+    const nc = mat.length, nr = mat[0].length;
+    let mn = Infinity, mx = -Infinity;
+    mat.forEach((c) => c.forEach((v) => { if (v < mn) mn = v; if (v > mx) mx = v; }));
+    if (opt.floor != null) mn = Math.max(mn, mx - opt.floor);
+    const cw = box.w / nc, ch = box.h / nr, els = [];
+    /* 发散色（MFCC）：每个系数沿时间标准化后再上色，和作者训练前的标准化一致 */
+    const mu = [], sd = [];
+    for (let j = 0; j < nr; j++) { let a = 0, b = 0; for (let i = 0; i < nc; i++) a += mat[i][j]; a /= nc; for (let i = 0; i < nc; i++) b += (mat[i][j] - a) ** 2; mu.push(a); sd.push(Math.sqrt(b / nc) || 1); }
+    for (let i = 0; i < nc; i++) for (let j = 0; j < nr; j++) {
+      const t = K.clamp((mat[i][j] - mn) / (mx - mn || 1), 0, 1);
+      const z = K.clamp((mat[i][j] - mu[j]) / sd[j] / 2.2, -1, 1);
+      els.push(K.svg(svg, "rect", { x: box.x + i * cw, y: box.y + box.h - (j + 1) * ch, width: cw + 0.4, height: ch + 0.4, fill: opt.diverge ? K.heat(z, true) : K.heat(t) }));
+    }
+    return els;
+  }
+  function wavePath(x, ax, n0, n1) {
+    const W = 360, step = Math.max(1, Math.floor((n1 - n0) / W)); let d = "";
+    for (let i = n0; i < n1; i += step) { let lo = 1, hi = -1; for (let j = i; j < Math.min(i + step, n1); j++) { lo = Math.min(lo, x[j]); hi = Math.max(hi, x[j]); } d += (d ? "L" : "M") + ax.sx(i) + "," + ax.sy(hi) + "L" + ax.sx(i) + "," + ax.sy(lo); }
+    return d;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "开场：Freesound 声音标注比赛", kicker: "第 0–1 格 · 目标与开关",
+      html: `<p>作者先介绍比赛：给来自 Freesound 的真实声音（乐器、人声、动物、机器……）自动打标签，难点是部分标签没有人工核验。目录列出了 6 部分：数据探索、原始波形 1D 模型、MFCC 介绍、MFCC 2D 模型、两者集成、结论。</p><p>第 1 格有一个开关 <code>COMPLETE_RUN = False</code>：Kaggle 上运行时间有限，默认只跑缩小版，完整的 10 折训练由作者在本地完成。</p>`,
+      cells: [0, 1], highlight: ["COMPLETE_RUN = False"],
+      draw(svg, ctx) {
+        const parts = ["数据探索", "原始波形\n1D CNN", "MFCC\n介绍", "MFCC\n2D CNN", "两路集成", "结果"];
+        const els = parts.map((p, i) => { const g = K.node(svg, 20 + i * 117, 120, 105, 70, p, { bold: true, stroke: K.colors[i], fill: `color-mix(in srgb, ${K.colors[i]} 12%, var(--panel))` }); g.style.opacity = 0; return g; });
+        for (let i = 0; i < 5; i++) K.arrow(svg, 125 + i * 117, 155, 135 + i * 117, 155);
+        K.svg(svg, "text", { x: 20, y: 80, "font-size": 14, "font-weight": 700 }, "这份 notebook 的 6 个部分（第 0 格目录）");
+        K.svg(svg, "text", { x: 20, y: 250, "font-size": 13, "font-family": "var(--mono)" }, "COMPLETE_RUN = False  →  Kaggle 上只跑缩小版，完整训练在作者本地");
+        (async () => { for (const e of els) if (!(await ctx.tween(250, (t) => (e.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      at: 2, title: "比赛与数据：41 类、标签有真有假", kicker: "第 0–11 格 · 认识数据",
+      html: `<p>训练集里每个文件有一个标签（共 41 类）和一列 <code>manually_verified</code>：1 表示人工核验过，0 表示没核验，可能标错，这叫<b>弱标注</b>。</p><p>作者画出每类样本数的堆叠柱状图，发现两件事：每类数量不均匀，<b>最少 94 条、最多 300 条</b>；每类里核验过的比例也不一样。<span data-cell="11">第 11 格</span></p>`,
+      cells: [9, 10], highlight: ["manually_verified", "min(train.label.value_counts())"],
+      draw(svg, ctx) {
+        const r = K.rng(5), n = 41, vals = [];
+        for (let i = 0; i < n; i++) vals.push(94 + (300 - 94) * Math.pow(i / (n - 1), 1.6) * (i === n - 1 ? 1 : 0.92 + 0.08 * r()));
+        vals[0] = 94; vals[n - 1] = 300;
+        const ax = K.axes(svg, { x: 50, y: 40, w: 640, h: 230 }, [0, n], [0, 320], { xticks: 0, yticks: 4, ylabel: "样本数" });
+        const bars = vals.map((v, i) => {
+          const ver = v * (0.3 + 0.5 * r());
+          const g = K.svg(svg, "g");
+          const b1 = K.svg(g, "rect", { x: ax.sx(i) + 1, width: 640 / n - 3, y: ax.sy(0), height: 0, fill: "var(--c1)" });
+          const b2 = K.svg(g, "rect", { x: ax.sx(i) + 1, width: 640 / n - 3, y: ax.sy(0), height: 0, fill: "var(--c2)", opacity: 0.85 });
+          return { v, ver, b1, b2 };
+        });
+        K.svg(svg, "text", { x: 50, y: 24, "font-size": 12, fill: "var(--c1)" }, "■ 人工核验");
+        K.svg(svg, "text", { x: 140, y: 24, "font-size": 12, fill: "var(--c2)" }, "■ 未核验（弱标注）");
+        K.svg(svg, "text", { x: 300, y: 24, "font-size": 12, class: "muted" }, "41 类按数量排序（每类比例为示意，最少 94、最多 300 为原文）");
+        K.svg(svg, "text", { x: ax.sx(0), y: 296, "font-size": 12, fill: "var(--warn)" }, "最少 94");
+        K.svg(svg, "text", { x: ax.sx(n) - 50, y: 296, "font-size": 12, fill: "var(--warn)" }, "最多 300");
+        ctx.tween(1500, (t) => bars.forEach((d, i) => {
+          const k = K.clamp(t * 1.6 - i / n * 0.6, 0, 1);
+          const h1 = (ax.sy(0) - ax.sy(d.ver)) * k, h2 = (ax.sy(d.ver) - ax.sy(d.v)) * k;
+          d.b1.setAttribute("y", ax.sy(0) - h1); d.b1.setAttribute("height", h1);
+          d.b2.setAttribute("y", ax.sy(0) - h1 - h2); d.b2.setAttribute("height", h2);
+        }));
+      },
+    },
+    {
+      at: 11, title: "声音在电脑里是一串整数", kicker: "第 11–18 格 · 读取音频",
+      html: `<p>音频是 <b>PCM</b>（脉冲编码调制）格式：每秒对声波“拍照” 44100 次（采样率 44.1 kHz），每次的振幅用 16 位整数记录，可取 2<sup>16</sup> = 65536 种值。</p><p>所以 3.2 秒的音频就是 44100 × 3.2 = 141120 个整数。作者分别用 <code>wave</code> 和 <code>scipy</code> 读入并画出前 500 个点。动画：连续声波 → 等间隔采样 → 取整（为了看清只画了 8 个量化等级）。</p>`,
+      cells: [11, 14], highlight: ["wavfile.read", "getframerate"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 30, w: 640, h: 260 }, [0, 1], [-1.1, 1.1], { xticks: 0, yticks: 0, xlabel: "时间" });
+        const f = (t) => 0.7 * Math.sin(2 * Math.PI * 2.3 * t) + 0.3 * Math.sin(2 * Math.PI * 7.1 * t + 1);
+        let d = ""; for (let t = 0; t <= 1.0001; t += 0.004) d += (d ? "L" : "M") + ax.sx(t) + "," + ax.sy(f(t));
+        K.svg(svg, "path", { d, fill: "none", stroke: "var(--ink-3)", "stroke-width": 1.5 });
+        for (let q = -4; q <= 4; q++) K.svg(svg, "line", { x1: 50, x2: 690, y1: ax.sy(q / 4), y2: ax.sy(q / 4), stroke: "var(--line)", "stroke-dasharray": "2 4" });
+        const n = 40, pts = [];
+        for (let i = 0; i < n; i++) {
+          const t = (i + 0.5) / n, v = f(t), qv = Math.round(v * 4) / 4;
+          const ln = K.svg(svg, "line", { x1: ax.sx(t), x2: ax.sx(t), y1: ax.sy(0), y2: ax.sy(0), stroke: "var(--c1)", "stroke-width": 1.5 });
+          const c = K.svg(svg, "circle", { cx: ax.sx(t), cy: ax.sy(v), r: 0, fill: "var(--c1)" });
+          pts.push({ ln, c, v, qv });
+        }
+        const lab = K.svg(svg, "text", { x: 50, y: 20, "font-size": 13, "font-weight": 700 }, "① 采样：每隔固定时间取一个值");
+        ctx.tween(1400, (t) => pts.forEach((p, i) => { const k = K.clamp(t * n * 1.2 - i, 0, 1); p.ln.setAttribute("y2", ax.sy(p.v * k)); p.c.setAttribute("r", 4 * k); }))
+          .then((ok) => { if (ok) lab.textContent = "② 量化：把每个值取整到最近的等级（真实为 65536 级）"; return ok && ctx.wait(600); })
+          .then((ok) => ok && ctx.tween(900, (t) => pts.forEach((p) => { const y = ax.sy(K.lerp(p.v, p.qv, t)); p.c.setAttribute("cy", y); p.ln.setAttribute("y2", y); p.c.style.fill = "var(--c2)"; })));
+      },
+    },
+    {
+      at: 19, title: "每段音频长短不一", kicker: "第 19–24 格 · 时长分析",
+      html: `<p>作者用小提琴图看每类音频的帧数分布，再画训练/测试集的长度直方图。结论：长度差异很大，大多数文件很短；测试集里还有 4 个异常长度，作者逐个播放检查。</p><p>神经网络需要固定长度的输入，所以下一步必须统一长度。动画中的条长是示意。</p>`,
+      cells: [20, 24], highlight: ["violinplot", "abnormal_length"],
+      draw(svg, ctx) {
+        const r = K.rng(7), bars = [];
+        for (let i = 0; i < 14; i++) {
+          const len = Math.min(620, 30 + Math.exp(K.randn(r) * 0.8 + 4.4));
+          const b = K.svg(svg, "rect", { x: 60, y: 24 + i * 21, width: 0, height: 15, rx: 3, fill: len > 400 ? "var(--warn)" : "var(--c1)" });
+          bars.push({ b, len });
+        }
+        K.svg(svg, "line", { x1: 60 + 120, x2: 60 + 120, y1: 16, y2: 320, stroke: "var(--c3)", "stroke-width": 2, "stroke-dasharray": "5 4" });
+        K.svg(svg, "text", { x: 186, y: 334, "font-size": 12, fill: "var(--c3)" }, "统一长度（下一步）");
+        K.svg(svg, "text", { x: 60, y: 334, "font-size": 12, class: "muted" }, "每条 = 一个文件（示意）");
+        ctx.tween(1300, (t) => bars.forEach((d) => d.b.setAttribute("width", d.len * t)));
+      },
+    },
+    {
+      at: 25, title: "统一长度：长的随机截，短的随机补零", kicker: "第 30–33 格 · DataGenerator",
+      html: `<p><code>Config</code> 规定输入长度 = 采样率 × 时长。<code>DataGenerator</code> 每次读一批文件，先用 librosa 重采样，然后：</p><ul class="tight"><li>比规定长：在随机位置<b>截取</b>一段</li><li>比规定短：在随机位置左右<b>补零</b></li></ul><p>“随机”很关键：同一文件每轮截到的位置不同，相当于免费的数据增强。<code>Sequence</code> 还保证每轮每个样本只用一次。</p>`,
+      cells: [30, 33], highlight: ["np.random.randint(max_offset)", "np.pad", "audio_duration"],
+      draw(svg, ctx) {
+        const r = K.rng(3);
+        const longW = Array.from({ length: 300 }, (_, i) => Math.sin(i / 3) * (0.3 + 0.7 * Math.abs(Math.sin(i / 37))) + 0.15 * K.randn(r));
+        const shortW = Array.from({ length: 90 }, (_, i) => Math.sin(i / 2) * Math.sin((Math.PI * i) / 90));
+        const draw = (arr, x0, y0, sc, color) => { let d = ""; arr.forEach((v, i) => (d += (d ? "L" : "M") + (x0 + i * sc) + "," + (y0 - v * 28))); return K.svg(svg, "path", { d, fill: "none", stroke: color, "stroke-width": 1.3 }); };
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "长文件：随机截取");
+        draw(longW, 30, 80, 2.2, "var(--c1)");
+        const win = K.svg(svg, "rect", { x: 30, y: 46, width: 240, height: 68, fill: "var(--warn)", "fill-opacity": 0.18, stroke: "var(--warn)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 30, y: 180, "font-size": 13, "font-weight": 700 }, "短文件：随机位置补零");
+        const box = K.svg(svg, "rect", { x: 30, y: 196, width: 240 * 2.2 / 2.2 * 2.75, height: 68, fill: "none", stroke: "var(--c3)", "stroke-dasharray": "5 4" });
+        const sp = draw(shortW, 30, 230, 2.2, "var(--c2)");
+        const zl = K.svg(svg, "line", { x1: 30, x2: 30, y1: 230, y2: 230, stroke: "var(--ink-3)", "stroke-width": 2 });
+        const zr = K.svg(svg, "line", { x1: 228, x2: 228, y1: 230, y2: 230, stroke: "var(--ink-3)", "stroke-width": 2 });
+        const note = K.svg(svg, "text", { x: 30, y: 300, "font-size": 12, class: "muted" }, "两种情况最后都变成同样长度（虚线框）");
+        (async () => {
+          for (let k = 0; k < 3; k++) {
+            const to = 30 + r() * (300 * 2.2 - 240);
+            const from = +win.getAttribute("x");
+            if (!(await ctx.tween(700, (t) => win.setAttribute("x", K.lerp(from, to, t))))) return;
+            const off = r() * (660 - 198);
+            if (!(await ctx.tween(600, (t) => { sp.setAttribute("transform", `translate(${off * t},0)`); zl.setAttribute("x2", 30 + off * t); zr.setAttribute("x1", 228 + off * t); zr.setAttribute("x2", 690); }))) return;
+            if (!(await ctx.wait(400))) return;
+          }
+        })();
+        box.setAttribute("width", 660);
+        note.textContent = "截取窗口和补零位置每轮都随机（示意）";
+      },
+    },
+    {
+      at: 34, title: "归一化到 [−0.5, 0.5]", kicker: "第 34–35 格 · 预处理",
+      html: `<p><code>audio_norm</code> 做最简单的最小-最大缩放：减去最小值、除以（最大值 − 最小值），落到 [0, 1]，再整体减 0.5。</p><p>这样不同音量的录音进入网络时尺度一致，梯度更稳定。注意它是<b>每条音频各自</b>归一化，所以“响度”这条信息被抹掉了。</p>`,
+      cells: [35], highlight: ["(data-min_data)/(max_data-min_data+1e-6)", "data-0.5"],
+      draw(svg, ctx) {
+        const r = K.rng(4), w = Array.from({ length: 220 }, (_, i) => 0.25 * Math.sin(i / 4) * Math.sin(i / 50) + 0.05 * K.randn(r) + 0.2);
+        const mn = Math.min(...w), mx = Math.max(...w), nw = w.map((v) => (v - mn) / (mx - mn) - 0.5);
+        const ax = K.axes(svg, { x: 60, y: 30, w: 620, h: 260 }, [0, 220], [-0.6, 0.6], { xticks: 0, yticks: 4 });
+        [0.5, -0.5].forEach((y) => K.svg(svg, "line", { x1: 60, x2: 680, y1: ax.sy(y), y2: ax.sy(y), stroke: "var(--c3)", "stroke-dasharray": "5 4" }));
+        const p = K.svg(svg, "path", { fill: "none", stroke: "var(--c1)", "stroke-width": 1.5 });
+        const lab = K.svg(svg, "text", { x: 70, y: 22, "font-size": 13, "font-weight": 700 }, "原始：偏在一侧、幅度小");
+        const set = (t) => { let d = ""; w.forEach((v, i) => (d += (d ? "L" : "M") + ax.sx(i) + "," + ax.sy(K.lerp(v, nw[i], t)))); p.setAttribute("d", d); };
+        set(0);
+        ctx.wait(800).then((ok) => ok && ctx.tween(1400, set)).then((ok) => { if (ok) lab.textContent = "归一化后：正好占满 [−0.5, 0.5]（绿虚线）"; });
+      },
+    },
+    {
+      at: 36, title: "路线 1：一维卷积直接听原始波形", kicker: "第 36–37 格 · 1D CNN",
+      html: `<p>输入是 2 秒、16 kHz 的原始波形，共 32000 个点。网络是 4 个卷积块：每块两层 <code>Convolution1D</code> + 一个池化。第一块用宽度 9 的卷积核和 <b>MaxPool1D(16)</b>，一下把长度缩小 16 倍。</p><p>最后 <code>GlobalMaxPool1D</code> 对整条序列取最大值，再接 Dense(64) → Dense(1028) → softmax(41)。图中长度按代码（padding='valid'）推算。</p>`,
+      cells: [37], highlight: ["Convolution1D(16, 9", "MaxPool1D(16)", "GlobalMaxPool1D", "Dense(nclass, activation=softmax)"],
+      draw(svg, ctx) {
+        const L = [["输入", "32000", 32000], ["Conv×2 +Pool16", "1999×16", 1999], ["Conv×2 +Pool4", "498×32", 498], ["Conv×2 +Pool4", "123×32", 123], ["Conv×2", "119×256", 119], ["GlobalMax", "256", 1], ["Dense", "64→1028", 1], ["softmax", "41", 1]];
+        const els = L.map((l, i) => {
+          const x = 14 + i * 88, w = 8 + 50 * Math.log10(l[2] + 1) / Math.log10(32001);
+          const g = K.svg(svg, "g");
+          K.svg(g, "rect", { x: x + (66 - w) / 2, y: 60, width: w, height: 170, rx: 4, fill: `color-mix(in srgb, ${K.colors[i % 6]} 20%, var(--panel))`, stroke: K.colors[i % 6] });
+          if (i < 5) { let d = ""; for (let k = 0; k < 40; k++) d += (d ? "L" : "M") + (x + (66 - w) / 2 + (w * k) / 39) + "," + (145 + Math.sin(k * (1.7 + i)) * 50 * Math.exp(-i * 0.3)); K.svg(g, "path", { d, fill: "none", stroke: K.colors[i % 6], "stroke-width": 1 }); }
+          K.svg(g, "text", { x: x + 33, y: 258, "text-anchor": "middle", "font-size": 11, "font-weight": 700 }, l[0]);
+          K.svg(g, "text", { x: x + 33, y: 276, "text-anchor": "middle", "font-size": 11, class: "muted" }, l[1]);
+          g.style.opacity = 0; return g;
+        });
+        K.svg(svg, "text", { x: 14, y: 30, "font-size": 12, class: "muted" }, "方块宽度 ∝ log(序列长度)：池化一层层把 32000 个点压成 256 个“声音特征”");
+        K.svg(svg, "text", { x: 14, y: 318, "font-size": 12, fill: "var(--accent)" }, "作者表格：可训练参数 360,513");
+        (async () => { for (const e of els) if (!(await ctx.tween(280, (t) => (e.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      at: 38, title: "10 折交叉验证 + 训练回调", kicker: "第 40–43 格 · 训练",
+      html: `<p>训练集按类别分层切成 10 份（StratifiedKFold），轮流拿 1 份做验证、9 份训练，共训练 10 个模型。三个回调：</p><ul class="tight"><li><b>ModelCheckpoint</b>：只保存验证损失最好的权重</li><li><b>EarlyStopping</b>：验证损失 5 轮不降就停（patience=5）</li><li><b>TensorBoard</b>：记录曲线</li></ul><p>每个模型都对测试集预测一次，存成 .npy，留给下一步集成。</p>`,
+      cells: [43], highlight: ["StratifiedKFold", "ModelCheckpoint", "EarlyStopping", "patience=5"],
+      draw(svg, ctx) {
+        const n = 10, w = 62, cells = [];
+        for (let f = 0; f < n; f++) for (let k = 0; k < n; k++) {
+          const e = K.svg(svg, "rect", { x: 40 + k * w, y: 30 + f * 26, width: w - 4, height: 20, rx: 3, fill: "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: "var(--line)" });
+          e.style.opacity = 0; cells.push({ e, f, k });
+        }
+        const tag = K.svg(svg, "text", { x: 40, y: 310, "font-size": 12, class: "muted" }, "橙色 = 验证折，蓝色 = 训练折；每一行训练一个模型 → 10 份测试集预测");
+        ctx.tween(2400, (t, raw) => {
+          const rows = Math.floor(raw * n + 0.999);
+          cells.forEach((c) => { if (c.f < rows) { c.e.style.opacity = 1; if (c.k === c.f) c.e.style.fill = "color-mix(in srgb, var(--c2) 45%, var(--panel))"; } });
+        });
+      },
+    },
+    {
+      at: 44, title: "10 个模型的几何平均", kicker: "第 44–45 格 · 集成",
+      html: `<p>把 10 份预测概率逐类<b>相乘再开 10 次方</b>，这就是几何平均。然后每段音频取概率最高的 3 个类别作为提交（比赛按 MAP@3 计分）。</p><p>几何平均的特点：只要有一个模型给某类很低的概率，乘积就会被拉低，所以它比算术平均更“保守”。动画演示 3 个模型对 5 个类别的概率合并。</p>`,
+      cells: [45], highlight: ["prediction*pred", "**(1./len(pred_list))", "[:, :3]"],
+      draw(svg, ctx) {
+        const labs = ["Trumpet", "Meow", "Applause", "Squeak", "Hi-hat"];
+        const P = [[0.5, 0.2, 0.1, 0.15, 0.05], [0.35, 0.4, 0.05, 0.15, 0.05], [0.45, 0.02, 0.2, 0.25, 0.08]];
+        const g = labs.map((_, j) => Math.pow(P[0][j] * P[1][j] * P[2][j], 1 / 3));
+        const s = g.reduce((a, b) => a + b, 0), gn = g.map((v) => v / s);
+        const bw = 18, sets = [];
+        P.forEach((p, m) => {
+          K.svg(svg, "text", { x: 30, y: 46 + m * 70, "font-size": 12, fill: K.colors[m], "font-weight": 700 }, "模型 " + (m + 1));
+          p.forEach((v, j) => { const r = K.svg(svg, "rect", { x: 100 + j * 46, y: 52 + m * 70 - v * 80 + 8, width: bw, height: v * 80, fill: K.colors[m] }); sets.push(r); });
+        });
+        labs.forEach((l, j) => K.svg(svg, "text", { x: 109 + j * 46, y: 270, "text-anchor": "end", "font-size": 10, transform: `rotate(-40 ${109 + j * 46} 270)` }, l));
+        K.svg(svg, "text", { x: 400, y: 30, "font-size": 13, "font-weight": 700 }, "几何平均（再归一化）");
+        const bars = gn.map((v, j) => ({ r: K.svg(svg, "rect", { x: 410 + j * 56, y: 250, width: 30, height: 0, fill: "var(--accent)" }), v, t: K.svg(svg, "text", { x: 425 + j * 56, y: 268, "text-anchor": "middle", "font-size": 11 }, labs[j]) }));
+        const rank = gn.map((v, j) => [v, j]).sort((a, b) => b[0] - a[0]).slice(0, 3).map((d) => d[1]);
+        const top = K.svg(svg, "text", { x: 400, y: 300, "font-size": 13, fill: "var(--good)", "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 400, y: 322, "font-size": 11, class: "muted" }, "模型 3 给 Meow 仅 0.02，几何平均把它压下去（示意）");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1200, (t) => bars.forEach((b) => { b.r.setAttribute("y", 250 - b.v * 400 * t); b.r.setAttribute("height", b.v * 400 * t); })))
+          .then((ok) => { if (ok) { top.textContent = "提交前 3 名：" + rank.map((j) => labs[j]).join(" "); rank.forEach((j) => (bars[j].r.style.fill = "var(--good)")); } });
+      },
+    },
+    {
+      at: 46, title: "MFCC：模仿人耳的声音特征", kicker: "第 46 格 · 原理",
+      html: `<p>深度学习之前，人们手工设计声音特征。<b>MFCC</b>（梅尔频率倒谱系数）在 1980 年代由 Davis 和 Mermelstein 提出，模仿人耳两个特点：对音高的感知是<b>对数刻度</b>（低频分得细、高频分得粗），对响度的感知也是对数刻度。</p><p>计算链：分帧 → FFT 得功率谱 → 梅尔滤波器组（三角形滤波器，越往高频越宽）→ 取对数 → 离散余弦变换（DCT），取前几个系数。</p>`,
+      cells: [46], highlight: [],
+      draw(svg, ctx) {
+        const names = ["分帧\n+加窗", "FFT\n功率谱", "梅尔\n滤波器组", "取 log", "DCT\n取前 n 个"];
+        const nodes = names.map((n, i) => { const g = K.node(svg, 20 + i * 140, 30, 110, 54, n, { fill: `color-mix(in srgb, ${K.colors[i]} 16%, var(--panel))`, stroke: K.colors[i] }); g.style.opacity = 0.25; return g; });
+        for (let i = 0; i < 4; i++) K.arrow(svg, 130 + i * 140, 57, 158 + i * 140, 57);
+        const sr = 8000, N = 256, bank = melBank(12, N, sr);
+        const ax = K.axes(svg, { x: 60, y: 130, w: 620, h: 150 }, [0, 4000], [0, 1.05], { yticks: 0, xlabel: "频率 Hz（三角形 = 梅尔滤波器，示意 12 个）" });
+        const tris = bank.edges.slice(0, -2).map((_, m) => {
+          const a = bank.edges[m], b = bank.edges[m + 1], c = bank.edges[m + 2];
+          const p = K.svg(svg, "path", { d: `M${ax.sx(a)},${ax.sy(0)}L${ax.sx(b)},${ax.sy(1)}L${ax.sx(c)},${ax.sy(0)}`, fill: K.colors[m % 6], "fill-opacity": 0.15, stroke: K.colors[m % 6], "stroke-width": 1.5 });
+          p.style.opacity = 0; return p;
+        });
+        (async () => {
+          for (let i = 0; i < 5; i++) {
+            if (!(await ctx.tween(350, (t) => (nodes[i].style.opacity = 0.25 + 0.75 * t)))) return;
+            if (i === 2) for (const p of tris) if (!(await ctx.tween(90, (t) => (p.style.opacity = t)))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 47, title: "用 librosa 生成 MFCC 图", kicker: "第 47–49、54 格 · 特征",
+      html: `<p>作者对一段踩镲（Hi-hat）声音调用 <code>librosa.feature.mfcc(n_mfcc=40)</code>，得到一张“系数 × 时间”的二维图。</p><p>2D 模型的配置是 44.1 kHz、2 秒、40 个系数；按 <code>Config</code> 里的公式，形状是 40 × (1 + ⌊88200/512⌋) = <b>40 × 173</b>，可以把它当成一张单通道“图片”交给二维卷积。动画用合成的踩镲声在浏览器里真算 MFCC（采样率改为 8 kHz）。</p>`,
+      cells: [48], highlight: ["n_mfcc=40"],
+      draw(svg, ctx) {
+        const sr = 8000, x = synthSound("hihat", sr, 1.2, 3);
+        const ax = K.axes(svg, { x: 50, y: 14, w: 640, h: 70 }, [0, x.length], [-1, 1], { xticks: 0, yticks: 0 });
+        K.svg(svg, "path", { d: wavePath(x, ax, 0, x.length), fill: "none", stroke: "var(--c1)" });
+        const R = mfccOf(x, sr, 256, 128, 40, 20);
+        const els = heatMap(svg, R.C.map((c) => c.slice(1)), { x: 50, y: 110, w: 640, h: 190 }, { diverge: true });
+        els.forEach((e) => (e.style.opacity = 0));
+        K.svg(svg, "text", { x: 50, y: 320, "font-size": 12, class: "muted" }, "上：踩镲波形（合成）；下：MFCC 第 1–19 个系数 × 时间（每个系数标准化后着色，蓝低橙高）");
+        const nr = 19;
+        ctx.tween(1600, (t, raw) => { const c = Math.floor(raw * R.C.length); for (let i = 0; i < Math.min(els.length, (c + 1) * nr); i++) els[i].style.opacity = 1; });
+      },
+    },
+    {
+      at: 50, title: "路线 2：二维卷积看 MFCC 图", kicker: "第 52、60 格 · 2D CNN",
+      html: `<p>4 个相同的块：<code>Conv2D(32, (4,10))</code> → <b>BatchNormalization</b>（把每层输出标准化，训练更稳）→ ReLU → MaxPool2D(2×2)。卷积核是 4×10 的扁长方形：纵向跨 4 个系数，横向跨 10 帧，更关注<b>时间上的变化</b>。</p><p>最后 Flatten → Dense(64) → softmax(41)。作者表格里它只有 168,361 个参数，不到 1D 模型的一半。训练前还按训练集的均值、标准差标准化。<span data-cell="58">第 58 格</span></p>`,
+      cells: [52], highlight: ["Convolution2D(32, (4,10)", "BatchNormalization", "MaxPool2D"],
+      draw(svg, ctx) {
+        const r = K.rng(9), nr = 12, nc = 30, cs = 13, x0 = 30, y0 = 40;
+        for (let i = 0; i < nc; i++) for (let j = 0; j < nr; j++) K.svg(svg, "rect", { x: x0 + i * cs, y: y0 + j * cs, width: cs - 1, height: cs - 1, fill: K.heat(0.15 + 0.7 * Math.abs(Math.sin(i / 4 + j / 3) * r())) });
+        K.svg(svg, "text", { x: x0, y: 28, "font-size": 12, class: "muted" }, "MFCC 图（示意）：纵 = 系数，横 = 时间帧");
+        const k = K.svg(svg, "rect", { x: x0, y: y0, width: cs * 10, height: cs * 4, fill: "var(--warn)", "fill-opacity": 0.2, stroke: "var(--warn)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: x0, y: y0 + nr * cs + 20, "font-size": 12, fill: "var(--warn)" }, "4×10 卷积核滑动");
+        const ox = 470, oc = [];
+        for (let i = 0; i < 21; i++) for (let j = 0; j < 9; j++) { const e = K.svg(svg, "rect", { x: ox + i * 10, y: y0 + j * 10, width: 9, height: 9, fill: K.heat(0.2 + 0.7 * r()) }); e.style.opacity = 0; oc.push({ e, i, j }); }
+        K.svg(svg, "text", { x: ox, y: 28, "font-size": 12, class: "muted" }, "特征图（32 张中的 1 张）");
+        const blocks = ["Conv2D", "BatchNorm", "ReLU", "MaxPool 2×2"];
+        blocks.forEach((b, i) => K.node(svg, 30 + i * 165, 260, 145, 40, b + (i === 0 ? "" : ""), { fill: `color-mix(in srgb, ${K.colors[i]} 16%, var(--panel))`, stroke: K.colors[i] }));
+        for (let i = 0; i < 3; i++) K.arrow(svg, 175 + i * 165, 280, 195 + i * 165, 280);
+        K.svg(svg, "text", { x: 30, y: 325, "font-size": 12, class: "muted" }, "× 4 块 → Flatten → Dense(64) → softmax(41)");
+        ctx.tween(3000, (t, raw) => {
+          const idx = Math.floor(raw * 21 * 9);
+          const i = Math.floor(idx / 9), j = idx % 9;
+          k.setAttribute("x", x0 + i * cs); k.setAttribute("y", y0 + j * cs);
+          oc.forEach((c) => { if (c.i * 9 + c.j <= idx) c.e.style.opacity = 1; });
+        });
+      },
+    },
+    {
+      at: 63, title: "两条路线再集成：0.895", kicker: "第 63–66 格 · 结果",
+      html: `<p>2D 模型同样 10 折、几何平均。最后把 <b>1D 的 10 份预测和 2D 的 10 份预测</b>一起做几何平均，得到最终提交。</p><p>作者的结果表：2D MFCC 模型（0.844）好于 1D 原始波形（0.809）；两者集成达到 <b>0.895</b>。只用人工核验标签训练的 2D 模型反而最低（0.785）。<span data-cell="66">第 66 格</span></p>`,
+      cells: [64, 66], highlight: ["freesound-prediction-data-2d-conv-reduced-lr", "freesound-prediction-file"],
+      draw(svg, ctx) {
+        const items = [
+          { label: "1D 波形", value: 0.809, color: "var(--c1)" },
+          { label: "2D MFCC（仅核验）", value: 0.785, color: "var(--ink-3)" },
+          { label: "2D MFCC", value: 0.844, color: "var(--c3)" },
+          { label: "1D + 2D 集成", value: 0.895, color: "var(--accent)" },
+        ];
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 13, class: "muted" }, "公榜分数（作者第 66 格的表格，横轴从 0.7 开始）");
+        const els = items.map((d, i) => {
+          const y = 50 + i * 66;
+          K.svg(svg, "text", { x: 170, y: y + 26, "text-anchor": "end", "font-size": 13 }, d.label);
+          const r = K.svg(svg, "rect", { x: 180, y, width: 0, height: 38, rx: 4, fill: d.color });
+          const t = K.svg(svg, "text", { x: 186, y: y + 25, "font-size": 14, "font-weight": 700 }, "");
+          return { r, t, d };
+        });
+        const sx = (v) => ((v - 0.7) / 0.22) * 480;
+        ctx.tween(1400, (k) => els.forEach((e) => { const w = sx(e.d.value) * k; e.r.setAttribute("width", w); e.t.setAttribute("x", 186 + w); e.t.textContent = k > 0.95 ? e.d.value.toFixed(3) : ""; }));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：MFCC 分阶段计算 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "type", label: "声音类型（浏览器合成）", value: "meow", options: [["whistle", "口哨（单一频率 + 颤音）"], ["trumpet", "小号（谐波丰富）"], ["meow", "猫叫（音高先升后降）"], ["applause", "掌声（一阵阵噪声）"], ["hihat", "踩镲（短促高频噪声）"]] },
+      { id: "stage", label: "看哪一阶段", value: "mfcc", options: [["wave", "① 波形"], ["power", "② 功率谱（FFT）"], ["mel", "③ 梅尔滤波后"], ["log", "④ 取 log"], ["mfcc", "⑤ DCT → MFCC"]] },
+      { id: "nmels", label: "梅尔滤波器个数", min: 8, max: 64, step: 4, value: 40 },
+      { id: "nmfcc", label: "保留的 MFCC 个数", min: 4, max: 40, step: 1, value: 20 },
+    ],
+    note: "采样率 8000 Hz、1.2 秒；每帧 256 点、帧移 128 点。每次拖动都重新做 FFT、梅尔滤波、对数、DCT。MFCC 图里第 0 个系数（整体能量）被去掉，每个系数沿时间标准化后着色（蓝低橙高）。试试把“保留个数”调小：只留前几个系数，相当于只保留频谱的粗轮廓。",
+    render(svg, v) {
+      const sr = 8000, x = synthSound(v.type, sr, 1.2, 11);
+      const R = mfccOf(x, sr, 256, 128, v.nmels, Math.min(v.nmfcc + 1, v.nmels));
+      const box = { x: 50, y: 20, w: 570, h: 300 };
+      let title = "", rows = 0;
+      if (v.stage === "wave") {
+        const ax = K.axes(svg, { x: 50, y: 30, w: 570, h: 280 }, [0, x.length], [-1, 1], { xticks: 0, yticks: 2 });
+        K.svg(svg, "path", { d: wavePath(x, ax, 0, x.length), fill: "none", stroke: "var(--c1)" });
+        title = "波形：一维、" + x.length + " 个采样点";
+      } else if (v.stage === "power") {
+        heatMap(svg, R.P.map((p) => Array.from(p.slice(0, 128)).map((q) => 10 * Math.log10(q + 1e-10))), box, { floor: 70 });
+        title = "功率谱（为了能看清用了 dB）：129 个线性频点 × " + R.P.length + " 帧"; rows = 129;
+      } else if (v.stage === "mel") {
+        heatMap(svg, R.M, box, {});
+        title = `梅尔滤波后（未取 log）：${v.nmels} × ${R.M.length}，只有最强的几处亮`; rows = v.nmels;
+      } else if (v.stage === "log") {
+        heatMap(svg, R.L, box, { floor: 70 });
+        title = `取 log 后：${v.nmels} × ${R.L.length}，弱的细节也显出来了`; rows = v.nmels;
+      } else {
+        const C = R.C.map((c) => c.slice(1));
+        heatMap(svg, C, box, { diverge: true });
+        title = `MFCC：${C[0].length} × ${C.length}（系数 × 帧）`; rows = C[0].length;
+      }
+      K.svg(svg, "text", { x: 50, y: 345, "font-size": 12, class: "muted" }, title);
+      K.svg(svg, "text", { x: 50, y: 365, "font-size": 12, class: "muted" }, v.stage === "wave" ? "横轴：时间" : "横轴：时间帧；纵轴：低频/低阶在下");
+      const dimIn = x.length, dimOut = v.stage === "wave" ? x.length : rows * R.P.length;
+      return { readout: [
+        { k: "帧数", v: R.P.length },
+        { k: "当前阶段的数据量", v: dimOut.toLocaleString() },
+        { k: "相对原始波形", v: ((dimOut / dimIn) * 100).toFixed(1) + "%" },
+        { k: "第 1 个滤波器宽度", v: Math.round(R.bank.edges[2] - R.bank.edges[0]) + " Hz" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：几何平均 vs 算术平均 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "n", label: "参与集成的模型数", min: 2, max: 10, step: 1, value: 5 },
+      { id: "noise", label: "单个模型的“随机失误”程度", min: 0, max: 1, step: 0.05, value: 0.5, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "模拟 41 类、500 段音频：每个模型对正确类给出偏高的分数，再加上随机噪声，经 softmax 得概率。分别用算术平均与几何平均合并，现场计算 MAP@3（正确类排第 1 得 1 分、第 2 得 1/2、第 3 得 1/3，否则 0）。",
+    render(svg, v) {
+      const C = 41, S = 500, r = K.rng(77 + v.seed * 13);
+      const map3 = (P) => { let s = 0; P.forEach((p, i) => { const idx = p.map((q, j) => [q, j]).sort((a, b) => b[0] - a[0]).slice(0, 3).map((d) => d[1]); const k = idx.indexOf(i % C); if (k >= 0) s += 1 / (k + 1); }); return s / P.length; };
+      const models = [];
+      for (let m = 0; m < v.n; m++) {
+        const P = [];
+        for (let i = 0; i < S; i++) {
+          const z = []; for (let c = 0; c < C; c++) z.push(K.randn(r) * (0.6 + 2.2 * v.noise) + (c === i % C ? 2.2 : 0));
+          if (r() < 0.15 * v.noise) z[i % C] -= 4; /* 偶尔非常自信地判错 */
+          const mx = Math.max(...z), e = z.map((q) => Math.exp(q - mx)), s = e.reduce((a, b) => a + b, 0);
+          P.push(e.map((q) => q / s));
+        }
+        models.push(P);
+      }
+      const ari = models[0].map((_, i) => models[0][i].map((_, c) => models.reduce((s, M) => s + M[i][c], 0) / v.n));
+      const geo = models[0].map((_, i) => models[0][i].map((_, c) => Math.exp(models.reduce((s, M) => s + Math.log(M[i][c]), 0) / v.n)));
+      const singles = models.map(map3), a = map3(ari), g = map3(geo);
+      const items = singles.map((s, m) => ({ label: "模型" + (m + 1), value: s, color: "var(--ink-3)" })).concat([{ label: "算术平均", value: a, color: "var(--c1)" }, { label: "几何平均", value: g, color: "var(--accent)" }]);
+      K.bars(svg, { x: 20, y: 30, w: 600, h: 230 }, items, { max: 1, gap: 6, fmt: (x) => x.toFixed(3) });
+      K.svg(svg, "text", { x: 20, y: 18, "font-size": 12, class: "muted" }, "MAP@3（越高越好）");
+      const avg = singles.reduce((p, q) => p + q, 0) / singles.length;
+      return { readout: [
+        { k: "单模型平均", v: avg.toFixed(3) },
+        { k: "算术平均集成", v: a.toFixed(3), color: "var(--c1)" },
+        { k: "几何平均集成", v: g.toFixed(3), color: "var(--accent)" },
+        { k: "集成提升", v: "+" + (Math.max(a, g) - avg).toFixed(3), color: "var(--good)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

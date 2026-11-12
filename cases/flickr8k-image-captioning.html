@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>看图说话</title>
+<meta name="description" content="Kaggle 案例拆解：Flickr8k 图像描述生成——DenseNet201 把图片编码成 1920 维向量，LSTM 一个词一个词地写出英文句子；文本预处理、前缀到下一个词的样本展开、贪心解码。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">图像 + 文本 · 图像描述生成 · 编码器-解码器</div>
+  <h1>看图说话：CNN 看图，LSTM 写句子</h1>
+  <p class="en">Flickr8K Image Captioning using CNNs+LSTMs</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">图像描述 Image Captioning</span><span class="tag method">DenseNet201 特征提取</span><span class="tag method">词嵌入 Embedding</span>
+    <span class="tag method">LSTM</span><span class="tag method">Teacher forcing 样本展开</span><span class="tag method">贪心解码</span><span class="tag method">早停 + 学习率衰减</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Quadeer Shaikh</b></span>
+    <span>Kaggle 点赞 <b>2,228</b>（2026-11 抓取）</span>
+    <span>数据集 <b>adityajn105/flickr8k</b></span>
+    <span><a href="https://www.kaggle.com/code/quadeer15sh/flickr8k-image-captioning-using-cnns-lstms" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">Flickr8k：约 8000 张生活照，每张配 5 句英文描述</div><p>按数据集说明，共 8091 张图、约 4 万条人工写的描述，内容多是人、狗、运动和户外场景。描述存在 <code>captions.txt</code> 里，一行是“图片名, 一句话”。<span data-cell="4">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">给一张新图，写出一句描述</div><p>输出不是一个类别，而是一个<b>词序列</b>，如 “dog runs through the grass”。模型每次只预测“下一个词”，一个词一个词往下写。</p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">CNN 编码图像 + LSTM 解码文字</div><p>预训练的 DenseNet201 把图片变成 1920 维向量；把它压到 256 维当作句子的“第 0 个词”，和词嵌入一起送进 LSTM，最后 softmax 选下一个词。<span data-cell="14">出处</span> <span data-cell="20">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">能写出大致相关的句子，但明显过拟合</div><p>作者结论：学习曲线“明显过拟合”，生成的句子有重复，比如老说狗在水里跑、什么衣服都说成蓝衬衫；建议加数据、加注意力机制。没有计算 BLEU 分数。<span data-cell="30">出处</span> <span data-cell="38">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>Flickr8k</b>：从图片网站 Flickr 上选出的日常生活照，每张由 5 位标注员各写一句英文描述。以下规模来自数据集说明。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">图片</div><div class="v">8,091 张</div></div>
+        <div class="stat-tile"><div class="k">每张图的描述</div><div class="v">5 句</div></div>
+        <div class="stat-tile"><div class="k">训练 / 验证</div><div class="v">85% / 15%</div></div>
+        <div class="stat-tile"><div class="k">图像特征</div><div class="v">1920 维</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">图片数与每图 5 句来自数据集说明；按图片 85/15 划分见 <span data-cell="13">第 13 格</span>；1920 维见 <span data-cell="14">第 14 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">captions.txt 的字段</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>image</code></td><td>图片文件名，对应 Images 文件夹里的 jpg</td><td>文本</td></tr>
+        <tr><td><code>caption</code></td><td><b>要预测的答案</b>：一句英文描述</td><td>文本</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">读取见 <span data-cell="4">第 4 格</span>。作者在清洗时给每句加上 <code>startseq</code> 和 <code>endseq</code> 作为开头和结尾标记 <span data-cell="9">第 9 格</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+      <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+      <p class="lead"></p>
+      <div id="pipe"></div>
+      <div data-at="34">
+    <h3>动手试试 B · 一个词一个词地写：贪心、采样与束搜索 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="17">
+    <h3>动手试试 A · 一句描述能变成多少条训练样本 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+    <section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>DenseNet201 取全局平均池化层输出，图像向量是 1920 维</td><td><span data-cell="14">第 14 格</span></td></tr>
+        <tr><td>在 2014 年 Show and Tell 模型上做了改动：把图像特征再加到 LSTM 输出上，“稍微提升了效果”</td><td><span data-cell="22">第 22 格</span></td></tr>
+        <tr><td>学习曲线显示模型明显过拟合，可能因为数据少；可用更大的数据集或注意力模型解决</td><td><span data-cell="30">第 30 格</span></td></tr>
+        <tr><td>生成句子有冗余：例如“狗在水里跑”，任何颜色的衣服都说成蓝衬衫</td><td><span data-cell="38">第 38 格</span></td></tr>
+        <tr><td>本 notebook 不算 BLEU，只靠人看句子和图片是否相关；BLEU 和注意力留作以后的工作</td><td><span data-cell="29">第 29 格</span> <span data-cell="40">第 40 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">训练和验证损失的具体数值、生成的 15 句示例都在运行输出里，源码不带输出，作者文字里也没写分数，所以这里不列任何数值。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一张生活照，生成一句英文描述（词汇来自 Flickr8k 的描述）。</li>
+        <li><b>同类问题：</b>给视障人士读图、电商商品图自动写标题、图片检索与标注、医学影像自动生成报告草稿、视频字幕，以及化学结构图转文字（如 InChI 比赛）。</li>
+        <li><b>可迁移的套路：</b>预训练 CNN 提特征并缓存 → 文本清洗 + 起止标记 → “前缀预测下一个词”展开样本 → 编码器-解码器 → 逐词解码。今天更常见的做法是用 Transformer 和注意力，但流程是一样的。</li>
+        <li><b>值得注意的细节：</b>训练集和验证集按<b>图片</b>划分（85% / 15%），同一张图的 5 句描述不会同时出现在两边，避免信息泄漏。<span data-cell="13">第 13 格</span></li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>文本清洗、加 startseq / endseq <span data-cell="9">第 9 格</span></li>
+        <li>Tokenizer 编号、按图片划分训练/验证 <span data-cell="13">第 13 格</span></li>
+        <li>DenseNet201 提取 1920 维特征 <span data-cell="15">第 15 格</span></li>
+        <li>自定义数据生成器：前缀 → 下一个词 <span data-cell="17">第 17 格</span></li>
+        <li>Dense + Embedding + LSTM + 残差相加 + softmax <span data-cell="20">第 20 格</span></li>
+        <li>ModelCheckpoint、EarlyStopping、ReduceLROnPlateau <span data-cell="26">第 26 格</span></li>
+        <li>贪心解码 predict_caption <span data-cell="34">第 34 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>第 9 格里 <code>x.replace("[^A-Za-z]", "")</code> 用的是 Python 字符串的 replace，不是正则替换。它真的能去掉标点和数字吗？应该怎么改？</li>
+      <li>为什么训练集和验证集要按图片划分，而不是按描述句子随机划分？</li>
+      <li>训练时 LSTM 每一步看到的是<b>真实</b>的前一个词，预测时看到的是<b>自己生成</b>的前一个词。这种差别会带来什么问题？</li>
+      <li>贪心解码每步只挑概率最大的词，为什么容易产生“a dog runs through the water”这类万能句子？束搜索能解决多少？</li>
+      <li>模型“什么衣服都说成蓝衬衫”，从训练数据的角度分析可能的原因。</li>
+      <li>没有 BLEU 等自动指标，只靠人看，评估有什么局限？你会怎样设计一个评估方案？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Quadeer Shaikh，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：Flickr8k（Hodosh, Young &amp; Hockenmaier, 2013）。模型参考：Vinyals et al., “Show and Tell”, 2014。
+</footer>
+</main>
+
+<script src="nb/flickr8k-image-captioning.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 代码画的小场景 ---------- */
+  function scene(svg, x, y, w, kind) {
+    const g = K.svg(svg, "g", { transform: `translate(${x},${y}) scale(${w / 160})` });
+    const water = kind === "water", rock = kind === "rock";
+    K.svg(g, "rect", { x: 0, y: 0, width: 160, height: 120, rx: 6, fill: "color-mix(in srgb, var(--c1) 22%, var(--panel))" });
+    K.svg(g, "rect", { x: 0, y: 72, width: 160, height: 48, fill: water ? "color-mix(in srgb, var(--c1) 55%, var(--panel))" : rock ? "color-mix(in srgb, var(--ink-3) 45%, var(--panel))" : "color-mix(in srgb, var(--c3) 50%, var(--panel))" });
+    if (rock) { K.svg(g, "path", { d: "M70,120 L95,30 L125,120 Z", fill: "color-mix(in srgb, var(--ink-3) 70%, var(--panel))" }); K.svg(g, "circle", { cx: 100, cy: 42, r: 6, fill: "var(--c2)" }); K.svg(g, "path", { d: "M100,48 L100,66 M100,54 L110,46 M100,54 L92,60 M100,66 L94,76 M100,66 L106,74", stroke: "var(--c2)", "stroke-width": 3, fill: "none" }); }
+    else if (kind === "kids") { [50, 90].forEach((cx, i) => { K.svg(g, "circle", { cx, cy: 54, r: 7, fill: i ? "var(--c4)" : "var(--c5)" }); K.svg(g, "path", { d: `M${cx},61 L${cx},82 M${cx},68 L${cx - 9},76 M${cx},68 L${cx + 9},62 M${cx},82 L${cx - 6},96 M${cx},82 L${cx + 6},96`, stroke: i ? "var(--c4)" : "var(--c5)", "stroke-width": 3, fill: "none" }); }); K.svg(g, "circle", { cx: 120, cy: 90, r: 7, fill: "var(--c6)" }); }
+    else { K.svg(g, "ellipse", { cx: 75, cy: 82, rx: 24, ry: 11, fill: "color-mix(in srgb, var(--c5) 65%, var(--panel))" }); K.svg(g, "circle", { cx: 101, cy: 72, r: 9, fill: "color-mix(in srgb, var(--c5) 75%, var(--panel))" }); [60, 70, 82, 92].forEach((lx) => K.svg(g, "rect", { x: lx, y: 88, width: 4, height: 13, fill: "color-mix(in srgb, var(--c5) 65%, var(--panel))" })); if (water) for (let i = 0; i < 6; i++) K.svg(g, "path", { d: `M${30 + i * 20},${100 + (i % 2) * 6} q6,-5 12,0`, stroke: "var(--panel)", "stroke-width": 2, fill: "none" }); }
+    return g;
+  }
+
+  const steps = [
+    {
+      title: "任务：看图写一句话", at: 0, kicker: "第 0–2 格 · 问题",
+      html: `<p><b>图像描述生成</b>处在计算机视觉和自然语言处理的交界：输入一张图，输出一句话。</p><p>主流做法是<b>编码器-解码器</b>：编码器（CNN）把图片压成一个特征向量，相当于“看懂了什么”；解码器（LSTM，一种能记住前文的循环神经网络）根据这个向量，一个词一个词地写出句子。</p>`,
+      cells: [1],
+      draw(svg, ctx) {
+        scene(svg, 20, 100, 170, "water");
+        const enc = K.node(svg, 230, 130, 120, 60, "CNN 编码器\n看图", { fill: "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: "var(--c1)" });
+        const vec = []; for (let i = 0; i < 10; i++) vec.push(K.svg(svg, "rect", { x: 370, y: 105 + i * 11, width: 18, height: 9, fill: K.heat(((i * 37) % 10) / 10) }));
+        const dec = K.node(svg, 410, 130, 120, 60, "LSTM 解码器\n写字", { fill: "color-mix(in srgb, var(--c3) 18%, var(--panel))", stroke: "var(--c3)" });
+        K.arrow(svg, 192, 160, 228, 160); K.arrow(svg, 350, 160, 366, 160); K.arrow(svg, 390, 160, 408, 160); K.arrow(svg, 470, 192, 470, 218);
+        const words = ["dog", "runs", "through", "the", "water"];
+        const t = K.svg(svg, "text", { x: 470, y: 240, "text-anchor": "middle", "font-size": 18, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 470, y: 268, "text-anchor": "middle", "font-size": 11, class: "muted" }, "逐词生成的句子");
+        K.svg(svg, "text", { x: 379, y: 98, "text-anchor": "middle", "font-size": 11, class: "muted" }, "特征向量");
+        (async () => { for (let i = 0; i < words.length; i++) { if (!(await ctx.wait(500))) return; t.textContent = words.slice(0, i + 1).join(" "); } })();
+        K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 11, class: "muted" }, "示意图与示意句子");
+      },
+    },
+    {
+      title: "数据：一张图配 5 句描述", at: 3, kicker: "第 3–7 格 · 数据",
+      html: `<p><code>captions.txt</code> 每行是“图片文件名, 一句描述”。Flickr8k 每张图有 5 位标注员各写一句，所以同一张图会出现 5 行。</p><p>5 句话的说法各不相同，这正是语言的多样性：模型要学的不是背某一句，而是学会“这类画面通常怎么说”。作者随机抽 15 张图，把图和描述一起画出来检查。</p>`,
+      cells: [4, 5], highlight: ["captions.txt", "display_images"],
+      draw(svg, ctx) {
+        scene(svg, 30, 70, 200, "kids");
+        const caps = ["Two children are playing on the grass .", "A boy and a girl play outside .", "Two kids running in a field near a ball .", "Children playing in the park .", "A little girl and boy are outside on green grass ."];
+        K.svg(svg, "text", { x: 270, y: 50, "font-size": 12, class: "muted", "font-family": "var(--mono)" }, "image, caption");
+        const T = caps.map((c, i) => { const e = K.svg(svg, "text", { x: 270, y: 84 + i * 40, "font-size": 13, "font-family": "var(--mono)" }, `kids.jpg, ${c}`); e.style.opacity = 0; return e; });
+        (async () => { for (const e of T) if (!(await ctx.tween(350, (u) => (e.style.opacity = u)))) return; })();
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 11, class: "muted" }, "示意：句子为仿照数据集风格编写的例子");
+      },
+    },
+    {
+      title: "文本清洗 + 起止标记", at: 8, kicker: "第 8–11 格 · 预处理",
+      html: `<p>作者的清洗步骤：转小写 → 去掉特殊字符和数字 → 合并多余空格 → <b>删掉只有一个字母的词</b>（如 a）→ 句首加 <code>startseq</code>、句尾加 <code>endseq</code>。</p><p>起止标记很关键：<code>startseq</code> 告诉模型“开始写”，模型写出 <code>endseq</code> 就停笔。</p><p>小细节：代码里 <code>x.replace("[^A-Za-z]","")</code> 是普通字符串替换，不是正则表达式，所以句号等符号其实没被删掉（后面 Tokenizer 默认会过滤标点，影响不大）。</p>`,
+      cells: [9], highlight: ["lower()", "len(word)>1", "\"startseq \"", "\" endseq\"", "replace(\"[^A-Za-z]\",\"\")"],
+      draw(svg, ctx) {
+        const st = ["A dog runs through the Water .", "a dog runs through the water .", "dog runs through the water .", "startseq dog runs through the water . endseq"];
+        const lab = ["原句", "转小写", "删单字母词（a）", "加起止标记"];
+        const rows = st.map((s, i) => { const g = K.svg(svg, "g"); K.svg(g, "text", { x: 30, y: 60 + i * 66, "font-size": 12, class: "muted" }, lab[i]); K.svg(g, "text", { x: 30, y: 84 + i * 66, "font-size": 17, "font-family": "var(--mono)", "font-weight": i === 3 ? 700 : 400 }, s); g.style.opacity = 0; return g; });
+        const arrows = [0, 1, 2].map((i) => { const a = K.arrow(svg, 20, 90 + i * 66, 20, 112 + i * 66, { color: "var(--accent)" }); a.style.opacity = 0; return a; });
+        (async () => { for (let i = 0; i < 4; i++) { if (i) arrows[i - 1].style.opacity = 1; if (!(await ctx.tween(450, (u) => (rows[i].style.opacity = u)))) return; } })();
+      },
+    },
+    {
+      title: "分词编号，按图片划分", at: 12, kicker: "第 12–13 格 · 编码",
+      html: `<p>Keras 的 <code>Tokenizer</code> 统计所有描述里出现的词，按出现频率给每个词一个整数编号（越常见编号越小）。词表大小 <code>vocab_size</code> = 词数 + 1（0 留给填充）；<code>max_length</code> 是最长句子的词数。</p><p>然后取 85% 的<b>图片</b>做训练、15% 做验证：按图片而不是按句子分，保证同一张图的 5 句描述不会一部分在训练集、一部分在验证集。</p>`,
+      cells: [13], highlight: ["Tokenizer()", "vocab_size = len(tokenizer.word_index) + 1", "round(0.85*nimages)", "isin(train_images)"],
+      draw(svg, ctx) {
+        const words = ["startseq", "dog", "runs", "through", "the", "water", "endseq"], ids = [2, 9, 74, 51, 3, 30, 1];
+        const W = words.map((w, i) => { const g = K.node(svg, 20 + i * 98, 40, 90, 34, w, { fs: 12, rx: 5 }); return g; });
+        const I = ids.map((d, i) => { const g = K.node(svg, 20 + i * 98, 110, 90, 34, String(d), { fs: 14, rx: 5, fill: "var(--accent-soft)", stroke: "var(--accent)" }); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 20, y: 98, "font-size": 11, class: "muted" }, "编号为示意，真实编号由词频决定");
+        // 图片划分
+        const imgs = []; for (let i = 0; i < 20; i++) { const tr = i < 17; imgs.push(K.svg(svg, "rect", { x: 20 + i * 34, y: 200, width: 28, height: 28, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" })); }
+        K.svg(svg, "text", { x: 20, y: 190, "font-size": 12 }, "每格 = 1 张图（连同它的 5 句描述）");
+        const t1 = K.svg(svg, "text", { x: 20, y: 252, "font-size": 13, fill: "var(--c1)", "font-weight": 700 }, ""), t2 = K.svg(svg, "text", { x: 600, y: 252, "font-size": 13, fill: "var(--c2)", "font-weight": 700 }, "");
+        (async () => {
+          for (const g of I) if (!(await ctx.tween(200, (u) => (g.style.opacity = u)))) return;
+          if (!(await ctx.wait(300))) return;
+          for (let i = 0; i < 20; i++) { imgs[i].style.fill = i < 17 ? "color-mix(in srgb, var(--c1) 40%, var(--panel))" : "color-mix(in srgb, var(--c2) 40%, var(--panel))"; if (!(await ctx.wait(60))) return; }
+          t1.textContent = "训练 85% 的图片"; t2.textContent = "验证 15%";
+        })();
+      },
+    },
+    {
+      title: "DenseNet201：每张图变成 1920 个数", at: 14, kicker: "第 14–15 格 · 图像编码",
+      html: `<p>作者用在 ImageNet 上预训练好的 <b>DenseNet201</b>，去掉最后的分类层，取倒数第二层（全局平均池化）的输出：每张图变成一个 <b>1920 维</b>向量。</p><p>所有图片<b>只提取一次</b>，存进字典 <code>features</code>。之后训练描述模型时 CNN 不再参与，大大节省时间。这是“迁移学习当特征提取器”的典型用法。</p>`,
+      cells: [15], highlight: ["DenseNet201()", "model.layers[-2].output", "features[image] = feature"],
+      draw(svg, ctx) {
+        scene(svg, 20, 110, 130, "rock");
+        const blocks = [[170, 90, 50, 140], [240, 105, 44, 110], [302, 120, 38, 80], [356, 132, 32, 56], [404, 142, 26, 36]];
+        const B = blocks.map((b, i) => { const r = K.svg(svg, "rect", { x: b[0], y: b[1], width: b[2], height: b[3], rx: 4, fill: `color-mix(in srgb, var(--c1) ${20 + i * 15}%, var(--panel))`, stroke: "var(--c1)" }); r.style.opacity = 0; return r; });
+        K.svg(svg, "text", { x: 300, y: 260, "text-anchor": "middle", "font-size": 12 }, "DenseNet201 的卷积块（冻结，不训练）");
+        const gap = K.node(svg, 450, 140, 70, 40, "全局平均\n池化", { fs: 11 }); gap.style.opacity = 0;
+        const vec = []; for (let i = 0; i < 24; i++) vec.push(K.svg(svg, "rect", { x: 550, y: 40 + i * 11, width: 26, height: 9, fill: K.heat(((i * 53) % 17) / 17) }));
+        vec.forEach((v) => (v.style.opacity = 0));
+        K.svg(svg, "text", { x: 590, y: 170, "font-size": 13, "font-weight": 700 }, "1920 维");
+        K.svg(svg, "text", { x: 590, y: 190, "font-size": 11, class: "muted" }, "（画了 24 格示意）");
+        K.svg(svg, "text", { x: 590, y: 230, "font-size": 12, "font-family": "var(--mono)" }, "features[\"rock.jpg\"]");
+        (async () => {
+          for (const b of B) if (!(await ctx.tween(220, (u) => (b.style.opacity = u)))) return;
+          if (!(await ctx.tween(300, (u) => (gap.style.opacity = u)))) return;
+          for (const v of vec) { v.style.opacity = 1; if (!(await ctx.wait(30))) return; }
+        })();
+      },
+    },
+    {
+      title: "一句话拆成多条“前缀 → 下一个词”", at: 16, kicker: "第 16–17 格 · 训练样本",
+      html: `<p>模型的工作是“看图 + 已写的前几个词 → 预测下一个词”。所以一句 7 个 token 的描述会被拆成 6 条训练样本：</p><p><code>startseq</code> → dog；<code>startseq dog</code> → runs；……；<code>… water</code> → endseq。</p><p>前缀在<b>左边补 0</b> 到统一长度 <code>max_length</code>，目标词变成 one-hot 向量。每条样本都配上同一张图的 1920 维特征。由于数据量大，作者写了一个 <code>Sequence</code> 生成器，按批现场生成。</p>`,
+      cells: [17], highlight: ["for i in range(1,len(seq))", "in_seq, out_seq = seq[:i], seq[i]", "pad_sequences", "to_categorical"],
+      draw(svg, ctx) {
+        const toks = ["startseq", "dog", "runs", "through", "the", "water", "endseq"];
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 12, "font-weight": 700 }, "输入前缀（左侧补 0）");
+        K.svg(svg, "text", { x: 560, y: 26, "font-size": 12, "font-weight": 700 }, "目标：下一个词");
+        const ML = 7, cw = 70;
+        const rows = [];
+        for (let i = 1; i < toks.length; i++) {
+          const g = K.svg(svg, "g");
+          const y = 36 + (i - 1) * 46;
+          for (let j = 0; j < ML; j++) {
+            const k = j - (ML - i);
+            const has = k >= 0;
+            K.svg(g, "rect", { x: 30 + j * cw * 0.72, y, width: cw * 0.72 - 3, height: 32, rx: 4, fill: has ? "color-mix(in srgb, var(--c1) 18%, var(--panel))" : "var(--panel-2)", stroke: "var(--line)" });
+            K.svg(g, "text", { x: 30 + j * cw * 0.72 + (cw * 0.72 - 3) / 2, y: y + 20, "text-anchor": "middle", "font-size": has ? 10 : 11, class: has ? null : "muted" }, has ? toks[k] : "0");
+          }
+          K.arrow(g, 30 + ML * cw * 0.72 + 6, y + 16, 552, y + 16, { color: "var(--accent)" });
+          K.node(g, 560, y, 110, 32, toks[i], { fs: 13, bold: true, fill: "color-mix(in srgb, var(--c3) 20%, var(--panel))", stroke: "var(--c3)" });
+          g.style.opacity = 0;
+          rows.push(g);
+        }
+        (async () => { for (const g of rows) if (!(await ctx.tween(320, (u) => (g.style.opacity = u)))) return; })();
+      },
+    },
+    {
+      title: "模型结构：图像当作第 0 个词", at: 20, kicker: "第 20–24 格 · 建模",
+      html: `<ol class="tight"><li>图像 1920 维 → <code>Dense(256, relu)</code> → 变形成 1×256，当作序列里的“第 0 个词”；</li><li>前缀词编号 → <code>Embedding</code> 变成每词 256 维的<b>词向量</b>（词嵌入：把编号变成可学习的稠密向量）；</li><li>两者拼接成一个序列送进 <code>LSTM(256)</code>；</li><li>作者的改动：把 LSTM 输出（Dropout 后）和图像的 256 维特征<b>相加</b>，再接 <code>Dense(128)</code> → <code>Dense(vocab_size, softmax)</code>，得到词表里每个词作为下一个词的概率。</li></ol><p>作者说这个改动比 2014 年原版 Show and Tell 效果稍好。</p>`,
+      cells: [20, 22], highlight: ["Reshape((1, 256)", "Embedding(vocab_size, 256", "LSTM(256)", "add([x, img_features])", "activation='softmax'"],
+      draw(svg, ctx) {
+        const N = (x, y, w, h, t, col) => { const g = K.node(svg, x, y, w, h, t, { fs: 11, fill: col ? `color-mix(in srgb, ${col} 18%, var(--panel))` : "var(--panel-2)", stroke: col || "var(--line)" }); g.style.opacity = 0; return g; };
+        const items = [
+          N(20, 40, 130, 36, "图像特征 1920", "var(--c1)"), N(20, 220, 130, 36, "前缀词编号", "var(--c3)"),
+          N(180, 40, 120, 36, "Dense 256 relu", "var(--c1)"), N(180, 220, 120, 36, "Embedding 256", "var(--c3)"),
+          N(330, 120, 120, 50, "拼接成序列\n[图, 词1, 词2…]"), N(470, 120, 90, 50, "LSTM 256", "var(--c4)"),
+          N(470, 210, 90, 36, "Dropout 0.5"), N(590, 120, 40, 50, "＋", "var(--c2)"), N(590, 210, 110, 36, "Dense 128 relu"), N(590, 280, 120, 40, "softmax\n词表大小", "var(--accent)"),
+        ];
+        const arrs = [[150, 58, 178, 58], [150, 238, 178, 238], [300, 58, 330, 130], [300, 238, 330, 160], [450, 145, 468, 145], [515, 170, 515, 208], [560, 228, 600, 172], [300, 50, 610, 118], [630, 170, 645, 208], [645, 246, 650, 278]];
+        const A = arrs.map((a, i) => { const e = K.arrow(svg, a[0], a[1], a[2], a[3], { color: i === 7 ? "var(--c2)" : "var(--ink-3)", dash: i === 7 ? "5 4" : null }); e.style.opacity = 0; return e; });
+        K.svg(svg, "text", { x: 440, y: 44, "font-size": 11, fill: "var(--c2)" }, "作者的改动：图像特征再加一次");
+        const order = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        (async () => {
+          const seq = [[items[0], items[1]], [A[0], A[1], items[2], items[3]], [A[2], A[3], items[4]], [A[4], items[5]], [A[5], items[6]], [A[6], A[7], items[7]], [A[8], items[8]], [A[9], items[9]]];
+          for (const grp of seq) if (!(await ctx.tween(330, (u) => grp.forEach((e) => (e.style.opacity = u))))) return;
+        })();
+      },
+    },
+    {
+      title: "LSTM 逐步读入序列", at: 18, kicker: "第 18–19 格 · 循环网络",
+      html: `<p>LSTM 是一种循环神经网络：它按顺序读入序列，每一步把当前输入和上一步的<b>隐藏状态</b>（可以理解为“到目前为止读到的内容摘要”）结合，更新出新的隐藏状态。内部的门控机制决定哪些旧信息保留、哪些新信息写入，因此比普通 RNN 更能记住较远的上文。</p><p>这里第一步读入的是图像向量，后面依次读入前缀词。读完后最后一个隐藏状态就概括了“图 + 已写内容”，用来预测下一个词。</p>`,
+      cells: [20], highlight: ["LSTM(256)(merged)", "concatenate([img_features_reshaped,sentence_features],axis=1)"],
+      draw(svg, ctx) {
+        const ins = ["图像", "startseq", "dog", "runs", "through"];
+        const cells = ins.map((w, i) => {
+          const x = 40 + i * 130;
+          const c = K.node(svg, x, 130, 90, 56, "LSTM", { fs: 13, fill: "var(--panel-2)", stroke: "var(--c4)" });
+          K.node(svg, x + 5, 250, 80, 34, w, { fs: 12, rx: 5, fill: i === 0 ? "color-mix(in srgb, var(--c1) 20%, var(--panel))" : "color-mix(in srgb, var(--c3) 20%, var(--panel))" });
+          K.arrow(svg, x + 45, 248, x + 45, 188);
+          return { c, x };
+        });
+        const hs = []; for (let i = 0; i < ins.length - 1; i++) { const a = K.arrow(svg, cells[i].x + 90, 158, cells[i + 1].x - 2, 158, { color: "var(--c4)", sw: 2.5 }); a.style.opacity = 0.15; hs.push(a); }
+        const hl = K.svg(svg, "text", { x: 0, y: 150, "font-size": 11, fill: "var(--c4)" }, "");
+        const out = K.node(svg, 560, 30, 120, 40, "预测下一个词", { fs: 12, fill: "var(--accent-soft)", stroke: "var(--accent)" }); out.style.opacity = 0;
+        const oa = K.arrow(svg, 605, 128, 615, 72, { color: "var(--accent)" }); oa.style.opacity = 0;
+        const vec = (n) => Array.from({ length: 6 }, (_, j) => K.svg(svg, "rect", { x: cells[n].x + 15 + j * 10, y: 100, width: 8, height: 20, fill: K.heat(((n * 7 + j * 3) % 10) / 10) }));
+        (async () => {
+          for (let i = 0; i < ins.length; i++) {
+            if (!(await ctx.tween(350, (u) => { cells[i].c.querySelector("rect").style.fill = `color-mix(in srgb, var(--c4) ${Math.round(u * 35)}%, var(--panel))`; }))) return;
+            vec(i);
+            if (i < hs.length && !(await ctx.tween(250, (u) => (hs[i].style.opacity = 0.15 + 0.85 * u)))) return;
+          }
+          K.svg(svg, "text", { x: 40, y: 92, "font-size": 11, class: "muted" }, "小色条 = 每步更新后的隐藏状态 h（示意）");
+          await ctx.tween(400, (u) => { out.style.opacity = oa.style.opacity = u; });
+        })();
+      },
+    },
+    {
+      title: "训练：50 轮上限，三个回调", at: 25, kicker: "第 25–31 格 · 训练",
+      html: `<p>损失是分类交叉熵（预测下一个词就是一个“词表那么多类”的分类问题），优化器 Adam，batch 64，最多 50 轮。三个回调：</p><ul class="tight"><li><code>ModelCheckpoint</code>：保存验证损失最低的模型；</li><li><code>EarlyStopping(patience=5, restore_best_weights=True)</code>：5 轮不改善就停，并恢复最好的权重；</li><li><code>ReduceLROnPlateau(patience=3, factor=0.2)</code>：3 轮不改善就把学习率乘 0.2。</li></ul><p>作者看了学习曲线后的判断：<b>明显过拟合</b>，训练损失继续降、验证损失却不降了。</p>`,
+      cells: [26, 30], highlight: ["patience = 5", "factor=0.2", "restore_best_weights=True", "save_best_only = True"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [0, 20], [2, 6], { xlabel: "轮次（示意曲线，非原 notebook 数值）", ylabel: "损失" });
+        const tr = [], va = [];
+        for (let e = 0; e <= 20; e++) { tr.push(2.4 + 3 * Math.exp(-e / 3.5)); va.push(3.7 + 1.9 * Math.exp(-e / 2) + (e > 6 ? (e - 6) * 0.06 : 0)); }
+        let best = 0, stop = 20, lrDrops = [];
+        let since = 0;
+        for (let e = 1; e <= 20; e++) { if (va[e] < va[best]) { best = e; since = 0; } else { since++; if (since === 3) lrDrops.push(e); if (since >= 5) { stop = e; break; } } }
+        const p1 = K.svg(svg, "path", { fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 }), p2 = K.svg(svg, "path", { fill: "none", stroke: "var(--c2)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 540, y: 50, "font-size": 12, fill: "var(--c1)" }, "训练损失");
+        K.svg(svg, "text", { x: 540, y: 68, "font-size": 12, fill: "var(--c2)" }, "验证损失");
+        ctx.tween(2200, (t) => {
+          const m = Math.round(t * stop); let a = "", b = "";
+          for (let e = 0; e <= m; e++) { a += (a ? "L" : "M") + ax.sx(e) + "," + ax.sy(tr[e]); b += (b ? "L" : "M") + ax.sx(e) + "," + ax.sy(va[e]); }
+          p1.setAttribute("d", a); p2.setAttribute("d", b);
+        }).then((ok) => {
+          if (!ok) return;
+          K.svg(svg, "circle", { cx: ax.sx(best), cy: ax.sy(va[best]), r: 6, fill: "var(--good)" });
+          K.svg(svg, "text", { x: ax.sx(best) - 10, y: ax.sy(va[best]) - 12, "font-size": 12, fill: "var(--good)", "text-anchor": "middle" }, "恢复这一轮的权重");
+          lrDrops.forEach((e) => K.svg(svg, "text", { x: ax.sx(e), y: ax.sy(va[e]) - 12, "font-size": 11, fill: "var(--warn)", "text-anchor": "middle" }, "学习率×0.2"));
+          K.svg(svg, "line", { x1: ax.sx(stop), x2: ax.sx(stop), y1: 30, y2: 280, stroke: "var(--bad)", "stroke-dasharray": "5 3" });
+          K.svg(svg, "text", { x: ax.sx(stop) + 6, y: 100, "font-size": 12, fill: "var(--bad)" }, "早停");
+          K.svg(svg, "text", { x: ax.sx(10), y: ax.sy(3.2), "font-size": 12, fill: "var(--warn)" }, "两条线越拉越开 = 过拟合");
+        });
+      },
+    },
+    {
+      title: "推理：贪心解码，写到 endseq 为止", at: 32, kicker: "第 32–37 格 · 生成",
+      html: `<p><code>predict_caption</code> 从 <code>in_text = "startseq"</code> 开始循环：把当前文本编号、补齐，和图像特征一起送进模型，得到词表上的概率分布，<b>取概率最大的那个词</b>（<code>np.argmax</code>，即贪心解码），接到句子后面；遇到 <code>endseq</code> 或达到最大长度就停。</p><p>注意每生成一个词就要完整跑一次模型。贪心解码简单快速，但每步只看眼前最优，整句不一定最优（实验 B 可以对比束搜索）。</p>`,
+      cells: [34], highlight: ["in_text = \"startseq\"", "np.argmax(y_pred)", "if word == 'endseq':"],
+      draw(svg, ctx) {
+        scene(svg, 20, 30, 150, "water");
+        const steps = [
+          [["dog", 0.46], ["man", 0.18], ["two", 0.14], ["black", 0.12]],
+          [["runs", 0.41], ["is", 0.27], ["swims", 0.2], ["plays", 0.08]],
+          [["through", 0.52], ["in", 0.3], ["on", 0.1], ["across", 0.05]],
+          [["the", 0.71], ["water", 0.14], ["grass", 0.08], ["snow", 0.04]],
+          [["water", 0.63], ["grass", 0.18], ["snow", 0.1], ["field", 0.06]],
+          [["endseq", 0.77], ["and", 0.12], ["with", 0.06], ["near", 0.03]],
+        ];
+        const sent = K.svg(svg, "text", { x: 20, y: 300, "font-size": 15, "font-family": "var(--mono)", "font-weight": 700 }, "startseq");
+        K.svg(svg, "text", { x: 20, y: 326, "font-size": 11, class: "muted" }, "概率为示意数值");
+        const g = K.svg(svg, "g");
+        (async () => {
+          let txt = "startseq";
+          for (let s = 0; s < steps.length; s++) {
+            g.innerHTML = "";
+            K.svg(g, "text", { x: 220, y: 34, "font-size": 13, "font-weight": 700 }, `第 ${s + 1} 步：softmax 给出的前 4 个候选`);
+            const bars = steps[s].map((d, i) => {
+              K.svg(g, "text", { x: 300, y: 76 + i * 46, "text-anchor": "end", "font-size": 14, "font-family": "var(--mono)" }, d[0]);
+              const r = K.svg(g, "rect", { x: 310, y: 58 + i * 46, width: 0, height: 26, rx: 4, fill: i === 0 ? "var(--accent)" : "var(--ink-3)", "fill-opacity": i === 0 ? 0.9 : 0.4 });
+              const t = K.svg(g, "text", { x: 316, y: 76 + i * 46, "font-size": 12 }, d[1].toFixed(2));
+              return [r, t, d[1]];
+            });
+            if (!(await ctx.tween(500, (u) => bars.forEach((b) => { b[0].setAttribute("width", b[2] * 380 * u); b[1].setAttribute("x", 316 + b[2] * 380 * u); })))) return;
+            K.svg(g, "text", { x: Math.min(310 + steps[s][0][1] * 380 + 50, 650), y: 76, "font-size": 12, fill: "var(--accent)", "font-weight": 700 }, "← argmax");
+            if (!(await ctx.wait(450))) return;
+            txt += " " + steps[s][0][0];
+            sent.textContent = txt;
+            sent.style.fontSize = "15px";
+          }
+        })();
+      },
+    },
+    {
+      title: "结果：能说，但爱说套话", at: 38, kicker: "第 38–40 格 · 结论",
+      html: `<p>作者从验证集随机抽 15 张图生成描述，自己观察到：</p><ul class="tight"><li>有<b>冗余、套话</b>：比如常说“狗跑过水里”；</li><li>衣服颜色几乎总说“蓝衬衫”。</li></ul><p>原因：训练数据少导致过拟合，模型倾向于输出训练集里最常见的说法。改进方向：用更多数据（作者写的是 “Flickr40k”，常见的更大数据集是 Flickr30k）、加入<b>注意力机制</b>，让模型生成每个词时关注图中相关的区域，同时还能解释“哪个区域生成了哪个词”。</p>`,
+      cells: [38, 40], highlight: ["blue shirt", "attention"],
+      draw(svg, ctx) {
+        const kinds = ["water", "kids", "rock"];
+        const caps = [["dog runs through the water", "var(--good)"], ["man in blue shirt is ...", "var(--warn)"], ["dog runs through the water", "var(--bad)"]];
+        kinds.forEach((k, i) => {
+          const g = K.svg(svg, "g"); scene(g, 30 + i * 230, 40, 180, k);
+          const t = K.svg(g, "text", { x: 120 + i * 230, y: 196, "text-anchor": "middle", "font-size": 13, "font-family": "var(--mono)", fill: caps[i][1] }, caps[i][0]);
+          g.style.opacity = 0;
+          ctx.wait(300 + i * 600).then((ok) => ok && ctx.tween(400, (u) => (g.style.opacity = u)));
+        });
+        const note = K.svg(svg, "text", { x: 360, y: 250, "text-anchor": "middle", "font-size": 13 }, "套话问题示意：画面不同，句子却很像训练集里最常见的那几句");
+        K.svg(svg, "text", { x: 360, y: 280, "text-anchor": "middle", "font-size": 12, fill: "var(--accent)" }, "改进：更多数据 + 注意力机制（作者列为后续工作）");
+        K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 11, class: "muted" }, "示意：句子是为说明作者观察而编写的例子，不是原 notebook 的输出");
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：迷你语言模型 + 三种解码 ---------- */
+  const CORPUS = [
+    "dog runs through the water", "black dog swims in the water", "dog is running through the water", "brown dog plays in the water",
+    "two children play on the grass", "children are playing on the grass", "boy and girl run on the grass", "two kids play with ball on the grass",
+    "man climbs the rock", "man in blue shirt climbs rock", "climber is climbing the rock", "man is climbing the steep rock",
+    "dog runs on the grass", "man in blue shirt runs", "two dogs play on the grass", "boy in blue shirt plays in the water",
+  ].map((s) => "startseq " + s + " endseq");
+  const SCENES = {
+    water: { name: "狗在水里", words: ["dog", "water", "swims", "runs", "black", "brown", "through", "plays"] },
+    kids: { name: "孩子在草地上", words: ["children", "kids", "two", "boy", "girl", "play", "playing", "grass", "ball", "run"] },
+    rock: { name: "人在攀岩", words: ["man", "climbs", "climbing", "climber", "rock", "steep"] },
+  };
+  const big = {}, vocab = new Set();
+  CORPUS.forEach((s) => { const w = s.split(" "); w.forEach((x) => vocab.add(x)); for (let i = 0; i + 1 < w.length; i++) { big[w[i]] = big[w[i]] || {}; big[w[i]][w[i + 1]] = (big[w[i]][w[i + 1]] || 0) + 1; } });
+  const V = [...vocab].filter((w) => w !== "startseq");
+  function nextProbs(prev, scene, beta, used) {
+    const row = big[prev] || {}, sw = new Set(SCENES[scene].words);
+    const sc = V.map((w) => Math.log((row[w] || 0) + 0.05) + (sw.has(w) ? beta : 0) - (used.has(w) && w !== "the" ? 1.5 : 0));
+    const m = Math.max(...sc), e = sc.map((x) => Math.exp(x - m)), Z = e.reduce((a, b) => a + b);
+    return V.map((w, i) => [w, e[i] / Z]).sort((a, b) => b[1] - a[1]);
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 660, height: 360,
+    controls: [
+      { id: "scene", label: "选一张“图”（决定图像特征）", value: "water", options: Object.keys(SCENES).map((k) => [k, SCENES[k].name]) },
+      { id: "mode", label: "解码方式", value: "greedy", options: [["greedy", "贪心：每步取最大（作者的做法）"], ["sample", "温度采样：按概率抽"], ["beam", "束搜索：同时保留 k 个候选"]] },
+      { id: "beta", label: "图像特征的影响力 β", min: 0, max: 4, step: 0.1, value: 1.5, fmt: (v) => v.toFixed(1) },
+      { id: "temp", label: "温度（采样用）", min: 0.2, max: 2, step: 0.05, value: 1, fmt: (v) => v.toFixed(2) },
+      { id: "k", label: "束宽 k（束搜索用）", min: 1, max: 5, step: 1, value: 3 },
+      { id: "seed", label: "重新采样", button: true },
+    ],
+    note: "迷你模型：P(下一个词 | 上一个词, 图) ∝ 二元词频 × e^(β·是否与图相关)，并对已经出现过的词降权。它只是为了演示“逐词生成”和解码策略，不是 LSTM。β = 0 时完全不看图，句子只由词频决定。",
+    render(svg, v) {
+      const r = K.rng(7 + v.seed * 13), maxLen = 10;
+      let best = null; const trace = [];
+      if (v.mode === "beam") {
+        let beams = [{ w: ["startseq"], lp: 0, done: false }];
+        for (let t = 0; t < maxLen; t++) {
+          const cand = [];
+          beams.forEach((b) => {
+            if (b.done) { cand.push(b); return; }
+            nextProbs(b.w[b.w.length - 1], v.scene, v.beta, new Set(b.w)).slice(0, v.k).forEach(([w, p]) => cand.push({ w: b.w.concat(w), lp: b.lp + Math.log(p), done: w === "endseq" }));
+          });
+          cand.sort((a, b) => b.lp / b.w.length - a.lp / a.w.length);
+          beams = cand.slice(0, v.k);
+          trace.push(beams.map((b) => b.w.slice(1).join(" ")));
+          if (beams.every((b) => b.done)) break;
+        }
+        best = beams[0];
+      } else {
+        const w = ["startseq"]; let lp = 0;
+        for (let t = 0; t < maxLen; t++) {
+          const P = nextProbs(w[w.length - 1], v.scene, v.beta, new Set(w));
+          let pick;
+          if (v.mode === "greedy") pick = P[0];
+          else { const q = P.map(([x, p]) => [x, Math.pow(p, 1 / v.temp)]), Z = q.reduce((a, b) => a + b[1], 0); let u = r() * Z; pick = q.find((d) => (u -= d[1]) <= 0) || q[q.length - 1]; pick = P.find((d) => d[0] === pick[0]); }
+          trace.push(P.slice(0, 4).map((d) => [d[0], d[1], d[0] === pick[0]]));
+          w.push(pick[0]); lp += Math.log(pick[1]);
+          if (pick[0] === "endseq") break;
+        }
+        best = { w, lp };
+      }
+      const box = K.svg(svg, "g");
+      const icon = { water: "water", kids: "kids", rock: "rock" }[v.scene];
+      scene(box, 10, 10, 120, icon);
+      K.svg(svg, "text", { x: 150, y: 30, "font-size": 12, class: "muted" }, "生成的句子：");
+      const sentence = best.w.slice(1).join(" ");
+      K.svg(svg, "text", { x: 150, y: 56, "font-size": sentence.length > 46 ? 12 : 15, "font-family": "var(--mono)", "font-weight": 700 }, sentence);
+      if (v.mode === "beam") {
+        K.svg(svg, "text", { x: 150, y: 90, "font-size": 12, "font-weight": 700 }, `束搜索每一步保留的 ${v.k} 个候选（按平均对数概率排序）：`);
+        trace.slice(-6).forEach((bs, i) => bs.forEach((s, j) => { const t = s.length > 34 ? "…" + s.slice(-33) : s; K.svg(svg, "text", { x: 150 + j * 170, y: 116 + i * 38, "font-size": 10.5, "font-family": "var(--mono)", fill: j === 0 ? "var(--accent)" : "var(--ink-3)" }, t); }));
+      } else {
+        K.svg(svg, "text", { x: 150, y: 90, "font-size": 12, "font-weight": 700 }, "每一步的前 4 个候选及概率（高亮 = 选中的词）：");
+        trace.slice(0, 8).forEach((cands, i) => {
+          const y = 104 + i * 31;
+          K.svg(svg, "text", { x: 150, y: y + 16, "font-size": 11, class: "muted" }, `第${i + 1}步`);
+          cands.forEach(([w, p, sel], j) => {
+            const x = 196 + j * 116;
+            K.svg(svg, "rect", { x, y, width: 112, height: 24, rx: 4, fill: sel ? "var(--accent-soft)" : "var(--panel-2)", stroke: sel ? "var(--accent)" : "var(--line)" });
+            K.svg(svg, "rect", { x, y: y + 20, width: 112 * p, height: 4, fill: sel ? "var(--accent)" : "var(--ink-3)" });
+            K.svg(svg, "text", { x: x + 6, y: y + 15, "font-size": 11, "font-family": "var(--mono)" }, `${w} ${p.toFixed(2)}`);
+          });
+        });
+        if (trace.length > 8) K.svg(svg, "text", { x: 150, y: 356, "font-size": 11, class: "muted" }, `……共 ${trace.length} 步`);
+      }
+      const rel = best.w.filter((w) => SCENES[v.scene].words.includes(w)).length;
+      return { readout: [
+        { k: "句子长度（词）", v: String(best.w.length - 1) },
+        { k: "整句对数概率", v: best.lp.toFixed(2) },
+        { k: "与图相关的词数", v: String(rel), color: rel >= 2 ? "var(--good)" : "var(--warn)" },
+        { k: "是否正常结束", v: best.w[best.w.length - 1] === "endseq" ? "是" : "达到最大长度", color: best.w[best.w.length - 1] === "endseq" ? "var(--good)" : "var(--warn)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：预处理 + 编号 + 样本展开 ---------- */
+  const RAW = ["A black dog is running through the water .", "Two young kids play soccer on the green grass !", "A man in a blue shirt climbs a steep rock wall .", "A girl in a pink dress is jumping into a pool of water ."];
+  const TOK = {}; // 按词频编号（在示例语料 + 原句上统计）
+  (function () { const cnt = {}; CORPUS.concat(RAW.map((s) => "startseq " + s.toLowerCase().replace(/[^a-z ]/g, " ") + " endseq")).forEach((s) => s.split(/\s+/).filter((w) => w.length > 1).forEach((w) => (cnt[w] = (cnt[w] || 0) + 1))); Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a] || (a < b ? -1 : 1)).forEach((w, i) => (TOK[w] = i + 1)); })();
+  K.lab(document.getElementById("lab2"), {
+    width: 660, height: 420,
+    controls: [
+      { id: "cap", label: "选一句原始描述", value: "0", options: RAW.map((s, i) => [String(i), s.length > 30 ? s.slice(0, 30) + "…" : s]) },
+      { id: "regex", label: "去符号的写法", value: "orig", options: [["orig", "原代码：str.replace（实际不生效）"], ["fix", "改正：真正用正则去掉非字母"]] },
+      { id: "maxlen", label: "max_length（补齐长度）", min: 8, max: 16, step: 1, value: 12 },
+    ],
+    note: "按第 9 格清洗、第 13 格编号（这里只在示例语料上统计词频，编号为示意）、第 17 格展开：一句 n 个 token 产生 n−1 条样本，前缀左侧补 0。Keras Tokenizer 默认会过滤标点，所以即便第 9 格没删掉标点，编号时也会被丢掉。",
+    render(svg, v) {
+      const raw = RAW[+v.cap];
+      let s = raw.toLowerCase();
+      s = v.regex === "fix" ? s.replace(/[^a-z ]/g, "") : s.split("[^A-Za-z]").join("");
+      s = s.replace(/\s+/g, " ").trim();
+      const kept = s.split(" ").filter((w) => w.length > 1);
+      const fin = "startseq " + kept.join(" ") + " endseq";
+      const toks = fin.split(" ").map((w) => w.replace(/[!"#$%&()*+,\-./:;<=>?@[\\\]^_`{|}~]/g, "")).filter((w) => w);
+      const ids = toks.map((w) => TOK[w] || 0);
+      K.svg(svg, "text", { x: 10, y: 20, "font-size": 11, class: "muted" }, "原句");
+      K.svg(svg, "text", { x: 10, y: 38, "font-size": 13, "font-family": "var(--mono)" }, raw);
+      K.svg(svg, "text", { x: 10, y: 60, "font-size": 11, class: "muted" }, "第 9 格清洗后");
+      K.svg(svg, "text", { x: 10, y: 78, "font-size": 12.5, "font-family": "var(--mono)" }, fin);
+      K.svg(svg, "text", { x: 10, y: 100, "font-size": 11, class: "muted" }, "Tokenizer 编号（标点被过滤）");
+      K.svg(svg, "text", { x: 10, y: 118, "font-size": 12.5, "font-family": "var(--mono)", fill: "var(--accent)" }, "[" + ids.join(", ") + "]");
+      K.svg(svg, "text", { x: 10, y: 146, "font-size": 12, "font-weight": 700 }, "展开成训练样本（前缀补到 max_length → 下一个词）：");
+      const ML = v.maxlen, cw = Math.min(30, 470 / ML);
+      const n = ids.length - 1, show = Math.min(n, 8);
+      for (let i = 1; i <= show; i++) {
+        const y = 156 + (i - 1) * 30, pre = ids.slice(0, i);
+        const pad = Array(Math.max(0, ML - pre.length)).fill(0).concat(pre.slice(-ML));
+        pad.forEach((d, j) => {
+          K.svg(svg, "rect", { x: 10 + j * cw, y, width: cw - 2, height: 24, rx: 3, fill: d ? "color-mix(in srgb, var(--c1) 22%, var(--panel))" : "var(--panel-2)" });
+          K.svg(svg, "text", { x: 10 + j * cw + (cw - 2) / 2, y: y + 16, "text-anchor": "middle", "font-size": 10, class: d ? null : "muted" }, String(d));
+        });
+        K.svg(svg, "text", { x: 20 + ML * cw, y: y + 16, "font-size": 12, "font-family": "var(--mono)", fill: "var(--c3)" }, `→ ${toks[i]} (${ids[i]})`);
+      }
+      if (n > show) K.svg(svg, "text", { x: 10, y: 156 + show * 30 + 14, "font-size": 11, class: "muted" }, `……还有 ${n - show} 条`);
+      const trunc = ids.length - 1 > ML;
+      return { readout: [
+        { k: "清洗后 token 数", v: String(toks.length) },
+        { k: "训练样本条数", v: String(n) },
+        { k: "被删的单字母词", v: String(s.split(" ").filter((w) => w.length === 1).length) },
+        { k: "每张图 5 句 → 约", v: `${n * 5} 条`, color: trunc ? "var(--warn)" : null },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

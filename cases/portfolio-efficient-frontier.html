@@ -1,0 +1,664 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>投资组合有效前沿</title>
+<meta name="description" content="Kaggle 案例拆解：现代投资组合理论（MPT）。用随机模拟和 scipy 优化器，在“收益—波动”平面上找最小风险组合、最大夏普组合和资本市场线。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">股票日收益 · 带约束的最优化 · 均值—方差模型</div>
+  <h1>鸡蛋怎么分篮子：用优化算出“最划算”的投资组合</h1>
+  <p class="en">Modern Portfolio Theory (MPT)</p>
+  <div class="tags">
+    <span class="tag method">优化与运筹</span>
+    <span class="tag method">均值—方差模型</span><span class="tag method">蒙特卡洛随机组合</span><span class="tag method">有效前沿</span>
+    <span class="tag method">scipy minimize（带约束）</span><span class="tag method">最大夏普比率</span><span class="tag method">拉格朗日乘数</span><span class="tag method">资本市场线</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Yousef Saeedian</b></span>
+    <span>Kaggle 点赞 <b>94</b>（2026-11 抓取）</span>
+    <span>数据集 <b>yousefsaeedian/edhec-investment-management-datasets</b>（提供辅助函数库）+ yfinance 下载的股价</span>
+    <span><a href="https://www.kaggle.com/code/yousefsaeedian/modern-portfolio-theory-mpt" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">三只美股 8 年的每日收盘价</div><p>亚马逊（AMZN）、可口可乐（KO）、微软（MSFT），2011-01-01 到 2019-01-01，用 yfinance 联网下载。<span data-cell="18">出处</span> 前面还有一个用随机数造出的“两只假股票”示例。<span data-cell="10">出处</span></p></div>
+    <div class="card panel"><h3>要解决什么</h3><div class="big">钱按什么比例分给这几只股票</div><p>不是预测股价，而是<b>在约束下找最优方案</b>：权重加起来等于 1、每个权重在 0 到 1 之间，在这些规则里让风险最小，或让“每承担一分风险换来的收益”最大。<span data-cell="32">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">先随机撒 4000 个点，再让优化器精确求解</div><p>蒙特卡洛随机组合画出“有效前沿”；scipy <code>minimize</code> 求最小波动组合、给定收益的最小波动组合、最大夏普组合；允许卖空时用拉格朗日乘数推公式；最后加入无风险资产，画资本市场线。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">优化器的解和随机模拟“几乎重合”</div><p>作者文字：两资产负相关时可以“几乎零波动拿到约 30% 收益”<span data-cell="16">出处</span>；目标 20% 收益时最低波动约 17.5%，而很多组合要 22.5%<span data-cell="27">出处</span>；公式解与优化器结果一致。<span data-cell="73">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>问题长什么样</h2>
+  <p class="lead">这是一个<b>优化问题</b>：没有“标签”要预测，而是给定几只股票的历史收益，在规则（约束）之内找一组最好的分配比例（决策变量），让目标函数最小或最大。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">题目给的实例</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">股票只数</div><div class="v">3</div></div>
+        <div class="stat-tile"><div class="k">时间范围</div><div class="v" style="font-size:16px">2011–2019</div></div>
+        <div class="stat-tile"><div class="k">随机组合个数</div><div class="v">4,000</div></div>
+        <div class="stat-tile"><div class="k">每年交易日（换算用）</div><div class="v">252</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">股票代码和日期见第 18 格 <span data-cell="18">出处</span>，4000 和 252 见第 23 格 <span data-cell="23">出处</span>。两只“假股票”示例用 500 个随机日收益、6 种相关系数、每种 20 组权重 <span data-cell="10">出处</span> <span data-cell="14">出处</span>。</p>
+      <p class="callout warn">注意：Kaggle 上挂的数据集 <code>edhec-investment-management-datasets</code> 在这里只用来导入作者的辅助函数库 <code>edhec_risk_kit</code> <span data-cell="6">出处</span>；股价是运行时联网从 yfinance 下载的，下载接口不带运行结果，所以本页不列具体价格和收益数字。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">优化问题的四个零件</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>零件</th><th>本案例里是什么</th></tr>
+        <tr><td>输入数据</td><td>每只股票的<b>年化平均收益</b> R<sub>i</sub>，以及两两之间一起涨跌的程度（<b>协方差矩阵</b> Σ）<span data-cell="21">第 21 格</span></td></tr>
+        <tr><td>决策变量</td><td>权重 w<sub>1</sub>, w<sub>2</sub>, w<sub>3</sub>：每只股票分到总资金的几成</td></tr>
+        <tr><td>约束</td><td>w<sub>1</sub>+w<sub>2</sub>+w<sub>3</sub> = 1（钱全投进去）；0 ≤ w<sub>i</sub> ≤ 1（只买不卖空）<span data-cell="32">第 32 格</span></td></tr>
+        <tr><td>目标函数</td><td>①组合波动 √(wᵀΣw) 最小；或 ②夏普比率 (R<sub>p</sub> − r<sub>f</sub>) / σ<sub>p</sub> 最大 <span data-cell="48">第 48 格</span></td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">白话：<b>收益</b>是一年平均赚几成；<b>波动（volatility）</b>是收益上下晃得有多厉害，作者把它当作“风险”；<b>夏普比率</b>是每多扛一份风险，能多赚多少（比无风险利息多出来的部分）。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="16">
+    <h3>动手试试 A · 两只股票的相关系数如何“掰弯”组合曲线 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="39">
+    <h3>动手试试 B · 随机撒点 vs 优化器：谁找得更准 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="65">
+    <h3>动手试试 C · 调无风险利率，看资本市场线的切点怎么移动 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>两只资产相关性越低，收益和波动的取舍越划算；相关系数 −1 时，理论上能以几乎零波动拿到约 30% 收益（假股票示例）</td><td><span data-cell="16">第 16 格</span></td></tr>
+        <tr><td>目标 20% 收益时，最省风险的组合波动约 17.5%，而同样 20% 收益的其他组合可能高达 22.5%：权重要仔细选</td><td><span data-cell="27">第 27 格</span></td></tr>
+        <tr><td>用优化器求出的最小波动组合，和 4000 个随机组合里挑出的最小波动组合“几乎重合”</td><td><span data-cell="38">第 38 格</span></td></tr>
+        <tr><td>三只股票里最高年化收益约 30%（亚马逊），所以组合收益不可能做到 40%</td><td><span data-cell="46">第 46 格</span></td></tr>
+        <tr><td>加入无风险资产后，除了切点，资本市场线在每个波动水平上都比原来的有效前沿收益更高</td><td><span data-cell="63">第 63 格</span></td></tr>
+        <tr><td>用拉格朗日乘数推出的最大夏普权重公式，与优化器的结果一致</td><td><span data-cell="73">第 73 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">原 notebook 的具体权重、夏普比率等数字在运行输出里，Kaggle 下载的源码不带输出，作者文字里也只给了上面这些近似值，所以这里不列其他数字。动画和实验里的“资产 A/B/C”是虚构参数，不是这三只股票的真实数据。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能算出：</b>给定几种资产的历史收益和协方差，算出“同样收益下风险最小”的分配比例，或“性价比最高”的那一组比例。</li>
+        <li><b>同类问题：</b>养老金 / 基金的资产配置、企业在几个项目之间分预算、电力公司在几种发电方式之间分配容量（都是“分篮子 + 控制总风险”）。</li>
+        <li><b>可迁移的套路：</b>先随机撒点看问题长什么样 → 写出目标函数和约束 → 交给优化器精确求解 → 和随机结果对照检查 → 能推公式时再用公式验证。</li>
+        <li><b>局限：</b>完全依赖历史均值和协方差，而这两样对未来的预测很不稳定；作者在结论里也提醒了这一点。<span data-cell="93">第 93 格</span></li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>组合收益与波动：wᵀR、√(wᵀΣw)，年化换算 <span data-cell="8">第 8 格</span></li>
+        <li>两资产不同相关系数模拟 <span data-cell="15">第 15 格</span></li>
+        <li>蒙特卡洛 4000 个随机组合 + 有效前沿 <span data-cell="24">第 24 格</span></li>
+        <li>scipy minimize：最小波动 / 给定收益 <span data-cell="35">第 35 格</span> <span data-cell="43">第 43 格</span></li>
+        <li>最大夏普 = 最小化负夏普 <span data-cell="49">第 49 格</span></li>
+        <li>拉格朗日乘数解析解（允许卖空）<span data-cell="57">第 57 格</span></li>
+        <li>无风险资产与资本市场线 <span data-cell="62">第 62 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>4000 个随机组合已经能画出有效前沿的大致样子，为什么还要用优化器？如果股票有 500 只，随机撒点还管用吗？</li>
+      <li>作者用 2011–2019 年的历史数据算平均收益和协方差。拿“过去 8 年亚马逊涨得多”去决定“明年该多买亚马逊”，有什么风险？</li>
+      <li>第 46 格把目标收益设成 40%，比三只股票里最高的约 30% 还高。这时问题其实<b>无解</b>，优化器给出的权重还能信吗？应该怎么检查？</li>
+      <li>第 53 格的约束写成“½·wᵀΣw = σ₀”，左边是方差的一半、右边是波动率，单位对得上吗？你会怎么改？</li>
+      <li>允许卖空后，有效前沿往左上方“扩张”了。为什么多了一种选择，结果只会更好、不会更差？现实中卖空又有什么额外风险？</li>
+      <li>波动率把“涨得猛”和“跌得猛”都算作风险。你觉得这合理吗？你自己理财时最在意的“风险”是什么？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Yousef Saeedian，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意，不构成任何投资建议。股价数据来源：yfinance（作者运行时下载）；辅助函数库来自数据集 yousefsaeedian/edhec-investment-management-datasets。
+</footer>
+</main>
+
+<script src="nb/portfolio-efficient-frontier.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ================= 小型线性代数与组合工具（页面专用） ================= */
+  function covOf(sig, cor) { return sig.map((a, i) => sig.map((b, j) => a * b * cor[i][j])); }
+  function mv(M, v) { return M.map((r) => r.reduce((s, x, j) => s + x * v[j], 0)); }
+  function dot(a, b) { return a.reduce((s, x, i) => s + x * b[i], 0); }
+  function inv(M) {
+    const n = M.length, A = M.map((r, i) => r.concat(M.map((_, j) => (i === j ? 1 : 0))));
+    for (let c = 0; c < n; c++) {
+      let p = c; for (let r = c + 1; r < n; r++) if (Math.abs(A[r][c]) > Math.abs(A[p][c])) p = r;
+      [A[c], A[p]] = [A[p], A[c]];
+      const d = A[c][c]; for (let j = 0; j < 2 * n; j++) A[c][j] /= d;
+      for (let r = 0; r < n; r++) if (r !== c) { const f = A[r][c]; for (let j = 0; j < 2 * n; j++) A[r][j] -= f * A[c][j]; }
+    }
+    return A.map((r) => r.slice(n));
+  }
+  function stat(w, mu, S) { return [dot(w, mu), Math.sqrt(Math.max(0, dot(w, mv(S, w))))]; } // [收益, 波动]
+  // 投影到单纯形 {w ≥ 0, Σw = 1}
+  function projSimplex(v) {
+    const u = v.slice().sort((a, b) => b - a); let css = 0, th = 0;
+    for (let i = 0; i < u.length; i++) { css += u[i]; const t = (css - 1) / (i + 1); if (u[i] - t > 0) th = t; }
+    return v.map((x) => Math.max(0, x - th));
+  }
+  // 投影梯度法：最小方差（只买不卖空）
+  function solveGMV(S, n, path) {
+    let w = Array(n).fill(1 / n); if (path) { w = path.start.slice(); path.pts.push(w.slice()); }
+    for (let it = 0; it < 400; it++) {
+      const g = mv(S, w).map((x) => 2 * x);
+      w = projSimplex(w.map((x, i) => x - 1.2 * g[i]));
+      if (path && it < 60) path.pts.push(w.slice());
+    }
+    return w;
+  }
+  // 投影梯度法：最大夏普（只买不卖空），多个起点取最好
+  function solveMSR(mu, S, rf) {
+    const n = mu.length, sh = (w) => { const [r, s] = stat(w, mu, S); return (r - rf) / s; };
+    let best = null;
+    const starts = [Array(n).fill(1 / n)].concat(mu.map((_, k) => mu.map((__, i) => (i === k ? 0.7 : 0.3 / (n - 1)))));
+    starts.forEach((w0) => {
+      let w = w0.slice(), step = 0.05;
+      for (let it = 0; it < 600; it++) {
+        const Sw = mv(S, w), r = dot(w, mu) - rf, s = Math.sqrt(dot(w, Sw));
+        const g = mu.map((m, i) => (m * s - r * Sw[i] / s) / (s * s));
+        const w2 = projSimplex(w.map((x, i) => x + step * g[i]));
+        if (sh(w2) >= sh(w)) { w = w2; step *= 1.1; } else step *= 0.5;
+      }
+      if (!best || sh(w) > sh(best)) best = w;
+    });
+    return best;
+  }
+  // 单纯形网格：穷举所有步长为 h 的权重
+  function grid(n, h) {
+    const m = Math.round(1 / h), out = [];
+    (function rec(pre, left) {
+      if (pre.length === n - 1) { out.push(pre.concat([left]).map((k) => k / m)); return; }
+      for (let k = 0; k <= left; k++) rec(pre.concat([k]), left - k);
+    })([], m);
+    return out;
+  }
+  // 由一堆 (收益, 波动) 点取有效前沿：按收益分箱，每箱最小波动，只留最小波动点以上的部分
+  function frontier(pts, bins) {
+    let lo = Infinity, hi = -Infinity; pts.forEach((p) => { lo = Math.min(lo, p[0]); hi = Math.max(hi, p[0]); });
+    const B = Array(bins).fill(null);
+    pts.forEach((p) => { const b = Math.min(bins - 1, Math.floor(((p[0] - lo) / (hi - lo + 1e-12)) * bins)); if (!B[b] || p[1] < B[b][1]) B[b] = p; });
+    const F = B.filter(Boolean); let k = 0; F.forEach((p, i) => { if (p[1] < F[k][1]) k = i; });
+    return F.slice(k);
+  }
+  function linePath(pts, ax) { return pts.map((p, i) => (i ? "L" : "M") + ax.sx(p[1]).toFixed(1) + "," + ax.sy(p[0]).toFixed(1)).join(""); }
+
+  // 三只虚构资产（示意，不是 AMZN/KO/MSFT 的真实数据）
+  const NAMES = ["A", "B", "C", "D"];
+  const MU3 = [0.28, 0.08, 0.18], SIG3 = [0.30, 0.15, 0.22];
+  const COR3 = [[1, 0.25, 0.45], [0.25, 1, 0.3], [0.45, 0.3, 1]];
+  const S3 = covOf(SIG3, COR3);
+  const MU4 = [0.28, 0.08, 0.18, 0.12], SIG4 = [0.30, 0.15, 0.22, 0.18];
+  const COR4 = [[1, 0.25, 0.45, 0.2], [0.25, 1, 0.3, 0.1], [0.45, 0.3, 1, 0.35], [0.2, 0.1, 0.35, 1]];
+  const S4 = covOf(SIG4, COR4);
+  const G3 = grid(3, 0.01).map((w) => stat(w, MU3, S3));
+  const F3 = frontier(G3, 70);
+  const GMV3 = solveGMV(S3, 3), GMV3s = stat(GMV3, MU3, S3);
+  const BOX = { x: 60, y: 22, w: 600, h: 250 };
+  const XD = [0, 0.36], YD = [0, 0.34];
+  const pctf = (v) => Math.round(v * 100) + "%";
+  function plane(svg, opt) {
+    opt = opt || {};
+    return K.axes(svg, opt.box || BOX, opt.xd || XD, opt.yd || YD, { xlabel: "波动（风险）", ylabel: "年化收益", xfmt: pctf, yfmt: pctf, xticks: 6, yticks: 4 });
+  }
+  function xmark(svg, x, y, color, size) {
+    const s = size || 7, g = K.svg(svg, "g");
+    K.svg(g, "line", { x1: x - s, y1: y - s, x2: x + s, y2: y + s, stroke: color, "stroke-width": 3 });
+    K.svg(g, "line", { x1: x - s, y1: y + s, x2: x + s, y2: y - s, stroke: color, "stroke-width": 3 });
+    return g;
+  }
+  function randW(r, n) { const w = Array.from({ length: n }, () => r()); const s = w.reduce((a, b) => a + b, 0); return w.map((x) => x / s); }
+  const note = (svg, txt, y) => K.svg(svg, "text", { x: 60, y: y || 334, "font-size": 12, class: "muted" }, txt);
+
+  const steps = [
+    {
+      title: "开场：导入与读数据", kicker: "第 0–7 格 · 准备工作", at: 0,
+      html: `<p>作者先介绍了<b>现代投资组合理论（MPT）</b>：1952 年由马科维茨提出，核心想法是“不要只看一只资产自己的收益和风险，要看它放进组合以后对整体的影响”。<span data-cell="0">第 0 格</span></p><p>然后安装 <code>yfinance</code>（联网下载股价的库），导入 numpy、pandas、scipy 的 <code>minimize</code>，再从数据集里导入作者的辅助函数库 <code>edhec_risk_kit</code>：后面算收益、波动、夏普比率、画有效前沿都靠它。</p><p>动画演示 MPT 最朴素的直觉：三条示意走势各自起伏很大，但<b>平均分着买</b>之后，总体曲线平稳得多。</p>`,
+      cells: [6], highlight: ["edhec_risk_kit"],
+      draw(svg, ctx) {
+        const r = K.rng(11), T = 120, lines = [[], [], []], avg = [];
+        const v = [0, 0, 0];
+        for (let t = 0; t < T; t++) {
+          const common = K.randn(r) * 0.6;
+          for (let k = 0; k < 3; k++) { v[k] += 0.04 + common * (k === 1 ? -0.5 : 0.5) + K.randn(r) * 1.4; lines[k].push(v[k]); }
+          avg.push((v[0] + v[1] + v[2]) / 3);
+        }
+        const sx = (t) => 60 + t * 5, sy = (y) => 170 - y * 4.2;
+        K.svg(svg, "line", { x1: 60, y1: 170, x2: 660, y2: 170, stroke: "var(--line)" });
+        const cols = ["var(--c1)", "var(--c2)", "var(--c4)"];
+        const ps = lines.map((L, k) => K.svg(svg, "path", { d: "", fill: "none", stroke: cols[k], "stroke-width": 1.5, opacity: 0.55 }));
+        const pa = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--ink)", "stroke-width": 3 });
+        K.svg(svg, "text", { x: 60, y: 24, "font-size": 13, class: "muted" }, "三只“示意股票”的累计涨跌（彩色细线）与平均分买的组合（黑色粗线）");
+        K.svg(svg, "text", { x: 470, y: 320, "font-size": 13, "font-weight": 700 }, "组合更平稳 = 风险更小");
+        ctx.tween(2600, (t, raw) => {
+          const n = Math.max(2, Math.round(raw * T));
+          ps.forEach((p, k) => p.setAttribute("d", lines[k].slice(0, n).map((y, i) => (i ? "L" : "M") + sx(i) + "," + sy(y)).join("")));
+          pa.setAttribute("d", avg.slice(0, n).map((y, i) => (i ? "L" : "M") + sx(i) + "," + sy(y)).join(""));
+        });
+      },
+    },
+    {
+      title: "组合的收益和风险怎么算", kicker: "第 8 格 · 理论",
+      html: `<p>假设有 N 只股票，给每只分一个<b>权重</b> w<sub>i</sub>（投进去的钱占总资金的比例），全部加起来等于 1，这叫“只做多”（long-only）。</p><ul class="tight"><li><b>组合收益</b>就是各只收益的加权平均：R<sub>p</sub> = Σ w<sub>i</sub>R<sub>i</sub> = wᵀR</li><li><b>组合波动</b>却不是简单平均：σ<sub>p</sub> = √(wᵀΣw)，要把每一对股票“一起涨跌的程度”（协方差 Σ<sub>ij</sub>）都算进去</li></ul><p>动画右边的 3×3 格子一格一格亮起：每格是 w<sub>i</sub>·w<sub>j</sub>·Σ<sub>ij</sub>，加在一起就是组合方差。两只股票相关性低时，交叉格子很小，方差就被“抵消”掉一部分。</p>`,
+      cells: [8],
+      draw(svg, ctx) {
+        const w = [0.3, 0.45, 0.25], cols = ["var(--c1)", "var(--c2)", "var(--c4)"];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 14, "font-weight": 700 }, "权重 w（加起来 = 1）");
+        let x = 30;
+        w.forEach((v, i) => { K.svg(svg, "rect", { x, y: 44, width: v * 280, height: 34, fill: cols[i], opacity: 0.85 }); K.svg(svg, "text", { x: x + v * 140, y: 66, "text-anchor": "middle", "font-size": 13, fill: "#fff" }, `${NAMES[i]} ${Math.round(v * 100)}%`); x += v * 280; });
+        const ret = dot(w, MU3);
+        K.svg(svg, "text", { x: 30, y: 120, "font-size": 14 }, "收益 = 加权平均：");
+        MU3.forEach((m, i) => K.svg(svg, "text", { x: 30, y: 146 + i * 22, "font-size": 13, class: "muted" }, `${NAMES[i]}：${Math.round(w[i] * 100)}% × ${Math.round(m * 100)}%`));
+        const rt = K.svg(svg, "text", { x: 30, y: 228, "font-size": 18, "font-weight": 700, fill: "var(--good)" }, "");
+        K.svg(svg, "text", { x: 400, y: 30, "font-size": 14, "font-weight": 700 }, "方差 = 9 格之和（每格 wᵢ·wⱼ·Σᵢⱼ）");
+        const cells = [];
+        for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
+          const val = w[i] * w[j] * S3[i][j];
+          const rc = K.svg(svg, "rect", { x: 420 + j * 72, y: 46 + i * 62, width: 66, height: 56, rx: 6, fill: i === j ? "var(--c3)" : "var(--c5)", opacity: 0.08 });
+          K.svg(svg, "text", { x: 453 + j * 72, y: 79 + i * 62, "text-anchor": "middle", "font-size": 12 }, (val * 1000).toFixed(1));
+          cells.push({ rc, val });
+        }
+        K.svg(svg, "text", { x: 420, y: 252, "font-size": 11, class: "muted" }, "格内数字 ×0.001；对角线=自己的方差，其余=两两协方差");
+        const vt = K.svg(svg, "text", { x: 420, y: 290, "font-size": 18, "font-weight": 700, fill: "var(--warn)" }, "");
+        note(svg, "示意：资产 A/B/C 的参数为虚构");
+        (async () => {
+          if (!(await ctx.tween(900, (t) => (rt.textContent = "组合收益 ≈ " + (ret * t * 100).toFixed(1) + "%")))) return;
+          let acc = 0;
+          for (const c of cells) { if (!(await ctx.tween(220, (t) => K.set(c.rc, { opacity: 0.08 + 0.6 * t })))) return; acc += c.val; vt.textContent = "方差 " + (acc * 1000).toFixed(1) + "e-3 → 波动 √ = " + (Math.sqrt(acc) * 100).toFixed(1) + "%"; }
+        })();
+      },
+    },
+    {
+      title: "两只假股票、六种相关系数", kicker: "第 9–16 格 · 人造示例",
+      html: `<p>作者先造了两只“假股票”：日平均收益 0.1019% 和 0.1249%，日波动 1.63% 和 1.91%，生成 500 个交易日的随机收益。<span data-cell="12">第 12 格</span></p><p>然后让两只股票的<b>相关系数 ρ</b> 从 1（同涨同跌）变到 −1（此涨彼跌），共 6 档；每档用 20 组权重（从全买第一只到全买第二只）画出组合点。<span data-cell="14">第 14 格</span></p><p>作者的结论：<b>相关性越低，收益和波动的取舍越划算</b>；ρ = −1 时，理论上可以几乎零波动拿到约 30% 的收益。<span data-cell="16">第 16 格</span></p><p>动画用作者的参数和公式直接画出 6 条曲线（年化：收益×252、波动×√252），没有加随机噪声。</p>`,
+      cells: [9, 10, 15], highlight: ["np.linspace(1,-1,num=6)", "multivariate_normal"],
+      draw(svg, ctx) {
+        const m1 = 0.001019 * 252, m2 = 0.001249 * 252, s1 = 0.016317 * Math.sqrt(252), s2 = 0.019129 * Math.sqrt(252);
+        const ax = plane(svg, { xd: [0, 0.34], yd: [0.2, 0.34] });
+        const rhos = [1, 0.6, 0.2, -0.2, -0.6, -1];
+        const paths = rhos.map((rho, k) => K.svg(svg, "path", { d: "", fill: "none", stroke: K.heat(1 - k / 5 * 2, true), "stroke-width": 2.5 }));
+        const labs = rhos.map((rho, k) => K.svg(svg, "text", { x: 0, y: 0, "font-size": 11, opacity: 0 }, "ρ=" + rho));
+        K.svg(svg, "text", { x: 70, y: 40, "font-size": 12, class: "muted" }, "曲线两端：全买第 1 只（左下）/ 全买第 2 只（右上）");
+        (async () => {
+          for (let k = 0; k < 6; k++) {
+            const rho = rhos[k], pts = [];
+            for (let i = 0; i <= 60; i++) { const w = i / 60, r = w * m1 + (1 - w) * m2, v = Math.sqrt(w * w * s1 * s1 + (1 - w) * (1 - w) * s2 * s2 + 2 * w * (1 - w) * rho * s1 * s2); pts.push([r, v]); }
+            if (!(await ctx.tween(500, (t) => paths[k].setAttribute("d", linePath(pts.slice(0, Math.max(2, Math.round(t * 61))), ax))))) return;
+            let mi = 0; pts.forEach((p, i) => { if (p[1] < pts[mi][1]) mi = i; });
+            K.set(labs[k], { x: ax.sx(pts[mi][1]) + 8, y: ax.sy(pts[mi][0]) + 14, opacity: 1 });
+          }
+        })();
+      },
+    },
+    {
+      title: "真实世界：亚马逊、可口可乐、微软", kicker: "第 17–21 格 · 下载股价、算收益与协方差",
+      html: `<p>接下来换成真实股票：亚马逊 AMZN、可口可乐 KO、微软 MSFT，2011 年到 2019 年每天的复权收盘价，用 <code>yf.download</code> 联网下载。<span data-cell="18">第 18 格</span></p><p>三步加工：①价格 → <b>日收益率</b>（今天比昨天涨了百分之几）；②每只股票日收益的<b>平均值</b>；③三只股票两两之间的<b>协方差矩阵</b>，描述它们一起涨跌的程度。<span data-cell="21">第 21 格</span></p><p>动画是示意：价格线变成每日涨跌柱，再汇总成一张 3×3 的“一起涨跌”表。</p>`,
+      cells: [17, 18, 21], highlight: ["yf.download", "daily_rets.cov()"],
+      draw(svg, ctx) {
+        const r = K.rng(5), P = [[], [], []];
+        const lv = [100, 100, 100];
+        for (let t = 0; t < 60; t++) for (let k = 0; k < 3; k++) { lv[k] *= 1 + 0.003 * (k === 0 ? 2 : 1) + K.randn(r) * [0.025, 0.01, 0.017][k]; P[k].push(lv[k]); }
+        const cols = ["var(--c1)", "var(--c2)", "var(--c4)"], nm = ["AMZN", "KO", "MSFT"];
+        K.svg(svg, "text", { x: 20, y: 22, "font-size": 13, "font-weight": 700 }, "① 价格（示意）");
+        P.forEach((L, k) => {
+          K.svg(svg, "path", { d: L.map((y, i) => (i ? "L" : "M") + (20 + i * 3.4) + "," + (150 - (y - 100) * 2.2)).join(""), fill: "none", stroke: cols[k], "stroke-width": 1.8 });
+          K.svg(svg, "text", { x: 20, y: 250 + k * 16, "font-size": 11, fill: cols[k] }, "— " + nm[k]);
+        });
+        const g2 = K.svg(svg, "g", { opacity: 0 });
+        K.svg(g2, "text", { x: 280, y: 22, "font-size": 13, "font-weight": 700 }, "② 日收益率 = 今天/昨天 − 1");
+        P.forEach((L, k) => L.slice(1).forEach((y, i) => { const d = (y / L[i] - 1) * 900; K.svg(g2, "rect", { x: 322 + i * 2.6, y: 70 + k * 60 - Math.max(0, d), width: 2, height: Math.abs(d) + 0.5, fill: cols[k] }); }));
+        nm.forEach((n, k) => K.svg(g2, "text", { x: 280, y: 74 + k * 60, "font-size": 11, fill: cols[k] }, n));
+        const g3 = K.svg(svg, "g", { opacity: 0 });
+        K.svg(g3, "text", { x: 500, y: 22, "font-size": 13, "font-weight": 700 }, "③ 协方差矩阵");
+        const cv = [[1, 0.35, 0.5], [0.35, 0.4, 0.3], [0.5, 0.3, 0.7]];
+        for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) { K.svg(g3, "rect", { x: 530 + j * 52, y: 40 + i * 52, width: 48, height: 48, rx: 4, fill: K.heat(cv[i][j]) }); }
+        nm.forEach((n, k) => { K.svg(g3, "text", { x: 554 + k * 52, y: 210, "text-anchor": "middle", "font-size": 11 }, n); K.svg(g3, "text", { x: 524, y: 68 + k * 52, "text-anchor": "end", "font-size": 11 }, n); });
+        K.svg(g3, "text", { x: 500, y: 236, "font-size": 11, class: "muted" }, "颜色越深 = 越爱一起涨跌（示意）");
+        note(svg, "示意动画：曲线和颜色不是三只股票的真实数据");
+        ctx.wait(500).then((ok) => ok && ctx.tween(900, (t) => K.set(g2, { opacity: t }))).then((ok) => ok && ctx.tween(900, (t) => K.set(g3, { opacity: t })));
+      },
+    },
+    {
+      title: "撒 4000 个随机组合，画出有效前沿", kicker: "第 22–26 格 · 蒙特卡洛",
+      html: `<p>怎么知道哪种分法最好？最笨也最直观的办法：<b>随便分 4000 次</b>。每次给三只股票各抽一个随机数，再除以总和让它们加起来等于 1，算出这个组合的年化收益、波动和夏普比率。<span data-cell="24">第 24 格</span></p><p>把 4000 个点画在“波动—收益”平面上，会看到一团伞形的点云。点云<b>左上方的边</b>就是<b>有效前沿</b>：在同样的波动下收益最高，或在同样收益下波动最低。作者用 <code>erk.efficient_frontier</code> 画出这条虚线。<span data-cell="26">第 26 格</span></p><p>动画里的点用虚构的三只资产生成，虚线是在浏览器里把所有 1% 步长的权重组合穷举一遍后取的左边界。</p>`,
+      cells: [22, 24, 26], highlight: ["np.random.random(n_assets)", "weights /= np.sum(weights)", "efficient_frontier"],
+      draw(svg, ctx) {
+        const ax = plane(svg), r = K.rng(42), dots = [];
+        for (let i = 0; i < 700; i++) { const w = randW(r, 3), [rt, v] = stat(w, MU3, S3); dots.push(K.svg(svg, "circle", { cx: ax.sx(v), cy: ax.sy(rt), r: 0, fill: K.heat(0.25 + (rt / v) * 0.6), opacity: 0.85 })); }
+        const fp = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5, "stroke-dasharray": "6 4" });
+        const cnt = K.svg(svg, "text", { x: 80, y: 40, "font-size": 14, "font-weight": 700 }, "");
+        note(svg, "示意：700 个点（原文 4000 个），蓝色越浓 = 夏普比率越高；红虚线 = 有效前沿");
+        ctx.tween(2200, (t, raw) => { const n = Math.round(raw * dots.length); dots.forEach((d, i) => d.setAttribute("r", i < n ? 2.6 : 0)); cnt.textContent = `已抽 ${n} 个随机组合`; })
+          .then((ok) => ok && ctx.tween(1000, (t) => fp.setAttribute("d", linePath(F3.slice(0, Math.max(2, Math.round(t * F3.length))), ax))));
+      },
+    },
+    {
+      title: "两个特别的组合：最小波动 GMV 和最大夏普 MSR", kicker: "第 27–31 格 · 从点云里挑点",
+      html: `<p>作者读图：如果目标是 20% 的收益，最省风险的组合波动约 17.5%，但也有很多组合同样 20% 收益却要扛 22.5% 的波动，<b>所以权重一定要挑</b>。<span data-cell="27">第 27 格</span></p><p>点云里有两个最重要的点：</p><ul class="tight"><li><b>GMV</b>（全局最小波动组合）：整团点里最靠左的那个，风险最低</li><li><b>MSR</b>（最大夏普组合）：从原点（无风险利率 0）出发、斜率最大的那条射线碰到的点，“性价比”最高</li></ul><p>作者直接用 <code>idxmin</code> / <code>idxmax</code> 在 4000 行表格里找出这两行。<span data-cell="28">第 28 格</span> 注意第 24 格最后把整张表四舍五入到两位小数，可能出现并列。</p>`,
+      cells: [27, 28, 29], highlight: ["idxmin()", "idxmax()"],
+      draw(svg, ctx) {
+        const ax = plane(svg), r = K.rng(42), P = [];
+        for (let i = 0; i < 700; i++) { const w = randW(r, 3); P.push(stat(w, MU3, S3)); }
+        P.forEach((p) => K.svg(svg, "circle", { cx: ax.sx(p[1]), cy: ax.sy(p[0]), r: 2.4, fill: "var(--ink-3)", opacity: 0.35 }));
+        let gi = 0, mi = 0; P.forEach((p, i) => { if (p[1] < P[gi][1]) gi = i; if (p[0] / p[1] > P[mi][0] / P[mi][1]) mi = i; });
+        const scan = K.svg(svg, "line", { x1: ax.sx(0.36), y1: 22, x2: ax.sx(0.36), y2: 272, stroke: "var(--c3)", "stroke-width": 2, "stroke-dasharray": "4 3" });
+        const ray = K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0), x2: ax.sx(0), y2: ax.sy(0), stroke: "var(--c6)", "stroke-width": 2 });
+        const t1 = K.svg(svg, "text", { x: 0, y: 0, "font-size": 13, "font-weight": 700, fill: "var(--c3)", opacity: 0 }, "GMV 最小波动");
+        const t2 = K.svg(svg, "text", { x: 0, y: 0, "font-size": 13, "font-weight": 700, fill: "var(--c6)", opacity: 0 }, "MSR 最大夏普");
+        note(svg, "示意数据；绿色竖线从右往左扫，第一个碰到的点就是 GMV；红色射线从下往上转，最后碰到的点就是 MSR");
+        (async () => {
+          if (!(await ctx.tween(1400, (t) => { const x = ax.sx(K.lerp(0.36, P[gi][1], t)); K.set(scan, { x1: x, x2: x }); }))) return;
+          xmark(svg, ax.sx(P[gi][1]), ax.sy(P[gi][0]), "var(--c3)", 8); K.set(t1, { x: ax.sx(P[gi][1]) - 50, y: ax.sy(P[gi][0]) + 26, opacity: 1 });
+          const sMax = P[mi][0] / P[mi][1];
+          if (!(await ctx.tween(1600, (t) => { const s = K.lerp(0.2, sMax, t); K.set(ray, { x2: ax.sx(0.3), y2: ax.sy(Math.min(0.34, s * 0.3)) }); }))) return;
+          xmark(svg, ax.sx(P[mi][1]), ax.sy(P[mi][0]), "var(--c6)", 8); K.set(t2, { x: ax.sx(P[mi][1]) + 12, y: ax.sy(P[mi][0]) + 4, opacity: 1 });
+        })();
+      },
+    },
+    {
+      title: "交给优化器：精确求最小波动组合", kicker: "第 32–39 格 · scipy minimize",
+      html: `<p>随机撒点只能“碰运气”。作者接着把问题写成标准的<b>带约束最优化</b>：<span data-cell="32">第 32 格</span></p><p style="text-align:center"><b>最小化 ½·wᵀΣw</b>，约束：wᵀ1 = 1，0 ≤ w ≤ 1</p><p>交给 <code>erk.minimize_volatility</code>（内部用 scipy 的 <code>minimize</code>）求解，得到三只股票的最优权重。<span data-cell="35">第 35 格</span> 作者再把它和第 28 格随机找到的 GMV 对比，结论是两者<b>几乎重合</b>。<span data-cell="38">第 38 格</span></p><p>动画：三角形里每个点代表一种分法（三个角 = 全买一只），蓝色越浓波动越大。优化器从一个角附近出发，沿着“下坡”一步步走到蓝色最淡的地方，而且始终不走出三角形（不违反约束）。这里用的是投影梯度法，和 scipy 的算法不同，但思路一样。</p>`,
+      cells: [32, 35, 37, 39], highlight: ["minimize_volatility"],
+      draw(svg, ctx) {
+        const V = [[360, 30], [140, 300], [580, 300]]; // A 顶, B 左下, C 右下
+        const tp = (w) => [w[0] * V[0][0] + w[1] * V[1][0] + w[2] * V[2][0], w[0] * V[0][1] + w[1] * V[1][1] + w[2] * V[2][1]];
+        let vmin = 1, vmax = 0; const G = grid(3, 0.04).map((w) => { const v = stat(w, MU3, S3)[1]; vmin = Math.min(vmin, v); vmax = Math.max(vmax, v); return [w, v]; });
+        G.forEach(([w, v]) => { const p = tp(w); K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 6.5, fill: K.heat((v - vmin) / (vmax - vmin)), opacity: 0.9 }); });
+        K.svg(svg, "text", { x: V[0][0], y: V[0][1] - 10, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "全买 A");
+        K.svg(svg, "text", { x: V[1][0] - 10, y: V[1][1] + 22, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "全买 B");
+        K.svg(svg, "text", { x: V[2][0] + 10, y: V[2][1] + 22, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "全买 C");
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 12, class: "muted" }, "蓝色越浓 = 波动越大（示意资产）");
+        const path = { start: [0.85, 0.05, 0.1], pts: [] }; const wopt = solveGMV(S3, 3, path);
+        const pl = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        const dot0 = K.svg(svg, "circle", { cx: tp(path.start)[0], cy: tp(path.start)[1], r: 7, fill: "var(--c6)" });
+        const info = K.svg(svg, "text", { x: 600, y: 60, "font-size": 13, "font-family": "var(--mono)" }, "");
+        const info2 = K.svg(svg, "text", { x: 600, y: 82, "font-size": 13, "font-family": "var(--mono)" }, "");
+        ctx.wait(400).then((ok) => ok && ctx.tween(2600, (t, raw) => {
+          const n = Math.max(1, Math.round(raw * (path.pts.length - 1))) , w = path.pts[n];
+          pl.setAttribute("d", path.pts.slice(0, n + 1).map((q, i) => (i ? "L" : "M") + tp(q).join(",")).join(""));
+          const p = tp(w); K.set(dot0, { cx: p[0], cy: p[1] });
+          info.textContent = "第 " + n + " 步";
+          info2.textContent = "波动 " + (stat(w, MU3, S3)[1] * 100).toFixed(1) + "%";
+        })).then((ok) => { if (ok) { info.textContent = "最优:"; info2.textContent = wopt.map((x, i) => NAMES[i] + Math.round(x * 100)).join(" "); } });
+      },
+    },
+    {
+      title: "给定收益 16%，风险最小能到多少", kicker: "第 40–47 格 · 加一条等式约束",
+      html: `<p>换个问法：<b>我想要 16% 的年收益，怎么分最省风险？</b>只需在约束里多加一条 wᵀR = R₀。<span data-cell="40">第 40 格</span> 作者设 R₀ = 16%，再用 <code>minimize_volatility(ann_rets, cov_rets, target_return)</code> 求解。<span data-cell="43">第 43 格</span></p><p>在图上看，就是画一条“收益 = 16%”的水平线，找它和点云相交部分里<b>最靠左</b>的点，它正好落在有效前沿上。</p><p>作者还提醒：组合收益只能落在“最低收益的股票”和“最高收益的股票”之间。三只股票里最高约 30%（亚马逊），所以要 40% 是做不到的。<span data-cell="46">第 46 格</span> 作者说此时优化器会把权重全给亚马逊；严格说这时问题<b>无可行解</b>，返回的结果并不满足 40% 的约束，应当检查优化器的成功标志。</p>`,
+      cells: [40, 43, 46, 47], highlight: ["target_return", "0.4"],
+      draw(svg, ctx) {
+        const ax = plane(svg), r = K.rng(42);
+        for (let i = 0; i < 700; i++) { const w = randW(r, 3), p = stat(w, MU3, S3); K.svg(svg, "circle", { cx: ax.sx(p[1]), cy: ax.sy(p[0]), r: 2.3, fill: "var(--ink-3)", opacity: 0.3 }); }
+        K.svg(svg, "path", { d: linePath(F3, ax), fill: "none", stroke: "var(--c6)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        const hl = K.svg(svg, "line", { x1: 60, x2: 660, y1: ax.sy(0.05), y2: ax.sy(0.05), stroke: "var(--c3)", "stroke-width": 2 });
+        const lab = K.svg(svg, "text", { x: 480, y: 0, "font-size": 13, "font-weight": 700, fill: "var(--c3)" }, "");
+        const pt = K.svg(svg, "circle", { cx: -20, cy: -20, r: 7, fill: "var(--c3)" });
+        const leftmost = (R) => { let best = null; G3.forEach((p) => { if (Math.abs(p[0] - R) < 0.003 && (!best || p[1] < best[1])) best = p; }); return best; };
+        ctx.tween(2200, (t) => {
+          const R = K.lerp(0.10, 0.25, t); K.set(hl, { y1: ax.sy(R), y2: ax.sy(R) });
+          const b = leftmost(R); if (b) K.set(pt, { cx: ax.sx(b[1]), cy: ax.sy(b[0]) });
+          lab.setAttribute("y", ax.sy(R) - 6); lab.textContent = `目标收益 ${(R * 100).toFixed(0)}% → 最低波动 ${b ? (b[1] * 100).toFixed(1) + "%" : "—"}`;
+        }).then((ok) => ok && ctx.wait(500)).then((ok) => ok && ctx.tween(900, (t) => {
+          const R = K.lerp(0.25, 0.32, t); K.set(hl, { y1: ax.sy(R), y2: ax.sy(R), stroke: "var(--bad)" });
+          lab.setAttribute("y", ax.sy(R) - 6); lab.textContent = "目标高于最高收益 28%：无解"; K.set(lab, { fill: "var(--bad)" }); K.set(pt, { opacity: 0 });
+        }));
+        note(svg, "示意资产：最高收益 28%（资产 A），所以 32% 的目标线上一个点都没有");
+      },
+    },
+    {
+      title: "最大化夏普比率 = 最小化“负夏普”", kicker: "第 48–52 格 · 把最大化改写成最小化",
+      html: `<p>scipy 只有 <code>minimize</code>（求最小），没有“求最大”。作者的小技巧：<b>求夏普比率的最大值，等于求“负夏普”的最小值</b>。<span data-cell="48">第 48 格</span></p><p style="text-align:center">最小化 −(R<sub>p</sub> − r<sub>f</sub>) / σ<sub>p</sub>，约束：wᵀ1 = 1，0 ≤ w ≤ 1</p><p>求出权重后，再和第 28 格随机模拟找到的 MSR 对比。<span data-cell="52">第 52 格</span></p><p>动画：从无风险利率那一点（这里 r<sub>f</sub> = 0，就是原点）出发画射线，射线越陡代表夏普越高。射线一点点往上转，直到刚好贴住有效前沿：贴住的那一点就是最大夏普组合。</p>`,
+      cells: [48, 49, 52], highlight: ["maximize_shape_ratio"],
+      draw(svg, ctx) {
+        const ax = plane(svg);
+        K.svg(svg, "path", { d: linePath(F3, ax), fill: "none", stroke: "var(--c1)", "stroke-width": 3 });
+        const wm = solveMSR(MU3, S3, 0), pm = stat(wm, MU3, S3), smax = pm[0] / pm[1];
+        const ray = K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0), x2: ax.sx(0), y2: ax.sy(0), stroke: "var(--c6)", "stroke-width": 2 });
+        const lab = K.svg(svg, "text", { x: 420, y: 60, "font-size": 14, "font-weight": 700, fill: "var(--c6)" }, "");
+        K.svg(svg, "text", { x: 70, y: 40, "font-size": 12, class: "muted" }, "蓝线 = 有效前沿（示意）；射线斜率 = 夏普比率");
+        ctx.tween(2400, (t) => {
+          const s = K.lerp(1.6, smax, t), x = 0.34; let y = s * x; let xx = x; if (y > 0.34) { y = 0.34; xx = y / s; }
+          K.set(ray, { x2: ax.sx(xx), y2: ax.sy(y) }); lab.textContent = "夏普（斜率）= " + s.toFixed(2);
+        }).then((ok) => { if (ok) { xmark(svg, ax.sx(pm[1]), ax.sy(pm[0]), "var(--c6)", 8); K.svg(svg, "text", { x: ax.sx(pm[1]) + 12, y: ax.sy(pm[0]) + 22, "font-size": 12 }, "MSR：" + wm.map((x, i) => NAMES[i] + Math.round(x * 100) + "%").join(" ")); } });
+      },
+    },
+    {
+      title: "给定波动 20%，找夏普最大的组合", kicker: "第 53–55 格 · 换一条约束",
+      html: `<p>和第 40 格对称：这次固定<b>波动 = 20%</b>，在这条竖线上找夏普最大（也就是收益最高）的组合。<span data-cell="54">第 54 格</span></p><p>需要指出原文公式的一个小问题：第 53 格把约束写成 <b>½·wᵀΣw = σ₀</b>，左边是“方差的一半”，右边却是“波动率（标准差）”，两者单位不同。按意思应写成 √(wᵀΣw) = σ₀。<span data-cell="53">第 53 格</span> 实际计算由 <code>erk</code> 库里的代码完成，这份 notebook 里看不到它具体怎么写的。</p><p>动画：竖线停在 20%，线上的点从下往上找，最高的那个就是答案，它同样在有效前沿上。</p>`,
+      cells: [53, 54], highlight: ["target_volatility = 0.2"],
+      draw(svg, ctx) {
+        const ax = plane(svg), r = K.rng(42);
+        for (let i = 0; i < 700; i++) { const w = randW(r, 3), p = stat(w, MU3, S3); K.svg(svg, "circle", { cx: ax.sx(p[1]), cy: ax.sy(p[0]), r: 2.3, fill: "var(--ink-3)", opacity: 0.3 }); }
+        K.svg(svg, "path", { d: linePath(F3, ax), fill: "none", stroke: "var(--c6)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        const vl = K.svg(svg, "line", { x1: ax.sx(0.2), x2: ax.sx(0.2), y1: ax.sy(0), y2: ax.sy(0), stroke: "var(--c3)", "stroke-width": 2 });
+        let best = null; G3.forEach((p) => { if (Math.abs(p[1] - 0.2) < 0.002 && (!best || p[0] > best[0])) best = p; });
+        const pt = K.svg(svg, "circle", { cx: ax.sx(0.2), cy: ax.sy(0), r: 7, fill: "var(--c3)" });
+        const lab = K.svg(svg, "text", { x: ax.sx(0.2) + 12, y: 60, "font-size": 13, "font-weight": 700, fill: "var(--c3)" }, "波动固定 20%");
+        ctx.tween(900, (t) => K.set(vl, { y2: ax.sy(0.34 * t) }))
+          .then((ok) => ok && best && ctx.tween(1500, (t) => K.set(pt, { cy: ax.sy(best[0] * t) })))
+          .then((ok) => { if (ok && best) lab.textContent = `波动 20% 时最高收益 ≈ ${(best[0] * 100).toFixed(1)}%`; });
+        note(svg, "示意资产；在所有 1% 步长的权重里挑波动约等于 20% 且收益最高的");
+      },
+    },
+    {
+      title: "允许卖空：用拉格朗日乘数直接推公式", kicker: "第 56–57 格 · 解析解",
+      html: `<p>前面都要求“只买不卖空、钱全投进去”。如果放松约束，允许<b>卖空</b>（借别人的股票先卖掉，以后再买回来还，权重可以是负数），问题就变成：最小化 ½wᵀΣw，约束只剩 wᵀR = R₀（和 wᵀ1 = 1）。<span data-cell="56">第 56 格</span></p><p>没有了“不等式”约束，可以用<b>拉格朗日乘数法</b>求出精确公式：先把约束“揉进”目标函数里，再令导数等于 0。作者定义了三个常数 A = RᵀΣ⁻¹R、B = 1ᵀΣ⁻¹R、C = 1ᵀΣ⁻¹1，解出两个乘数。<span data-cell="57">第 57 格</span> （原文第三个偏导的符号写成了 ∂L/∂λ、右边写成 R₀，按推导应为 ∂L/∂δ 和 1，属于笔误，不影响后面的 A、B、C 方程组。）</p><p>动画：蓝色是只做多的有效前沿；红色是允许卖空后的前沿，它<b>整体往左上方扩张</b>：多一种选择，结果只会更好或一样。右边柱子显示要拿 34% 收益时的权重，有一只是负的（卖空）。</p>`,
+      cells: [56, 57],
+      draw(svg, ctx) {
+        const box = { x: 60, y: 22, w: 420, h: 250 };
+        const ax = plane(svg, { box, xd: [0, 0.36], yd: [0, 0.4] });
+        const iS = inv(S3), one = [1, 1, 1], A = dot(MU3, mv(iS, MU3)), B = dot(one, mv(iS, MU3)), C = dot(one, mv(iS, one)), D = A * C - B * B;
+        K.svg(svg, "path", { d: linePath(F3, ax), fill: "none", stroke: "var(--c1)", "stroke-width": 3 });
+        const hyp = []; for (let R = 0.02; R <= 0.4; R += 0.005) { const sv = Math.sqrt((C * R * R - 2 * B * R + A) / D); if (sv <= 0.36) hyp.push([R, sv]); }
+        const hp = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 70, y: 40, "font-size": 12, fill: "var(--c1)" }, "蓝：只买不卖空");
+        K.svg(svg, "text", { x: 70, y: 58, "font-size": 12, fill: "var(--c6)" }, "红：允许卖空（公式解）");
+        // 收益 34% 时的卖空权重：w = Σ⁻¹(λR + δ1)
+        const R0 = 0.34, del = (R0 * B - A) / (B * B - A * C), lam = (1 - del * C) / B;
+        const w = mv(iS, MU3.map((m) => lam * m + del));
+        const bars = w.map((v, i) => {
+          K.svg(svg, "text", { x: 530 + i * 60, y: 310, "text-anchor": "middle", "font-size": 13 }, NAMES[i]);
+          return { v, r: K.svg(svg, "rect", { x: 512 + i * 60, y: 170, width: 36, height: 0, fill: v < 0 ? "var(--bad)" : "var(--good)" }), t: K.svg(svg, "text", { x: 530 + i * 60, y: 0, "text-anchor": "middle", "font-size": 12 }, "") };
+        });
+        K.svg(svg, "line", { x1: 500, x2: 700, y1: 170, y2: 170, stroke: "var(--ink-3)" });
+        K.svg(svg, "text", { x: 500, y: 40, "font-size": 13, "font-weight": 700 }, "要 34% 收益时的权重");
+        ctx.tween(1600, (t) => hp.setAttribute("d", linePath(hyp.slice(0, Math.max(2, Math.round(t * hyp.length))), ax)))
+          .then((ok) => ok && ctx.tween(1000, (t) => bars.forEach((b) => { const h = Math.abs(b.v) * 90 * t; K.set(b.r, { y: b.v < 0 ? 170 : 170 - h, height: h }); K.set(b.t, { y: b.v < 0 ? 170 + h + 14 : 170 - h - 5 }); b.t.textContent = Math.round(b.v * 100 * t) + "%"; })));
+      },
+    },
+    {
+      title: "加入无风险资产：资本市场线", kicker: "第 58–66 格 · CML",
+      html: `<p><b>无风险资产</b>（比如短期国债）有固定利息、几乎不会违约，波动为 0。<span data-cell="58">第 58 格</span> 把它和风险组合搭配，组合在图上只能沿着一条<b>直线</b>移动：一端是 100% 买国债（在纵轴上，高度 = 无风险利率），另一端是 100% 买风险组合。</p><p>最好的那条直线恰好和有效前沿<b>相切</b>，切点就是最大夏普组合，这条线叫<b>资本市场线（CML）</b>。作者分别取无风险利率 6% 和 5% 画了图。<span data-cell="59">第 59 格</span> <span data-cell="65">第 65 格</span></p><p>作者结论：除了切点以外，在任何波动水平上，CML 的收益都比原来的有效前沿更高。<span data-cell="63">第 63 格</span> 另外，第 65 格的图标题里显示的夏普值 <code>shp</code> 还是第 60 格按 6% 利率算的，而这张图用的是 5%，标题数字和图对不上。</p>`,
+      cells: [58, 59, 62, 65], highlight: ["cml=True", "risk_free_rate = 0.06", "risk_free_rate = 0.05"],
+      draw(svg, ctx) {
+        const ax = plane(svg);
+        K.svg(svg, "path", { d: linePath(F3, ax), fill: "none", stroke: "var(--c1)", "stroke-width": 3 });
+        const rf = 0.06, wm = solveMSR(MU3, S3, rf), pm = stat(wm, MU3, S3), s = (pm[0] - rf) / pm[1];
+        const rfDot = K.svg(svg, "circle", { cx: ax.sx(0), cy: ax.sy(rf), r: 7, fill: "var(--c3)" });
+        K.svg(svg, "text", { x: ax.sx(0) + 10, y: ax.sy(rf) + 18, "font-size": 12, fill: "var(--c3)" }, "100% 国债（r_f = 6%）");
+        const ln = K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(rf), x2: ax.sx(0), y2: ax.sy(rf), stroke: "var(--c6)", "stroke-width": 2.5 });
+        const mover = K.svg(svg, "circle", { cx: ax.sx(0), cy: ax.sy(rf), r: 5, fill: "var(--c6)" });
+        const lab = K.svg(svg, "text", { x: 300, y: 50, "font-size": 13, "font-weight": 700 }, "");
+        note(svg, "示意资产；红线 = 资本市场线，切点 = 最大夏普组合；切点往右 = 借钱加杠杆");
+        ctx.tween(1200, (t) => { const x = 0.34 * t, y = Math.min(0.34, rf + s * x); K.set(ln, { x2: ax.sx(Math.min(x, (0.34 - rf) / s)), y2: ax.sy(y) }); })
+          .then((ok) => { if (ok) xmark(svg, ax.sx(pm[1]), ax.sy(pm[0]), "var(--c6)", 8); return ok && ctx.tween(2200, (t) => {
+            const a = t * 1.2, x = a * pm[1], y = rf + a * (pm[0] - rf); K.set(mover, { cx: ax.sx(x), cy: ax.sy(y) });
+            lab.textContent = `风险组合 ${Math.round(a * 100)}% + 国债 ${Math.round((1 - a) * 100)}%`;
+          }); });
+      },
+    },
+    {
+      title: "公式验证：最大夏普权重与 CML 上的组合", kicker: "第 67–94 格 · 解析解对照",
+      html: `<p>最后一节作者又用拉格朗日乘数推了一遍：允许卖空、同时持有无风险资产时，最小化风险的权重是 <b>w* = r·Σ⁻¹(R − r<sub>f</sub>1)</b>，剩下 1 − w*ᵀ1 放进国债。<span data-cell="67">第 67 格</span></p><p>其中切点组合的权重 <b>w<sub>M</sub> = Σ⁻¹(R − r<sub>f</sub>1) / 1ᵀΣ⁻¹(R − r<sub>f</sub>1)</b>。作者把公式算出的 w<sub>M</sub> 和优化器的结果对比，说“它们一致”。<span data-cell="72">第 72 格</span> <span data-cell="73">第 73 格</span> 然后取目标收益 13%，算出风险资产权重和国债权重，验证收益正好是 13%。<span data-cell="81">第 81 格</span></p><p>最后在 13% 到切点收益之间取 20 个目标收益，算出的组合全部落在 CML 这条直线上。<span data-cell="90">第 90 格</span> 原文第 89 格说“从原来的目标收益 0.06 开始”，但代码里起点是 13%（0.06 是无风险利率），文字写错了。</p><p>动画：沿着 CML 从 13% 走到切点，下方的条形显示国债的份额越来越小，风险资产份额越来越大。</p>`,
+      cells: [67, 72, 81, 90], highlight: ["w_M = np.dot( invcov, r_rf )", "target_ret = 0.13", "np.linspace(target_ret,mu_M,20)"],
+      draw(svg, ctx) {
+        const box = { x: 60, y: 22, w: 600, h: 180 };
+        const ax = plane(svg, { box, yd: [0, 0.34] });
+        const rf = 0.06, iS = inv(S3), ex = MU3.map((m) => m - rf), z = mv(iS, ex), wM = z.map((v) => v / z.reduce((a, b) => a + b, 0));
+        const pm = stat(wM, MU3, S3);
+        const hyp = []; const one = [1, 1, 1], A = dot(MU3, mv(iS, MU3)), B = dot(one, mv(iS, MU3)), C = dot(one, mv(iS, one)), D = A * C - B * B;
+        for (let R = 0.04; R <= 0.34; R += 0.005) hyp.push([R, Math.sqrt((C * R * R - 2 * B * R + A) / D)]);
+        K.svg(svg, "path", { d: linePath(hyp.filter((p) => p[1] < 0.36), ax), fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+        K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(rf), x2: ax.sx(pm[1] * 1.3), y2: ax.sy(rf + 1.3 * (pm[0] - rf)), stroke: "var(--c6)", "stroke-width": 2 });
+        xmark(svg, ax.sx(pm[1]), ax.sy(pm[0]), "var(--c6)", 7);
+        K.svg(svg, "text", { x: 70, y: 40, "font-size": 12, class: "muted" }, "蓝：允许卖空的前沿；红：CML（r_f = 6%，示意资产）");
+        const pts = []; for (let k = 0; k < 20; k++) { const R = K.lerp(0.13, pm[0], k / 19); pts.push(K.svg(svg, "circle", { cx: ax.sx(((R - rf) / (pm[0] - rf)) * pm[1]), cy: ax.sy(R), r: 0, fill: "var(--c3)" })); }
+        const bR = K.svg(svg, "rect", { x: 60, y: 270, width: 0, height: 26, fill: "var(--c6)" }), bF = K.svg(svg, "rect", { x: 60, y: 270, width: 600, height: 26, fill: "var(--c3)", opacity: 0.6 });
+        const lab = K.svg(svg, "text", { x: 60, y: 262, "font-size": 13, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 60, y: 316, "font-size": 12, class: "muted" }, "红 = 风险资产（按切点比例 w_M 分配）  绿 = 国债");
+        ctx.tween(2600, (t, raw) => {
+          const k = Math.min(19, Math.floor(raw * 20)); pts.forEach((p, i) => p.setAttribute("r", i <= k ? 4.5 : 0));
+          const R = K.lerp(0.13, pm[0], k / 19), a = (R - rf) / (pm[0] - rf);
+          K.set(bR, { width: 600 * a }); K.set(bF, { x: 60 + 600 * a, width: 600 * (1 - a) });
+          lab.textContent = `目标收益 ${(R * 100).toFixed(1)}%：风险资产 ${Math.round(a * 100)}%，国债 ${Math.round((1 - a) * 100)}%`;
+        });
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：两资产相关系数 ---------- */
+  const m1 = 0.001019 * 252, m2 = 0.001249 * 252, s1 = 0.016317 * Math.sqrt(252), s2 = 0.019129 * Math.sqrt(252);
+  const two = (w, rho) => [w * m1 + (1 - w) * m2, Math.sqrt(Math.max(0, w * w * s1 * s1 + (1 - w) * (1 - w) * s2 * s2 + 2 * w * (1 - w) * rho * s1 * s2))];
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "rho", label: "相关系数 ρ（1 = 同涨同跌，−1 = 此涨彼跌）", min: -1, max: 1, step: 0.05, value: 0.2, fmt: (v) => v.toFixed(2) },
+      { id: "w", label: "投给第 1 只股票的比例 w₁（其余给第 2 只）", min: 0, max: 1, step: 0.01, value: 0.5, fmt: (v) => Math.round(v * 100) + "%" },
+    ],
+    note: "参数取自作者第 12 格的两只假股票，按公式直接计算（年化：收益×252，波动×√252），不加随机噪声。灰色虚线是 ρ = 1 和 ρ = −1 两种极端情况，彩色曲线是当前 ρ。",
+    render(svg, v) {
+      const ax = K.axes(svg, { x: 60, y: 16, w: 550, h: 290 }, [0, 0.34], [0.24, 0.33], { xlabel: "波动（风险）", ylabel: "年化收益", xfmt: pctf, yfmt: (x) => (x * 100).toFixed(0) + "%", xticks: 6, yticks: 4 });
+      const curve = (rho) => { const p = []; for (let i = 0; i <= 100; i++) p.push(two(i / 100, rho)); return p; };
+      [1, -1].forEach((rho) => K.svg(svg, "path", { d: linePath(curve(rho), ax), fill: "none", stroke: "var(--ink-3)", "stroke-width": 1.2, "stroke-dasharray": "4 3" }));
+      const c = curve(v.rho);
+      K.svg(svg, "path", { d: linePath(c, ax), fill: "none", stroke: "var(--c1)", "stroke-width": 3 });
+      let mi = 0; c.forEach((p, i) => { if (p[1] < c[mi][1]) mi = i; });
+      xmark(svg, ax.sx(c[mi][1]), ax.sy(c[mi][0]), "var(--c3)", 6);
+      const p = two(v.w, v.rho);
+      K.svg(svg, "circle", { cx: ax.sx(p[1]), cy: ax.sy(p[0]), r: 7, fill: "var(--c6)", stroke: "var(--panel)", "stroke-width": 2 });
+      K.svg(svg, "text", { x: ax.sx(s1) + 8, y: ax.sy(m1) + 4, "font-size": 12 }, "全买第 1 只");
+      K.svg(svg, "text", { x: ax.sx(s2) - 8, y: ax.sy(m2) - 8, "text-anchor": "end", "font-size": 12 }, "全买第 2 只");
+      K.svg(svg, "text", { x: 70, y: 372, "font-size": 12, class: "muted" }, "红点 = 当前权重的组合；绿色 × = 这条曲线上波动最小的点");
+      return { readout: [
+        { k: "组合年化收益", v: (p[0] * 100).toFixed(1) + "%" },
+        { k: "组合波动", v: (p[1] * 100).toFixed(1) + "%" },
+        { k: "这个 ρ 下最小波动", v: (c[mi][1] * 100).toFixed(1) + "%", color: "var(--c3)" },
+        { k: "最小波动时 w₁", v: mi + "%" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：随机撒点 vs 优化器 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "n", label: "资产只数", value: "3", options: [["3", "3 只（A、B、C）"], ["4", "4 只（再加 D）"]] },
+      { id: "k", label: "随机组合个数", min: 20, max: 4000, step: 20, value: 200 },
+      { id: "rf", label: "无风险利率（算夏普用）", min: 0, max: 0.08, step: 0.005, value: 0, fmt: (v) => (v * 100).toFixed(1) + "%" },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "像作者第 24 格那样随机生成权重再归一化；同时用投影梯度法（一种带约束的优化器）直接求最小波动组合和最大夏普组合。资产参数为虚构。试试把随机组合减到 20 个：随机找到的最好组合离优化器的解有多远？",
+    render(svg, v) {
+      const n = +v.n, mu = n === 3 ? MU3 : MU4, S = n === 3 ? S3 : S4, r = K.rng(1000 + v.seed * 31);
+      const ax = K.axes(svg, { x: 60, y: 16, w: 550, h: 310 }, [0.08, 0.32], [0.04, 0.3], { xlabel: "波动（风险）", ylabel: "年化收益", xfmt: pctf, yfmt: pctf, xticks: 6, yticks: 4 });
+      const P = []; for (let i = 0; i < v.k; i++) { const w = randW(r, n), s = stat(w, mu, S); P.push(s); }
+      const shs = P.map((p) => (p[0] - v.rf) / p[1]), smin = Math.min(...shs), smax = Math.max(...shs);
+      P.forEach((p, i) => K.svg(svg, "circle", { cx: ax.sx(p[1]), cy: ax.sy(p[0]), r: 2.4, fill: K.heat(0.2 + 0.8 * (shs[i] - smin) / (smax - smin + 1e-9)), opacity: 0.85 }));
+      const F = frontier(grid(n, n === 3 ? 0.01 : 0.025).map((w) => stat(w, mu, S)), 70);
+      K.svg(svg, "path", { d: linePath(F, ax), fill: "none", stroke: "var(--c6)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+      let gi = 0, mi = 0; P.forEach((p, i) => { if (p[1] < P[gi][1]) gi = i; if (shs[i] > shs[mi]) mi = i; });
+      const wg = solveGMV(S, n), pg = stat(wg, mu, S), wm = solveMSR(mu, S, v.rf), pm = stat(wm, mu, S);
+      K.svg(svg, "circle", { cx: ax.sx(P[gi][1]), cy: ax.sy(P[gi][0]), r: 8, fill: "none", stroke: "var(--c3)", "stroke-width": 2 });
+      K.svg(svg, "circle", { cx: ax.sx(P[mi][1]), cy: ax.sy(P[mi][0]), r: 8, fill: "none", stroke: "var(--c6)", "stroke-width": 2 });
+      xmark(svg, ax.sx(pg[1]), ax.sy(pg[0]), "var(--c3)", 7); xmark(svg, ax.sx(pm[1]), ax.sy(pm[0]), "var(--c6)", 7);
+      K.svg(svg, "text", { x: 60, y: 372, "font-size": 12, class: "muted" }, "空心圈 = 随机组合里最好的；× = 优化器的解；绿 = 最小波动，红 = 最大夏普；虚线 = 穷举得到的有效前沿");
+      const smsr = (pm[0] - v.rf) / pm[1];
+      return { readout: [
+        { k: "最小波动：随机 / 优化器", v: (P[gi][1] * 100).toFixed(2) + "% / " + (pg[1] * 100).toFixed(2) + "%", color: "var(--c3)" },
+        { k: "最大夏普：随机 / 优化器", v: shs[mi].toFixed(3) + " / " + smsr.toFixed(3), color: "var(--c6)" },
+        { k: "优化器 GMV 权重", v: wg.map((x, i) => NAMES[i] + Math.round(x * 100)).join(" ") },
+        { k: "优化器 MSR 权重", v: wm.map((x, i) => NAMES[i] + Math.round(x * 100)).join(" ") },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：无风险利率与资本市场线 ---------- */
+  const GRID3 = grid(3, 0.01);
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "rf", label: "无风险利率 r_f", min: 0, max: 0.16, step: 0.005, value: 0.06, fmt: (v) => (v * 100).toFixed(1) + "%" },
+      { id: "short", label: "能否卖空", value: "no", options: [["no", "不允许（权重 0~1）"], ["yes", "允许（公式解，第 72 格的 w_M）"]] },
+    ],
+    note: "不允许卖空时：在所有 1% 步长的权重里找夏普最大的（穷举）；允许卖空时：直接套作者第 72 格的公式 w_M = Σ⁻¹(R − r_f) / 1ᵀΣ⁻¹(R − r_f)。把 r_f 慢慢拉高，看切点往哪边跑；拉过最小波动组合的收益之后，公式会出什么问题？",
+    render(svg, v) {
+      const ax = K.axes(svg, { x: 60, y: 16, w: 550, h: 310 }, [0, 0.4], [0, 0.4], { xlabel: "波动（风险）", ylabel: "年化收益", xfmt: pctf, yfmt: pctf, xticks: 5, yticks: 4 });
+      const rf = v.rf; let w = null, warn = "";
+      const iS = inv(S3), one = [1, 1, 1], A = dot(MU3, mv(iS, MU3)), B = dot(one, mv(iS, MU3)), C = dot(one, mv(iS, one)), D = A * C - B * B;
+      if (v.short === "yes") {
+        const hyp = []; for (let R = -0.05; R <= 0.45; R += 0.005) { const s = Math.sqrt((C * R * R - 2 * B * R + A) / D); if (s < 0.4) hyp.push([R, s]); }
+        K.svg(svg, "path", { d: linePath(hyp, ax), fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const z = mv(iS, MU3.map((m) => m - rf)), sz = z.reduce((a, b) => a + b, 0);
+        if (sz > 1e-9) w = z.map((x) => x / sz); else warn = "分母 1ᵀΣ⁻¹(R−r_f) ≤ 0：r_f 已不低于最小方差组合的收益 " + (B / C * 100).toFixed(1) + "%，上半支前沿上没有切点";
+      } else {
+        K.svg(svg, "path", { d: linePath(F3, ax), fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        let best = -Infinity; GRID3.forEach((q) => { const [r, s] = stat(q, MU3, S3), sh = (r - rf) / s; if (sh > best) { best = sh; w = q; } });
+        if (best <= 0) warn = "所有组合的收益都不高于 r_f：夏普全为负，买国债就够了";
+      }
+      K.svg(svg, "circle", { cx: ax.sx(0), cy: ax.sy(rf), r: 6, fill: "var(--c3)" });
+      SIG3.forEach((s, i) => { K.svg(svg, "circle", { cx: ax.sx(s), cy: ax.sy(MU3[i]), r: 4, fill: "var(--ink-3)" }); K.svg(svg, "text", { x: ax.sx(s) + 7, y: ax.sy(MU3[i]) + 4, "font-size": 12 }, NAMES[i]); });
+      let read = [{ k: "切点权重", v: "—" }, { k: "切点收益 / 波动", v: "—" }, { k: "CML 斜率（夏普）", v: "—" }];
+      if (w && !warn) {
+        const [r, s] = stat(w, MU3, S3), sh = (r - rf) / s, xe = Math.min(0.4, (0.4 - rf) / sh);
+        K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(rf), x2: ax.sx(xe), y2: ax.sy(rf + sh * xe), stroke: "var(--c6)", "stroke-width": 2 });
+        xmark(svg, ax.sx(s), ax.sy(r), "var(--c6)", 7);
+        read = [{ k: "切点权重", v: w.map((x, i) => NAMES[i] + Math.round(x * 100)).join(" "), color: w.some((x) => x < -0.005) ? "var(--bad)" : null }, { k: "切点收益 / 波动", v: (r * 100).toFixed(1) + "% / " + (s * 100).toFixed(1) + "%" }, { k: "CML 斜率（夏普）", v: sh.toFixed(3) }];
+      }
+      if (warn) K.svg(svg, "text", { x: 70, y: 40, "font-size": 12.5, fill: "var(--bad)", "font-weight": 700 }, warn.length > 60 ? warn.slice(0, 60) + "…" : warn);
+      K.svg(svg, "text", { x: 60, y: 372, "font-size": 12, class: "muted" }, "绿点 = 无风险资产；红线 = 资本市场线；红 × = 切点（最大夏普组合）；灰点 = 单只资产");
+      read.push({ k: "最小方差组合收益", v: (v.short === "yes" ? B / C : GMV3s[0]) * 100 > 0 ? ((v.short === "yes" ? B / C : GMV3s[0]) * 100).toFixed(1) + "%" : "—" });
+      return { readout: read };
+    },
+  });
+})();
+</script>
+</body>
+</html>

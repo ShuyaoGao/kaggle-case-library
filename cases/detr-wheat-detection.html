@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DETR 数麦穗</title>
+<meta name="description" content="Kaggle 案例拆解：DETR 用 Transformer 做目标检测，100 个“查询”各认领一个目标，匈牙利匹配一对一配对，不再需要锚框和非极大值抑制。用在全球小麦麦穗检测比赛上。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">农田图像 · 目标检测 · 检测 Transformer</div>
+  <h1>DETR：让 100 个“查询”去认领麦穗</h1>
+  <p class="en">End to End Object Detection with Transformers: DETR</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">DETR</span><span class="tag method">目标查询</span><span class="tag method">匈牙利匹配</span>
+    <span class="tag method">集合损失（分类 + L1 + GIoU）</span><span class="tag method">迁移学习</span><span class="tag method">分层 K 折</span><span class="tag method">albumentations 增强</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Tanul Singh（Mr_KnowNothing）</b></span>
+    <span>Kaggle 点赞 <b>1,398</b>（2026-11 抓取）</span>
+    <span>数据 <b>Global Wheat Detection</b> 比赛</span>
+    <span><a href="https://www.kaggle.com/code/tanulsingh077/end-to-end-object-detection-with-transformers-detr" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">麦田俯拍照片 + 麦穗框</div><p>每张图标了很多个麦穗的边框（左上角 x、y，宽、高），照片来自不同地区、不同光照和缩放。<span data-cell="6">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">每个麦穗在哪</div><p>输出一组框和置信度。比赛按 IoU 阈值 0.5 到 0.75 的平均精度打分。<span data-cell="15">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">ResNet50 + Transformer</div><p>加载 Facebook 预训练的 DETR，把分类头换成“麦穗 / 无目标”，用匈牙利匹配和集合损失微调。<span data-cell="28">出处</span></p></div>
+    <div class="card panel"><h3>特别在哪里</h3><div class="big">没有锚框，没有 NMS</div><p>YOLO 一类检测器先铺满锚框、再用非极大值抑制删重复框；DETR 让 100 个“查询”各自直接给出一个框，训练时一对一配对，天然不重复。<span data-cell="2">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛 <b>Global Wheat Detection</b>：从多个国家的麦田拍摄的俯视照片，要求框出每一个麦穗。作者引用了另一位参赛者的数据分析结论：图片缩放程度不同、光照不同、标注框有些很大有些极小（“很乱”）。<span data-cell="6">出处</span></p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者的设置</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">输入尺寸</div><div class="v">512×512</div></div>
+        <div class="stat-tile"><div class="k">每张图的查询数</div><div class="v">100</div></div>
+        <div class="stat-tile"><div class="k">类别（含“无目标”）</div><div class="v">2</div></div>
+        <div class="stat-tile"><div class="k">折数</div><div class="v">5</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">见第 14 格配置和第 23 格增强 <span data-cell="14">出处</span> <span data-cell="23">出处</span>。图片和框的总数在运行输出里，这里不写。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">train.csv 的列</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>image_id</code></td><td>图片编号，一张图有多少个麦穗就有多少行</td><td>文本</td></tr>
+        <tr><td><code>bbox</code></td><td><b>答案</b>：一个麦穗的框 [x, y, w, h]，作者拆成四列 <span data-cell="20">出处</span></td><td>4 个数</td></tr>
+        <tr><td><code>source</code></td><td>图片来自哪个机构 / 地区，用来分层切折 <span data-cell="21">出处</span></td><td>类别</td></tr>
+        <tr><td><code>width</code>, <code>height</code></td><td>原图尺寸（作者没用到）</td><td>数值</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="30">
+    <h3>动手试试 A · IoU 与比赛打分 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="32">
+    <h3>动手试试 B · 匈牙利匹配：谁和谁配对 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>DETR 的主要动机：去掉 NMS、锚框这些手工设计的部件；核心是“二分图匹配的集合损失 + Transformer 编码器-解码器”</td><td><span data-cell="2">第 2 格</span></td></tr>
+        <tr><td>这只是展示结构的基线，不追求排行榜高分</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>只训练了一折，作者认为“DETR 看起来效果不错”；计划 5 折 + WBF 融合，估计能到 0.74 以上（作者的推测，不是结果）</td><td><span data-cell="44">第 44 格</span></td></tr>
+        <tr><td>第 2 版修正：之前画的是真实框而不是预测框；框做了归一化，麦穗类标为 0</td><td><span data-cell="1">第 1 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">验证集 mAP 和预测效果图都在运行输出里，Kaggle 下载的源码不带输出，作者文字里也没有写具体分数，这里不列分数。</p>
+      <h3>读代码时发现的问题（原文未改，供讨论）</h3>
+      <ul class="tight">
+        <li><b>框的格式可能对不上</b>：DETR 官方代码（匹配器和 GIoU 损失）把框当作 (中心 x, 中心 y, 宽, 高)；第 26 格归一化后的是 COCO 格式 (左上 x, 左上 y, 宽, 高)，两者差了半个框。<span data-cell="26">第 26 格</span></li>
+        <li>第 44 格说“训练了一个 epoch”，第 14 格配置却是 <code>EPOCHS = 20</code>，文字和代码不一致。</li>
+        <li>训练集 DataLoader 用了 <code>shuffle=False</code>，每轮看到的顺序都一样。<span data-cell="39">第 39 格</span></li>
+        <li><code>area</code> 在缩放到 512×512 之前算，增强之后没有更新。<span data-cell="26">第 26 格</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一张麦田照片，输出每个麦穗的位置，进而估算单位面积穗数、预测产量。</li>
+        <li><b>同类问题：</b>数果实、数细胞、清点仓库货物、遥感找车辆和船只、病虫害定位。</li>
+        <li><b>和 YOLO、Faster R-CNN 的区别：</b>传统检测器在图上铺满几万个候选框（锚框），每个都打分，最后用 NMS 把重叠的删掉；DETR 把检测看成“集合预测”：固定 100 个查询，每个直接输出一个框或“无目标”，训练时用匈牙利算法一对一匹配，所以推理时不需要 NMS。代价是训练收敛慢、对很小很密的目标不够敏感。</li>
+        <li><b>和普通 Transformer 的关系：</b>编码器把 CNN 特征图上的每个位置当作一个“词”，让图上任意两处直接交流；解码器里的 100 个查询像 100 个“提问”，各自在整张图里找自己的目标。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>按“来源 + 框数段”分层的 5 折 <span data-cell="21">第 21 格</span></li>
+        <li>颜色、模糊、翻转旋转、雾、Cutout 等增强 <span data-cell="23">第 23 格</span></li>
+        <li><code>torch.hub</code> 加载预训练 <code>detr_resnet50</code>，换分类头 <span data-cell="28">第 28 格</span></li>
+        <li>HungarianMatcher + SetCriterion，损失权重 分类 0.5、L1 1、GIoU 1，“无目标”类权重 0.5 <span data-cell="32">第 32 格</span> <span data-cell="14">第 14 格</span></li>
+        <li>AdamW，学习率 2e-5 <span data-cell="39">第 39 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>一张图里有 30 个麦穗，DETR 却固定输出 100 个框。多出来的 70 个怎么办？如果一张图有 150 个麦穗呢？</li>
+      <li>为什么一定要“一对一”匹配？如果允许两个查询都去匹配同一个麦穗，训练出来的模型推理时会出什么问题？</li>
+      <li>实验 B 里贪心匹配和匈牙利匹配的总代价有时不一样。生活中有没有“每一步都选最好的，但整体不是最好”的例子？</li>
+      <li>麦穗又小又密、互相遮挡。你觉得 DETR 的“全局注意力”在这里是优势还是劣势？</li>
+      <li>框的坐标格式（左上角还是中心点）写错了，代码不会报错。你会怎么设计一个小检查，尽早发现这种问题？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Tanul Singh（Mr_KnowNothing），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Kaggle 比赛 Global Wheat Detection；DETR 论文：Carion et al., End-to-End Object Detection with Transformers（2020）。
+</footer>
+</main>
+
+<script src="nb/detr-wheat-detection.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+  /* 画一个麦穗（椭圆 + 芒） */
+  function ear(svg, cx, cy, s, ang) {
+    const g = K.svg(svg, "g", { transform: `rotate(${ang || 0} ${cx} ${cy})` });
+    K.svg(g, "ellipse", { cx, cy, rx: s * 0.32, ry: s * 0.5, fill: "color-mix(in srgb, var(--c5) 70%, var(--panel))", stroke: "var(--c5)" });
+    for (let k = -2; k <= 2; k++) K.svg(g, "line", { x1: cx + k * s * 0.08, y1: cy - s * 0.45, x2: cx + k * s * 0.15, y2: cy - s * 0.8, stroke: "var(--c5)", "stroke-width": 1 });
+    return g;
+  }
+  function field(svg, seed, n, box) {
+    const r = K.rng(seed), out = [];
+    for (let i = 0; i < n; i++) {
+      const s = 26 + r() * 14, cx = box.x + 20 + r() * (box.w - 40), cy = box.y + 25 + r() * (box.h - 50);
+      ear(svg, cx, cy, s, (r() - 0.5) * 50);
+      out.push({ x: cx - s * 0.42, y: cy - s * 0.75, w: s * 0.84, h: s * 1.3 });
+    }
+    return out;
+  }
+  const iou = (a, b) => { const x1 = Math.max(a.x, b.x), y1 = Math.max(a.y, b.y), x2 = Math.min(a.x + a.w, b.x + b.w), y2 = Math.min(a.y + a.h, b.y + b.h); const I = Math.max(0, x2 - x1) * Math.max(0, y2 - y1); return I / (a.w * a.h + b.w * b.h - I); };
+  function giou(a, b) { const x1 = Math.max(a.x, b.x), y1 = Math.max(a.y, b.y), x2 = Math.min(a.x + a.w, b.x + b.w), y2 = Math.min(a.y + a.h, b.y + b.h); const I = Math.max(0, x2 - x1) * Math.max(0, y2 - y1), U = a.w * a.h + b.w * b.h - I; const C = (Math.max(a.x + a.w, b.x + b.w) - Math.min(a.x, b.x)) * (Math.max(a.y + a.h, b.y + b.h) - Math.min(a.y, b.y)); return I / U - (C - U) / C; }
+  const rect = (svg, b, color, dash, w) => K.svg(svg, "rect", { x: b.x, y: b.y, width: b.w, height: b.h, fill: "none", stroke: color, "stroke-width": w || 2, "stroke-dasharray": dash || null });
+
+  const steps = [
+    {
+      at: 0, title: "DETR：用 Transformer 做目标检测", kicker: "第 0–4 格 · 介绍",
+      html: `<p>作者被 Facebook 2020 年发布的 <b>DETR</b>（DEtection TRansformer）吸引，拿它来做全球小麦麦穗检测。他强调 DETR 的出发点：<b>去掉锚框和非极大值抑制（NMS）这些手工设计的部件</b>，只靠两样东西：一对一匹配的集合损失，以及 Transformer 编码器-解码器。</p><p>动画上半是传统检测器：先铺很多候选框，再用 NMS 删重复；下半是 DETR：每个查询直接认领一个目标。</p>`,
+      cells: [2], highlight: ["removing the need for many hand-designed components", "bipartite matching"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 13, "font-weight": 700 }, "传统：锚框 + NMS");
+        K.svg(svg, "text", { x: 20, y: 194, "font-size": 13, "font-weight": 700, fill: "var(--accent)" }, "DETR：查询 + 一对一");
+        const g1 = field(svg, 3, 3, { x: 20, y: 30, w: 300, h: 140 });
+        const r = K.rng(5), anchors = [];
+        g1.forEach((b) => { for (let k = 0; k < 4; k++) anchors.push(rect(svg, { x: b.x + (r() - 0.5) * 16, y: b.y + (r() - 0.5) * 16, w: b.w * (0.8 + r() * 0.5), h: b.h * (0.8 + r() * 0.4) }, "var(--c1)", null, 1)); });
+        const keep = g1.map((b) => rect(svg, b, "var(--good)", null, 2.5)); hide(keep);
+        K.svg(svg, "text", { x: 340, y: 100, "font-size": 12 }, "每个麦穗被好几个框“认领”→ NMS 删掉重叠的");
+        const g2 = field(svg, 3, 3, { x: 20, y: 200, w: 300, h: 140 });
+        const qs = []; for (let q = 0; q < 6; q++) qs.push(K.node(svg, 360 + q * 56, 280, 48, 30, "Q" + (q + 1), { fs: 11, fill: q < 3 ? "var(--accent-soft)" : "var(--panel-2)" }));
+        const lines = g2.map((b, i) => K.svg(svg, "line", { x1: 384 + i * 56, y1: 280, x2: b.x + b.w / 2, y2: b.y + b.h, stroke: "var(--accent)", "stroke-width": 2 }));
+        const boxes2 = g2.map((b) => rect(svg, b, "var(--accent)", null, 2.5));
+        K.svg(svg, "text", { x: 540, y: 330, "font-size": 11, class: "muted" }, "Q4–Q6：无目标 ∅");
+        hide([...lines, ...boxes2]);
+        ctx.wait(700).then((ok) => ok && ctx.tween(900, (t) => { anchors.forEach((a) => (a.style.opacity = 1 - t * 0.9)); keep.forEach((k) => (k.style.opacity = t)); }))
+          .then((ok) => ok && ctx.tween(900, (t) => [...lines, ...boxes2].forEach((e) => (e.style.opacity = t))));
+      },
+    },
+    {
+      title: "小麦比赛的经验与准备", kicker: "第 5–9 格 · 背景",
+      html: `<p>作者总结了这个比赛的常见做法：图片来源不同，要用分层 K 折；用 Cut-mix 增强泛化；多折模型用 WBF（加权框融合）合并预测。数据分析的结论是：缩放不一、光照不一、标注框很乱，有些特别大或特别小的框，但删掉它们反而掉分，所以保留。</p><p>然后从 GitHub 克隆 DETR 官方仓库，为的是直接用它的<b>匈牙利匹配器</b>和<b>集合损失</b>。</p>`,
+      cells: [6, 8], highlight: ["Use Stratified Kfold", "Bounding boxes are messy!", "hungarian matcher"],
+      draw(svg, ctx) {
+        const bx = [{ x: 30, y: 40, w: 200, h: 200, lab: "近拍" }, { x: 260, y: 40, w: 200, h: 200, lab: "远拍" }, { x: 490, y: 40, w: 200, h: 200, lab: "暗光" }];
+        const gs = bx.map((b, i) => { const g = K.svg(svg, "g"); K.svg(g, "rect", { x: b.x, y: b.y, width: b.w, height: b.h, rx: 8, fill: i === 2 ? "color-mix(in srgb, var(--ink) 25%, var(--panel))" : "var(--panel-2)", stroke: "var(--line)" }); field(g, 10 + i, i === 1 ? 9 : 4, b).forEach((e, k) => { if (i === 0 || k % 2) rect(g, e, "var(--c2)", null, 1.2); }); K.svg(g, "text", { x: b.x + b.w / 2, y: b.y + b.h + 22, "text-anchor": "middle", "font-size": 13 }, b.lab); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 30, y: 320, "font-size": 12, class: "muted" }, "不同来源的照片：缩放、光照、密度都不一样（示意）");
+        (async () => { for (const g of gs) if (!(await ctx.tween(400, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "导入：借用官方的匹配器和损失", kicker: "第 10–12 格 · 导入",
+      html: `<p>导入 PyTorch、albumentations、OpenCV 等常用库，以及两样 DETR 专用的东西：<code>HungarianMatcher</code>（匈牙利匹配器）和 <code>SetCriterion</code>（集合损失）。比赛指标用的是另一个公开数据集里的 <code>mAP</code> 模块。</p><p><code>AverageMeter</code> 是个小工具，记录每轮损失的平均值。</p>`,
+      cells: [10], highlight: ["from detr.models.matcher import HungarianMatcher", "from detr.models.detr import SetCriterion"],
+      draw(svg, ctx) {
+        const items = [["PyTorch", "模型与训练"], ["albumentations", "图像增强"], ["OpenCV", "读图"], ["HungarianMatcher", "一对一匹配"], ["SetCriterion", "集合损失"], ["mAP", "比赛指标"]];
+        const ns = items.map((d, i) => K.node(svg, 40 + (i % 3) * 220, 70 + Math.floor(i / 3) * 120, 190, 70, d[0] + "\n" + d[1], { fs: 12, bold: i === 3 || i === 4, fill: i === 3 || i === 4 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 3 || i === 4 ? "var(--accent)" : "var(--line)" }));
+        hide(ns);
+        K.svg(svg, "text", { x: 40, y: 320, "font-size": 12, class: "muted" }, "蓝框两项来自 DETR 官方仓库（第 7 格克隆）");
+        (async () => { for (const n of ns) if (!(await ctx.tween(250, (t) => (n.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "配置：100 个查询，“无目标”权重 0.5", kicker: "第 13–18 格 · 超参数",
+      html: `<p>关键设置：</p><ul class="tight"><li><code>num_classes = 2</code>：麦穗 + “无目标”；</li><li><code>num_queries = 100</code>：每张图固定输出 100 个框；</li><li><code>null_class_coef = 0.5</code>：“无目标”类在分类损失里的权重。100 个查询里大多数都应该是“无目标”，不降权的话模型会偷懒全说“没有”；</li><li>学习率 2e-5（微调预训练模型，步子要小），批大小 16，20 轮。</li></ul><p>比赛指标在 IoU 阈值 0.5、0.55……0.75 六个档上分别算精度再平均。</p>`,
+      cells: [14, 15], highlight: ["num_queries = 100", "null_class_coef = 0.5", "LR = 2e-5"],
+      draw(svg, ctx) {
+        const cells = [];
+        for (let q = 0; q < 100; q++) cells.push(K.svg(svg, "rect", { x: 40 + (q % 20) * 24, y: 40 + Math.floor(q / 20) * 34, width: 20, height: 28, rx: 3, fill: "var(--panel-2)", stroke: "var(--line)" }));
+        K.svg(svg, "text", { x: 40, y: 30, "font-size": 12 }, "100 个查询的输出（示意：这张图有 23 个麦穗）");
+        const r = K.rng(4), hit = new Set(); while (hit.size < 23) hit.add(Math.floor(r() * 100));
+        K.svg(svg, "text", { x: 540, y: 80, "font-size": 13, fill: "var(--c5)" }, "■ 麦穗：23 个");
+        K.svg(svg, "text", { x: 540, y: 106, "font-size": 13, class: "muted" }, "■ 无目标 ∅：77 个");
+        K.svg(svg, "text", { x: 540, y: 150, "font-size": 12 }, "∅ 类损失 × 0.5");
+        K.svg(svg, "text", { x: 540, y: 172, "font-size": 12, class: "muted" }, "防止“全说没有”");
+        ctx.tween(1500, (t) => cells.forEach((c, q) => { if (q / 100 <= t) K.set(c, { fill: hit.has(q) ? "color-mix(in srgb, var(--c5) 70%, var(--panel))" : "color-mix(in srgb, var(--ink-3) 15%, var(--panel))" }); }));
+      },
+    },
+    {
+      title: "分层切折：按来源和框的数量", kicker: "第 19–21 格 · 交叉验证",
+      html: `<p>先把 <code>bbox</code> 字符串拆成 x、y、w、h 四列。再以<b>图片</b>为单位切 5 折：每张图的分层标签 = 来源 + 框数段（框数整除 15），比如 “来源A_2” 表示来源 A、有 30–44 个框。这样每一折里各来源、各种密度的图片比例都差不多。</p>`,
+      cells: [20, 21], highlight: ["df_folds['bbox_count'].apply(lambda x: f'_{x // 15}')", "StratifiedKFold(n_splits=n_folds"],
+      draw(svg, ctx) {
+        const r = K.rng(2), imgs = [];
+        for (let i = 0; i < 40; i++) imgs.push({ src: Math.floor(r() * 3), dens: Math.floor(r() * 3) });
+        imgs.sort((a, b) => a.src - b.src || a.dens - b.dens);
+        const els = imgs.map((d, i) => K.svg(svg, "rect", { x: 30 + (i % 20) * 33, y: 40 + Math.floor(i / 20) * 40, width: 28, height: 30, rx: 3, fill: K.colors[d.src], opacity: 0.35 + d.dens * 0.3 }));
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 12 }, "颜色 = 来源，深浅 = 框多框少（示意）");
+        const folds = []; for (let f = 0; f < 5; f++) { K.svg(svg, "text", { x: 30 + f * 135, y: 160, "font-size": 12 }, "第 " + (f + 1) + " 折"); folds.push(f); }
+        ctx.wait(500).then((ok) => ok && ctx.tween(1600, (t) => els.forEach((e, i) => { const f = i % 5, k = Math.floor(i / 5); const tx = 30 + f * 135 + (k % 4) * 30, ty = 175 + Math.floor(k / 4) * 36; K.set(e, { x: K.lerp(30 + (i % 20) * 33, tx, t), y: K.lerp(40 + Math.floor(i / 20) * 40, ty, t) }); })));
+      },
+    },
+    {
+      title: "数据增强：颜色、模糊、翻转、雾、挖洞", kicker: "第 22–24 格 · 增强",
+      html: `<p>训练增强分几组，每组随机挑一种：色调饱和度 / 亮度对比度 / RGB 偏移；伽马 / 模糊 / 噪声 / 转灰度；<b>水平翻转 / 垂直翻转 / 转置 / 旋转 90°（必选一种）</b>；偶尔加雾；统一缩放到 512×512；15% 概率挖掉 1–6 个黑块（Cutout）。框会跟着图片一起变换。</p><p>俯拍的麦田没有“上下左右”之分，所以翻转旋转都是安全的。</p>`,
+      cells: [23], highlight: ["A.RandomRotate90(p=1)", "A.Resize(height=512, width=512, p=1)", "A.Cutout("],
+      draw(svg, ctx) {
+        const base = { x: 40, y: 60, w: 200, h: 200 };
+        K.svg(svg, "rect", { x: base.x, y: base.y, width: base.w, height: base.h, rx: 6, fill: "var(--panel-2)", stroke: "var(--line)" });
+        const bs = field(svg, 21, 4, base); bs.forEach((b) => rect(svg, b, "var(--c2)"));
+        K.svg(svg, "text", { x: 140, y: 290, "text-anchor": "middle", "font-size": 12 }, "原图（示意）");
+        const g = K.svg(svg, "g");
+        const tile = { x: 420, y: 60, w: 200, h: 200 };
+        K.svg(g, "rect", { x: tile.x, y: tile.y, width: tile.w, height: tile.h, rx: 6, fill: "var(--panel-2)", stroke: "var(--line)" });
+        field(g, 21, 4, tile).forEach((b) => rect(g, b, "var(--c2)"));
+        const hole = K.svg(svg, "rect", { x: 470, y: 110, width: 50, height: 50, fill: "var(--ink)", opacity: 0 });
+        const lab = K.svg(svg, "text", { x: 520, y: 290, "text-anchor": "middle", "font-size": 12 }, "");
+        K.arrow(svg, 260, 160, 400, 160);
+        (async () => {
+          const ops = [["旋转 90°", 90, 1], ["水平翻转", 0, -1], ["转置", 90, -1]];
+          for (const [name, rot, sx] of ops) {
+            lab.textContent = name;
+            if (!(await ctx.tween(700, (t) => g.setAttribute("transform", `translate(520 160) rotate(${rot * t}) scale(${K.lerp(1, sx, t)} 1) translate(-520 -160)`)))) return;
+            if (!(await ctx.wait(500))) return;
+          }
+          lab.textContent = "Cutout 挖洞"; await ctx.tween(400, (t) => (hole.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "Dataset：框的格式与归一化", kicker: "第 25–26 格 · 数据集类",
+      html: `<p>每次取一张图：读图、转 RGB、除以 255；取出这张图所有的框 [x, y, w, h]（COCO 格式：左上角 + 宽高），标签全部是 0（麦穗）。增强之后，把框坐标除以图片宽高，<b>归一化</b>到 0–1。</p><p class="note">DETR 官方代码默认的框格式是 (中心 x, 中心 y, 宽, 高)。这里归一化后仍是“左上角”格式，匹配和 GIoU 计算时框会整体错开半个宽高。动画演示两种格式的差别。</p>`,
+      cells: [26], highlight: ["boxes = records[['x', 'y', 'w', 'h']].values", "A.augmentations.bbox_utils.normalize_bboxes(sample['bboxes'],rows=h,cols=w)", "labels =  np.zeros(len(boxes), dtype=np.int32)"],
+      draw(svg, ctx) {
+        const B = { x: 200, y: 90, w: 160, h: 120 };
+        K.svg(svg, "rect", { x: 60, y: 30, width: 600, height: 280, fill: "var(--panel-2)", stroke: "var(--line)" });
+        rect(svg, B, "var(--c2)", null, 3);
+        K.svg(svg, "circle", { cx: B.x, cy: B.y, r: 6, fill: "var(--c2)" });
+        K.svg(svg, "text", { x: B.x - 8, y: B.y - 10, "text-anchor": "end", "font-size": 12, fill: "var(--c2)" }, "COCO：(x, y) = 左上角");
+        K.svg(svg, "circle", { cx: B.x + B.w / 2, cy: B.y + B.h / 2, r: 6, fill: "var(--accent)" });
+        K.svg(svg, "text", { x: B.x + B.w / 2 + 10, y: B.y + B.h / 2 + 4, "font-size": 12, fill: "var(--accent)" }, "DETR：(cx, cy) = 中心");
+        const wrong = rect(svg, B, "var(--bad)", "6 4", 2.5);
+        const lab = K.svg(svg, "text", { x: 420, y: 290, "font-size": 12, fill: "var(--bad)" }, "");
+        ctx.wait(800).then((ok) => ok && ctx.tween(1200, (t) => { K.set(wrong, { x: B.x - B.w / 2 * t, y: B.y - B.h / 2 * t }); if (t > 0.9) lab.textContent = "把左上角当成中心 → 框错开半个身位"; }));
+      },
+    },
+    {
+      title: "模型：预训练 DETR，换掉分类头", kicker: "第 27–28 格 · DETRModel",
+      html: `<p>用 <code>torch.hub</code> 加载 Facebook 在 COCO 数据集（91 类 + 背景）上训练好的 <code>detr_resnet50</code>，只把最后的分类层 <code>class_embed</code> 换成输出 2 类，查询数设为 100。</p><p>DETR 的结构：ResNet50 把图片变成特征图 → 特征图的每个位置当作一个“词”，加上位置编码送进 Transformer <b>编码器</b>，让图上各处互相交流 → <b>解码器</b>里 100 个可学习的“查询”通过注意力在整张图里找目标 → 每个查询接两个小网络：一个出类别，一个出框。</p>`,
+      cells: [28], highlight: ["torch.hub.load('facebookresearch/detr', 'detr_resnet50', pretrained=True)", "self.model.class_embed = nn.Linear(in_features=self.in_features,out_features=self.num_classes)"],
+      draw(svg, ctx) {
+        const st = [["图片\n512×512", 20], ["ResNet50\n特征图", 140], ["Transformer\n编码器", 270], ["Transformer\n解码器", 410], ["每个查询：\n类别 + 框", 560]];
+        const ns = st.map((s, i) => K.node(svg, s[1], 120, 120, 70, s[0], { fs: 12, bold: i === 2 || i === 3, fill: i === 2 || i === 3 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 2 || i === 3 ? "var(--accent)" : "var(--line)" }));
+        const ar = [0, 1, 2, 3].map((i) => K.arrow(svg, st[i][1] + 120, 155, st[i + 1][1] - 2, 155));
+        const qs = []; for (let q = 0; q < 6; q++) qs.push(K.node(svg, 400 + q * 24, 250, 20, 28, "", { fill: "var(--c4)" }));
+        K.svg(svg, "text", { x: 400, y: 300, "font-size": 11 }, "100 个可学习查询");
+        K.arrow(svg, 470, 248, 470, 192);
+        K.svg(svg, "text", { x: 560, y: 230, "font-size": 11, fill: "var(--c2)" }, "← 只换了这里（91→2 类）");
+        hide([...ns, ...ar]);
+        (async () => { for (let i = 0; i < 5; i++) { if (i) if (!(await ctx.tween(200, (t) => (ar[i - 1].style.opacity = t)))) return; if (!(await ctx.tween(300, (t) => (ns[i].style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      title: "比赛指标：多个 IoU 阈值下的精度", kicker: "第 29–30 格 · 评估",
+      html: `<p><b>IoU</b>（交并比）= 两个框重叠面积 ÷ 合起来的面积，1 表示完全重合。比赛规定：在 IoU 阈值 0.5、0.55……0.75 下分别判断每个预测框算不算“命中”，每个阈值算一个精度 TP / (TP + FP + FN)，再取平均。</p><p>作者的 <code>calculate_final_score</code> 先只保留置信度 &gt; 0.5 的预测框，再调用 mAP 模块算每张图的分数，最后对所有图取平均。</p>`,
+      cells: [30], highlight: ["indexes = np.where(scores>score_threshold)", "mAP.calculate_image_precision"],
+      draw(svg, ctx) {
+        const G = { x: 120, y: 90, w: 160, h: 160 };
+        rect(svg, G, "var(--c2)", null, 3);
+        K.svg(svg, "text", { x: 120, y: 80, "font-size": 12, fill: "var(--c2)" }, "真实框");
+        const P = rect(svg, { x: 120, y: 90, w: 160, h: 160 }, "var(--accent)", "6 3", 3);
+        const ov = K.svg(svg, "rect", { x: 0, y: 0, width: 0, height: 0, fill: "color-mix(in srgb, var(--accent) 25%, transparent)" });
+        const t1 = K.svg(svg, "text", { x: 400, y: 120, "font-size": 16, "font-weight": 700 }, "");
+        const marks = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75].map((th, k) => K.svg(svg, "text", { x: 400 + k * 50, y: 190, "font-size": 12, "text-anchor": "middle" }, th));
+        const ticks = marks.map((m, k) => K.svg(svg, "text", { x: 400 + k * 50, y: 220, "font-size": 16, "text-anchor": "middle" }, ""));
+        K.svg(svg, "text", { x: 375, y: 160, "font-size": 12, class: "muted" }, "各阈值下算不算命中：");
+        ctx.tween(3000, (t) => {
+          const off = t * 90, b = { x: 120 + off, y: 90 + off * 0.3, w: 160, h: 160 };
+          K.set(P, { x: b.x, y: b.y });
+          const x1 = Math.max(G.x, b.x), y1 = Math.max(G.y, b.y), x2 = Math.min(G.x + G.w, b.x + b.w), y2 = Math.min(G.y + G.h, b.y + b.h);
+          K.set(ov, { x: x1, y: y1, width: Math.max(0, x2 - x1), height: Math.max(0, y2 - y1) });
+          const v = iou(G, b); t1.textContent = "IoU = " + v.toFixed(2);
+          ticks.forEach((tk, k) => { const ok = v >= [0.5, 0.55, 0.6, 0.65, 0.7, 0.75][k]; tk.textContent = ok ? "✓" : "✗"; K.set(tk, { fill: ok ? "var(--good)" : "var(--bad)" }); });
+        });
+      },
+    },
+    {
+      title: "匈牙利匹配与集合损失", kicker: "第 31–32 格 · DETR 的核心",
+      html: `<p>100 个预测框和图上（比如）23 个真实框，谁该和谁比？DETR 先算一张“配对代价表”：每个预测 × 每个真实框的代价 = 分类代价 + 框坐标 L1 距离 + (1 − GIoU)。然后用<b>匈牙利算法</b>找总代价最小的一对一配对：每个真实框恰好配一个预测，剩下 77 个预测都配“无目标”。</p><p>配好对之后才算损失：分类损失（权重 0.5）、L1 框损失（1）、GIoU 损失（1），另外还记录一个“预测数量对不对”的 cardinality 指标。</p>`,
+      cells: [32], highlight: ["matcher = HungarianMatcher()", "weight_dict = {'loss_ce': 0.5, 'loss_bbox': 1 , 'loss_giou': 1}"],
+      draw(svg, ctx) {
+        const n = 4, m = 6, s = 46, x0 = 160, y0 = 60, r = K.rng(7);
+        const C = []; for (let i = 0; i < n; i++) { C.push([]); for (let j = 0; j < m; j++) C[i].push(0.3 + r() * 0.7); }
+        const best = [2, 0, 5, 3]; best.forEach((j, i) => (C[i][j] = 0.05 + r() * 0.1));
+        for (let j = 0; j < m; j++) K.svg(svg, "text", { x: x0 + j * s + s / 2, y: y0 - 10, "text-anchor": "middle", "font-size": 11 }, "预测" + (j + 1));
+        for (let i = 0; i < n; i++) K.svg(svg, "text", { x: x0 - 8, y: y0 + i * s + s / 2 + 4, "text-anchor": "end", "font-size": 11 }, "真实框" + (i + 1));
+        const cells = [];
+        for (let i = 0; i < n; i++) for (let j = 0; j < m; j++) { K.svg(svg, "rect", { x: x0 + j * s, y: y0 + i * s, width: s - 3, height: s - 3, rx: 3, fill: K.heat(1 - C[i][j]) }); K.svg(svg, "text", { x: x0 + j * s + s / 2 - 1, y: y0 + i * s + s / 2 + 4, "text-anchor": "middle", "font-size": 10 }, C[i][j].toFixed(2)); }
+        const rings = best.map((j, i) => K.svg(svg, "rect", { x: x0 + j * s - 2, y: y0 + i * s - 2, width: s + 1, height: s + 1, rx: 4, fill: "none", stroke: "var(--good)", "stroke-width": 3 }));
+        hide(rings);
+        K.svg(svg, "text", { x: 470, y: 90, "font-size": 12 }, "格内 = 配对代价（越小越像）");
+        K.svg(svg, "text", { x: 470, y: 114, "font-size": 12, fill: "var(--good)" }, "绿框 = 匈牙利算法选出的一对一配对");
+        K.svg(svg, "text", { x: 470, y: 138, "font-size": 12, class: "muted" }, "没被选中的预测 2、4 → 无目标 ∅");
+        K.svg(svg, "text", { x: 160, y: 270, "font-size": 11, class: "muted" }, "代价为示意数字");
+        (async () => { for (const rg of rings) if (!(await ctx.tween(400, (t) => (rg.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "训练与验证循环", kicker: "第 33–40 格 · 训练",
+      html: `<p>每一步：模型输出 100 个预测 → <code>criterion</code>（内部先做匈牙利匹配）算出各项损失 → 按权重加总 → 反向传播。验证时取每个查询“是麦穗”的概率（softmax 后第 0 类），把归一化框还原成像素坐标，交给比赛指标打分。</p><p><code>run(fold)</code> 用 AdamW（学习率 2e-5），每轮验证一次，mAP 创新高就保存权重。作者只跑了第 0 折。</p>`,
+      cells: [34, 36, 39, 40], highlight: ["loss_dict = criterion(output, targets)", "scores = output['pred_logits'][i].softmax(1).detach().cpu().numpy()[:,0]", "if valid_map_score > best_map:", "run(fold=0)"],
+      draw(svg, ctx) {
+        const st = [["图片", 30], ["DETR", 160], ["100 个预测", 290], ["匈牙利匹配", 420], ["加权损失", 560]];
+        const ns = st.map((s, i) => K.node(svg, s[1], 120, 110, 56, s[0], { fs: 12, bold: i === 3, fill: i === 3 ? "var(--accent-soft)" : "var(--panel-2)" }));
+        for (let i = 0; i < 4; i++) K.arrow(svg, st[i][1] + 110, 148, st[i + 1][1] - 2, 148);
+        const back = K.svg(svg, "path", { d: "M615,180 C615,260 215,260 215,180", fill: "none", stroke: "var(--bad)", "stroke-width": 2.5, "stroke-dasharray": "6 4" });
+        K.svg(svg, "text", { x: 330, y: 268, "font-size": 12, fill: "var(--bad)" }, "反向传播更新 DETR");
+        const dot = K.svg(svg, "circle", { cx: 85, cy: 148, r: 7, fill: "var(--accent)" });
+        ctx.tween(2600, (t) => { const k = t * 4, i = Math.min(3, Math.floor(k)); K.set(dot, { cx: K.lerp(st[i][1] + 55, st[i + 1][1] + 55, k - i) }); back.style.opacity = t > 0.95 ? 1 : 0.2; });
+      },
+    },
+    {
+      title: "看一眼预测结果", kicker: "第 41–44 格 · 可视化与总结",
+      html: `<p>作者加载第 0 折最好的权重，在验证集第一张图上画框：红色是真实框，蓝色是置信度 &gt; 0.5 的预测框（第 2 版修正了之前误把真实框当预测框画的问题）。</p><p>结尾作者说：只训练了一折，DETR 看起来效果不错；如果大家喜欢，会继续 5 折训练、用 WBF 融合，并加入注意力权重的可视化。</p>`,
+      cells: [42, 43], highlight: ["if p >0.5:"],
+      draw(svg, ctx) {
+        const box = { x: 160, y: 30, w: 400, h: 290 };
+        K.svg(svg, "rect", { x: box.x, y: box.y, width: box.w, height: box.h, rx: 6, fill: "var(--panel-2)", stroke: "var(--line)" });
+        const G = field(svg, 33, 8, box), r = K.rng(4);
+        G.forEach((b) => rect(svg, b, "var(--c6)", null, 1.5));
+        const P = G.map((b, i) => ({ x: b.x + (r() - 0.5) * 8, y: b.y + (r() - 0.5) * 8, w: b.w * (0.9 + r() * 0.2), h: b.h * (0.9 + r() * 0.2), keep: i !== 3 }));
+        const pe = P.filter((p) => p.keep).map((p) => rect(svg, p, "var(--c1)", null, 2));
+        hide(pe);
+        K.svg(svg, "text", { x: 20, y: 60, "font-size": 12, fill: "var(--c6)" }, "■ 真实框");
+        K.svg(svg, "text", { x: 20, y: 84, "font-size": 12, fill: "var(--c1)" }, "■ 预测（p > 0.5）");
+        K.svg(svg, "text", { x: 20, y: 300, "font-size": 11, class: "muted" }, "示意，不是作者的运行结果");
+        (async () => { for (const p of pe) if (!(await ctx.tween(220, (t) => (p.style.opacity = t)))) return; })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ===== 实验 A：IoU 与比赛打分 ===== */
+  const THS = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75];
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "jit", label: "预测框的偏差（像素，越大越不准）", min: 0, max: 30, step: 1, value: 8 },
+      { id: "th", label: "置信度阈值（作者用 0.5）", min: 0.05, max: 0.95, step: 0.05, value: 0.5, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "换一张图", button: true },
+    ],
+    note: "随机生成一张有 10 个麦穗的图和一批预测框（真麦穗附近的预测置信度偏高，另有几个误报的低置信度框）。按比赛规则在 6 个 IoU 阈值下分别做一对一贪心匹配，算 TP/(TP+FP+FN) 再平均。",
+    render(svg, v) {
+      const r = K.rng(50 + v.seed * 13), box = { x: 20, y: 20, w: 360, h: 290 };
+      K.svg(svg, "rect", { x: box.x, y: box.y, width: box.w, height: box.h, rx: 6, fill: "var(--panel-2)", stroke: "var(--line)" });
+      const G = field(svg, 60 + v.seed, 10, box);
+      const P = [];
+      G.forEach((b, i) => { if (i === 9) return; const j = v.jit; P.push({ x: b.x + (r() - 0.5) * 2 * j, y: b.y + (r() - 0.5) * 2 * j, w: b.w * (1 + (r() - 0.5) * j / 40), h: b.h * (1 + (r() - 0.5) * j / 40), s: 0.55 + r() * 0.4 }); });
+      for (let k = 0; k < 4; k++) P.push({ x: box.x + r() * (box.w - 40), y: box.y + r() * (box.h - 50), w: 25 + r() * 15, h: 35 + r() * 15, s: 0.1 + r() * 0.55 });
+      const kept = P.filter((p) => p.s > v.th).sort((a, b) => b.s - a.s);
+      G.forEach((b) => rect(svg, b, "var(--c6)", null, 1.5));
+      kept.forEach((p) => rect(svg, p, "var(--c1)", "4 2", 2));
+      const scores = THS.map((th) => {
+        const used = new Set(); let TP = 0;
+        kept.forEach((p) => { let best = -1, bi = -1; G.forEach((g, gi) => { if (used.has(gi)) return; const u = iou(p, g); if (u > best) { best = u; bi = gi; } }); if (best >= th) { used.add(bi); TP++; } });
+        const FP = kept.length - TP, FN = G.length - TP;
+        return TP / (TP + FP + FN);
+      });
+      const ax = K.axes(svg, { x: 430, y: 30, w: 190, h: 220 }, [0, 6], [0, 1], { xticks: 0, yticks: 4 });
+      scores.forEach((s, k) => { K.svg(svg, "rect", { x: ax.sx(k) + 3, y: ax.sy(s), width: 26, height: ax.sy(0) - ax.sy(s), fill: "var(--accent)" }); K.svg(svg, "text", { x: ax.sx(k) + 16, y: 268, "text-anchor": "middle", "font-size": 10 }, THS[k]); });
+      K.svg(svg, "text", { x: 525, y: 290, "text-anchor": "middle", "font-size": 11 }, "IoU 阈值");
+      K.svg(svg, "text", { x: 30, y: 326, "font-size": 11, class: "muted" }, "红实线 = 真实麦穗（第 10 个没被预测到），蓝虚线 = 保留下来的预测");
+      const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
+      return { readout: [
+        { k: "6 个阈值的平均精度", v: mean.toFixed(3), color: "var(--accent)" },
+        { k: "阈值 0.5 时", v: scores[0].toFixed(3) },
+        { k: "阈值 0.75 时", v: scores[5].toFixed(3) },
+        { k: "保留的预测框数", v: String(kept.length) },
+      ] };
+    },
+  });
+
+  /* ===== 实验 B：匈牙利匹配 vs 贪心 ===== */
+  function exactAssign(C) {   // 更稳妥：递归枚举（n ≤ 6、m ≤ 10，最多 151200 种）
+    const n = C.length, m = C[0].length; let best = 1e9, bestM = null; const cur = [], used = new Array(m).fill(false);
+    (function go(i, acc) { if (acc >= best) return; if (i === n) { best = acc; bestM = cur.slice(); return; } for (let j = 0; j < m; j++) if (!used[j]) { used[j] = true; cur[i] = j; go(i + 1, acc + C[i][j]); used[j] = false; } })(0, 0);
+    return { cost: best, match: bestM };
+  }
+  function greedy(C) {
+    const n = C.length, m = C[0].length, pairs = [];
+    for (let i = 0; i < n; i++) for (let j = 0; j < m; j++) pairs.push([C[i][j], i, j]);
+    pairs.sort((a, b) => a[0] - b[0]);
+    const ri = new Set(), cj = new Set(), match = new Array(n).fill(-1); let cost = 0;
+    pairs.forEach(([c, i, j]) => { if (!ri.has(i) && !cj.has(j)) { ri.add(i); cj.add(j); match[i] = j; cost += c; } });
+    return { cost, match };
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "n", label: "真实麦穗数", min: 2, max: 6, step: 1, value: 4 },
+      { id: "m", label: "查询（预测框）数", min: 6, max: 10, step: 1, value: 8 },
+      { id: "wg", label: "GIoU 代价的权重（作者 1）", min: 0, max: 3, step: 0.1, value: 1, fmt: (v) => v.toFixed(1) },
+      { id: "mode", label: "配对方法", value: "hung", options: [["hung", "匈牙利（最优一对一）"], ["greedy", "贪心：每次挑当前最便宜的一对"]] },
+      { id: "seed", label: "换一批框", button: true },
+    ],
+    note: "代价 = 分类代价（1 − 预测为麦穗的概率）+ 5 × L1 坐标差（按画布归一化）+ 权重 × (1 − GIoU)。最优配对用穷举求解（规模很小时等价于匈牙利算法）。没配上的查询被当作“无目标”。",
+    render(svg, v) {
+      const r = K.rng(77 + v.seed * 19), W = 380, H = 300, box = { x: 20, y: 20, w: W, h: H };
+      K.svg(svg, "rect", { x: box.x, y: box.y, width: W, height: H, rx: 6, fill: "var(--panel-2)", stroke: "var(--line)" });
+      const G = field(svg, 90 + v.seed, v.n, box);
+      const P = [];
+      for (let j = 0; j < v.m; j++) {
+        if (j < v.n + 1) { const g = G[(j * 7) % v.n]; P.push({ x: g.x + (r() - 0.5) * 40, y: g.y + (r() - 0.5) * 40, w: g.w * (0.7 + r() * 0.6), h: g.h * (0.7 + r() * 0.6), p: 0.4 + r() * 0.55 }); }
+        else P.push({ x: box.x + r() * (W - 50), y: box.y + r() * (H - 60), w: 25 + r() * 25, h: 35 + r() * 25, p: r() * 0.5 });
+      }
+      const C = G.map((g) => P.map((p) => (1 - p.p) + 5 * (Math.abs(g.x - p.x) + Math.abs(g.y - p.y) + Math.abs(g.w - p.w) + Math.abs(g.h - p.h)) / (W + H) + v.wg * (1 - giou(g, p))));
+      const opt = exactAssign(C), res = v.mode === "hung" ? opt : greedy(C);
+      G.forEach((g, i) => { rect(svg, g, "var(--c6)", null, 2); K.svg(svg, "text", { x: g.x + 2, y: g.y - 3, "font-size": 10, fill: "var(--c6)" }, "G" + (i + 1)); });
+      const matched = new Set(res.match);
+      P.forEach((p, j) => { rect(svg, p, matched.has(j) ? "var(--c1)" : "var(--ink-3)", "4 3", matched.has(j) ? 2 : 1); K.svg(svg, "text", { x: p.x + p.w - 2, y: p.y + p.h + 11, "text-anchor": "end", "font-size": 10, fill: matched.has(j) ? "var(--c1)" : "var(--ink-3)" }, "Q" + (j + 1) + (matched.has(j) ? "" : " ∅")); });
+      res.match.forEach((j, i) => { const g = G[i], p = P[j]; K.svg(svg, "line", { x1: g.x + g.w / 2, y1: g.y + g.h / 2, x2: p.x + p.w / 2, y2: p.y + p.h / 2, stroke: "var(--good)", "stroke-width": 2.5 }); });
+      // 代价表
+      const s = 22, x0 = 440, y0 = 40;
+      for (let j = 0; j < v.m; j++) K.svg(svg, "text", { x: x0 + j * s + s / 2, y: y0 - 6, "text-anchor": "middle", "font-size": 9 }, "Q" + (j + 1));
+      C.forEach((row, i) => { K.svg(svg, "text", { x: x0 - 4, y: y0 + i * s + 15, "text-anchor": "end", "font-size": 9 }, "G" + (i + 1)); row.forEach((c, j) => { K.svg(svg, "rect", { x: x0 + j * s, y: y0 + i * s, width: s - 2, height: s - 2, fill: K.heat(Math.max(0, 1 - c / 3)) }); if (res.match[i] === j) K.svg(svg, "rect", { x: x0 + j * s - 1, y: y0 + i * s - 1, width: s, height: s, fill: "none", stroke: "var(--good)", "stroke-width": 2 }); }); });
+      K.svg(svg, "text", { x: x0, y: y0 + v.n * s + 18, "font-size": 10, class: "muted" }, "代价表：颜色越深越便宜");
+      K.svg(svg, "text", { x: 30, y: 350, "font-size": 11, class: "muted" }, "红 = 真实麦穗 G，蓝 = 配上的查询，灰 ∅ = 没配上（算“无目标”）");
+      return { readout: [
+        { k: "当前方法总代价", v: res.cost.toFixed(3), color: res.cost > opt.cost + 1e-9 ? "var(--bad)" : "var(--good)" },
+        { k: "最优总代价", v: opt.cost.toFixed(3) },
+        { k: "被判“无目标”的查询", v: String(v.m - v.n) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

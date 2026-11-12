@@ -1,0 +1,479 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>员工离职预测</title>
+<meta name="description" content="Kaggle 案例拆解：IBM HR 员工离职数据，分组直方图找离职线索，独热编码后比较 L1 逻辑回归、随机森林网格搜索、SVM、XGBoost、LightGBM、CatBoost、AdaBoost，并指出评估代码里的几处陷阱。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格数据 · 二分类 · 人力资源分析</div>
+  <h1>员工离职预测：七个模型，谁更能认出“想走的人”</h1>
+  <p class="en">IBM HR Analytics Employee Attrition &amp; Performance</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">分组直方图</span><span class="tag method">相关矩阵</span><span class="tag method">独热编码</span>
+    <span class="tag method">L1 逻辑回归</span><span class="tag method">随机森林 + GridSearchCV</span><span class="tag method">SVM</span>
+    <span class="tag method">XGBoost / LightGBM / CatBoost</span><span class="tag method">AdaBoost</span><span class="tag method">ROC AUC</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Fares Sayah</b></span>
+    <span>Kaggle 点赞 <b>1,954</b>（2026-11 抓取）</span>
+    <span>数据集 <b>pavansubhasht/ibm-hr-analytics-attrition-dataset</b></span>
+    <span><a href="https://www.kaggle.com/code/faressayah/ibm-hr-analytics-employee-attrition-performance" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">1470 名员工的人事档案</div><p>IBM 数据科学家制作的<b>虚构</b>数据集（数据集说明），35 列：年龄、部门、岗位、职级、月薪、加班、出差频率、通勤距离、满意度评分、司龄、晋升间隔、股票期权等级……</p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这名员工会不会离职（Attrition）</div><p>离职 237 人，约 16%（数据集统计）。作者指出：全部预测“留下”就有 <b>83.90%</b> 的准确率，所以准确率不能当成功标准。<span data-cell="50">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">看图找线索 + 七个分类器横向比较</div><p>按是否离职画分组直方图和相关矩阵；独热编码、去重、分层切分、标准化；依次训练 L1 逻辑回归、随机森林（网格搜索）、SVM（网格搜索）、XGBoost、LightGBM、CatBoost、AdaBoost，用 ROC AUC 比较。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一份“谁更容易走”的画像</div><p>低职级、低月薪、司龄短、常出差、单身、加班多的员工更容易离职。<span data-cell="35">出处</span> 各模型的分数在运行输出里，源码不带；本页还指出了评估代码里影响分数的几处问题。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>IBM HR Analytics Employee Attrition &amp; Performance</b>（IBM 数据科学家创建的虚构数据，Kaggle：pavansubhasht/ibm-hr-analytics-attrition-dataset）。规模和字段来自数据集说明，83.90% 来自作者第 50 格。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">员工数（行）</div><div class="v">1,470</div></div>
+        <div class="stat-tile"><div class="k">字段数（列）</div><div class="v">35</div></div>
+        <div class="stat-tile"><div class="k">离职人数</div><div class="v" style="color:var(--bad)">237（约 16%）</div></div>
+        <div class="stat-tile"><div class="k">全猜“留下”的准确率</div><div class="v">83.90%</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">83.90% 见第 50 格 <span data-cell="50">出处</span>；作者删除的 4 列无信息字段见第 9 格 <span data-cell="9">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">主要的列</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>Attrition</code></td><td><b>要预测的答案</b>：是否离职（Yes / No）</td><td>类别</td></tr>
+        <tr><td><code>Age</code></td><td>年龄</td><td>数值</td></tr>
+        <tr><td><code>Department</code> / <code>JobRole</code></td><td>部门 / 岗位</td><td>类别</td></tr>
+        <tr><td><code>JobLevel</code></td><td>职级（1–5）</td><td>数值</td></tr>
+        <tr><td><code>MonthlyIncome</code></td><td>月薪</td><td>数值</td></tr>
+        <tr><td><code>OverTime</code></td><td>是否加班</td><td>类别</td></tr>
+        <tr><td><code>BusinessTravel</code></td><td>出差频率：不出差 / 偶尔 / 经常</td><td>类别</td></tr>
+        <tr><td><code>DistanceFromHome</code></td><td>离家距离</td><td>数值</td></tr>
+        <tr><td><code>JobSatisfaction</code> 等</td><td>工作、环境、人际关系满意度（1–4 分）</td><td>数值</td></tr>
+        <tr><td><code>YearsAtCompany</code> / <code>TotalWorkingYears</code></td><td>司龄 / 总工龄</td><td>数值</td></tr>
+        <tr><td><code>MaritalStatus</code> / <code>StockOptionLevel</code></td><td>婚姻状况 / 股票期权等级</td><td>类别 / 数值</td></tr>
+        <tr><td><code>EmployeeCount</code> 等 4 列</td><td>每人都相同或只是工号，作者删除</td><td>—</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="57">
+    <h3>动手试试 · L1 正则与 AUC 的两种算法 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>EmployeeCount、Over18、StandardHours 只有一个取值，EmployeeNumber 每人不同，四列都没有信息，删除</td><td><span data-cell="9">第 9 格</span></td></tr>
+        <tr><td>环境满意度、工作满意度、绩效评分、关系满意度对离职影响不大</td><td><span data-cell="30">第 30 格</span></td></tr>
+        <tr><td>低职级、低月薪、司龄短、总工龄短的人更容易离职；经常出差、单身、加班的人更容易离职；研发部更稳定</td><td><span data-cell="35">第 35 格</span></td></tr>
+        <tr><td>月薪与职级、职级与总工龄、月薪与总工龄高度相关；婚姻状况与股票期权等级负相关</td><td><span data-cell="40">第 40 格</span></td></tr>
+        <tr><td>数据不平衡：全部预测“留下”的准确率就有 83.90%</td><td><span data-cell="50">第 50 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">七个模型的 ROC AUC 打印在运行输出里，源码不带输出，作者文字也没写，这里不列分数。而且下方“评估陷阱”说明，第 57 格和第 88 格的写法本身会让 AUC 偏离真实水平，读原作者的数字时要留意。</p>
+      <h3>评估代码里的三个陷阱</h3>
+      <ul class="tight">
+        <li>AUC 用 <code>model.predict()</code> 的 0/1 标签计算，而不是 <code>predict_proba</code> 的概率，ROC 曲线只剩一个拐点 <span data-cell="57">第 57 格</span></li>
+        <li>逻辑回归、SVM 在标准化数据上训练，第 57、88 格却在<b>未标准化</b>的 X 上打分 <span data-cell="88">第 88 格</span></li>
+        <li>PR 曲线、ROC 曲线同样基于 0/1 预测，曲线退化成折线 <span data-cell="56">第 56 格</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给每位员工一个离职风险分，HR 可据此优先安排面谈、调岗、调薪或改善加班。</li>
+        <li><b>同类问题：</b>会员流失、学生辍学预警、销售人员流失、司机/骑手流失。</li>
+        <li><b>可迁移的套路：</b>删掉常数列和 ID 列 → 分组直方图看差异 → 独热编码（drop_first 防共线）→ 分层切分 → 多模型 + 网格搜索 → 用概率算 AUC，画精确率/召回率随阈值变化的曲线。</li>
+        <li><b>伦理提醒：</b>“单身、男性更容易走”这类结论不能用来做歧视性的人事决定；模型更适合发现可改进的因素（加班、薪资、晋升）。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>删除无信息列 <span data-cell="10">第 10 格</span></li>
+        <li>独热编码 + 去重 <span data-cell="42">第 42 格</span>、<span data-cell="43">第 43 格</span></li>
+        <li>分层切分 7:3 + 标准化 <span data-cell="48">第 48 格</span></li>
+        <li>L1 逻辑回归 <span data-cell="55">第 55 格</span></li>
+        <li>随机森林网格搜索（5 折，AUC） <span data-cell="60">第 60 格</span></li>
+        <li>SVM 网格搜索（线性 / RBF） <span data-cell="66">第 66 格</span></li>
+        <li>XGBoost <span data-cell="71">第 71 格</span>、LightGBM <span data-cell="76">第 76 格</span>、CatBoost <span data-cell="80">第 80 格</span>、AdaBoost <span data-cell="84">第 84 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>为什么用 0/1 预测值算出来的 AUC，通常比用概率算的低？在实验里比较两者，并说说什么时候差得最多。</li>
+      <li>一个在标准化数据上训练的逻辑回归，拿未标准化的数据去预测，会发生什么？你能想到用 <code>Pipeline</code> 怎样从结构上避免这个错误吗？</li>
+      <li>月薪和职级高度相关。L1 正则在两个高度相关的特征之间会怎么“取舍”？这对解释“谁影响离职”有什么风险？</li>
+      <li>随机森林网格有 648 种参数组合，5 折就是 3240 次训练。只有 1000 来条数据时，这么大的搜索可能带来什么问题？</li>
+      <li>数据是 IBM 虚构的。用虚构数据得出的“加班的人更容易走”，能直接搬到你所在的单位吗？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Fares Sayah，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：IBM HR Analytics Employee Attrition &amp; Performance（IBM 数据科学家创建的虚构数据，Kaggle：pavansubhasht/ibm-hr-analytics-attrition-dataset）。
+</footer>
+</main>
+
+<script src="nb/hr-attrition-models.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* 自查用：地址带 #fast 时动画直接跳到终态 */
+  if (/fast/.test(location.hash)) { K.tween = (ms, fn, c) => { if (c && !c.alive()) return Promise.resolve(false); fn(1, 1); return Promise.resolve(true); }; K.wait = (ms, c) => Promise.resolve(!c || c.alive()); }
+
+  function table(svg, x, y, cols, rows, opt) {
+    opt = opt || {};
+    const rh = opt.rh || 26, fs = opt.fs || 12, cells = [], rowG = [], head = [];
+    let cx = x; const xs = cols.map((c) => { const v = cx; cx += c.w; return v; });
+    cols.forEach((c, j) => {
+      const g = K.svg(svg, "g"); head.push(g);
+      K.svg(g, "rect", { x: xs[j], y, width: c.w, height: rh, fill: c.hl ? "color-mix(in srgb, var(--accent) 22%, var(--panel))" : "var(--panel-2)", stroke: "var(--line)" });
+      K.svg(g, "text", { x: xs[j] + c.w / 2, y: y + rh / 2 + 4, "text-anchor": "middle", "font-size": fs, "font-weight": 700 }, c.h);
+    });
+    rows.forEach((r, i) => {
+      const g = K.svg(svg, "g"); rowG.push(g);
+      cells.push(r.map((v, j) => ({ rect: K.svg(g, "rect", { x: xs[j], y: y + (i + 1) * rh, width: cols[j].w, height: rh, fill: "var(--panel)", stroke: "var(--line)" }), t: K.svg(g, "text", { x: xs[j] + cols[j].w / 2, y: y + (i + 1) * rh + rh / 2 + 4, "text-anchor": "middle", "font-size": fs }, v) })));
+    });
+    return { cells, rows: rowG, head, xs, rh };
+  }
+  const fade = (els, v) => els.forEach((e) => (e.style.opacity = v));
+  const tint = (c, p) => `color-mix(in srgb, ${c} ${p}%, var(--panel))`;
+
+  const steps = [
+    {
+      title: "XGBoost、LightGBM、CatBoost、AdaBoost", kicker: "第 70–86 格 · Boosting 家族", at: 70, cells: [71, 76, 80, 84], highlight: ["XGBClassifier", "LGBMClassifier", "CatBoostClassifier", "AdaBoostClassifier"],
+      html: `<p>四个 Boosting 模型都用默认参数训练，每个都用同一个 <code>evaluate</code> 函数打印训练/测试结果、画精确率-召回率随阈值变化的曲线，并把 AUC 存进 <code>scores_dict</code>。XGBoost 还画了前 35 个重要特征。</p><p>它们共同的思路是“一棵接一棵修正错误”；区别在细节：XGBoost 加了正则项防过拟合，LightGBM 按叶子生长、速度快，CatBoost 对类别特征有专门处理，AdaBoost 是最早的版本，靠给错样本加权。</p>`,
+    },
+    {
+      title: "先想清楚业务问题", kicker: "第 0–5 格 · 问题定义",
+      html: `<p>员工离职意味着招聘和培训新人的金钱、时间成本，经验流失，产能和利润受影响。</p><p>作者在动手前先列出要回答的业务问题：哪些因素最导致离职？公司该采取什么挽留措施？模型能带来什么价值、能省多少钱？哪个部门问题最严重？<b>先定问题，再找答案</b>，模型才有意义。</p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        const qs = ["哪些因素导致离职？", "该采取什么挽留措施？", "模型带来什么业务价值？", "能省下多少钱？", "哪个部门问题最严重？"];
+        K.node(svg, 280, 140, 160, 60, "员工离职", { bold: true, fill: tint("var(--bad)", 18), stroke: "var(--bad)" });
+        const pos = [[60, 40], [480, 40], [30, 250], [500, 250], [270, 270]];
+        const gs = qs.map((q, i) => { const g = K.svg(svg, "g"); K.node(g, pos[i][0], pos[i][1], 190, 44, q, { fs: 13 }); K.arrow(g, 360, 170, pos[i][0] + 95, pos[i][1] + (pos[i][1] < 140 ? 44 : 0), { color: "var(--ink-3)", dash: "4 3" }); g.style.opacity = 0; return g; });
+        (async () => { for (const g of gs) { if (!(await ctx.tween(350, (t) => (g.style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      title: "删掉没有信息的列", kicker: "第 6–10 格 · 清洗",
+      html: `<p>作者逐列打印唯一值个数，发现：<code>EmployeeCount</code>、<code>Over18</code>、<code>StandardHours</code> 每个人都一样（只有 1 个取值）；<code>EmployeeNumber</code> 有 1470 个取值，每人一个，只是工号。</p><p>前三列对区分任何人都没用，工号则会让模型“记住”具体员工而不是规律。四列一起删掉。</p>`,
+      cells: [6, 9, 10], highlight: ["EmployeeCount", "EmployeeNumber", "Over18", "StandardHours"],
+      draw(svg, ctx) {
+        const T = table(svg, 20, 40, [{ h: "Age", w: 56 }, { h: "EmployeeCount", w: 120 }, { h: "EmployeeNumber", w: 130 }, { h: "Over18", w: 70 }, { h: "StandardHours", w: 120 }, { h: "OverTime", w: 84 }, { h: "Attrition", w: 84, hl: 1 }], [
+          ["41", "1", "1", "Y", "80", "Yes", "Yes"], ["49", "1", "2", "Y", "80", "No", "No"], ["37", "1", "4", "Y", "80", "Yes", "Yes"], ["33", "1", "5", "Y", "80", "Yes", "No"], ["27", "1", "7", "Y", "80", "No", "No"],
+        ], { rh: 32 });
+        const nu = K.svg(svg, "text", { x: 20, y: 250, "font-size": 13 }, "");
+        const dead = [1, 2, 3, 4];
+        (async () => {
+          if (!(await ctx.wait(600))) return;
+          nu.textContent = "唯一值个数：EmployeeCount 1 · EmployeeNumber 1470 · Over18 1 · StandardHours 1";
+          dead.forEach((j) => { T.head[j].querySelector("rect").style.fill = tint("var(--bad)", 25); });
+          if (!(await ctx.wait(900))) return;
+          if (!(await ctx.tween(900, (t) => { dead.forEach((j) => { T.head[j].style.opacity = 1 - t * 0.85; T.cells.forEach((r) => { r[j].t.style.opacity = 1 - t * 0.85; r[j].rect.style.opacity = 1 - t * 0.85; }); }); }))) return;
+          K.svg(svg, "text", { x: 20, y: 280, "font-size": 14, "font-weight": 700, fill: "var(--accent)" }, "35 列 → 31 列（数据集原始 35 列）");
+        })();
+      },
+    },
+    {
+      title: "把列分成三类", kicker: "第 11–17 格 · 认识特征",
+      html: `<p>作者用两个简单规则给列分组：</p><ul class="tight"><li><b>类别列</b>：字符串类型（部门、岗位、婚姻、出差频率、加班…）</li><li><b>离散数值列</b>：数字但取值少于 30 种（职级、满意度 1–4、股票期权 0–3…）</li><li><b>连续数值列</b>：取值超过 30 种（年龄、月薪、日薪…）</li></ul><p>目标列 Attrition 用 <code>LabelEncoder</code> 变成 0/1。分组后，不同类型的列用不同的图和编码方式处理。</p>`,
+      cells: [11, 12, 16, 17], highlight: ["nunique() < 30", "nunique() > 30"],
+      draw(svg, ctx) {
+        const cols = [["Department", 0], ["JobRole", 0], ["MaritalStatus", 0], ["OverTime", 0], ["BusinessTravel", 0], ["JobLevel", 1], ["JobSatisfaction", 1], ["StockOptionLevel", 1], ["Education", 1], ["Age", 2], ["MonthlyIncome", 2], ["DailyRate", 2], ["DistanceFromHome", 1]];
+        const bins = [["类别列（object）", "var(--c2)"], ["离散数值（< 30 种）", "var(--c3)"], ["连续数值（> 30 种）", "var(--c1)"]];
+        bins.forEach((b, i) => { K.svg(svg, "rect", { x: 20 + i * 235, y: 150, width: 220, height: 180, rx: 8, fill: tint(b[1], 8), stroke: b[1] }); K.svg(svg, "text", { x: 30 + i * 235, y: 172, "font-size": 13, "font-weight": 700, fill: b[1] }, b[0]); });
+        const cnt = [0, 0, 0];
+        const els = cols.map((c, i) => { const g = K.node(svg, 20 + (i % 5) * 140, 14 + Math.floor(i / 5) * 40, 104, 30, c[0], { fs: 10 }); const k = c[1]; const tgt = [30 + k * 235 + (cnt[k] % 2) * 106, 184 + Math.floor(cnt[k]++ / 2) * 36]; return { g, from: [20 + (i % 5) * 140, 14 + Math.floor(i / 5) * 40], tgt, k }; });
+        (async () => {
+          if (!(await ctx.wait(500))) return;
+          for (const e of els) {
+            if (!(await ctx.tween(220, (t) => { e.g.setAttribute("transform", `translate(${(e.tgt[0] - e.from[0]) * t},${(e.tgt[1] - e.from[1]) * t}) scale(1)`); }))) return;
+            e.g.querySelector("rect").style.stroke = bins[e.k][1];
+          }
+        })();
+      },
+    },
+    {
+      title: "分组直方图：留下的人 vs 离开的人", kicker: "第 18–35 格 · 探索",
+      html: `<p>作者对每个特征画“按 Attrition 分组”的直方图，把两组的分布叠在一起比较。比如月薪：离职者集中在低薪段。</p><p>汇总结论：低职级、低月薪、司龄短、总工龄短的人更容易离职；经常出差、单身、加班多的人更容易离职；研发部员工更稳定；人力资源、技术学位背景以及实验室技术员、销售代表岗位离职偏多。</p>`,
+      cells: [18, 32, 35], highlight: ["by='Attrition'"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 230 }, [1000, 20000], [0, 1], { xticks: 4, yticks: 0, xlabel: "月薪 MonthlyIncome（示意分布，两组各自归一化）" });
+        const lg = (x, m, s) => Math.exp(-((Math.log(x) - m) ** 2) / (2 * s * s)) / x;
+        const bins = 30, w = 19000 / bins;
+        const mk = (m, s) => { const v = []; for (let i = 0; i < bins; i++) v.push(lg(1000 + (i + 0.5) * w, m, s)); const mx = Math.max(...v); return v.map((x) => x / mx); };
+        const stay = mk(Math.log(5500), 0.6), leave = mk(Math.log(3300), 0.55);
+        const b1 = stay.map((h, i) => K.svg(svg, "rect", { x: ax.sx(1000 + i * w) + 1, y: ax.sy(0), width: ax.sx(w) - ax.sx(0) - 2, height: 0, fill: "var(--c1)", opacity: 0.5 }));
+        const b2 = leave.map((h, i) => K.svg(svg, "rect", { x: ax.sx(1000 + i * w) + 1, y: ax.sy(0), width: ax.sx(w) - ax.sx(0) - 2, height: 0, fill: "var(--bad)", opacity: 0.55 }));
+        K.svg(svg, "text", { x: 470, y: 60, "font-size": 13, fill: "var(--c1)" }, "■ 留下（Attrition = 0）");
+        K.svg(svg, "text", { x: 470, y: 84, "font-size": 13, fill: "var(--bad)" }, "■ 离开（Attrition = 1）");
+        const msg = K.svg(svg, "text", { x: 60, y: 320, "font-size": 13 }, "");
+        (async () => {
+          if (!(await ctx.tween(900, (t) => b1.forEach((b, i) => { const h = (ax.sy(0) - ax.sy(stay[i])) * t; b.setAttribute("y", ax.sy(0) - h); b.setAttribute("height", h); })))) return;
+          if (!(await ctx.tween(900, (t) => b2.forEach((b, i) => { const h = (ax.sy(0) - ax.sy(leave[i])) * t; b.setAttribute("y", ax.sy(0) - h); b.setAttribute("height", h); })))) return;
+          msg.textContent = "离开的人整体偏向低薪一侧 → 月薪是有区分度的特征";
+        })();
+      },
+    },
+    {
+      title: "相关矩阵：哪些特征“说的是同一件事”", kicker: "第 36–40 格 · 相关性",
+      html: `<p>作者画了全部特征的相关热力图，又挑出与 Attrition 最相关的 20 个单独再画，并画出每个特征与 Attrition 的相关系数条形图。</p><p>他的观察：月薪与职级高度相关，职级与总工龄高度相关，年龄与总工龄正相关，婚姻状况与股票期权负相关。高度相关的特征提供的信息有重叠，解释模型时要小心。</p>`,
+      cells: [36, 38, 40], highlight: ["nlargest(20"],
+      draw(svg, ctx) {
+        const f = ["MonthlyIncome", "JobLevel", "TotalWorkingYears", "Age", "YearsAtCompany", "StockOptionLevel"];
+        const M = [[1, 0.95, 0.77, 0.5, 0.51, 0.0], [0.95, 1, 0.78, 0.51, 0.53, 0.01], [0.77, 0.78, 1, 0.68, 0.63, 0.01], [0.5, 0.51, 0.68, 1, 0.31, 0.04], [0.51, 0.53, 0.63, 0.31, 1, 0.02], [0, 0.01, 0.01, 0.04, 0.02, 1]];
+        const s = 44, x0 = 200, y0 = 20, rects = [];
+        f.forEach((n, i) => { K.svg(svg, "text", { x: x0 - 8, y: y0 + i * s + 27, "text-anchor": "end", "font-size": 12 }, n); for (let j = 0; j < 6; j++) rects.push({ i, j, e: K.svg(svg, "rect", { x: x0 + j * s, y: y0 + i * s, width: s - 2, height: s - 2, fill: "var(--panel-2)" }), t: K.svg(svg, "text", { x: x0 + j * s + s / 2 - 1, y: y0 + i * s + 26, "text-anchor": "middle", "font-size": 10 }, "") }); });
+        K.svg(svg, "text", { x: x0, y: 300, "font-size": 11, class: "muted" }, "列顺序同行；数值为示意，只体现作者第 40 格描述的强弱关系");
+        const note = K.svg(svg, "text", { x: 480, y: 70, "font-size": 13 }, "");
+        const note2 = K.svg(svg, "text", { x: 480, y: 94, "font-size": 12, class: "muted" }, "");
+        ctx.tween(1300, (t) => rects.forEach((d) => { const k = K.clamp(t * 12 - (d.i + d.j), 0, 1); d.e.style.fill = K.heat(M[d.i][d.j] * k, true); d.t.textContent = k > 0.9 ? M[d.i][d.j].toFixed(2) : ""; }))
+          .then((ok) => { if (!ok) return; K.svg(svg, "rect", { x: x0 + s - 2, y: y0 - 2, width: s + 2, height: s + 2, fill: "none", stroke: "var(--warn)", "stroke-width": 3 }); note.textContent = "月薪 ↔ 职级：几乎同一个信号"; note2.textContent = "（模型可能只用其中一个）"; });
+      },
+    },
+    {
+      title: "独热编码 + 去重", kicker: "第 41–46 格 · 预处理",
+      html: `<p>取值少于 20 种的列（包括类别列和离散数值列）全部用 <code>pd.get_dummies(..., drop_first=True)</code> 独热编码。<b>drop_first</b> 去掉每组的第一列：知道了其他列，第一列就能推出来，留着只会造成完全共线。</p><p>然后作者用一个小技巧去掉<b>重复列</b>：把表转置（列变行）后 <code>drop_duplicates()</code> 再转回来；同时去掉重复行。</p>`,
+      cells: [41, 42, 43], highlight: ["drop_first=True", "data.T.drop_duplicates()"],
+      draw(svg, ctx) {
+        const A = table(svg, 20, 40, [{ h: "BusinessTravel", w: 150 }], [["Non-Travel"], ["Travel_Rarely"], ["Travel_Frequently"], ["Travel_Rarely"]], { rh: 32 });
+        const B = table(svg, 210, 40, [{ h: "_Non-Travel", w: 120 }, { h: "_Travel_Frequently", w: 160, hl: 1 }, { h: "_Travel_Rarely", w: 140, hl: 1 }], [["1", "0", "0"], ["0", "0", "1"], ["0", "1", "0"], ["0", "0", "1"]], { rh: 32 });
+        fade(B.head.concat(B.rows), 0);
+        const msg = K.svg(svg, "text", { x: 20, y: 230, "font-size": 13 }, "");
+        const msg2 = K.svg(svg, "text", { x: 20, y: 256, "font-size": 13 }, "");
+        (async () => {
+          if (!(await ctx.tween(800, (t) => fade(B.head.concat(B.rows), t)))) return;
+          msg.textContent = "三个取值 → 三列 0/1";
+          if (!(await ctx.wait(800))) return;
+          B.head[0].querySelector("rect").style.fill = tint("var(--bad)", 25);
+          msg2.textContent = "drop_first：删掉第一列。另两列都是 0 时，就知道是 Non-Travel";
+          if (!(await ctx.wait(700))) return;
+          await ctx.tween(800, (t) => { B.head[0].style.opacity = 1 - 0.85 * t; B.cells.forEach((r) => { r[0].t.style.opacity = 1 - 0.85 * t; r[0].rect.style.opacity = 1 - 0.85 * t; }); });
+        })();
+      },
+    },
+    {
+      title: "分层切分、标准化，以及 83.90% 这条线", kicker: "第 47–53 格 · 准备评估",
+      html: `<p>按 7:3 分层切分（<code>stratify=y</code>），训练集和测试集的离职率一致。然后用 <code>StandardScaler</code> 在训练集上 fit，得到标准化版本，供逻辑回归和 SVM 使用；树模型直接用原始数据。</p><p>作者给出“及格线”：全部预测“留下”就有 <b>83.90%</b> 准确率。（第 50 格） 他还写了一个 <code>evaluate</code> 函数，统一打印训练集、测试集的混淆矩阵、准确率和分类报告，方便对比是否过拟合。</p>`,
+      cells: [47, 48, 50, 53], highlight: ["stratify=y", "StandardScaler"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 560, h: 220 }, [0, 3], [70, 100], { xticks: 0, yticks: 6, yfmt: (v) => v + "%" });
+        const base = ax.sy(83.9);
+        K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(3), y1: base, y2: base, stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        K.svg(svg, "text", { x: ax.sx(3) + 8, y: base - 4, "font-size": 12, fill: "var(--warn)", "font-weight": 700 }, "全猜“留下”");
+        K.svg(svg, "text", { x: ax.sx(3) + 8, y: base + 12, "font-size": 12, fill: "var(--warn)", "font-weight": 700 }, "83.90%");
+        const d = [["全猜“留下”", 83.9, "var(--ink-3)", "召回率 0%"], ["模型 A（示意）", 86, "var(--c1)", "召回率低"], ["模型 B（示意）", 88, "var(--good)", "召回率较高"]];
+        const bars = d.map((x, i) => { K.svg(svg, "text", { x: ax.sx(i + 0.5), y: 272, "text-anchor": "middle", "font-size": 12 }, x[0]); K.svg(svg, "text", { x: ax.sx(i + 0.5), y: 290, "text-anchor": "middle", "font-size": 11, class: "muted" }, x[3]); return { v: x[1], r: K.svg(svg, "rect", { x: ax.sx(i + 0.25), y: ax.sy(70), width: ax.sx(0.5) - ax.sx(0), height: 0, rx: 3, fill: x[2] }) }; });
+        K.svg(svg, "text", { x: 70, y: 322, "font-size": 12, class: "muted" }, "只看准确率，模型比“什么都不做”只高几个点；要看它到底认出了多少离职者");
+        ctx.tween(1200, (t) => bars.forEach((b) => { const y = ax.sy(70 + (b.v - 70) * t); b.r.setAttribute("y", y); b.r.setAttribute("height", ax.sy(70) - y); }));
+      },
+    },
+    {
+      title: "L1 逻辑回归：把没用的系数压成 0", kicker: "第 54–57 格 · 线性模型",
+      html: `<p>第一个模型：<code>LogisticRegression(solver='liblinear', penalty='l1')</code>，在标准化数据上训练。</p><p><b>L1 正则</b>在损失里加上“所有系数绝对值之和”的惩罚，结果是不重要特征的系数被压到<b>恰好为 0</b>，相当于自动做了特征选择。动画演示正则变强时，系数一个个归零（示意）。</p>`,
+      cells: [54, 55, 56, 57], highlight: ["penalty='l1'"],
+      draw(svg, ctx) {
+        const names = ["OverTime_Yes", "MonthlyIncome", "JobLevel", "Single", "StockOption", "Distance", "Age", "Education", "HourlyRate"];
+        const w0 = [1.1, -0.7, -0.35, 0.6, -0.45, 0.3, -0.38, 0.08, -0.05];
+        const cx = 400;
+        K.svg(svg, "line", { x1: cx, x2: cx, y1: 20, y2: 300, stroke: "var(--ink-3)" });
+        const bars = names.map((n, i) => { const y = 24 + i * 30; K.svg(svg, "text", { x: 150, y: y + 15, "text-anchor": "end", "font-size": 12 }, n); return { r: K.svg(svg, "rect", { x: cx, y, width: 0, height: 20, rx: 3 }), w: w0[i] }; });
+        const lab = K.svg(svg, "text", { x: 170, y: 320, "font-size": 13 }, "");
+        const draw = (lam) => { let nz = 0; bars.forEach((b) => { const v = Math.sign(b.w) * Math.max(0, Math.abs(b.w) - lam); if (v) nz++; const W = Math.abs(v) * 200; b.r.setAttribute("x", v < 0 ? cx - W : cx); b.r.setAttribute("width", W); b.r.style.fill = v === 0 ? "var(--ink-3)" : v > 0 ? "var(--bad)" : "var(--c1)"; }); lab.textContent = `正则强度 λ = ${lam.toFixed(2)}，非零系数 ${nz} / ${bars.length}（示意）`; };
+        draw(0);
+        K.svg(svg, "text", { x: cx + 10, y: 14, "font-size": 11, fill: "var(--bad)" }, "→ 增加离职风险");
+        K.svg(svg, "text", { x: cx - 10, y: 14, "text-anchor": "end", "font-size": 11, fill: "var(--c1)" }, "降低离职风险 ←");
+        ctx.wait(600).then((ok) => ok && ctx.tween(2600, (t) => draw(t * 0.5)));
+      },
+    },
+    {
+      title: "随机森林 + 网格搜索", kicker: "第 58–63 格 · 树集成",
+      html: `<p>先用默认参数的随机森林（100 棵树，<code>bootstrap=False</code>）看一眼，再用 <code>GridSearchCV</code> 搜索：树的数量 3 种 × 特征采样 2 种 × 最大深度 6 种 × 最小分裂样本 3 种 × 最小叶子样本 3 种 × 是否自助采样 2 种 = <b>648 种组合</b>，5 折交叉验证共 3240 次训练，以 ROC AUC 为准。</p><p>用最佳参数重新训练后，画出前 40 个最重要的特征。</p>`,
+      cells: [58, 59, 60, 63], highlight: ["param_grid", "scoring='roc_auc'", "cv=5"],
+      draw(svg, ctx) {
+        const dims = [["n_estimators", 3], ["max_features", 2], ["max_depth", 6], ["min_samples_split", 3], ["min_samples_leaf", 3], ["bootstrap", 2]];
+        let tot = 1;
+        const lab = K.svg(svg, "text", { x: 420, y: 60, "font-size": 22, "font-weight": 700, fill: "var(--accent)" }, "1");
+        const lab2 = K.svg(svg, "text", { x: 420, y: 90, "font-size": 13, class: "muted" }, "种参数组合");
+        const rows = dims.map((d, i) => { const g = K.svg(svg, "g"); K.svg(g, "text", { x: 30, y: 44 + i * 40, "font-size": 13 }, d[0]); for (let k = 0; k < d[1]; k++) K.svg(g, "rect", { x: 190 + k * 30, y: 30 + i * 40, width: 24, height: 20, rx: 3, fill: tint("var(--c" + (i + 1) + ")", 40), stroke: "var(--c" + (i + 1) + ")" }); K.svg(g, "text", { x: 190 + d[1] * 30 + 6, y: 45 + i * 40, "font-size": 12, class: "muted" }, "× " + d[1]); g.style.opacity = 0; return g; });
+        const fin = K.svg(svg, "text", { x: 420, y: 180, "font-size": 14 }, "");
+        const fin2 = K.svg(svg, "text", { x: 420, y: 206, "font-size": 14, "font-weight": 700 }, "");
+        (async () => {
+          for (let i = 0; i < dims.length; i++) {
+            if (!(await ctx.tween(300, (t) => (rows[i].style.opacity = t)))) return;
+            tot *= dims[i][1]; lab.textContent = String(tot);
+            if (!(await ctx.wait(250))) return;
+          }
+          fin.textContent = "× 5 折交叉验证";
+          fin2.textContent = `= ${tot * 5} 次训练`;
+          K.svg(svg, "text", { x: 30, y: 300, "font-size": 12, class: "muted" }, "每格 = 该参数的一个候选值；网格搜索把所有组合都试一遍");
+        })();
+      },
+    },
+    {
+      title: "SVM：划一条最宽的隔离带", kicker: "第 64–69 格 · 更多模型",
+      html: `<p><b>SVM</b>（支持向量机）在两类样本之间找一条“间隔最宽”的分界线。作者先试线性核，再用网格搜索在线性核（C = 1/10/100/1000）和 RBF 核（再加 gamma 两个值）之间挑选，3 折交叉验证、以 ROC AUC 为准，用最佳参数重新训练。</p><p>动画里七个模型已经到齐六个；剩下的 Boosting 家族见下一章。</p>`,
+      cells: [64, 65, 66, 67], highlight: ["kernel", "LGBMClassifier"],
+      draw(svg, ctx) {
+        const ms = [["L1 逻辑回归", "线性"], ["随机森林", "并行 · 投票"], ["SVM", "最大间隔"], ["XGBoost", "Boosting"], ["LightGBM", "Boosting"], ["CatBoost", "Boosting"], ["AdaBoost", "Boosting"]];
+        const gs = ms.map((m, i) => { const x = 20 + (i % 4) * 175, y = 40 + Math.floor(i / 4) * 120; const g = K.node(svg, x, y, 160, 70, m[0] + "\n" + m[1], { fill: tint(K.colors[i % 6], 14), stroke: K.colors[i % 6] }); g.style.opacity = 0; return g; });
+        K.node(svg, 540, 262, 160, 56, "scores_dict\n训练 / 测试 AUC", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        (async () => { for (const g of gs) { if (!(await ctx.tween(250, (t) => (g.style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      title: "比较 AUC，以及评估代码的陷阱", kicker: "第 87–89 格 · 评估",
+      html: `<p>最后作者把七个模型的测试 AUC 打印出来并画成条形图。但这段评估有两个问题，值得课堂上专门讲：</p><ul class="tight"><li>AUC 用的是 <code>predict()</code> 的 0/1 标签，不是 <code>predict_proba</code> 的概率。ROC 曲线因此只有一个拐点，AUC 往往偏低，模型之间也难以细分。</li><li>第 57、88 格把在<b>标准化</b>数据上训练的逻辑回归和 SVM，放到<b>未标准化</b>的 X 上打分，这两个模型的分数不可信。</li></ul><p>右侧动画对比同一模型的两种 ROC 曲线（示意）。</p>`,
+      cells: [87, 88], highlight: ["predict(X_test)", "predict(X_train)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 20, w: 280, h: 280 }, [0, 1], [0, 1], { xlabel: "假阳性率", ylabel: "真阳性率", xticks: 4, yticks: 4, xfmt: (v) => v.toFixed(2), yfmt: (v) => v.toFixed(2) });
+        K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0), x2: ax.sx(1), y2: ax.sy(1), stroke: "var(--ink-3)", "stroke-dasharray": "4 4" });
+        const r = K.rng(8), pos = [], neg = [];
+        for (let i = 0; i < 70; i++) pos.push(K.randn(r) + 1.4);
+        for (let i = 0; i < 370; i++) neg.push(K.randn(r));
+        const roc = []; const all = pos.concat(neg).sort((a, b) => b - a);
+        roc.push([0, 0]); all.forEach((th) => roc.push([neg.filter((s) => s >= th).length / neg.length, pos.filter((s) => s >= th).length / pos.length]));
+        const fp = neg.filter((s) => s >= 0.5 + 0.75).length / neg.length, tp = pos.filter((s) => s >= 1.25).length / pos.length;
+        const pP = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--good)", "stroke-width": 2.5 });
+        const pH = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--bad)", "stroke-width": 2.5 });
+        const area = (pts) => { let s = 0; for (let i = 1; i < pts.length; i++) s += (pts[i][0] - pts[i - 1][0]) * (pts[i][1] + pts[i - 1][1]) / 2; return s; };
+        const hard = [[0, 0], [fp, tp], [1, 1]];
+        const l1 = K.svg(svg, "text", { x: 390, y: 80, "font-size": 14, fill: "var(--good)", "font-weight": 700 }, "");
+        const l2 = K.svg(svg, "text", { x: 390, y: 130, "font-size": 14, fill: "var(--bad)", "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 390, y: 220, "font-size": 12, class: "muted" }, "同一个模型、同一份测试集（示意数据）");
+        K.svg(svg, "text", { x: 390, y: 240, "font-size": 12, class: "muted" }, "只换了 AUC 的算法");
+        (async () => {
+          if (!(await ctx.tween(1500, (t) => { const n = Math.max(1, Math.round(t * (roc.length - 1))); pP.setAttribute("d", roc.slice(0, n + 1).map((p, i) => (i ? "L" : "M") + ax.sx(p[0]) + "," + ax.sy(p[1])).join("")); }))) return;
+          l1.textContent = `用概率：AUC = ${area(roc).toFixed(3)}`;
+          if (!(await ctx.tween(900, (t) => { const q = hard.map((p) => [p[0], p[1]]); const k = t * 2; const pts = k < 1 ? [q[0], [q[0][0] + (q[1][0] - q[0][0]) * k, q[0][1] + (q[1][1] - q[0][1]) * k]] : [q[0], q[1], [q[1][0] + (1 - q[1][0]) * (k - 1), q[1][1] + (1 - q[1][1]) * (k - 1)]]; pH.setAttribute("d", pts.map((p, i) => (i ? "L" : "M") + ax.sx(p[0]) + "," + ax.sy(p[1])).join("")); }))) return;
+          l2.textContent = `用 0/1 标签：AUC = ${area(hard).toFixed(3)}`;
+          K.svg(svg, "circle", { cx: ax.sx(fp), cy: ax.sy(tp), r: 5, fill: "var(--bad)" });
+        })();
+      },
+    },
+  ];
+  const P = K.pipeline(document.getElementById("pipe"), steps);
+  const hs = location.hash.match(/step=(\d+)/); if (hs && P && P.go) P.go(+hs[1] - 1);
+  if (/fold/.test(location.hash)) document.head.appendChild(K.el("style", null, ".walk .cell{display:none}"));
+
+  /* ---------------- 实验：L1 逻辑回归 ---------------- */
+  const FEAT = ["加班 OverTime", "月薪", "职级（≈月薪）", "单身", "股票期权等级", "通勤距离", "年龄", "总工龄（≈年龄）", "出差频繁", "时薪（无关）", "绩效评分（无关）"];
+  function genHR(seed) {
+    const r = K.rng(seed), X = [], y = [];
+    for (let i = 0; i < 1470; i++) {
+      const ot = r() < 0.28 ? 1 : 0, inc = K.randn(r), lvl = 0.92 * inc + 0.39 * K.randn(r), single = r() < 0.32 ? 1 : 0;
+      const stock = single ? 0 : Math.floor(r() * 3) * 0.7, dist = K.randn(r), age = K.randn(r), tw = 0.75 * age + 0.66 * K.randn(r), trav = r() < 0.19 ? 1 : 0, hr = K.randn(r), perf = r() < 0.15 ? 1 : 0;
+      const z = -2.55 + 1.5 * ot - 0.75 * inc - 0.2 * lvl + 0.55 * single - 0.35 * stock + 0.32 * dist - 0.45 * age - 0.15 * tw + 0.7 * trav;
+      X.push([ot, inc, lvl, single, stock, dist, age, tw, trav, hr, perf]); y.push(r() < K.sigmoid(z) ? 1 : 0);
+    }
+    return { X, y };
+  }
+  function auc(s, y) {
+    const idx = s.map((v, i) => i).sort((a, b) => s[a] - s[b]);
+    let sumPos = 0, nPos = 0;
+    for (let i = 0; i < idx.length; ) { let j = i; while (j < idx.length && s[idx[j]] === s[idx[i]]) j++; const avg = (i + j + 1) / 2; for (let k = i; k < j; k++) if (y[idx[k]]) { sumPos += avg; nPos++; } i = j; }
+    const nNeg = y.length - nPos; return (sumPos - (nPos * (nPos + 1)) / 2) / (nPos * nNeg);
+  }
+  const cache = {};
+  function data(seed) {
+    if (cache[seed]) return cache[seed];
+    const D = genHR(seed);
+    // 分层 7:3
+    const tr = { X: [], y: [] }, te = { X: [], y: [] }; let c0 = 0, c1 = 0;
+    D.X.forEach((x, i) => { const t = D.y[i] ? c1++ % 10 < 3 : c0++ % 10 < 3; (t ? te : tr).X.push(x); (t ? te : tr).y.push(D.y[i]); });
+    const d = FEAT.length, mu = [], sd = [];
+    for (let j = 0; j < d; j++) { mu[j] = tr.X.reduce((s, x) => s + x[j], 0) / tr.X.length; sd[j] = Math.sqrt(tr.X.reduce((s, x) => s + (x[j] - mu[j]) ** 2, 0) / tr.X.length) || 1; }
+    const S = (x) => x.map((v, j) => (v - mu[j]) / sd[j]);
+    return (cache[seed] = { tr, te, S, Xs: tr.X.map(S), Ts: te.X.map(S) });
+  }
+  function l1lr(X, y, lam) {
+    const d = X[0].length, n = X.length; let w = new Array(d).fill(0), b = 0; const lr = 0.5;
+    for (let e = 0; e < 400; e++) {
+      const g = new Array(d).fill(0); let gb = 0;
+      for (let i = 0; i < n; i++) { let z = b; for (let j = 0; j < d; j++) z += w[j] * X[i][j]; const q = K.sigmoid(z) - y[i]; for (let j = 0; j < d; j++) g[j] += q * X[i][j]; gb += q; }
+      for (let j = 0; j < d; j++) { const v = w[j] - (lr * g[j]) / n; w[j] = Math.sign(v) * Math.max(0, Math.abs(v) - lr * lam); }
+      b -= (lr * gb) / n;
+    }
+    return { w, b };
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 400,
+    controls: [
+      { id: "c", label: "C（越小正则越强；sklearn 默认 1）", min: -3, max: 1, step: 0.05, value: -1.2, fmt: (v) => Math.pow(10, v).toPrecision(2) },
+      { id: "t", label: "把概率变成 0/1 的阈值（predict 默认 0.5）", min: 0.1, max: 0.9, step: 0.05, value: 0.5, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "训练集约 1029 人、测试集约 441 人，按 7:3 分层。L1 用近端梯度下降求解（每步做一次“软阈值”，把小系数直接截成 0）。λ = 1 / (C × 训练样本数)，与 sklearn 的 C 对应。",
+    render(svg, v) {
+      const D = data(3 + v.seed * 11);
+      const C = Math.pow(10, v.c), lam = 1 / (C * D.Xs.length);
+      const m = l1lr(D.Xs, D.tr.y, lam);
+      const sc = D.Ts.map((x) => K.sigmoid(x.reduce((s, xx, j) => s + xx * m.w[j], m.b)));
+      const hard = sc.map((p) => (p >= v.t ? 1 : 0));
+      const aP = auc(sc, D.te.y), aH = auc(hard, D.te.y);
+      const acc = hard.reduce((s, h, i) => s + (h === D.te.y[i] ? 1 : 0), 0) / hard.length;
+      const base = 1 - D.te.y.reduce((s, q) => s + q, 0) / D.te.y.length;
+      const nz = m.w.filter((w) => w !== 0).length;
+      const cx = 360, mx = Math.max(1, ...m.w.map(Math.abs));
+      K.svg(svg, "line", { x1: cx, x2: cx, y1: 26, y2: 360, stroke: "var(--ink-3)" });
+      K.svg(svg, "text", { x: cx + 8, y: 18, "font-size": 11, fill: "var(--bad)" }, "→ 提高离职概率");
+      K.svg(svg, "text", { x: cx - 8, y: 18, "text-anchor": "end", "font-size": 11, fill: "var(--c1)" }, "降低离职概率 ←");
+      FEAT.forEach((f, j) => {
+        const y = 30 + j * 30, w = m.w[j], W = (Math.abs(w) / mx) * 240;
+        K.svg(svg, "text", { x: 150, y: y + 15, "text-anchor": "end", "font-size": 12, fill: w === 0 ? "var(--ink-3)" : "var(--ink)" }, f);
+        if (w === 0) K.svg(svg, "text", { x: cx + 6, y: y + 15, "font-size": 11, class: "muted" }, "= 0（被 L1 剔除）");
+        else K.svg(svg, "rect", { x: w < 0 ? cx - W : cx, y: y + 3, width: Math.max(1, W), height: 18, rx: 3, fill: w > 0 ? "var(--bad)" : "var(--c1)" });
+        if (w !== 0) K.svg(svg, "text", { x: w < 0 ? cx - W - 4 : cx + W + 4, y: y + 16, "text-anchor": w < 0 ? "end" : "start", "font-size": 11, class: "muted" }, w.toFixed(2));
+      });
+      K.svg(svg, "text", { x: 20, y: 392, "font-size": 12, class: "muted" }, `标准化后的系数 · 非零 ${nz}/${FEAT.length}（模拟规律：时薪、绩效与离职无关）`);
+      return { readout: [
+        { k: "AUC（用概率）", v: aP.toFixed(3), color: "var(--good)" },
+        { k: "AUC（用 0/1 标签）", v: aH.toFixed(3), color: "var(--bad)" },
+        { k: "测试准确率", v: (acc * 100).toFixed(1) + "%" },
+        { k: "全猜“留下”的准确率", v: (base * 100).toFixed(1) + "%", color: "var(--ink-3)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

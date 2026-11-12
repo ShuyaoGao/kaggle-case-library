@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>发券给谁才有用</title>
+<meta name="description" content="Kaggle 案例拆解：MegaFon 增益建模数据上的元学习器（S-Learner、T-Learner、依赖式 T-Learner），以及 Uplift@k、Qini 曲线等增益评估指标。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">营销实验数据 · 因果推断 · 增益建模</div>
+  <h1>发券给谁才有用：不是找“会买的人”，而是找“因为发了券才买的人”</h1>
+  <p class="en">[study series] Uplift modeling</p>
+  <div class="tags">
+    <span class="tag st">统计分析</span><span class="tag ml">机器学习</span>
+    <span class="tag method">增益建模 Uplift</span><span class="tag method">CATE 条件平均处理效应</span><span class="tag method">四类顾客</span>
+    <span class="tag method">S-Learner</span><span class="tag method">T-Learner</span><span class="tag method">依赖式 T-Learner</span>
+    <span class="tag method">Uplift@k</span><span class="tag method">Qini 曲线 / AUUC</span><span class="tag method">XGBoost</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Daniil Karpov</b></span>
+    <span>Kaggle 点赞 <b>195</b>（2026-11 抓取）</span>
+    <span>数据集 <b>mrmorj/megafon-uplift-competition</b></span>
+    <span><a href="https://www.kaggle.com/code/vanguarde/study-series-uplift-modeling" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">一次营销实验：有人收到了推送，有人没收到</div><p>俄罗斯运营商 MegaFon 增益建模比赛的数据：50 个匿名特征、是否被“处理”（treatment / control）、是否转化（conversion）。<span data-cell="7">出处</span></p></div>
+    <div class="card panel"><h3>要做什么</h3><div class="big">估计“对这个人发券，能多带来多少转化”</div><p>这叫增益（uplift），也就是条件平均处理效应 CATE：同样的人，发与不发的转化率之差。<span data-cell="2">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">三种“元学习器”套 XGBoost</div><p>S-Learner（一个模型）、T-Learner（两个模型）、依赖式 T-Learner（两个模型互相喂预测），用 scikit-uplift 库。<span data-cell="30">出处</span> <span data-cell="35">出处</span> <span data-cell="42">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">T-Learner 比 S-Learner 稍差</div><p>作者只写了这一句文字结论，具体指标在运行输出里；notebook 标着“还在写”，没有总结。<span data-cell="36">出处</span> <span data-cell="45">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据来自 MegaFon 举办的增益建模比赛，由 Kaggle 用户 mrmorj 转存。数据集页面没有写规模说明，作者的文字里也没写总行数，所以这里不列；作者只取了<b>前 100,000 行</b>来建模。<span data-cell="22">出处</span></p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">匿名特征</div><div class="v">50 列</div></div>
+        <div class="stat-tile"><div class="k">建模用的行数</div><div class="v">100,000</div></div>
+        <div class="stat-tile"><div class="k">训练 / 验证</div><div class="v">80% / 20%</div></div>
+        <div class="stat-tile"><div class="k">分组</div><div class="v" style="font-size:16px">treatment / control</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">特征 X_1 到 X_50、二值的处理组与转化见第 7 格 <span data-cell="7">出处</span>；特征没有标准化 <span data-cell="10">出处</span>；切分见第 22 格 <span data-cell="22">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>X_1</code> … <code>X_50</code></td><td>用户的匿名特征，含义保密</td><td>数值</td></tr>
+        <tr><td><code>treatment_group</code></td><td>这个人有没有被“处理”（收到营销触达），原始是文字 treatment / control，作者改成 1 / 0</td><td>类别 → 0/1</td></tr>
+        <tr><td><code>conversion</code></td><td><b>结果</b>：有没有完成目标动作</td><td>0/1</td></tr>
+      </table></div>
+      <p class="callout"><b>增益建模的特殊之处：</b>每个人只能看到一种结果，要么发了券、要么没发，“另一个平行世界”永远看不到。所以没有一列现成的“增益答案”，只能靠随机分组的实验数据去估计。<span data-cell="2">出处</span></p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead">这是作者“学习系列”的一篇，先讲概念和指标，再依次实现三种元学习器。notebook 最后标着“In a process”，没有写完。</p>
+  <div id="pipe"></div>
+  <div data-at="2">
+    <h3>实验 A · 四类顾客与“平均增益” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labGroups"></div>
+  </div>
+  <div data-at="18">
+    <h3>实验 B · 画一条 Qini 曲线 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labQini"></div>
+  </div>
+  <div data-at="35">
+    <h3>实验 C · S-Learner 和 T-Learner 现场比一比 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labST"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的内容与结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>三类营销建模思路：相似人群（look-alike）、响应模型、增益模型；增益模型只挑“发了才会买”的人</td><td><span data-cell="2">第 2 格</span></td></tr>
+        <tr><td>按“发 / 不发”下的反应把顾客分四类：一定会买、可被说服、别打扰、怎样都不买</td><td><span data-cell="2">第 2 格</span></td></tr>
+        <tr><td>特征没有标准化，但看上去都已清洗过、近似正态分布</td><td><span data-cell="10">第 10 格</span> <span data-cell="12">第 12 格</span></td></tr>
+        <tr><td>四种评估指标：Uplift@k、按分位数的增益与加权平均增益、增益曲线与 AUUC、Qini 曲线与 AUQC</td><td><span data-cell="18">第 18 格</span></td></tr>
+        <tr><td>T-Learner 的结果比 S-Learner “稍差”</td><td><span data-cell="36">第 36 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">每个模型的 Uplift@30%、AUUC、AUQC 等数字都由第 29 格的函数打印在运行输出里，源码不带输出，作者文字里也没写，所以这里不列分数。</p>
+      <p class="callout warn"><b>原文值得注意的地方：</b>①第 22 格直接取<b>前</b> 10 万行（不是随机抽样），切分时也没有固定随机种子，结果不可复现；②第 29 格打印时把 AUUC、AUQC 都标成“by group”，但这两个函数用的是默认的 overall 策略；③文中多处 “Casual effect” 应为 “Causal effect”（因果效应）；④依赖式 T-Learner 两种做法跑完后没有任何文字比较，notebook 停在 “In a process”。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>营销预算有限时，只给“可被说服”的人发券、打电话、推送；避开“别打扰”的人（打扰了反而流失）。</li>
+        <li><b>同类问题：</b>精准营销、客户挽留、医疗里“这个药对哪类病人最有效”、教育里“哪些学生最能从辅导中受益”、政策评估。</li>
+        <li><b>可迁移的套路：</b>先做随机对照实验收集数据 → 用元学习器借普通分类器估计 CATE → 用 Uplift@k、Qini 曲线这种“按排序看增益”的指标评估 → 按增益从高到低决定触达名单。</li>
+        <li><b>前提：</b>作者特别提醒，处理分配要和潜在结果在给定特征时相互独立（随机实验最能保证）。<span data-cell="2">出处</span></li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>scikit-uplift：SoloModel（S-Learner） <span data-cell="30">第 30 格</span></li>
+        <li>TwoModels（T-Learner） <span data-cell="35">第 35 格</span></li>
+        <li>TwoModels ddr_control / ddr_treatment（依赖式） <span data-cell="42">第 42 格</span> <span data-cell="44">第 44 格</span></li>
+        <li>指标函数：uplift_at_k、qini_auc_score、uplift_auc_score、weighted_average_uplift <span data-cell="29">第 29 格</span></li>
+        <li>基础分类器：XGBoost <span data-cell="30">第 30 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>“最可能买的人”和“发券后最可能多买的人”为什么不是同一批人？举一个生活里的例子。</li>
+      <li>一个人不可能同时“收到券”和“没收到券”。那我们凭什么说某个人的增益是 0.1？</li>
+      <li>“别打扰”这类人收到营销后反而不买了。现实中你见过这样的情况吗？</li>
+      <li>S-Learner 把“发没发券”当作 50 多个特征里的一个，可能会出现什么问题？T-Learner 又有什么代价？</li>
+      <li>作者直接取前 10 万行、不固定随机种子。如果数据是按时间或按地区排序的，会带来什么偏差？</li>
+      <li>如果营销预算只够覆盖 30% 的人，你会看哪个指标来选模型？为什么不能用普通的准确率？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Daniil Karpov，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：MegaFon Uplift Competition（Kaggle 用户 mrmorj 转存）。
+</footer>
+</main>
+
+<script src="nb/megafon-uplift-metalearners.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const tint = (c, p) => `color-mix(in srgb, ${c} ${p}%, var(--panel))`;
+  const fadeIn = (ctx, els, ms) => ctx.tween(ms || 500, (t) => els.forEach((e) => (e.style.opacity = t)));
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+  const GRP = [["一定会买", "var(--c1)"], ["可被说服", "var(--good)"], ["别打扰", "var(--bad)"], ["怎样都不买", "var(--ink-3)"]];
+
+  /* 模拟数据：x1 影响基础转化，x2 决定增益方向（示意） */
+  function simData(seed, n, strength) {
+    const r = K.rng(seed), D = [];
+    for (let i = 0; i < n; i++) {
+      const x1 = r() * 2 - 1, x2 = r() * 2 - 1, w = r() < 0.5 ? 1 : 0;
+      const p0 = K.sigmoid(-1.6 + 1.0 * x1), p1 = K.sigmoid(-1.6 + 1.0 * x1 + strength * x2 + 0.15);
+      D.push({ x1, x2, w, y: r() < (w ? p1 : p0) ? 1 : 0, tau: p1 - p0 });
+    }
+    return D;
+  }
+  function qiniCurve(D, score) {
+    const idx = D.map((_, i) => i).sort((a, b) => score[b] - score[a]);
+    let nt = 0, nc = 0, yt = 0, yc = 0; const q = [0];
+    idx.forEach((i) => { const d = D[i]; if (d.w) { nt++; yt += d.y; } else { nc++; yc += d.y; } q.push(nc ? yt - (yc * nt) / nc : yt); });
+    return q;
+  }
+  function upliftAtK(D, score, k) {
+    const idx = D.map((_, i) => i).sort((a, b) => score[b] - score[a]).slice(0, Math.round(D.length * k));
+    let nt = 0, nc = 0, yt = 0, yc = 0; idx.forEach((i) => { const d = D[i]; if (d.w) { nt++; yt += d.y; } else { nc++; yc += d.y; } });
+    return (nt ? yt / nt : 0) - (nc ? yc / nc : 0);
+  }
+  function trainLR(X, y, iters) {
+    const m = X[0].length, w = new Array(m).fill(0); let b = 0; const lr = 0.5;
+    for (let it = 0; it < iters; it++) {
+      const g = new Array(m).fill(0); let gb = 0;
+      for (let i = 0; i < X.length; i++) { let z = b; for (let j = 0; j < m; j++) z += w[j] * X[i][j]; const e = K.sigmoid(z) - y[i]; for (let j = 0; j < m; j++) g[j] += e * X[i][j]; gb += e; }
+      for (let j = 0; j < m; j++) w[j] -= (lr * g[j]) / X.length; b -= (lr * gb) / X.length;
+    }
+    return (x) => { let z = b; for (let j = 0; j < m; j++) z += w[j] * x[j]; return K.sigmoid(z); };
+  }
+
+  const steps = [
+    {
+      at: 0, title: "从“找会买的人”到“找因为营销才买的人”", kicker: "第 0–2 格 · 概念",
+      html: `<p>作者先比较三种营销建模思路：<span data-cell="2">出处</span></p><ul class="tight"><li><b>相似人群（look-alike）</b>：找和老顾客长得像的新顾客</li><li><b>响应模型</b>：预测“收到营销后会不会买”</li><li><b>增益模型</b>：预测“收到营销<b>比没收到</b>多买多少”，只挑真正被营销打动的人</li></ul><p>按“发 / 不发”时的反应，顾客分四类：<b>一定会买</b>（发不发都买）、<b>可被说服</b>（发了才买）、<b>别打扰</b>（不发会买，发了反而不买）、<b>怎样都不买</b>。只有第二类值得花钱。</p><p>每个人的因果效应是“发了的结果 − 没发的结果”，但同一个人只能观察到一种，所以只能估计<b>一类人</b>的平均差，即 <b>CATE</b>（条件平均处理效应）。前提是分组和潜在结果在给定特征下相互独立。</p>`,
+      cells: [2],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 140, y: 26, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "发了券会买？");
+        K.svg(svg, "text", { x: 30, y: 180, "font-size": 13, "font-weight": 700, transform: "rotate(-90 30 180)", "text-anchor": "middle" }, "不发券会买？");
+        const cells = [[1, 1, 0], [1, 0, 1], [0, 1, 2], [0, 0, 3]];
+        const boxes = cells.map(([t, c, g], i) => {
+          const x = 70 + (t ? 0 : 150), y = 50 + (c ? 0 : 140);
+          const n = K.node(svg, x, y, 140, 130, `${GRP[g][0]}\n发:${t ? "买" : "不买"} 不发:${c ? "买" : "不买"}`, { fill: tint(GRP[g][1], 22), stroke: GRP[g][1], bold: g === 1 });
+          n.style.opacity = 0; return n;
+        });
+        K.svg(svg, "text", { x: 140, y: 44, "text-anchor": "middle", "font-size": 12 }, "会"); K.svg(svg, "text", { x: 290, y: 44, "text-anchor": "middle", "font-size": 12 }, "不会");
+        const r1 = K.svg(svg, "text", { x: 400, y: 80, "font-size": 13 }, "响应模型挑：发了会买的");
+        const r1b = K.svg(svg, "text", { x: 400, y: 100, "font-size": 13, fill: "var(--c1)" }, "→ 一定会买 + 可被说服");
+        const r2 = K.svg(svg, "text", { x: 400, y: 150, "font-size": 13 }, "增益模型挑：发了才会买的");
+        const r2b = K.svg(svg, "text", { x: 400, y: 170, "font-size": 13, fill: "var(--good)", "font-weight": 700 }, "→ 只要“可被说服”");
+        const r3 = K.svg(svg, "text", { x: 400, y: 230, "font-size": 12, class: "muted" }, "给“一定会买”的人发券 = 白送钱");
+        const r4 = K.svg(svg, "text", { x: 400, y: 250, "font-size": 12, class: "muted" }, "给“别打扰”的人发券 = 帮倒忙");
+        hide([r1, r1b, r2, r2b, r3, r4]);
+        (async () => {
+          for (const b of boxes) if (!(await fadeIn(ctx, [b], 300))) return;
+          if (!(await fadeIn(ctx, [r1, r1b], 500))) return;
+          if (!(await fadeIn(ctx, [r2, r2b], 500))) return;
+          await fadeIn(ctx, [r3, r4], 500);
+        })();
+      },
+    },
+    {
+      title: "数据：50 个匿名特征、是否处理、是否转化", kicker: "第 3–9 格 · 读数据",
+      html: `<p>导入 scikit-uplift（增益建模工具包）和 XGBoost，读入 MegaFon 比赛的训练集。<span data-cell="5">出处</span> <span data-cell="6">出处</span></p><p>作者看到：50 个隐藏特征 X_1–X_50，二值的处理组（以文字 treatment / control 存储），二值的转化结果。<span data-cell="7">出处</span></p>`,
+      cells: [5, 6, 8], highlight: ["from sklift.models import SoloModel, TwoModels"],
+      draw(svg, ctx) {
+        const cols = ["X_1", "X_2", "…", "X_50", "treatment_group", "conversion"];
+        const ws = [70, 70, 40, 70, 170, 120];
+        let x = 30; const heads = [];
+        cols.forEach((c, i) => { const n = K.node(svg, x, 40, ws[i] - 6, 40, c, { fs: 12, bold: true, stroke: i >= 4 ? "var(--accent)" : "var(--line)" }); heads.push(n); x += ws[i]; });
+        const r = K.rng(4), rows = [];
+        for (let k = 0; k < 6; k++) {
+          let xx = 30; const g = K.svg(svg, "g");
+          cols.forEach((c, i) => {
+            const v = i < 4 ? (i === 2 ? "…" : (K.randn(r) * 3).toFixed(1)) : i === 4 ? (r() < 0.5 ? "treatment" : "control") : String(r() < 0.2 ? 1 : 0);
+            K.svg(g, "text", { x: xx + (ws[i] - 6) / 2, y: 112 + k * 32, "text-anchor": "middle", "font-size": 12, "font-family": "var(--mono)", fill: i === 4 ? (v === "treatment" ? "var(--good)" : "var(--ink-3)") : "var(--ink)" }, v);
+            xx += ws[i];
+          });
+          g.style.opacity = 0; rows.push(g);
+        }
+        K.svg(svg, "text", { x: 30, y: 320, "font-size": 12, class: "muted" }, "示意行（不是真实数据）。治疗组 = 收到营销触达的人");
+        (async () => { for (const g of rows) if (!(await fadeIn(ctx, [g], 220))) return; })();
+      },
+    },
+    {
+      title: "特征分布：每一列都像正态分布", kicker: "第 10–16 格 · 探索",
+      html: `<p>describe() 显示特征没有标准化。<span data-cell="10">出处</span> 作者把 50 个特征的密度曲线排成 10×5 的小图，看起来每个都像正态分布，猜测已经被清洗过。<span data-cell="12">出处</span> <span data-cell="13">出处</span></p><p>为了确认，再画 <b>Q-Q 图</b>：把数据的分位数和标准正态的分位数一一配对画点，越贴近直线越像正态。<span data-cell="14">出处</span> <span data-cell="15">出处</span></p>`,
+      cells: [13, 15], highlight: ["qqplot(train[f'X_{n_feat}'], ax=axs[row, col], line='q')"],
+      draw(svg, ctx) {
+        const r = K.rng(9), v = []; for (let i = 0; i < 80; i++) v.push(K.randn(r) * 1.2 + 0.3);
+        v.sort((a, b) => a - b);
+        const ax1 = K.axes(svg, { x: 40, y: 30, w: 290, h: 240 }, [-4, 4], [0, 0.4], { xticks: 4, yticks: 0, xlabel: "某个特征 X_k（示意）" });
+        let d = ""; for (let x = -4; x <= 4.01; x += 0.1) { const z = (x - 0.3) / 1.2; d += (d ? "L" : "M") + ax1.sx(x) + "," + ax1.sy(Math.exp(-z * z / 2) / (1.2 * Math.sqrt(2 * Math.PI))); }
+        const kde = K.svg(svg, "path", { d: d + `L${ax1.sx(4)},${ax1.sy(0)}L${ax1.sx(-4)},${ax1.sy(0)}Z`, fill: tint("var(--c3)", 50), stroke: "var(--c3)", "stroke-width": 2 });
+        kde.style.opacity = 0;
+        const ax2 = K.axes(svg, { x: 410, y: 30, w: 270, h: 240 }, [-3, 3], [-4, 4], { xticks: 3, yticks: 4, xlabel: "标准正态分位数", ylabel: "数据分位数" });
+        K.svg(svg, "line", { x1: ax2.sx(-3), y1: ax2.sy(0.3 - 3 * 1.2), x2: ax2.sx(3), y2: ax2.sy(0.3 + 3 * 1.2), stroke: "var(--warn)", "stroke-width": 2 });
+        const inv = (p) => { const a = [-39.69683028665376, 220.9460984245205, -275.9285104469687, 138.357751867269, -30.66479806614716, 2.506628277459239], b = [-54.47609879822406, 161.5858368580409, -155.6989798598866, 66.80131188771972, -13.28068155288572], c = [-0.007784894002430293, -0.3223964580411365, -2.400758277161838, -2.549732539343734, 4.374664141464968, 2.938163982698783], dd = [0.007784695709041462, 0.3224671290700398, 2.445134137142996, 3.754408661907416]; if (p < 0.02425) { const q = Math.sqrt(-2 * Math.log(p)); return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / ((((dd[0] * q + dd[1]) * q + dd[2]) * q + dd[3]) * q + 1); } if (p > 1 - 0.02425) return -inv(1 - p); const q = p - 0.5, rr = q * q; return (((((a[0] * rr + a[1]) * rr + a[2]) * rr + a[3]) * rr + a[4]) * rr + a[5]) * q / (((((b[0] * rr + b[1]) * rr + b[2]) * rr + b[3]) * rr + b[4]) * rr + 1); };
+        const pts = v.map((y, i) => K.svg(svg, "circle", { cx: ax2.sx(inv((i + 0.5) / v.length)), cy: ax2.sy(y), r: 0, fill: "var(--c1)" }));
+        fadeIn(ctx, [kde], 700).then((ok) => ok && ctx.tween(1200, (t) => pts.forEach((p, i) => p.setAttribute("r", K.clamp(t * pts.length - i, 0, 1) * 3.2))));
+      },
+    },
+    {
+      title: "怎么给增益模型打分：Uplift@k 与 Qini 曲线", kicker: "第 17–18 格 · 评估指标",
+      html: `<p>没有人知道每个人“真实的增益”，普通的准确率用不了。作者介绍了四种指标，核心都是<b>按模型预测的增益从高到低排队</b>，再看排在前面的人里，处理组和对照组的转化率差多少：<span data-cell="18">出处</span></p><ul class="tight"><li><b>Uplift@k</b>：前 k%（比如 30%）的人里，处理组转化率 − 对照组转化率</li><li><b>按分位数的增益</b>：每 10% 一档分别算差，再按处理组人数加权平均</li><li><b>增益曲线与 AUUC</b>：随着覆盖人数增加，累计增益怎么涨；曲线下面积</li><li><b>Qini 曲线与 AUQC</b>：另一种累计算法 Y<sub>T</sub> − Y<sub>C</sub>·N<sub>T</sub>/N<sub>C</sub>；和随机排队的直线之间的面积</li></ul>`,
+      cells: [18],
+      draw(svg, ctx) {
+        const D = simData(5, 3000, 1.6), score = D.map((d) => d.tau + K.randn(K.rng(1)) * 0);
+        const r = K.rng(8), noisy = D.map((d) => d.tau + K.randn(r) * 0.08);
+        const q = qiniCurve(D, noisy), N = D.length, qmax = Math.max(...q, 1);
+        const ax = K.axes(svg, { x: 70, y: 24, w: 560, h: 250 }, [0, N], [Math.min(0, ...q), qmax * 1.1], { xticks: 5, yticks: 4, xlabel: "按预测增益从高到低，覆盖的人数", ylabel: "累计多出来的转化" });
+        K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0), x2: ax.sx(N), y2: ax.sy(q[N]), stroke: "var(--ink-3)", "stroke-dasharray": "5 4", "stroke-width": 1.5 });
+        K.svg(svg, "text", { x: ax.sx(N) - 4, y: ax.sy(q[N]) + 16, "text-anchor": "end", "font-size": 12, class: "muted" }, "随机排队");
+        const p = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        const area = K.svg(svg, "path", { d: "", fill: tint("var(--accent)", 25), stroke: "none" });
+        K.svg(svg, "text", { x: ax.sx(N * 0.32), y: ax.sy(qmax) - 4, "font-size": 12, fill: "var(--accent)" }, "模型的 Qini 曲线（示意数据现算）");
+        ctx.tween(2200, (t) => {
+          const n = Math.max(1, Math.floor(N * t)); let d = "", a = "";
+          for (let i = 0; i <= n; i += 20) { d += (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(q[i]); }
+          for (let i = 0; i <= n; i += 20) a += (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(q[i]);
+          for (let i = Math.floor(n / 20) * 20; i >= 0; i -= 20) a += "L" + ax.sx(i) + "," + ax.sy((q[N] * i) / N);
+          p.setAttribute("d", d); area.setAttribute("d", a + "Z");
+        });
+      },
+    },
+    {
+      title: "整理数据：文字标签改 0/1，取 10 万行切分", kicker: "第 19–22 格 · 准备训练",
+      html: `<p>把 <code>treatment_group</code> 的文字 treatment / control 改成 1 / 0。<span data-cell="21">出处</span></p><p>然后取<b>前 100,000 行</b>，特征是 X_1–X_50，再把特征、结果、处理标记一起按 8:2 切成训练集和验证集。<span data-cell="22">出处</span></p><p class="callout warn">这里取的是“前”10 万行而不是随机抽样，<code>train_test_split</code> 也没有设 <code>random_state</code>，每次运行切出来的验证集不一样。</p>`,
+      cells: [21, 22], highlight: ["train = train[:100000]", "test_size=0.2"],
+      draw(svg, ctx) {
+        const r = K.rng(2), rows = [];
+        for (let i = 0; i < 20; i++) { const t = r() < 0.5; rows.push(K.svg(svg, "rect", { x: 40 + i * 30, y: 60, width: 26, height: 40, rx: 3, fill: t ? tint("var(--good)", 40) : tint("var(--ink-3)", 30), stroke: "var(--line)" })); }
+        K.svg(svg, "text", { x: 40, y: 50, "font-size": 12 }, "原始数据（绿 = treatment，灰 = control）");
+        const cut = K.svg(svg, "line", { x1: 40 + 14 * 30 - 2, x2: 40 + 14 * 30 - 2, y1: 52, y2: 108, stroke: "var(--warn)", "stroke-width": 3 });
+        const cl = K.svg(svg, "text", { x: 40 + 14 * 30 + 4, y: 125, "font-size": 12, fill: "var(--warn)" }, "← 只取前面这一段");
+        const tr = K.node(svg, 40, 190, 320, 60, "训练 80%：X_1…X_50 + 是否处理 + 是否转化", { fs: 12, stroke: "var(--c1)" });
+        const va = K.node(svg, 380, 190, 140, 60, "验证 20%", { fs: 12, stroke: "var(--c2)" });
+        hide([cut, cl, tr, va]);
+        (async () => {
+          if (!(await ctx.tween(600, (t) => rows.forEach((rr, i) => { if (i >= 14) rr.style.opacity = 1 - 0.8 * t; })))) return;
+          if (!(await fadeIn(ctx, [cut, cl], 400))) return;
+          await fadeIn(ctx, [tr, va], 600);
+        })();
+      },
+    },
+    {
+      title: "S-Learner：一个模型，把“发没发”当成一个特征", kicker: "第 23–30 格 · 元学习器 1",
+      html: `<p><b>元学习器</b>的意思是：不发明新算法，而是“改造问题”，借用普通分类器来估计增益。<span data-cell="2">出处</span></p><p><b>S-Learner</b>（S = Single，一个）：把处理标记 W 当成第 51 个特征，训练一个分类器预测转化。预测时，同一个人分别把 W 设成 1 和 0 各算一次，两个概率相减就是增益。<span data-cell="26">出处</span> 作者用 XGBoost 作分类器，套在 scikit-uplift 的 <code>SoloModel</code> 里。<span data-cell="30">出处</span></p><p>第 29 格定义了统一的评估函数：前 30% 的增益（两种排序策略）、加权平均增益、AUUC、AUQC。</p>`,
+      cells: [26, 29, 30], highlight: ["SoloModel(estimator=xgb_sm)", "k=0.3"],
+      draw(svg, ctx) {
+        const inp = K.node(svg, 20, 120, 150, 70, "一个人的特征\nX_1 … X_50", { fs: 12 });
+        const w1 = K.node(svg, 200, 70, 90, 40, "W = 1", { stroke: "var(--good)", bold: true });
+        const w0 = K.node(svg, 200, 200, 90, 40, "W = 0", { stroke: "var(--ink-3)", bold: true });
+        const m = K.node(svg, 330, 115, 150, 80, "同一个\nXGBoost 模型", { bold: true, stroke: "var(--accent)" });
+        const p1 = K.svg(svg, "text", { x: 510, y: 120, "font-size": 14, fill: "var(--good)" }, "");
+        const p0 = K.svg(svg, "text", { x: 510, y: 200, "font-size": 14 }, "");
+        const up = K.svg(svg, "text", { x: 510, y: 260, "font-size": 16, "font-weight": 700, fill: "var(--accent)" }, "");
+        const arr = [K.arrow(svg, 170, 145, 198, 92), K.arrow(svg, 170, 165, 198, 218), K.arrow(svg, 290, 90, 328, 140), K.arrow(svg, 290, 220, 328, 170)];
+        hide([w1, w0, m, ...arr]);
+        (async () => {
+          if (!(await fadeIn(ctx, [arr[0], arr[1], w1, w0], 500))) return;
+          if (!(await fadeIn(ctx, [arr[2], arr[3], m], 500))) return;
+          if (!(await ctx.wait(300))) return;
+          p1.textContent = "P(转化 | W=1) = 0.23"; p0.textContent = "P(转化 | W=0) = 0.15";
+          if (!(await ctx.wait(500))) return;
+          up.textContent = "增益 = 0.23 − 0.15 = 0.08（示意）";
+        })();
+      },
+    },
+    {
+      title: "T-Learner：处理组、对照组各训练一个模型", kicker: "第 31–36 格 · 元学习器 2",
+      html: `<p><b>T-Learner</b>（T = Two，两个）：只用处理组的数据训练模型 T，只用对照组的数据训练模型 C。预测时，同一个人分别交给两个模型，概率相减就是增益。<span data-cell="33">出处</span> <span data-cell="35">出处</span></p><p>好处是处理效应不会被“淹没”在 50 个特征里；代价是每个模型只用到一半数据。作者的结论：结果比 S-Learner<b>稍差</b>。<span data-cell="36">出处</span></p>`,
+      cells: [33, 35, 36], highlight: ["TwoModels(estimator_trmnt=xgb_T, estimator_ctrl=xgb_C)"],
+      draw(svg, ctx) {
+        const r = K.rng(3), pts = [];
+        for (let i = 0; i < 40; i++) { const t = r() < 0.5; pts.push(K.svg(svg, "circle", { cx: 50 + (i % 8) * 18, cy: 80 + Math.floor(i / 8) * 34, r: 6, fill: t ? "var(--good)" : "var(--ink-3)" })); }
+        K.svg(svg, "text", { x: 50, y: 50, "font-size": 12 }, "训练数据（绿=处理组 灰=对照组）");
+        const mT = K.node(svg, 300, 60, 160, 70, "模型 T\n只学处理组", { stroke: "var(--good)", bold: true });
+        const mC = K.node(svg, 300, 190, 160, 70, "模型 C\n只学对照组", { stroke: "var(--ink-3)", bold: true });
+        const out = K.node(svg, 520, 120, 170, 80, "增益 =\nP_T(x) − P_C(x)", { stroke: "var(--accent)", bold: true });
+        const a = [K.arrow(svg, 200, 120, 298, 95, { color: "var(--good)" }), K.arrow(svg, 200, 200, 298, 225), K.arrow(svg, 460, 95, 518, 150), K.arrow(svg, 460, 225, 518, 175)];
+        hide([mT, mC, out, ...a]);
+        (async () => {
+          if (!(await ctx.wait(400))) return;
+          if (!(await fadeIn(ctx, [a[0], a[1], mT, mC], 600))) return;
+          await fadeIn(ctx, [a[2], a[3], out], 600);
+        })();
+      },
+    },
+    {
+      title: "依赖式 T-Learner：一个模型的预测喂给另一个", kicker: "第 37–47 格 · 元学习器 3 与未完",
+      html: `<p>借鉴“分类器链”的思路：训练其中一个模型时，把另一个模型的预测概率也当作一个特征。两种做法：<span data-cell="38">出处</span> <span data-cell="40">出处</span></p><ul class="tight"><li>增益 = P<sub>T</sub>(x, P<sub>C</sub>(x)) − P<sub>C</sub>(x)：先训对照模型，把它的预测喂给处理模型（<code>ddr_control</code>）<span data-cell="42">出处</span></li><li>增益 = P<sub>T</sub>(x) − P<sub>C</sub>(x, P<sub>T</sub>(x))：反过来（<code>ddr_treatment</code>）<span data-cell="44">出处</span></li></ul><p>两种都跑了，但作者没有写任何比较，notebook 停在“In a process…”。<span data-cell="45">出处</span></p>`,
+      cells: [40, 42, 44], highlight: ["method='ddr_control'", "method='ddr_treatment'"],
+      draw(svg, ctx) {
+        const mC = K.node(svg, 40, 70, 170, 70, "① 先训模型 C\n（对照组）", { stroke: "var(--ink-3)", bold: true });
+        const pc = K.node(svg, 260, 70, 160, 70, "P_C(x)\n作为新特征", { stroke: "var(--warn)" });
+        const mT = K.node(svg, 470, 70, 210, 70, "② 再训模型 T\n特征 = X + P_C(x)", { stroke: "var(--good)", bold: true });
+        const a1 = K.arrow(svg, 210, 105, 258, 105), a2 = K.arrow(svg, 420, 105, 468, 105);
+        const res = K.node(svg, 200, 210, 320, 70, "增益 = P_T(x, P_C(x)) − P_C(x)", { stroke: "var(--accent)", bold: true });
+        const a3 = K.arrow(svg, 575, 140, 470, 208), a4 = K.arrow(svg, 125, 140, 250, 208);
+        const fin = K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 13, fill: "var(--warn)" }, "原 notebook 到这里结束：“In a process…”");
+        hide([pc, mT, a1, a2, res, a3, a4, fin]);
+        (async () => {
+          if (!(await fadeIn(ctx, [a1, pc], 500))) return;
+          if (!(await fadeIn(ctx, [a2, mT], 500))) return;
+          if (!(await fadeIn(ctx, [a3, a4, res], 500))) return;
+          await fadeIn(ctx, [fin], 500);
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：四类顾客 ---------- */
+  K.lab(document.getElementById("labGroups"), {
+    width: 660, height: 300,
+    controls: [
+      { id: "a", label: "一定会买（%）", min: 0, max: 60, step: 1, value: 15 },
+      { id: "b", label: "可被说服（%）", min: 0, max: 60, step: 1, value: 10 },
+      { id: "c", label: "别打扰（%）", min: 0, max: 60, step: 1, value: 5 },
+      { id: "seed", label: "重新随机分组", button: true },
+    ],
+    note: "剩下的都是“怎样都不买”。100 个人随机一半发券（处理组）、一半不发（对照组），按各自类型决定买不买。左边是每个人的真实类型（现实中看不到），右边是我们实际能观察到的结果。只有 100 人，实验估计会和真实值有出入，多点几次“重新随机分组”看看它怎么晃。",
+    render(svg, v) {
+      const tot = v.a + v.b + v.c, d = Math.max(0, 100 - tot);
+      const sc = tot > 100 ? 100 / tot : 1, n = [Math.round(v.a * sc), Math.round(v.b * sc), Math.round(v.c * sc)];
+      n.push(100 - n[0] - n[1] - n[2]);
+      const r = K.rng(77 + v.seed * 13), people = [];
+      n.forEach((k, g) => { for (let i = 0; i < k; i++) people.push(g); });
+      for (let i = people.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [people[i], people[j]] = [people[j], people[i]]; }
+      const W = people.map(() => (r() < 0.5 ? 1 : 0));
+      const buy = (g, w) => (g === 0 ? 1 : g === 1 ? w : g === 2 ? 1 - w : 0);
+      K.svg(svg, "text", { x: 20, y: 18, "font-size": 12, "font-weight": 700 }, "真实类型（看不到）");
+      K.svg(svg, "text", { x: 340, y: 18, "font-size": 12, "font-weight": 700 }, "实际观察：●=买了 ○=没买（绿框=收到券）");
+      let yt = 0, nt = 0, yc = 0, nc = 0;
+      people.forEach((g, i) => {
+        const x = 20 + (i % 10) * 28, y = 30 + Math.floor(i / 10) * 26;
+        K.svg(svg, "rect", { x, y, width: 22, height: 20, rx: 4, fill: GRP[g][1], opacity: 0.85 });
+        const xx = 340 + (i % 10) * 28, b = buy(g, W[i]);
+        K.svg(svg, "rect", { x: xx, y, width: 22, height: 20, rx: 4, fill: "var(--panel-2)", stroke: W[i] ? "var(--good)" : "var(--line)", "stroke-width": W[i] ? 2 : 1 });
+        K.svg(svg, "circle", { cx: xx + 11, cy: y + 10, r: 5.5, fill: b ? "var(--ink)" : "none", stroke: "var(--ink)" });
+        if (W[i]) { nt++; yt += b; } else { nc++; yc += b; }
+      });
+      GRP.forEach(([nm, c], i) => K.svg(svg, "text", { x: 20 + i * 75, y: 296, "font-size": 11, fill: c }, "■ " + nm));
+      const rt = nt ? yt / nt : 0, rc = nc ? yc / nc : 0;
+      return { readout: [
+        { k: "处理组转化率", v: (rt * 100).toFixed(0) + "%" },
+        { k: "对照组转化率", v: (rc * 100).toFixed(0) + "%" },
+        { k: "实验估计的平均增益", v: ((rt - rc) * 100).toFixed(0) + " 个百分点", color: rt - rc > 0 ? "var(--good)" : "var(--bad)" },
+        { k: "真实平均增益", v: (n[1] - n[2]) + " 个百分点" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：Qini 曲线 ---------- */
+  K.lab(document.getElementById("labQini"), {
+    width: 660, height: 320,
+    controls: [
+      { id: "noise", label: "模型的误差（打分越乱越大）", min: 0, max: 0.5, step: 0.01, value: 0.08, fmt: (v) => v.toFixed(2) },
+      { id: "k", label: "Uplift@k 里的 k", min: 0.05, max: 1, step: 0.05, value: 0.3, fmt: (v) => Math.round(v * 100) + "%" },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "4000 个模拟用户，一半随机收到营销。每个人的真实增益由一个隐藏特征决定（有正有负）。“模型”给出的分数 = 真实增益 + 随机误差。按分数从高到低排队，现场算 Qini 曲线和 Uplift@k。误差调到 0.5 附近，曲线就贴近随机直线了。",
+    render(svg, v) {
+      const D = simData(900 + v.seed * 7, 4000, 1.6), r = K.rng(31 + v.seed);
+      const sc = D.map((d) => d.tau + K.randn(r) * v.noise), ideal = D.map((d) => d.tau);
+      const q = qiniCurve(D, sc), qi = qiniCurve(D, ideal), N = D.length;
+      const lo = Math.min(0, ...q), hi = Math.max(...qi, ...q) * 1.08;
+      const ax = K.axes(svg, { x: 70, y: 16, w: 560, h: 250 }, [0, N], [lo, hi], { xticks: 4, yticks: 4, xlabel: "按分数从高到低覆盖的人数", ylabel: "Qini（累计多出的转化）" });
+      const line = (arr, c, w, dash) => { let d = ""; for (let i = 0; i <= N; i += 20) d += (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(arr[i]); K.svg(svg, "path", { d, fill: "none", stroke: c, "stroke-width": w, "stroke-dasharray": dash || null }); };
+      line(qi, "var(--ink-3)", 1.5, "2 3"); line(q, "var(--accent)", 2.5);
+      K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0), x2: ax.sx(N), y2: ax.sy(q[N]), stroke: "var(--ink)", "stroke-dasharray": "6 4" });
+      K.svg(svg, "line", { x1: ax.sx(N * v.k), x2: ax.sx(N * v.k), y1: 16, y2: 266, stroke: "var(--warn)" });
+      K.svg(svg, "text", { x: 80, y: 312, "font-size": 12, fill: "var(--accent)" }, "— 模型");
+      K.svg(svg, "text", { x: 150, y: 312, "font-size": 12, class: "muted" }, "··· 按真实增益排（理想）");
+      K.svg(svg, "text", { x: 330, y: 312, "font-size": 12 }, "- - 随机排队");
+      K.svg(svg, "text", { x: 440, y: 312, "font-size": 12, fill: "var(--warn)" }, "| 前 k");
+      let area = 0, areaI = 0; for (let i = 0; i <= N; i++) { const rnd = (q[N] * i) / N; area += q[i] - rnd; areaI += qi[i] - rnd; }
+      return { readout: [
+        { k: `Uplift@${Math.round(v.k * 100)}%`, v: (upliftAtK(D, sc, v.k) * 100).toFixed(1) + " 个百分点", color: "var(--accent)" },
+        { k: "全体平均增益", v: (upliftAtK(D, sc, 1) * 100).toFixed(1) + " 个百分点" },
+        { k: "Qini 面积 / 理想面积", v: areaI > 0 ? (area / areaI).toFixed(2) : "—" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：S vs T ---------- */
+  K.lab(document.getElementById("labST"), {
+    width: 660, height: 325,
+    controls: [
+      { id: "s", label: "处理效应有多依赖特征 x2（0 = 人人一样）", min: 0, max: 2.5, step: 0.1, value: 1.6, fmt: (v) => v.toFixed(1) },
+      { id: "n", label: "训练样本数", min: 400, max: 4000, step: 200, value: 2000 },
+      { id: "inter", label: "S-Learner 的写法", value: "plain", options: [["plain", "只把 W 当一个特征（逻辑回归）"], ["inter", "再加 W×x1、W×x2 交互项"]] },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "浏览器里现场训练逻辑回归（作者用的是 XGBoost，这里换成更简单的模型便于现算）。数据有两个特征：x1 影响基础购买率，x2 决定营销有没有用。在另外 3000 人的验证集上比较两种学习器的 Qini 面积比。试试：S-Learner 选“只把 W 当一个特征”，它给每个人的增益排序几乎只跟 x1 走，抓不到 x2。",
+    render(svg, v) {
+      const tr = simData(40 + v.seed * 11, v.n, v.s), va = simData(5000 + v.seed, 3000, v.s);
+      const fs = (d, w) => (v.inter === "inter" ? [d.x1, d.x2, w, w * d.x1, w * d.x2] : [d.x1, d.x2, w]);
+      const S = trainLR(tr.map((d) => fs(d, d.w)), tr.map((d) => d.y), 250);
+      const T = trainLR(tr.filter((d) => d.w).map((d) => [d.x1, d.x2]), tr.filter((d) => d.w).map((d) => d.y), 250);
+      const C = trainLR(tr.filter((d) => !d.w).map((d) => [d.x1, d.x2]), tr.filter((d) => !d.w).map((d) => d.y), 250);
+      const uS = va.map((d) => S(fs(d, 1)) - S(fs(d, 0))), uT = va.map((d) => T([d.x1, d.x2]) - C([d.x1, d.x2]));
+      const ratio = (sc) => { const q = qiniCurve(va, sc), qi = qiniCurve(va, va.map((d) => d.tau)), N = va.length; let a = 0, ai = 0; for (let i = 0; i <= N; i++) { const rd = (q[N] * i) / N; a += q[i] - rd; ai += qi[i] - rd; } return { q, r: ai > 0 ? a / ai : 0 }; };
+      const rS = ratio(uS), rT = ratio(uT), N = va.length;
+      // 左：真实增益 vs 预测增益散点
+      const ax = K.axes(svg, { x: 50, y: 14, w: 260, h: 240 }, [-1, 1], [-1, 1], { xticks: 2, yticks: 2, xlabel: "x2（决定营销效果）", ylabel: "预测增益（相对）" });
+      const norm = (arr) => { const m = Math.max(...arr.map(Math.abs)) || 1; return arr.map((x) => x / m); };
+      const nS = norm(uS), nT = norm(uT);
+      for (let i = 0; i < 300; i++) { K.svg(svg, "circle", { cx: ax.sx(va[i].x2), cy: ax.sy(nS[i]), r: 2.2, fill: "var(--c2)", opacity: 0.7 }); K.svg(svg, "circle", { cx: ax.sx(va[i].x2), cy: ax.sy(nT[i]), r: 2.2, fill: "var(--c1)", opacity: 0.7 }); }
+      const ax2 = K.axes(svg, { x: 380, y: 14, w: 250, h: 240 }, [0, N], [Math.min(0, ...rS.q, ...rT.q), Math.max(...rS.q, ...rT.q, 1) * 1.1], { xticks: 2, yticks: 0, xlabel: "覆盖人数" });
+      [[rS.q, "var(--c2)"], [rT.q, "var(--c1)"]].forEach(([q, c]) => { let d = ""; for (let i = 0; i <= N; i += 15) d += (i ? "L" : "M") + ax2.sx(i) + "," + ax2.sy(q[i]); K.svg(svg, "path", { d, fill: "none", stroke: c, "stroke-width": 2.2 }); });
+      K.svg(svg, "line", { x1: ax2.sx(0), y1: ax2.sy(0), x2: ax2.sx(N), y2: ax2.sy(rT.q[N]), stroke: "var(--ink-3)", "stroke-dasharray": "5 4" });
+      K.svg(svg, "text", { x: 60, y: 318, "font-size": 12, fill: "var(--c2)" }, "● S-Learner");
+      K.svg(svg, "text", { x: 160, y: 318, "font-size": 12, fill: "var(--c1)" }, "● T-Learner");
+      K.svg(svg, "text", { x: 400, y: 318, "font-size": 12, class: "muted" }, "右图：两条 Qini 曲线");
+      return { readout: [
+        { k: "S-Learner Qini 面积比", v: rS.r.toFixed(2), color: "var(--c2)" },
+        { k: "T-Learner Qini 面积比", v: rT.r.toFixed(2), color: "var(--c1)" },
+        { k: "更好的是", v: rS.r > rT.r ? "S-Learner" : "T-Learner" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

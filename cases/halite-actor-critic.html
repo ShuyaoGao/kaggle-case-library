@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>采矿船 Actor-Critic</title>
+<meta name="description" content="Kaggle 案例拆解：Halite 资源采集游戏，先看规则机器人怎么采矿，再用 Actor-Critic（演员-评论家）网络控制一艘船，讲清折扣回报、优势和奖励设计的坑。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">问题</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">资源采集游戏 · 船队控制 · 策略梯度</div>
+  <h1>采矿船学开船：Actor-Critic 玩 Halite</h1>
+  <p class="en">Designing game AI with Reinforcement learning</p>
+  <div class="tags">
+    <span class="tag rl">强化学习</span><span class="tag dl">深度学习</span>
+    <span class="tag method">规则智能体</span><span class="tag method">Actor-Critic</span><span class="tag method">策略梯度</span>
+    <span class="tag method">折扣回报</span><span class="tag method">优势函数</span><span class="tag method">Huber 损失</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Victor Basu</b></span>
+    <span>Kaggle 点赞 <b>328</b>（2026-11 抓取）</span>
+    <span>比赛 <b>Halite by Two Sigma（Halite IV）</b></span>
+    <span><a href="https://www.kaggle.com/code/basu369victor/designing-game-ai-with-reinforcement-learning" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">一张布满矿的棋盘</div><p>Halite 是资源管理游戏：造船、开船去采“halite”能量矿、运回船坞，最后存得多的赢。<span data-cell="2">出处</span></p></div>
+    <div class="card panel"><h3>要决定什么</h3><div class="big">这艘船下一步往哪开</div><p>作者把问题缩成 5 个动作：东南西北四个方向，加上“变成船坞”。<span data-cell="24">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">Actor-Critic（演员 + 评论家）</div><p>同一个网络输出两样东西：每个动作的概率（演员）和对未来总收益的估计（评论家）。<span data-cell="7">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一艘船能采矿、建船坞、再造船</div><p>作者结论是“船表现得挺聪明”。<span data-cell="38">出处</span> 但只看了回放，没有分数，代码里还有几处会悄悄失效的地方（见第 8–10 章）。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>问题长什么样</h2>
+  <p class="lead">这是一个强化学习问题：智能体在环境里一步步行动，靠奖励学习。下面的设置都来自 notebook 的文字和代码。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者的简化</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">同时控制的船</div><div class="v">1 艘</div></div>
+        <div class="stat-tile"><div class="k">网络输出的动作</div><div class="v">5 个</div></div>
+        <div class="stat-tile"><div class="k">网络输入</div><div class="v">441 个数</div></div>
+        <div class="stat-tile"><div class="k">对手</div><div class="v">随机</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">1 艘船、5 个动作见 <span data-cell="24">第 24 格</span>；输入长度见 <span data-cell="28">第 28 格</span>的 <code>shape=[441,]</code>，喂的是 <code>state.halite</code>，即每个格子上还剩多少矿（441 = 21 × 21）；对手见 <span data-cell="30">第 30 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">状态、动作、奖励</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>名字</th><th>白话含义</th><th>角色</th></tr>
+        <tr><td><code>state.halite</code></td><td>棋盘每一格上的矿量，拉成一长串</td><td>状态（网络的输入）</td></tr>
+        <tr><td><code>NORTH / SOUTH / EAST / WEST</code></td><td>往北、南、东、西开一格</td><td>动作</td></tr>
+        <tr><td><code>CONVERT</code></td><td>把这艘船就地变成船坞</td><td>动作</td></tr>
+        <tr><td><code>state.players[0][0] / 5000</code></td><td>玩家 0 当前存下的矿总量，除以 5000</td><td>每一步的奖励</td></tr>
+        <tr><td>规则部分（不归网络管）</td><td>船上矿少于 200 去采、多于 800 回船坞；没有船就造船</td><td>手写规则</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">见 <span data-cell="33">第 33 格</span>、<span data-cell="34">第 34 格</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="21">
+    <h3>动手试试 A · 规则机器人采矿：两个阈值怎么定 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="34">
+    <h3>动手试试 B · 折扣回报与优势：评论家的“标准答案”怎么算 <span class="sim-badge">浏览器内计算</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="34">
+    <h3>动手试试 C · 真训练一个小 Actor-Critic：奖励该怎么给 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者写明的内容</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>只控制一艘船；取消了 SPAWN（造船）预测，只预测 4 个方向和 CONVERT；总是在最近建的船坞造船、卸货</td><td><span data-cell="24">第 24 格</span></td></tr>
+        <tr><td>训练时奖励按每一步“已存矿量 / 5000”累加，折扣因子 γ = 0.99，学习率 7e-4，评论家用 Huber 损失</td><td><span data-cell="30">第 30 格</span> <span data-cell="34">第 34 格</span></td></tr>
+        <tr><td>“running reward” 超过 550 就认为任务完成</td><td><span data-cell="34">第 34 格</span></td></tr>
+        <tr><td>结论：船能采矿、变船坞、没船时再造船，表现“挺聪明”；希望以后能找最近的船坞、控制多艘船</td><td><span data-cell="38">第 38 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">训练过程打印的 running reward 和对局回放都在运行输出里，Kaggle 下载的源码不带，作者文字里也没给数字，所以这里不列分数。“表现聪明”是作者看回放的主观判断，没有和规则机器人做定量比较。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>动作有限、需要连续做很多步决策的任务，让网络同时学“怎么做”（演员）和“做得怎么样”（评论家）。</li>
+        <li><b>同类问题：</b>即时战略游戏、物流车队调度、无人机巡检路径、扫地机器人覆盖。</li>
+        <li><b>可迁移的教训：</b>先写一个规则机器人当基线；网络的输入要包含做决定所需的信息（比如船在哪）；奖励要奖励“变化”而不是“存量”；不要用 <code>try/except: pass</code> 吞掉错误。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>规则机器人（收集 / 卸货两状态）<span data-cell="20">第 20 格</span></li>
+        <li>Actor 网络 441 → 128 → 32 → 5（softmax）<span data-cell="26">第 26 格</span></li>
+        <li>Critic 网络 441 → 128 → 32 → 1 <span data-cell="27">第 27 格</span></li>
+        <li>折扣回报、标准化、优势、两个损失 <span data-cell="34">第 34 格</span></li>
+        <li>Adam、Huber 损失 <span data-cell="29">第 29 格</span> <span data-cell="30">第 30 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>网络的输入只有“每个格子剩多少矿”，没有“船在哪”“船上装了多少”。网络能学会“往东开”还是“往西开”吗？</li>
+      <li>奖励是“当前已存矿量 / 5000”，每一步都给一次。存了 1000 之后什么都不做，每步仍能拿 0.2。这种奖励鼓励的是什么？实验 C 里换一种奖励试试。</li>
+      <li>第 33 格的 <code>update_L1()</code> 里写了 <code>ship_+=1</code>，却没有声明 <code>global ship_</code>，Python 会报错；而外面又包了 <code>try: … except: pass</code>。结果会怎样？</li>
+      <li>网络选的方向，只有在“收集状态且脚下矿少于 100”时才会被执行，其他时候都是规则在开船。那网络学到的东西还剩多少作用？</li>
+      <li>作者凭看回放判断“船很聪明”。你会设计什么实验，来证明 Actor-Critic 版比第 20 格的规则机器人更好（或更差）？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Victor Basu，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。规则机器人代码作者注明参考 Alexis Cook 的 Getting Started With Halite。本页为教学解读，动画与实验中的数据均为模拟示意，采矿规则是本页的简化版本。
+</footer>
+</main>
+
+<script src="nb/halite-actor-critic.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 简化版采矿世界（本页自定规则：停在原地采走格子里 25% 的矿；回到船坞自动卸货） ---------- */
+  function makeMap(n, seed) {
+    const r = K.rng(seed), M = [];
+    for (let i = 0; i < n * n; i++) M.push(r() < 0.3 ? Math.round(150 + r() * 350) : Math.round(r() * 80));
+    M[Math.floor(n * n / 2)] = 0;
+    return M;
+  }
+  function cellRect(svg, x0, y0, cs, n, M, max) {
+    return M.map((v, i) => K.svg(svg, "rect", { x: x0 + (i % n) * cs, y: y0 + Math.floor(i / n) * cs, width: cs - 1, height: cs - 1, rx: 2, fill: `color-mix(in srgb, var(--warn) ${Math.round(K.clamp(v / max, 0, 1) * 85)}%, var(--panel-2))` }));
+  }
+  // 第 20 格规则机器人（简化）：船上 < collectT 采矿；> depositT 回船坞；脚下 < moveT 就去四邻里矿最多的格子
+  function ruleRun(n, seed, T, collectT, depositT, moveT, explore) {
+    const M = makeMap(n, seed), yard = Math.floor(n * n / 2), visits = new Array(n * n).fill(0), rr0 = K.rng(seed + 5);
+    let pos = yard, cargo = 0, stored = 0, state = "COLLECT", idle = 0, dir = 0; const hist = [];
+    for (let t = 0; t < T; t++) {
+      if (cargo < collectT) state = "COLLECT"; if (cargo > depositT) state = "DEPOSIT";
+      const r = Math.floor(pos / n), c = pos % n;
+      if (state === "COLLECT") {
+        if (M[pos] < moveT) {
+          const nb = [[r - 1, c], [r, c + 1], [r + 1, c], [r, c - 1]].map(([rr, cc]) => ((rr + n) % n) * n + ((cc + n) % n));
+          const bestN = nb.reduce((b, j) => (M[j] > M[b] ? j : b), nb[0]);
+          if (explore && M[bestN] < moveT) { if (rr0() < 0.2) dir = Math.floor(rr0() * 4); pos = nb[dir]; } else pos = bestN;
+          idle++;
+        } else { const take = Math.floor(M[pos] * 0.25); M[pos] -= take; cargo += take; }
+      } else {
+        const yr = Math.floor(yard / n), yc = yard % n;
+        if (r !== yr) pos = (r < yr ? r + 1 : r - 1) * n + c; else if (c !== yc) pos = r * n + (c < yc ? c + 1 : c - 1);
+      }
+      if (pos === yard) { stored += cargo; cargo = 0; }
+      visits[pos]++; hist.push(stored);
+    }
+    return { stored, hist, visits, M, idle };
+  }
+
+  const steps = [
+    {
+      title: "开场：从 1956 年的跳棋程序说起", at: 0, kicker: "第 0–3 格 · 开场",
+      html: `<p>作者用一张老照片开头：1956 年，Arthur Samuel 的跳棋程序在 IBM 701 电脑上做了电视演示，它是最早“会自己变强”的游戏程序之一。<span data-cell="1">出处</span></p><p>这次的游戏是 Two Sigma 的 <b>Halite</b>：指挥一支小船队，去棋盘上采集会再生的能量矿 halite，运回船坞存起来；可以造新船、建新船坞；比赛结束时存得最多的赢。<span data-cell="2">出处</span> 规则细节作者推荐看 Alexis Cook 的入门 notebook。<span data-cell="3">出处</span></p>`,
+      draw(svg, ctx) {
+        const n = 9, cs = 30, M = makeMap(n, 4), x0 = 40, y0 = 30;
+        const rects = cellRect(svg, x0, y0, cs, n, M, 500), yard = Math.floor(n * n / 2);
+        K.svg(svg, "rect", { x: x0 + (yard % n) * cs + 4, y: y0 + Math.floor(yard / n) * cs + 4, width: cs - 9, height: cs - 9, rx: 3, fill: "var(--c1)" });
+        const ship = K.svg(svg, "path", { d: "", fill: "var(--c3)" });
+        const lab = K.svg(svg, "text", { x: 350, y: 60, "font-size": 15, "font-weight": 700 }, "");
+        K.svg(svg, "rect", { x: 350, y: 90, width: 14, height: 14, fill: "var(--warn)" }); K.svg(svg, "text", { x: 372, y: 102, "font-size": 13 }, "halite 矿（颜色越深越多）");
+        K.svg(svg, "rect", { x: 350, y: 116, width: 14, height: 14, fill: "var(--c1)" }); K.svg(svg, "text", { x: 372, y: 128, "font-size": 13 }, "船坞：把矿运回这里才算数");
+        K.svg(svg, "path", { d: "M350,152 l14,7 l-14,7 Z", fill: "var(--c3)" }); K.svg(svg, "text", { x: 372, y: 164, "font-size": 13 }, "船：开过去、停下采矿、运回来");
+        const M2 = makeMap(n, 4);
+        (async () => {
+          let p = yard, cargo = 0, stored = 0, st = "COLLECT";
+          for (let t = 0; t < 60; t++) {
+            if (cargo < 200) st = "COLLECT"; if (cargo > 500) st = "DEPOSIT";
+            const r = Math.floor(p / n), c = p % n;
+            if (st === "COLLECT") { if (M2[p] < 100) { const nb = [[r - 1, c], [r, c + 1], [r + 1, c], [r, c - 1]].map(([rr, cc]) => ((rr + n) % n) * n + ((cc + n) % n)); p = nb.reduce((b, j) => (M2[j] > M2[b] ? j : b), nb[0]); } else { const take = Math.floor(M2[p] * 0.25); M2[p] -= take; cargo += take; } }
+            else { const yr = Math.floor(yard / n), yc = yard % n; if (r !== yr) p = (r < yr ? r + 1 : r - 1) * n + c; else if (c !== yc) p = r * n + (c < yc ? c + 1 : c - 1); }
+            if (p === yard) { stored += cargo; cargo = 0; }
+            K.set(rects[p], { fill: `color-mix(in srgb, var(--warn) ${Math.round(K.clamp(M2[p] / 500, 0, 1) * 85)}%, var(--panel-2))` });
+            const sx = x0 + (p % n) * cs + cs / 2, sy = y0 + Math.floor(p / n) * cs + cs / 2;
+            ship.setAttribute("d", `M${sx - 8},${sy - 7} l16,7 l-16,7 Z`);
+            lab.textContent = `第 ${t + 1} 步 · 船上 ${cargo} · 已存 ${stored}`;
+            if (!(await ctx.wait(150))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "强化学习是什么：靠奖励变强", at: 4, kicker: "第 4–6 格 · 概念",
+      html: `<p>作者先讲概念：强化学习是“用经验做最优决策”的学问，它既不是有监督也不是无监督，和有没有标签无关。让它变强的东西是<b>奖励</b>：做对了给大的正奖励，做错了罚；每过一步没做成也给一点点负奖励。<span data-cell="4">出处</span></p><p>几个关键词：<b>智能体</b>在<b>环境</b>里，每一步看到<b>状态</b> s，按<b>策略</b> π(a|s) 选一个<b>动作</b> a，拿到<b>奖励</b> r 和下一个状态。目标是让奖励之和（回报）最大。<span data-cell="5">出处</span> <span data-cell="6">出处</span></p>`,
+      draw(svg, ctx) {
+        const ag = K.node(svg, 60, 120, 160, 80, "智能体\n策略 π(a|s)", { stroke: "var(--accent)", bold: true });
+        const env = K.node(svg, 480, 120, 180, 80, "环境\nHalite 棋盘", { stroke: "var(--good)", bold: true });
+        K.svg(svg, "path", { d: "M220,140 C330,60 380,60 478,140", fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+        K.svg(svg, "path", { d: "M478,185 C380,270 330,270 222,185", fill: "none", stroke: "var(--c3)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 350, y: 70, "text-anchor": "middle", "font-size": 13, fill: "var(--c1)" }, "动作 aₜ：往东开");
+        K.svg(svg, "text", { x: 350, y: 270, "text-anchor": "middle", "font-size": 13, fill: "var(--c3)" }, "状态 sₜ₊₁、奖励 rₜ₊₁");
+        const b1 = K.svg(svg, "circle", { cx: 220, cy: 140, r: 7, fill: "var(--c1)" }), b2 = K.svg(svg, "circle", { cx: 478, cy: 185, r: 7, fill: "var(--c3)" });
+        const tot = K.svg(svg, "text", { x: 60, y: 300, "font-size": 14, "font-family": "var(--mono)" }, "");
+        const r = K.rng(3); let G = 0;
+        (async () => {
+          for (let k = 0; k < 8; k++) {
+            if (!(await ctx.tween(500, (t) => { const u = 1 - t; b1.setAttribute("cx", u * u * u * 220 + 3 * u * u * t * 330 + 3 * u * t * t * 380 + t * t * t * 478); b1.setAttribute("cy", u * u * u * 140 + 3 * u * u * t * 60 + 3 * u * t * t * 60 + t * t * t * 140); }))) return;
+            if (!(await ctx.tween(500, (t) => { const u = 1 - t; b2.setAttribute("cx", u * u * u * 478 + 3 * u * u * t * 380 + 3 * u * t * t * 330 + t * t * t * 222); b2.setAttribute("cy", u * u * u * 185 + 3 * u * u * t * 270 + 3 * u * t * t * 270 + t * t * t * 185); }))) return;
+            const rw = r() < 0.3 ? 5 : -0.1; G += rw;
+            tot.textContent = `第 ${k + 1} 步  奖励 ${rw > 0 ? "+" : ""}${rw}   回报（累计）${G.toFixed(1)}`;
+          }
+        })();
+      },
+    },
+    {
+      title: "Actor-Critic：一个演员，一个评论家", at: 7, kicker: "第 7–8 格 · 算法",
+      html: `<p>作者建议先懂 Q 学习和深度 Q 学习，再看 Actor-Critic。简单说，智能体看到状态后输出两样东西：<span data-cell="7">出处</span></p><ul class="tight"><li><b>演员（Actor）</b>：每个动作的概率，决定怎么做</li><li><b>评论家（Critic）</b>：估计从现在起将来还能拿多少奖励</li></ul><p>两者一起学：评论家给出“预期”，实际结果比预期好，就提高刚才那个动作的概率；比预期差，就降低。作者说明这一部分参考了 Keras 官网的 CartPole 示例。</p>`,
+      draw(svg, ctx) {
+        K.node(svg, 30, 125, 120, 70, "状态 s\n（矿量地图）", { bold: true });
+        const A = K.node(svg, 260, 40, 170, 80, "演员 Actor\n各动作概率", { stroke: "var(--c1)", sw: 2 });
+        const C = K.node(svg, 260, 200, 170, 80, "评论家 Critic\n预计还能拿多少", { stroke: "var(--c4)", sw: 2 });
+        K.arrow(svg, 152, 150, 258, 85); K.arrow(svg, 152, 170, 258, 235);
+        const bars = ["北", "南", "东", "西", "建坞"].map((d, i) => { K.svg(svg, "text", { x: 470, y: 46 + i * 18, "font-size": 11 }, d); return K.svg(svg, "rect", { x: 500, y: 36 + i * 18, width: 40, height: 13, fill: "var(--c1)" }); });
+        const crit = K.svg(svg, "text", { x: 470, y: 245, "font-size": 15, "font-family": "var(--mono)", fill: "var(--c4)" }, "V = 3.0");
+        const msg = K.svg(svg, "text", { x: 460, y: 160, "font-size": 13 }, "");
+        const msg2 = K.svg(svg, "text", { x: 460, y: 182, "font-size": 13, "font-weight": 700 }, "");
+        let p = [0.2, 0.2, 0.2, 0.2, 0.2];
+        (async () => {
+          for (const [act, ret] of [[2, 5.2], [3, 1.1], [2, 6.0], [0, 2.0]]) {
+            msg.textContent = `选了“${["北", "南", "东", "西", "建坞"][act]}”，实际拿到 ${ret}`;
+            const adv = ret - 3.0;
+            msg2.textContent = adv > 0 ? `比评论家预计的 3.0 好 ${adv.toFixed(1)} → 提高它的概率` : `比预计差 ${(-adv).toFixed(1)} → 降低它的概率`;
+            K.set(msg2, { fill: adv > 0 ? "var(--good)" : "var(--bad)" });
+            const q = p.slice(); q[act] = Math.max(0.03, q[act] * (1 + adv * 0.15)); const s = q.reduce((a, b) => a + b, 0);
+            const np = q.map((x) => x / s), op = p.slice();
+            if (!(await ctx.tween(700, (t) => bars.forEach((b, i) => b.setAttribute("width", 200 * K.lerp(op[i], np[i], t)))))) return;
+            p = np;
+            if (!(await ctx.wait(900))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "安装环境，看看棋盘长什么样", kicker: "第 9–18 格 · 环境探索",
+      html: `<p>安装 kaggle-environments，导入 TensorFlow 和 Halite 的辅助工具，固定随机种子。<span data-cell="10">第 10 格</span> <span data-cell="11">第 11 格</span></p><p>然后建一个 halite 环境，让随机智能体跑一局看回放 <span data-cell="13">第 13 格</span>，再依次打印环境的配置、规格说明、奖励、动作和观察格式。<span data-cell="14">第 14–18 格</span> 这些打印内容都在运行输出里，源码里看不到。</p>`,
+      cells: [13, 14, 17], highlight: ["make(\"halite\", debug=True)", "env.configuration", "env.specification.action"],
+      draw(svg, ctx) {
+        const items = [["env.configuration", "棋盘大小、局长、各种费用……"], ["env.specification", "整个环境的说明书"], ["…reward", "奖励怎么算"], ["…action", "船：东南西北 / 建坞；船坞：造船"], ["…observation", "每格矿量、各玩家的船和船坞"]];
+        const els = items.map((it, i) => { const g = K.svg(svg, "g"); K.svg(g, "text", { x: 40, y: 50 + i * 54, "font-size": 15, "font-family": "var(--mono)", fill: "var(--accent)" }, it[0]); K.svg(g, "text", { x: 300, y: 50 + i * 54, "font-size": 13 }, it[1]); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 40, y: 320, "font-size": 12, class: "muted" }, "右侧说明是对字段用途的概括，具体打印结果在原 notebook 的运行输出里");
+        (async () => { for (const e of els) if (!(await ctx.tween(400, (t) => (e.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "先写一个规则机器人", kicker: "第 19–22 格 · 基线",
+      html: `<p>在上强化学习之前，作者先放了一个<b>纯规则</b>的智能体（来自 Alexis Cook 的入门教程）：<span data-cell="20">第 20 格</span></p><ul class="tight"><li>没有船就用船坞造一艘；没有船坞就把第一艘船变成船坞</li><li>船上矿少于 200 → “收集”状态；多于 500 → “卸货”状态</li><li>收集时：脚下矿少于 100 就开到四个邻格里矿最多的那格，否则停下采矿</li><li>卸货时：朝第一个船坞开</li></ul><p>然后用 <code>env.train</code> 让它和随机对手打一局，每步打印动作和奖励。<span data-cell="21">第 21 格</span></p>`,
+      cells: [20, 21], highlight: ["if ship.halite < 200", "if ship.halite > 500", "if ship.cell.halite < 100"],
+      draw(svg, ctx) {
+        const S = K.node(svg, 60, 60, 220, 90, "收集 COLLECT\n脚下 ≥100：停下采\n脚下 <100：去最富的邻格", { stroke: "var(--warn)", sw: 2 });
+        const D = K.node(svg, 420, 60, 220, 90, "卸货 DEPOSIT\n朝船坞开", { stroke: "var(--c1)", sw: 2 });
+        K.svg(svg, "path", { d: "M280,85 C340,40 370,40 418,85", fill: "none", stroke: "var(--ink-2)", "stroke-width": 1.5 });
+        K.svg(svg, "text", { x: 350, y: 42, "text-anchor": "middle", "font-size": 12 }, "船上 > 500");
+        K.svg(svg, "path", { d: "M418,125 C370,175 340,175 282,125", fill: "none", stroke: "var(--ink-2)", "stroke-width": 1.5 });
+        K.svg(svg, "text", { x: 350, y: 182, "text-anchor": "middle", "font-size": 12 }, "船上 < 200（卸完货）");
+        const ax = K.axes(svg, { x: 80, y: 210, w: 560, h: 90 }, [0, 600], [0, 1], { yticks: 0, xticks: 3, xlabel: "船上的矿" });
+        K.svg(svg, "rect", { x: ax.sx(0), y: 215, width: ax.sx(200) - ax.sx(0), height: 30, fill: "var(--warn)", opacity: 0.35 });
+        K.svg(svg, "rect", { x: ax.sx(500), y: 215, width: ax.sx(600) - ax.sx(500), height: 30, fill: "var(--c1)", opacity: 0.35 });
+        K.svg(svg, "text", { x: ax.sx(350), y: 236, "text-anchor": "middle", "font-size": 11, class: "muted" }, "200–500：保持原来的状态");
+        const dot = K.svg(svg, "circle", { cx: ax.sx(0), cy: 265, r: 8, fill: "var(--warn)" });
+        ctx.tween(4000, (t) => {
+          const c = t < 0.6 ? (t / 0.6) * 560 : 560 * (1 - (t - 0.6) / 0.4), st = t < 0.6 ? (c > 500 ? "D" : "C") : (c < 200 ? "C" : "D");
+          dot.setAttribute("cx", ax.sx(c)); K.set(dot, { fill: st === "C" ? "var(--warn)" : "var(--c1)" });
+          K.set(S.querySelector("rect"), { "stroke-width": st === "C" ? 4 : 1.5 }); K.set(D.querySelector("rect"), { "stroke-width": st === "D" ? 4 : 1.5 });
+        });
+      },
+    },
+    {
+      title: "目标与难点：作者做了哪些简化", at: 23, kicker: "第 23–24 格 · 问题设定",
+      html: `<p>看完回放，作者说左边黄色的船几乎不动，右边红色的船会采矿、卸货、造船；他的目标是用强化学习训练黄色这方。<span data-cell="23">出处</span></p><p>但他坦白遇到了几个难题，于是做了简化：<span data-cell="24">出处</span></p><ul class="tight"><li><b>只控制一艘船</b>：不会用 Actor-Critic 同时控制多艘，所以禁用了多船</li><li><b>5 个动作</b>：东南西北 + 变船坞，去掉了“造船”</li><li><b>只用最近建的船坞</b>：没船时在最近的船坞造，卸货也只去最近建的那一个，而不是离得最近的那个</li></ul>`,
+      draw(svg, ctx) {
+        const full = ["多艘船同时指挥", "造船 SPAWN", "选离得最近的船坞", "四个方向 + 变船坞"], keep = [false, false, false, true];
+        full.forEach((f, i) => {
+          const g = K.node(svg, 60, 30 + i * 70, 260, 50, f, { fs: 14 });
+          const x = K.svg(svg, "text", { x: 340, y: 62 + i * 70, "font-size": 20, "font-weight": 700, fill: keep[i] ? "var(--good)" : "var(--bad)" }, "");
+          ctx.wait(400 + i * 500).then((ok) => { if (!ok) return; x.textContent = keep[i] ? "✓ 保留" : "✗ 去掉"; if (!keep[i]) g.style.opacity = 0.4; });
+        });
+        K.svg(svg, "text", { x: 460, y: 120, "font-size": 14, "font-weight": 700 }, "简化后的问题：");
+        K.svg(svg, "text", { x: 460, y: 146, "font-size": 13 }, "1 艘船 × 5 个动作");
+        K.svg(svg, "text", { x: 460, y: 170, "font-size": 13 }, "对手：随机智能体");
+      },
+    },
+    {
+      title: "搭网络：441 → 演员 5 个概率，评论家 1 个数", kicker: "第 25–30 格 · 模型",
+      html: `<p>演员和评论家共用同一个输入（441 个数），各走各的两层全连接：<span data-cell="26">第 26 格</span> <span data-cell="27">第 27 格</span></p><ul class="tight"><li>演员：128（tanh）→ 32（tanh）→ 5，softmax 变成概率</li><li>评论家：128（ReLU）→ 32（ReLU）→ 1，就是一个数</li></ul><p>拼成一个 Keras 模型，输出 [动作概率, 评论值] <span data-cell="28">第 28 格</span>；优化器 Adam、学习率 7e-4 <span data-cell="29">第 29 格</span>；评论家用 Huber 损失，折扣 γ = 0.99，对手是随机智能体。<span data-cell="30">第 30 格</span></p><p>注意输入 <code>state.halite</code> 只是矿量地图，<b>不包含船的位置和载货</b>。</p>`,
+      cells: [26, 27, 28, 30], highlight: ["Dense(num_actions, activation='softmax')", "Dense(1)", "shape=[441,]", "gamma = 0.99", "Huber"],
+      draw(svg, ctx) {
+        const col = (x, n, y0, h, color) => Array.from({ length: n }, (_, i) => K.svg(svg, "circle", { cx: x, cy: y0 + (h * (i + 0.5)) / n, r: 6, fill: "var(--panel-2)", stroke: color }));
+        const inp = col(70, 12, 30, 280, "var(--ink-3)");
+        K.svg(svg, "text", { x: 70, y: 328, "text-anchor": "middle", "font-size": 11 }, "441 个格子的矿量");
+        const a1 = col(220, 8, 20, 130, "var(--c1)"), a2 = col(330, 5, 30, 110, "var(--c1)"), a3 = col(440, 5, 30, 110, "var(--c1)");
+        const c1 = col(220, 8, 190, 130, "var(--c4)"), c2 = col(330, 5, 200, 110, "var(--c4)"), c3 = col(440, 1, 230, 50, "var(--c4)");
+        K.svg(svg, "text", { x: 330, y: 18, "text-anchor": "middle", "font-size": 12, fill: "var(--c1)" }, "演员 128 → 32 → 5 (tanh, softmax)");
+        K.svg(svg, "text", { x: 330, y: 335, "text-anchor": "middle", "font-size": 12, fill: "var(--c4)" }, "评论家 128 → 32 → 1 (ReLU)");
+        ["北", "南", "东", "西", "坞"].forEach((d, i) => K.svg(svg, "text", { x: 456, y: 30 + (110 * (i + 0.5)) / 5 + 4, "font-size": 11 }, d));
+        K.svg(svg, "text", { x: 456, y: 259, "font-size": 11 }, "V");
+        const pb = Array.from({ length: 5 }, (_, i) => K.svg(svg, "rect", { x: 480, y: 30 + (110 * i) / 5 + 6, width: 0, height: 12, fill: "var(--c1)" }));
+        const vb = K.svg(svg, "text", { x: 480, y: 260, "font-size": 15, "font-family": "var(--mono)", fill: "var(--c4)" }, "");
+        K.svg(svg, "text", { x: 560, y: 160, "font-size": 12, fill: "var(--bad)" }, "输入里没有：");
+        K.svg(svg, "text", { x: 560, y: 178, "font-size": 12, fill: "var(--bad)" }, "船在哪、装了多少");
+        const groups = [inp, a1.concat(c1), a2.concat(c2), a3.concat(c3)];
+        (async () => {
+          for (let k = 0; k < 4; k++) if (!(await ctx.tween(350, (t) => groups[k].forEach((c) => K.set(c, { fill: `color-mix(in srgb, var(--accent) ${Math.round(t * 70)}%, var(--panel-2))` }))))) return;
+          const p = [0.15, 0.1, 0.45, 0.2, 0.1];
+          await ctx.tween(600, (t) => { pb.forEach((b, i) => b.setAttribute("width", p[i] * 120 * t)); vb.textContent = (2.7 * t).toFixed(2); });
+        })();
+      },
+    },
+    {
+      title: "把网络的选择翻译成船的指令", kicker: "第 31–33 格 · 动作编码",
+      html: `<p><code>LabelEncoder</code> 把 5 个动作名编成 0–4 的数字（按字母顺序）。<span data-cell="32">第 32 格</span> <code>advanced_agent</code> 把网络抽到的数字翻译回动作，但它<b>并不总是听网络的</b>：<span data-cell="33">第 33 格</span></p><ul class="tight"><li>动作是 CONVERT：把船变成船坞，然后调用 <code>update_L1()</code> 给船坞计数加 1</li><li>船上矿 &lt; 200 进“收集”，&gt; 800 进“卸货”（阈值从规则版的 500 改成了 800）</li><li>只有在“收集”状态<b>且</b>脚下矿少于 100 时，才执行网络选的方向；卸货时由规则开回船坞</li></ul><p>隐患：<code>update_L1</code> 里 <code>ship_+=1</code> 没有声明 <code>global</code>，一调用就报 UnboundLocalError；但整段包在 <code>try: … except: pass</code> 里，错误被悄悄吞掉，<code>ship_</code> 永远是 0，同一段里后面的指令也跳过了。</p>`,
+      cells: [32, 33], highlight: ["def update_L1():", "ship_+=1", "except:", "me.ships[0].next_action = decodeDir(act)", "if me.ships[0].halite > 800:"],
+      draw(svg, ctx) {
+        K.node(svg, 20, 30, 150, 50, "网络抽到动作", { stroke: "var(--accent)", bold: true });
+        const cond = [["动作是 CONVERT？", 120], ["收集状态 且 脚下 < 100？", 210]];
+        K.node(svg, 230, 100, 230, 46, cond[0][0], { fs: 13 });
+        K.node(svg, 230, 190, 230, 46, cond[1][0], { fs: 13 });
+        K.arrow(svg, 95, 82, 300, 98);
+        const conv = K.node(svg, 510, 70, 190, 50, "变船坞 → update_L1()", { stroke: "var(--c6)", fs: 12 });
+        const err = K.node(svg, 510, 130, 190, 46, "UnboundLocalError\n被 except: pass 吞掉", { stroke: "var(--bad)", fs: 12, color: "var(--bad)" });
+        err.style.opacity = 0;
+        K.arrow(svg, 462, 116, 508, 98, { color: "var(--c6)" }); K.svg(svg, "text", { x: 470, y: 96, "font-size": 11 }, "是");
+        K.arrow(svg, 345, 148, 345, 188); K.svg(svg, "text", { x: 352, y: 172, "font-size": 11 }, "否");
+        K.node(svg, 510, 190, 190, 46, "执行网络选的方向", { stroke: "var(--good)", fs: 12 });
+        K.node(svg, 230, 270, 230, 46, "规则说了算（采矿 / 回坞）", { stroke: "var(--ink-3)", fs: 12 });
+        K.arrow(svg, 462, 212, 508, 212, { color: "var(--good)" }); K.svg(svg, "text", { x: 474, y: 206, "font-size": 11 }, "是");
+        K.arrow(svg, 345, 238, 345, 268); K.svg(svg, "text", { x: 352, y: 258, "font-size": 11 }, "否");
+        ctx.wait(1500).then((ok) => ok && ctx.tween(600, (t) => (err.style.opacity = t)));
+      },
+    },
+    {
+      title: "训练循环：回报、优势、两个损失", kicker: "第 34 格 · Actor-Critic 训练",
+      html: `<p>训练循环（来自 Keras 的 CartPole 示例）：<span data-cell="34">第 34 格</span></p><ol class="tight"><li>每一步：把矿量地图送进网络，得到动作概率和评论值；按概率<b>抽</b>一个动作；记下 log 概率和评论值；奖励 = 玩家 0 的已存矿量 / 5000</li><li>一段结束后，从后往前算<b>折扣回报</b>：Gₜ = rₜ + γ·Gₜ₊₁，再标准化（减均值、除以标准差）</li><li><b>优势</b> = 实际回报 − 评论家的估计。演员的损失 = −log 概率 × 优势；评论家的损失 = Huber(估计, 实际回报)</li><li>两个损失相加，反向传播更新网络；running reward 超过 550 就停</li></ol><p>问题：奖励用的是“已存总量”而不是“这一步新增”，存下的矿越多，之后每一步都白拿奖励，哪怕船什么都不做。</p>`,
+      cells: [34], highlight: ["gain=state.players[0][0]/5000", "discounted_sum = r + gamma * discounted_sum", "diff = ret - value", "actor_losses.append(-log_prob * diff)", "huber_loss"],
+      draw(svg, ctx) {
+        const r = [0, 0, 0, 0.2, 0.2, 0.2, 0.5, 0.5], g = 0.9, G = []; let s = 0;
+        for (let i = r.length - 1; i >= 0; i--) { s = r[i] + g * s; G.unshift(s); }
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 230 }, [0, r.length], [0, 2.5], { xticks: 0, yticks: 5, ylabel: "数值" });
+        r.forEach((v, i) => { K.svg(svg, "text", { x: ax.sx(i + 0.5), y: 280, "text-anchor": "middle", "font-size": 11 }, "t=" + i); });
+        const rb = r.map((v, i) => K.svg(svg, "rect", { x: ax.sx(i + 0.15), y: ax.sy(v), width: ax.sx(0.3) - ax.sx(0), height: ax.sy(0) - ax.sy(v), fill: "var(--c2)" }));
+        const gb = G.map((v, i) => K.svg(svg, "rect", { x: ax.sx(i + 0.5), y: ax.sy(0), width: ax.sx(0.3) - ax.sx(0), height: 0, fill: "var(--c4)" }));
+        K.svg(svg, "rect", { x: 70, y: 300, width: 12, height: 12, fill: "var(--c2)" }); K.svg(svg, "text", { x: 88, y: 311, "font-size": 12 }, "每步奖励 r（示意：存量一旦变大就一直给）");
+        K.svg(svg, "rect", { x: 400, y: 300, width: 12, height: 12, fill: "var(--c4)" }); K.svg(svg, "text", { x: 418, y: 311, "font-size": 12 }, "折扣回报 G（从后往前累加，γ=0.9 示意）");
+        (async () => {
+          for (let i = r.length - 1; i >= 0; i--) {
+            if (!(await ctx.tween(350, (t) => { gb[i].setAttribute("y", ax.sy(G[i] * t)); gb[i].setAttribute("height", ax.sy(0) - ax.sy(G[i] * t)); }))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "结果与结论：“船挺聪明”？", kicker: "第 35–39 格 · 结果",
+      html: `<p>训练完，再用模型按概率抽动作跑一局 <span data-cell="35">第 35 格</span>，渲染回放：黄色是 Actor-Critic 控制的一方，红色是随机对手。<span data-cell="36">第 36 格</span></p><p>作者的结论：船会采矿、变船坞、没船时造船，“以最高效的方式”采矿；遗憾是没能找最近的船坞，也没能控制多艘船，提到多智能体、多目标强化学习可能更合适。<span data-cell="38">第 38 格</span></p><p>需要冷静看待：没有分数，没有和规则机器人比较；网络看不到船在哪；大部分时间开船的是规则；变船坞后的计数代码因为报错被吞掉而失效。所以“聪明”更可能来自规则部分。</p>`,
+      cells: [35, 37, 38], highlight: ["np.random.choice(num_actions, p=np.squeeze(action_probs))"],
+      draw(svg, ctx) {
+        const items = [["作者看到的", "船采矿、建坞、造船", "var(--good)"], ["没有给出的", "分数、和规则机器人的对比", "var(--warn)"], ["网络看不到的", "船的位置、载货量", "var(--bad)"], ["实际开船的", "大部分时间是手写规则", "var(--bad)"]];
+        items.forEach((it, i) => {
+          const g = K.svg(svg, "g"); g.style.opacity = 0;
+          K.svg(g, "rect", { x: 40, y: 30 + i * 72, width: 640, height: 56, rx: 8, fill: "var(--panel-2)", stroke: it[2] });
+          K.svg(g, "text", { x: 60, y: 64 + i * 72, "font-size": 14, "font-weight": 700, fill: it[2] }, it[0]);
+          K.svg(g, "text", { x: 220, y: 64 + i * 72, "font-size": 14 }, it[1]);
+          ctx.wait(300 + i * 500).then((ok) => ok && ctx.tween(400, (t) => (g.style.opacity = t)));
+        });
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+  if (/[?&]fold/.test(location.search)) document.querySelectorAll(".ch-cells > .cell, .cell-note").forEach((e) => (e.style.display = "none"));  // 自查截图用
+
+  /* ---------- 实验 A：规则机器人阈值 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "dep", label: "船上超过多少就回去卸货（第 20 格是 500）", min: 50, max: 1500, step: 50, value: 500 },
+      { id: "col", label: "船上低于多少重新去收集（第 20 格是 200）", min: 0, max: 500, step: 25, value: 200 },
+      { id: "mv", label: "脚下少于多少就换格子（第 20 格是 100）", min: 10, max: 400, step: 10, value: 100 },
+      { id: "ex", label: "四个邻格都不够多时", value: "orig", options: [["orig", "原规则：照样去四邻里最多的那格"], ["explore", "改进：朝一个方向往远处找"]] },
+      { id: "seed", label: "换一张地图", button: true },
+    ],
+    note: "本页的简化规则：11×11 棋盘边缘相连，停在原地采走格子里 25% 的矿，开回中央船坞自动卸货，共 200 步，不考虑对手、移动成本和矿的再生。原规则只看四个邻格：船坞附近的矿采光后，船常常在两个空格子之间来回打转。先看“只移动没采矿的步数”，再把最后一项换成“改进”对比；也试试把“回去卸货”的阈值拉到很低或很高。",
+    render(svg, v) {
+      const n = 11, res = ruleRun(n, 50 + v.seed * 13, 200, v.col, v.dep, v.mv, v.ex === "explore"), cs = 23, x0 = 10, y0 = 10;
+      const mv = Math.max(...res.visits);
+      res.M.forEach((m, i) => {
+        K.svg(svg, "rect", { x: x0 + (i % n) * cs, y: y0 + Math.floor(i / n) * cs, width: cs - 1, height: cs - 1, rx: 2, fill: `color-mix(in srgb, var(--warn) ${Math.round(K.clamp(m / 500, 0, 1) * 85)}%, var(--panel-2))` });
+        if (res.visits[i]) K.svg(svg, "circle", { cx: x0 + (i % n) * cs + cs / 2, cy: y0 + Math.floor(i / n) * cs + cs / 2, r: 2 + 6 * Math.sqrt(res.visits[i] / mv), fill: "var(--c3)", opacity: 0.8 });
+      });
+      const yard = Math.floor(n * n / 2);
+      K.svg(svg, "rect", { x: x0 + (yard % n) * cs + 3, y: y0 + Math.floor(yard / n) * cs + 3, width: cs - 7, height: cs - 7, fill: "var(--c1)" });
+      K.svg(svg, "text", { x: 10, y: 285, "font-size": 11, class: "muted" }, "格子颜色 = 结束时剩下的矿；绿点大小 = 船在这格待了多久；蓝块 = 船坞");
+      const ax = K.axes(svg, { x: 330, y: 20, w: 280, h: 220 }, [0, 200], [0, Math.max(500, res.stored * 1.1)], { yticks: 4, xticks: 4, xlabel: "步数", ylabel: "已存矿量" });
+      K.svg(svg, "path", { d: res.hist.map((h, i) => (i ? "L" : "M") + ax.sx(i + 1) + "," + ax.sy(h)).join(""), fill: "none", stroke: "var(--c1)", "stroke-width": 2.2 });
+      const trips = res.hist.reduce((s, h, i) => s + (i && h > res.hist[i - 1] ? 1 : 0), 0);
+      return { readout: [
+        { k: "200 步后已存矿量", v: String(res.stored), color: "var(--good)" },
+        { k: "回船坞卸货次数", v: String(trips) },
+        { k: "收集状态下只移动没采矿的步数", v: String(res.idle), color: res.idle > 100 ? "var(--bad)" : "var(--ink)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：折扣回报与优势 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "kind", label: "奖励序列", value: "stock", options: [["stock", "作者式：每步给“已存总量 / 5000”"], ["delta", "改进：每步给“这一步新增的存量 / 5000”"]] },
+      { id: "g", label: "折扣 γ（第 30 格是 0.99）", min: 0, max: 0.99, step: 0.01, value: 0.99, fmt: (v) => v.toFixed(2) },
+      { id: "norm", label: "回报是否标准化（第 34 格做了）", value: "yes", options: [["yes", "标准化：减均值、除以标准差"], ["no", "不标准化"]] },
+      { id: "crit", label: "评论家的估计（假设每步都猜同一个数）", min: -2, max: 2, step: 0.05, value: 0, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "示意的一段 60 步：船在第 15、35、50 步各卸货一次（每次 600）。柱子 = 每步奖励；蓝线 = 折扣回报 G；橙线 = 优势 = G − 评论家估计。优势为正的那些步，动作概率会被提高。",
+    render(svg, v) {
+      const T = 60, dep = { 15: 600, 35: 600, 50: 600 }; let stock = 0; const r = [];
+      for (let t = 0; t < T; t++) { const add = dep[t] || 0; stock += add; r.push(v.kind === "stock" ? stock / 5000 : add / 5000); }
+      let G = []; let s = 0; for (let i = T - 1; i >= 0; i--) { s = r[i] + v.g * s; G.unshift(s); }
+      if (v.norm === "yes") { const m = G.reduce((a, b) => a + b, 0) / T, sd = Math.sqrt(G.reduce((a, b) => a + (b - m) * (b - m), 0) / T) + 1e-8; G = G.map((x) => (x - m) / sd); }
+      const A = G.map((x) => x - v.crit);
+      const all = G.concat(A, r), lo = Math.min(0, ...all), hi = Math.max(0.1, ...all);
+      const ax = K.axes(svg, { x: 50, y: 14, w: 570, h: 270 }, [0, T], [lo, hi], { yticks: 4, xticks: 6, xlabel: "步数" });
+      K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(T), y1: ax.sy(0), y2: ax.sy(0), stroke: "var(--ink-3)" });
+      r.forEach((x, i) => K.svg(svg, "rect", { x: ax.sx(i + 0.1), y: ax.sy(Math.max(0, x)), width: ax.sx(0.8) - ax.sx(0), height: Math.abs(ax.sy(x) - ax.sy(0)), fill: "var(--c2)", opacity: 0.7 }));
+      K.svg(svg, "path", { d: G.map((x, i) => (i ? "L" : "M") + ax.sx(i + 0.5) + "," + ax.sy(x)).join(""), fill: "none", stroke: "var(--c1)", "stroke-width": 2.2 });
+      K.svg(svg, "path", { d: A.map((x, i) => (i ? "L" : "M") + ax.sx(i + 0.5) + "," + ax.sy(x)).join(""), fill: "none", stroke: "var(--warn)", "stroke-width": 1.8, "stroke-dasharray": "5 3" });
+      const tot = r.reduce((a, b) => a + b, 0), idle = r.reduce((a, x, i) => a + (dep[i] ? 0 : x), 0);
+      return { readout: [
+        { k: "60 步奖励总和", v: tot.toFixed(2) },
+        { k: "没卸货的步拿到的奖励占比", v: Math.round((idle / tot) * 100) + "%", color: idle > 0 ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：小 Actor-Critic ---------- */
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "rew", label: "奖励怎么给", value: "both", options: [["both", "两种都训练，放在一起比"], ["stock", "只看作者式：已存总量"], ["delta", "只看改进式：新增存量"]] },
+      { id: "N", label: "训练局数", min: 500, max: 6000, step: 500, value: 4000, fmt: (v) => v.toLocaleString() },
+      { id: "seed", label: "换随机种子", button: true },
+    ],
+    note: "浏览器里真训练：5×5 小棋盘、固定地图、中央是船坞，一局 40 步；状态 = 船的位置 + 载货多少（3 档），动作 = 东南西北 + 原地采矿。演员是 softmax 策略表，评论家是价值表，用一步 TD 误差当优势（比第 34 格的整段回报更简单，原理相同）。注意这里的状态包含船的位置，这正是原 notebook 输入里缺的。",
+    render(svg, v) {
+      const N5 = 5, YARD = 12, T = 40, MV = [[-1, 0], [0, 1], [1, 0], [0, -1]];
+      const map0 = () => { const r = K.rng(7); return Array.from({ length: 25 }, (_, i) => (i === YARD ? 0 : Math.round(r() < 0.35 ? 200 + r() * 300 : r() * 60))); };
+      function run(cum) {
+        const r = K.rng(1 + v.seed * 97), S = 75, A = 5, th = new Float64Array(S * A), V = new Float64Array(S), curve = []; let acc = 0;
+        const cb = (c) => (c < 50 ? 0 : c < 250 ? 1 : 2);
+        for (let ep = 0; ep < v.N; ep++) {
+          const H = map0(); let pos = YARD, cargo = 0, stored = 0, s = pos * 3;
+          for (let t = 0; t < T; t++) {
+            let m = -1e9; for (let a = 0; a < A; a++) m = Math.max(m, th[s * A + a]);
+            const pr = []; let z = 0; for (let a = 0; a < A; a++) { pr[a] = Math.exp(th[s * A + a] - m); z += pr[a]; }
+            let u = r() * z, a = 0; for (; a < A - 1; a++) { u -= pr[a]; if (u < 0) break; }
+            const before = stored;
+            if (a < 4) { const rr = Math.floor(pos / N5) + MV[a][0], cc = (pos % N5) + MV[a][1]; if (rr >= 0 && rr < N5 && cc >= 0 && cc < N5) pos = rr * N5 + cc; }
+            else { const take = Math.floor(H[pos] * 0.25); H[pos] -= take; cargo += take; }
+            if (pos === YARD) { stored += cargo; cargo = 0; }
+            const rew = cum ? stored / 500 : (stored - before) / 100, s2 = pos * 3 + cb(cargo), done = t === T - 1;
+            const delta = rew + (done ? 0 : 0.95 * V[s2]) - V[s];
+            V[s] += 0.1 * delta;
+            for (let b = 0; b < A; b++) th[s * A + b] += 0.05 * delta * ((b === a ? 1 : 0) - pr[b] / z);
+            s = s2;
+          }
+          acc += stored; if ((ep + 1) % 100 === 0) { curve.push(acc / 100); acc = 0; }
+        }
+        return curve;
+      }
+      const runs = [];
+      if (v.rew !== "delta") runs.push(["作者式：已存总量", "var(--c6)", run(true)]);
+      if (v.rew !== "stock") runs.push(["改进式：新增存量", "var(--good)", run(false)]);
+      const ymax = Math.max(100, ...runs.flatMap((x) => x[2])) * 1.1;
+      const ax = K.axes(svg, { x: 60, y: 16, w: 520, h: 250 }, [0, v.N], [0, ymax], { yticks: 4, xticks: 4, xlabel: "训练局数", ylabel: "每局存下的矿（近 100 局平均）" });
+      runs.forEach((x, k) => {
+        K.svg(svg, "path", { d: x[2].map((c, i) => (i ? "L" : "M") + ax.sx((i + 1) * 100) + "," + ax.sy(c)).join(""), fill: "none", stroke: x[1], "stroke-width": 2.4 });
+        K.svg(svg, "text", { x: 70, y: 34 + k * 20, "font-size": 13, fill: x[1], "font-weight": 700 }, x[0]);
+      });
+      return { readout: runs.map((x) => ({ k: x[0] + "：最后 100 局平均", v: Math.round(x[2][x[2].length - 1]).toString(), color: x[1] })) };
+    },
+  });
+})();
+</script>
+</body>
+</html>

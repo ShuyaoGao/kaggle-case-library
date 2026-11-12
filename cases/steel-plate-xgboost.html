@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>钢板缺陷分类</title>
+<meta name="description" content="Kaggle 案例拆解：Playground S4E3 钢板缺陷预测。从缺陷区域的位置、面积、亮度等 27 个特征判断 7 类表面缺陷；多标签改多分类、对抗验证、特征工程、XGBoost + Optuna、SHAP、与 LightGBM 融合。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格数据 · 多分类 · 表面质检</div>
+  <h1>钢板缺陷是哪一种：从面积、周长、亮度判断 7 类瑕疵</h1>
+  <p class="en">Steel Plate EDA &amp; XGBoost is all you need</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">多标签 → 多分类</span><span class="tag method">对抗验证</span><span class="tag method">特征工程</span><span class="tag method">分层 K 折</span>
+    <span class="tag method">XGBoost</span><span class="tag method">Optuna 贝叶斯调参</span><span class="tag method">SHAP</span><span class="tag method">LightGBM 融合</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Luca Massaron</b>（《The Kaggle Book》作者之一）</span>
+    <span>Kaggle 点赞 <b>448</b>（2026-11 抓取）</span>
+    <span>竞赛 <b>playground-series-s4e3</b></span>
+    <span><a href="https://www.kaggle.com/code/lucamassaron/steel-plate-eda-xgboost-is-all-you-need" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">钢板上每一处“疑似缺陷区域”的 27 个测量值</div><p>位置坐标、像素面积、周长、亮度之和/最小/最大、钢种、板厚，以及几个形状指数。Kaggle 用 UCI “Steel Plates Faults” 数据合成扩充而来。<span data-cell="16">出处</span> <span data-cell="38">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这处缺陷属于 7 类中的哪一类</div><p>Pastry、Z 向划痕、K 向划痕、污渍、脏污、凸起、其他。作者在 7 个 0/1 答案上算各类 ROC-AUC 的平均来评估。<span data-cell="82">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">一个精心调参的 XGBoost</div><p>先把多标签整理成 8 类多分类，做对抗验证和三组特征工程，分层 5 折交叉验证，Optuna 调参，SHAP 解释，最后与 LightGBM 按类别加权融合。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">调参后交叉验证 ROC-AUC 0.88887</div><p>写死在第 90 格的最优值（打印时误写成 accuracy）。<span data-cell="90">出处</span> 错误分析发现“无缺陷”类基本无法预测，Pastry、Dirtiness 最难。<span data-cell="84">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">Kaggle 竞赛 <b>Playground Series S4E3: Steel Plate Defect Prediction</b>。数据由原始 UCI Steel Plates Faults（M. Buscema 等，2010）用生成模型扩充而来，作者在第 16 格整理了它的来历。训练/测试行数在运行输出里，这里不写具体数字。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">特征数</div><div class="v">27</div></div>
+        <div class="stat-tile"><div class="k">缺陷类别</div><div class="v">7（+无缺陷）</div></div>
+        <div class="stat-tile"><div class="k">没有任何缺陷的样本</div><div class="v">800 多个</div></div>
+        <div class="stat-tile"><div class="k">同时有两种缺陷</div><div class="v">21 个</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">27 个特征见 <span data-cell="38">第 38 格</span>；800 多个、21 个见 <span data-cell="26">第 26 格</span>；没有缺失值 <span data-cell="40">第 40 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么（作者第 38 格的分组）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>分组</th><th>列</th><th>含义</th></tr>
+        <tr><td>位置</td><td><code>X_Minimum … Y_Maximum</code></td><td>缺陷区域的边界框坐标</td></tr>
+        <tr><td>大小</td><td><code>Pixels_Areas, X_Perimeter, Y_Perimeter</code></td><td>面积（像素数）、横向/纵向周长</td></tr>
+        <tr><td>亮度</td><td><code>Sum / Minimum / Maximum_of_Luminosity</code></td><td>区域内亮度之和、最暗、最亮</td></tr>
+        <tr><td>材料</td><td><code>TypeOfSteel_A300/A400, Steel_Plate_Thickness</code></td><td>钢种（两个 0/1 列）、板厚</td></tr>
+        <tr><td>形状指数</td><td><code>Edges_Index, Square_Index, Orientation_Index…</code></td><td>边缘、方正程度、朝向等几何指标；还有面积的对数、Sigmoid</td></tr>
+        <tr><td>答案</td><td><code>Pastry … Other_Faults</code></td><td><b>要预测的 7 个 0/1 列</b>，每列表示是否属于该类缺陷</td></tr>
+      </table></div>
+    </div>
+  </div>
+  <p class="callout" style="margin-top:14px">和 <b>Severstal 钢板分割</b>案例的区别：那个案例直接看照片、逐像素圈出缺陷；这个案例里，缺陷区域已经被别的系统找出来并测量好了，我们只拿这些<b>测量数字</b>判断它是哪一类。</p>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="66">
+    <h3>动手试试 A · 形状特征：划痕和斑块，面积/周长比差多少 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="82">
+    <h3>动手试试 B · 梯度提升：一棵接一棵修正错误 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>“其他缺陷”最常见，污渍和脏污最少</td><td><span data-cell="21">第 21 格</span></td></tr>
+        <tr><td>800 多个样本没有缺陷，21 个同时有两种（多是 K 向划痕 + 其他）；把双缺陷归为 K 向划痕，转成 8 类多分类</td><td><span data-cell="26">第 26 格</span> <span data-cell="29">第 29 格</span></td></tr>
+        <tr><td>对抗验证 ROC-AUC 约 0.5，训练集与测试集来自同一分布</td><td><span data-cell="59">第 59 格</span></td></tr>
+        <tr><td>“无缺陷”类完全无法预测，像随机噪声；Pastry 与 Dirtiness 最难，常和 Bumps、Other_Faults 混淆</td><td><span data-cell="84">第 84 格</span></td></tr>
+        <tr><td>提升模型最好的办法是特征工程</td><td><span data-cell="85">第 85 格</span></td></tr>
+        <tr><td>Optuna 调参后的最优交叉验证 ROC-AUC：0.88887</td><td><span data-cell="90">第 90 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">首个 XGBoost 的交叉验证分数、各模型 oof ROC-AUC、融合后的分数和每类融合权重都在运行输出里，源码不带，这里不列。</p>
+      <p class="callout">读代码发现的小问题（原文未改）：①第 3 格写的是“第 4 季第 2 期”，数据路径是 <code>s4e3</code>（第 3 期）；②0.88887 是 ROC-AUC，打印时写成了 “accuracy”，Optuna 的 study 名字还是上一个比赛的 “obesity_risk” <span data-cell="90">第 90 格</span>；③第 84 格建议删掉无缺陷样本，后面并没有删；④融合权重在同一份 oof 上优化又在同一份上评估，融合分数会略偏乐观 <span data-cell="113">第 113 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>表面检测系统找到一个可疑区域后，根据它的几何和亮度测量值，自动归类缺陷类型，分派给不同的工艺环节去追因（划痕查轧辊和输送，污渍查清洗和储运）。</li>
+        <li><b>同类问题：</b>铝板、玻璃、薄膜、纸张的缺陷分类；PCB 焊点缺陷分类；任何“先检出、再分类”的质检系统的第二步。</li>
+        <li><b>可迁移的套路：</b>先确认是多标签还是多分类 → 对抗验证检查训练/测试分布 → 有物理意义的比值、范围特征 → 分层交叉验证 + oof 预测 → 错误分析看哪几类互相混淆 → 贝叶斯调参 → SHAP 看每类靠什么判断 → 多模型按类融合。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>目标转换：矩阵乘法把 7 个 0/1 列变成 0–7 的类别号 <span data-cell="32">第 32 格</span></li>
+        <li>对抗验证：随机森林区分“训练 / 测试” <span data-cell="58">第 58 格</span></li>
+        <li>特征工程：X/Y 范围、面积/周长比、亮度范围 <span data-cell="63">第 63 格</span> <span data-cell="66">第 66 格</span> <span data-cell="69">第 69 格</span></li>
+        <li>MinMax 缩放（训练集拟合）<span data-cell="76">第 76 格</span>；分层 5 折 <span data-cell="78">第 78 格</span></li>
+        <li>XGBoost（GPU，300 棵，深度 6）<span data-cell="82">第 82 格</span>；Optuna TPE 多元采样 <span data-cell="90">第 90 格</span></li>
+        <li>SHAP（XGBoost 自带 <code>pred_contribs</code>）<span data-cell="95">第 95 格</span>；LightGBM + Nelder-Mead 逐类权重融合 <span data-cell="113">第 113 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>800 多个样本“没有任何缺陷”，却被检测系统当作缺陷区域记录下来。你觉得在真实钢厂里，这些可能是什么？作者说它们像随机噪声，该删还是该留？</li>
+      <li>21 个双缺陷样本被一律归为 K 向划痕。这种简化会让模型学到什么偏差？有没有不丢信息的做法（比如每类一个二分类器）？</li>
+      <li>对抗验证得到 0.5 说明训练集和测试集“分不出来”。如果得到 0.9，你会怎么办？</li>
+      <li>数据是用生成模型从原始 UCI 数据合成的。在合成数据上调出来的模型和参数，拿到真实钢厂能直接用吗？</li>
+      <li>和 Severstal 那种直接看图分割相比，“先测量、再用表格模型分类”有什么好处和局限？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Luca Massaron，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Kaggle Playground Series S4E3；原始数据 M. Buscema, S. Terzi, W. Tastle, Steel Plates Faults（UCI, CC BY 4.0）。
+</footer>
+</main>
+
+<script src="nb/steel-plate-xgboost.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const CLS = ["Pastry", "Z_Scratch", "K_Scatch", "Stains", "Dirtiness", "Bumps", "Other_Faults"];
+  const CC = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c5)", "var(--c6)", "var(--ink-3)"];
+
+  /* 在 H×W 网格上画一块缺陷形状，返回 0/1 掩码 */
+  function shape(kind, W, H, size, seed, angle) {
+    const r = K.rng(seed), m = new Array(W * H).fill(0), cx = W / 2, cy = H / 2;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const dx = x - cx, dy = y - cy, a = (angle || 0) * Math.PI / 180, u = dx * Math.cos(a) + dy * Math.sin(a), v = -dx * Math.sin(a) + dy * Math.cos(a);
+      let on = false;
+      if (kind === "scratch") on = Math.abs(v) < 0.8 + size * 0.15 && Math.abs(u) < 6 + size * 3;
+      else if (kind === "spot") on = u * u + v * v < (2 + size * 1.3) ** 2;
+      else if (kind === "stain") on = Math.hypot(u, v) < (2.5 + size * 1.2) * (1 + 0.35 * Math.sin(3 * Math.atan2(v, u) + seed));
+      else if (kind === "dirt") on = r() < 0.18 && Math.hypot(u, v) < 4 + size * 2;
+      m[y * W + x] = on ? 1 : 0;
+    }
+    return m;
+  }
+  function measure(m, W, H) {
+    let A = 0, px = 0, py = 0, xmin = W, xmax = -1, ymin = H, ymax = -1;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (m[y * W + x]) {
+      A++; xmin = Math.min(xmin, x); xmax = Math.max(xmax, x); ymin = Math.min(ymin, y); ymax = Math.max(ymax, y);
+      if (x === 0 || !m[y * W + x - 1]) py++; if (x === W - 1 || !m[y * W + x + 1]) py++;
+      if (y === 0 || !m[(y - 1) * W + x]) px++; if (y === H - 1 || !m[(y + 1) * W + x]) px++;
+    }
+    return { A, px, py, xr: xmax - xmin + 1, yr: ymax - ymin + 1 };
+  }
+
+  const steps = [
+    {
+      title: "Playground 竞赛：钢板表面缺陷 7 类", kicker: "第 0–8 格 · 背景", at: 0, cells: [3, 4, 5], highlight: ["Steel Plate Defect Prediction", "six parts"],
+      html: `<p>这是 Kaggle 的 <b>Playground（练习赛）</b>系列，题目是钢板缺陷预测。作者是《The Kaggle Book》的作者之一，他说这份 notebook 想做“直奔主题”的 EDA：不堆砌图表，只画能帮助理解问题的图。<span data-cell="4">出处</span></p><p>全文分六部分：读数据、看目标、EDA 与数据准备、建模、可解释性、准备提交。</p>`,
+      draw(svg, ctx) {
+        const parts = ["读数据", "看目标", "EDA + 准备", "建模", "可解释性", "提交"];
+        parts.forEach((p, i) => { const g = K.node(svg, 20 + (i % 3) * 230, 50 + Math.floor(i / 3) * 120, 200, 70, (i + 1) + ". " + p, { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" }); g.style.opacity = 0; ctx.wait(i * 250).then((ok) => ok && ctx.tween(300, (t) => (g.style.opacity = t))); });
+        K.svg(svg, "text", { x: 20, y: 310, "font-size": 13, class: "muted" }, "notebook 的六个部分（作者第 5 格）");
+      },
+    },
+    {
+      title: "读数据，以及它从哪里来", kicker: "第 9–19 格 · 读数据", cells: [9, 11, 13, 15, 16, 17, 19], highlight: ["set_index(\"id\")", "Steel Plates Faults", "targets_bin"],
+      html: `<p>读入训练集、测试集，以 id 为索引。作者发现这份数据对应 UCI 的 <b>Steel Plates Faults</b> 数据集（2010 年公开，M. Buscema 等创建），并查了相关论文。<span data-cell="16">出处</span></p><p>训练集的最后 7 列是答案：每列一个 0/1，表示这处缺陷是否属于该类。作者先把这 7 列单独拿出来，叫 <code>targets_bin</code>。</p>`,
+      draw(svg, ctx) {
+        const feat = ["X_Min", "Y_Min", "Areas", "Lum_Sum", "…"], tg = ["Pastry", "Z_Scr", "K_Scr", "Stains", "Dirt", "Bumps", "Other"];
+        feat.forEach((f, j) => K.node(svg, 20 + j * 70, 40, 64, 30, f, { fs: 11 }));
+        const tgs = tg.map((f, j) => K.node(svg, 380 + j * 46, 40, 42, 30, f, { fs: 9, stroke: CC[j] }));
+        const rows = [[0, 0, 1, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 1], [0, 0, 0, 0, 0, 0, 0], [0, 0, 1, 0, 0, 0, 1]];
+        rows.forEach((r0, i) => { feat.forEach((f, j) => K.svg(svg, "text", { x: 52 + j * 70, y: 100 + i * 34, "text-anchor": "middle", "font-size": 12, class: "muted" }, "·")); r0.forEach((v, j) => K.svg(svg, "text", { x: 401 + j * 46, y: 100 + i * 34, "text-anchor": "middle", "font-size": 13, "font-weight": v ? 700 : 400, fill: v ? CC[j] : "var(--ink-3)" }, v)); });
+        const box = K.svg(svg, "rect", { x: 374, y: 32, width: 330, height: 200, rx: 8, fill: "none", stroke: "var(--accent)", "stroke-width": 2, "stroke-dasharray": "6 4" }); box.style.opacity = 0;
+        K.svg(svg, "text", { x: 380, y: 260, "font-size": 13, fill: "var(--accent)" }, "↑ 这 7 列拿出来当答案 targets_bin");
+        K.svg(svg, "text", { x: 20, y: 300, "font-size": 12, class: "muted" }, "示意：第 3 行全是 0（无缺陷），第 4 行有两个 1（双缺陷）");
+        ctx.wait(500).then((ok) => ok && ctx.tween(600, (t) => (box.style.opacity = t)));
+      },
+    },
+    {
+      title: "七种缺陷分别是什么", kicker: "第 20–23 格 · 目标分析", cells: [20, 21, 22, 23], highlight: ["targets_bin.sum(axis=0)"],
+      html: `<p>数一数每类有多少：<b>“其他缺陷”最多，污渍和脏污最少。</b><span data-cell="21">出处</span> 作者还逐一解释了七类缺陷（第 23 格）：</p><ul class="tight"><li><b>Pastry</b>：表面的小块不平整</li><li><b>Z 向划痕</b>：顺着轧制方向的细长划痕；<b>K 向划痕</b>：垂直于轧制方向</li><li><b>Stains 污渍</b>：锈、油等造成的变色；<b>Dirtiness 脏污</b>：附着的灰尘颗粒</li><li><b>Bumps 凸起</b>：表面鼓起的部分；<b>Other_Faults</b>：其他各种表面缺陷</li></ul><p>动画用简笔画示意几种缺陷的样子（不是真实图片）。</p>`,
+      draw(svg, ctx) {
+        const W = 28, H = 28, items = [["划痕", "scratch", 0], ["凸起/小块", "spot", 0], ["污渍", "stain", 0], ["脏污", "dirt", 0]];
+        items.forEach((it, k) => { const m = shape(it[1], W, H, 3, 5 + k, it[1] === "scratch" ? 0 : 0); const g = K.svg(svg, "g"); g.style.opacity = 0;
+          K.svg(g, "rect", { x: 20 + k * 175, y: 40, width: 150, height: 150, fill: "var(--panel-2)", stroke: "var(--line)" });
+          for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (m[y * W + x]) K.svg(g, "rect", { x: 20 + k * 175 + x * 150 / W, y: 40 + y * 150 / H, width: 150 / W + 0.3, height: 150 / H + 0.3, fill: CC[[1, 5, 3, 4][k]] });
+          K.svg(g, "text", { x: 95 + k * 175, y: 215, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, it[0]);
+          ctx.wait(k * 300).then((ok) => ok && ctx.tween(300, (t) => (g.style.opacity = t))); });
+        K.svg(svg, "text", { x: 20, y: 260, "font-size": 13 }, "同样是缺陷：划痕细长、污渍成团、脏污零散 → 面积、周长、范围的组合不同");
+        K.svg(svg, "text", { x: 20, y: 290, "font-size": 12, class: "muted" }, "示意简笔画，不是数据集里的照片（这份数据只有测量值，没有图片）");
+      },
+    },
+    {
+      title: "多标签？有的没缺陷、有的有两种", kicker: "第 24–28 格 · 标签结构", cells: [24, 25, 26, 27, 28], highlight: ["sum(axis=1).value_counts()", "==2"],
+      html: `<p>每行把 7 个答案加起来：</p><ul class="tight"><li>大多数是 1：只属于一类</li><li><b>800 多个是 0</b>：哪一类都不是</li><li><b>21 个是 2</b>：同时属于两类，基本是“K 向划痕 + 其他”，少数是“K 向划痕 + 凸起”<span data-cell="28">出处</span></li></ul><p>所以严格说这是<b>多标签</b>问题（一个样本可以有多个标签），不是多分类（每个样本只能选一个）。</p>`,
+      draw(svg, ctx) {
+        const groups = [["1 类", 0.9, "var(--c1)"], ["0 类（无缺陷）", 0.08, "var(--warn)"], ["2 类（双缺陷）", 0.02, "var(--c6)"]];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "每行 7 个答案加起来 = ?");
+        const bs = groups.map((g, i) => { K.svg(svg, "text", { x: 30, y: 82 + i * 70, "font-size": 14 }, g[0]); return K.svg(svg, "rect", { x: 200, y: 64 + i * 70, width: 0, height: 28, rx: 3, fill: g[2] }); });
+        K.svg(svg, "text", { x: 200, y: 290, "font-size": 12, class: "muted" }, "条长为示意比例；作者文字给出：0 类 800 多个、2 类 21 个");
+        ctx.tween(1200, (t) => bs.forEach((b, i) => b.setAttribute("width", Math.max(6, 460 * groups[i][1]) * t)));
+      },
+    },
+    {
+      title: "整理成 8 类多分类", kicker: "第 29–35 格 · 目标转换", cells: [29, 30, 31, 32, 33, 34, 35], highlight: ["Zero_Defects", "targets_bin@(np.arange", "== 3"],
+      html: `<p>作者的简化：加一个<b>“无缺陷”类</b>（编号 0），把 21 个双缺陷样本都归为 <b>K 向划痕</b>，于是变成 0–7 共 8 类的多分类。</p><p>转换用了一个小技巧：7 个 0/1 列组成的向量乘以 <code>[1, 2, …, 7]</code>，只有一个 1 的行就得到它的类别号，全 0 的行得到 0。</p><p>画出类别分布后作者提醒：类别不平衡，会给交叉验证和模型都带来挑战。</p>`,
+      draw(svg, ctx) {
+        const v = [0, 0, 1, 0, 0, 0, 0], w = [1, 2, 3, 4, 5, 6, 7];
+        v.forEach((x, j) => { K.node(svg, 40 + j * 50, 60, 44, 40, String(x), { fs: 16, bold: x === 1, stroke: x ? CC[j] : "var(--line)" }); K.node(svg, 40 + j * 50, 150, 44, 40, String(w[j]), { fs: 16 }); });
+        K.svg(svg, "text", { x: 40, y: 48, "font-size": 12 }, "一行答案（7 个 0/1）");
+        K.svg(svg, "text", { x: 40, y: 140, "font-size": 12 }, "× [1, 2, …, 7]");
+        const prods = v.map((x, j) => K.svg(svg, "text", { x: 62 + j * 50, y: 235, "text-anchor": "middle", "font-size": 15 }, ""));
+        const res = K.svg(svg, "text", { x: 420, y: 130, "font-size": 26, "font-weight": 700, fill: CC[2] }, "");
+        (async () => { for (let j = 0; j < 7; j++) { prods[j].textContent = String(v[j] * w[j]); if (!(await ctx.wait(180))) return; } res.textContent = "= 3 → K_Scatch"; })();
+        K.svg(svg, "text", { x: 40, y: 290, "font-size": 12, class: "muted" }, "全 0 的行 → 0（无缺陷）；双缺陷行被直接改成 3");
+      },
+    },
+    {
+      title: "27 个特征：位置、大小、亮度、钢种", kicker: "第 36–53 格 · 认识特征", cells: [36, 38, 40, 41, 46, 48, 50, 52, 53], highlight: ["TypeOfSteel_A300", "Steel_Plate_Thickness", "Outside_Global_Index"],
+      html: `<p>作者按含义把 27 个特征分成位置、大小、亮度、材料与指数、对数、统计几组（见“数据”一节）。检查发现：</p><ul class="tight"><li>没有缺失值</li><li>数值特征取值都足够多，可以当连续变量</li><li><code>TypeOfSteel_A300 / A400</code> 是 0/1；<b>板厚</b>是有序的离散值，直接当数值用</li><li><code>Outside_Global_Index</code> 看起来像 0/1，却有一些中间值，作者称它“古怪”，暂时不处理 <span data-cell="53">出处</span></li></ul>`,
+      draw(svg, ctx) {
+        const groups = [["位置", 4, "var(--c1)"], ["大小", 3, "var(--c2)"], ["亮度", 3, "var(--c3)"], ["材料", 3, "var(--c4)"], ["形状指数", 8, "var(--c5)"], ["对数/统计", 6, "var(--c6)"]];
+        let x = 30; const gs = [];
+        groups.forEach((g, i) => { const w = g[1] * 22; const r0 = K.svg(svg, "rect", { x, y: 120, width: w - 4, height: 60, rx: 6, fill: g[2], opacity: 0 }); K.svg(svg, "text", { x: x + w / 2 - 2, y: 205, "text-anchor": "middle", "font-size": 12 }, g[0]); K.svg(svg, "text", { x: x + w / 2 - 2, y: 155, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "#fff" }, g[1]); gs.push(r0); x += w; });
+        K.svg(svg, "text", { x: 30, y: 90, "font-size": 14, "font-weight": 700 }, "27 个特征按含义分组（每组个数按第 38 格的列表计）");
+        (async () => { for (const r0 of gs) if (!(await ctx.tween(250, (t) => (r0.style.opacity = 0.75 * t)))) return; })();
+      },
+    },
+    {
+      title: "训练集和测试集像不像：对抗验证", kicker: "第 54–59 格 · 分布检查", cells: [54, 55, 56, 58, 59], highlight: ["[0] * len(train) + [1] * len(test)", "roc_auc_score"],
+      html: `<p>先把每个特征在训练集、测试集上的分布并排画出来对比。</p><p>然后是<b>对抗验证</b>（来自《The Kaggle Book》）：把训练集标 0、测试集标 1 混在一起，训练一个随机森林去区分“这行来自训练集还是测试集”。如果分不出来（ROC-AUC 约 0.5，和瞎猜一样），说明两者分布一致，交叉验证分数可以信任。作者得到的就是约 0.5。<span data-cell="59">出处</span></p>`,
+      draw(svg, ctx) {
+        const r = K.rng(58), P = []; for (let i = 0; i < 160; i++) P.push([K.randn(r), K.randn(r), i % 2]);
+        const ax = K.axes(svg, { x: 40, y: 30, w: 300, h: 260 }, [-3, 3], [-3, 3], { xticks: 0, yticks: 0 });
+        P.forEach((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 3.5, fill: p[2] ? "var(--c6)" : "var(--c1)", opacity: 0.7 }));
+        K.svg(svg, "text", { x: 360, y: 60, "font-size": 13, fill: "var(--c1)" }, "● 训练集（标 0）");
+        K.svg(svg, "text", { x: 360, y: 84, "font-size": 13, fill: "var(--c6)" }, "● 测试集（标 1）");
+        K.svg(svg, "text", { x: 360, y: 130, "font-size": 13 }, "让模型猜“这行来自哪边”");
+        const v = K.svg(svg, "text", { x: 360, y: 180, "font-size": 24, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 360, y: 210, "font-size": 13, fill: "var(--good)" }, "≈ 0.5：完全分不出来 → 同分布 ✓");
+        ctx.tween(1200, (t) => (v.textContent = "AUC ≈ " + (0.9 - 0.4 * t).toFixed(2)));
+      },
+    },
+    {
+      title: "特征工程：范围、面积/周长比、亮度范围", kicker: "第 60–73 格 · 造新特征", cells: [60, 62, 63, 65, 66, 68, 69, 71, 72], highlight: ["X_Range", "Area_Perimeter_Ratio", "Luminosity_Range"],
+      html: `<p>作者造了四个有物理意义的新特征：</p><ul class="tight"><li><b>X_Range、Y_Range</b> = 最大坐标 − 最小坐标：缺陷横向、纵向各延伸多远</li><li><b>面积/周长比</b> = 面积 ÷ (X 周长 + Y 周长)：越紧凑的形状这个比值越大，细长的划痕比值很小</li><li><b>亮度范围</b> = 最亮 − 最暗：区域内明暗反差有多大</li></ul><p>动画：同样面积的一条划痕和一块圆斑，周长差得很多。处理完的数据存成 CSV，方便以后给别的模型用。</p>`,
+      draw(svg, ctx) {
+        const W = 40, H = 30;
+        const s1 = shape("scratch", W, H, 3, 1, 0), s2 = shape("spot", W, H, 2.3, 2);
+        [s1, s2].forEach((m, k) => {
+          const ms = measure(m, W, H), x0 = 30 + k * 340;
+          K.svg(svg, "rect", { x: x0, y: 30, width: 280, height: 210, fill: "var(--panel-2)", stroke: "var(--line)" });
+          const cells = []; for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (m[y * W + x]) cells.push(K.svg(svg, "rect", { x: x0 + x * 7, y: 30 + y * 7, width: 7, height: 7, fill: k ? CC[5] : CC[1], opacity: 0 }));
+          ctx.tween(900, (t) => cells.forEach((c, i) => (c.style.opacity = i < t * cells.length ? 1 : 0)));
+          K.svg(svg, "text", { x: x0, y: 265, "font-size": 13 }, `${k ? "圆斑" : "划痕"}：面积 ${ms.A}，周长 ${ms.px + ms.py}`);
+          K.svg(svg, "text", { x: x0, y: 290, "font-size": 14, "font-weight": 700 }, `面积/周长 = ${(ms.A / (ms.px + ms.py)).toFixed(2)}`);
+        });
+        K.svg(svg, "text", { x: 30, y: 320, "font-size": 11, class: "muted" }, "现场按像素数出来的面积和周长（示意形状）");
+      },
+    },
+    {
+      title: "缩放与分层 5 折", kicker: "第 74–79 格 · 建模准备", cells: [74, 75, 76, 77, 78], highlight: ["mmscaler.fit(train)", "StratifiedKFold(5"],
+      html: `<p>为了在 GPU 上算得快，作者把所有特征用 <b>MinMaxScaler</b> 压到 0–1（只在训练集上拟合，测试集用同一把尺子，这是正确做法）；保持 float64 精度，避免 float32 的舍入误差。</p><p>类别不平衡，所以用<b>分层 5 折</b>：每一折里 8 类的比例都和整体一致，不会出现某一折里某类缺陷一个都没有。</p>`,
+      draw(svg, ctx) {
+        const props = [0.08, 0.07, 0.06, 0.18, 0.04, 0.03, 0.25, 0.29];
+        const cols = ["var(--warn)"].concat(CC);
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "分层 5 折：每一折里各类比例都一样（比例为示意）");
+        for (let f = 0; f < 5; f++) { let x = 120; K.svg(svg, "text", { x: 30, y: 72 + f * 50, "font-size": 13 }, "第 " + (f + 1) + " 折"); props.forEach((p, j) => { const w = p * 520; const r0 = K.svg(svg, "rect", { x, y: 56 + f * 50, width: w - 1, height: 26, fill: cols[j], opacity: 0 }); ctx.wait(f * 200).then((ok) => ok && ctx.tween(300, (t) => (r0.style.opacity = 0.8 * t))); x += w; }); }
+      },
+    },
+    {
+      title: "第一个 XGBoost：交叉验证与 ROC-AUC", kicker: "第 80–82 格 · 建模", cells: [80, 81, 82], highlight: ["n_estimators=300", "max_depth=6", "cv_oof.iloc[val_idx, :]", "y_val_prob[:, 1:]"],
+      html: `<p>先手动设一个 XGBoost：300 棵树、每棵最深 6 层。<b>梯度提升</b>的思路：第一棵树先粗略预测，后面每棵树专门学“前面所有树加起来还差多少”，一点一点修正。</p><p>每一折训练完，对验证折预测概率，存进 <b>oof</b>（out-of-fold，折外预测）表：最后每个训练样本都有一份“模型没见过它时”的预测。评分时去掉“无缺陷”那一列，在原来的 7 个 0/1 答案上算各类 ROC-AUC 的平均（作者注释：在原始的多标签答案上算分）。</p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [0, 10], [-1.5, 1.5], { xlabel: "某个特征（示意）", yticks: 0 });
+        const f = (x) => Math.sin(x * 0.9) + 0.3 * Math.cos(x * 2.3);
+        const r = K.rng(3), P = []; for (let i = 0; i < 60; i++) { const x = r() * 10; P.push([x, f(x) + K.randn(r) * 0.12]); }
+        P.forEach((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 3, fill: "var(--ink-3)", opacity: 0.6 }));
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const lab = K.svg(svg, "text", { x: 420, y: 52, "font-size": 13, "font-family": "var(--mono)", fill: "var(--c1)" }, "");
+        let pred = P.map(() => 0);
+        const fitStump = (res) => { let best = null; for (let s = 0.5; s < 10; s += 0.25) { const L = [], R = []; P.forEach((p, i) => (p[0] < s ? L : R).push(res[i])); if (!L.length || !R.length) continue; const ml = L.reduce((a, b) => a + b) / L.length, mr = R.reduce((a, b) => a + b) / R.length; let e = 0; P.forEach((p, i) => (e += (res[i] - (p[0] < s ? ml : mr)) ** 2)); if (!best || e < best.e) best = { e, s, ml, mr }; } return best; };
+        const stumps = [];
+        (async () => {
+          for (let k = 1; k <= 25; k++) {
+            const res = P.map((p, i) => p[1] - pred[i]), st = fitStump(res); stumps.push(st);
+            pred = P.map((p, i) => pred[i] + 0.4 * (p[0] < st.s ? st.ml : st.mr));
+            let d = ""; for (let x = 0; x <= 10; x += 0.05) { let y = 0; stumps.forEach((s) => (y += 0.4 * (x < s.s ? s.ml : s.mr))); d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(y); }
+            path.setAttribute("d", d); lab.textContent = "已经种了 " + k + " 棵树";
+            if (!(await ctx.wait(160))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "错误分析：无缺陷类像随机噪声", kicker: "第 83–87 格 · 错误分析", cells: [83, 84, 85, 86, 87], highlight: ["classification_report", "confusion_matrix"],
+      html: `<p>用 oof 预测画分类报告和混淆矩阵，作者得出：</p><ul class="tight"><li><b>“无缺陷”类完全预测不了</b>，看起来是散落在各类里的随机错误，也许干脆删掉</li><li><b>Pastry 和 Dirtiness 最难</b>：Pastry 常被当成 Bumps，Dirtiness 也常和 Bumps 混；这三类又常被当成 Other_Faults <span data-cell="84">出处</span></li></ul><p>作者认为解决这些问题最好的办法是<b>特征工程</b>。<span data-cell="85">出处</span></p>`,
+      draw(svg, ctx) {
+        const L = ["无缺陷", "Pastry", "Dirt", "Bumps", "Other"];
+        const M = [[0.05, 0.1, 0.05, 0.35, 0.45], [0.02, 0.35, 0.03, 0.35, 0.25], [0.01, 0.03, 0.45, 0.25, 0.26], [0.01, 0.05, 0.04, 0.7, 0.2], [0.01, 0.04, 0.03, 0.17, 0.75]];
+        L.forEach((l, i) => { K.svg(svg, "text", { x: 120, y: 74 + i * 48, "text-anchor": "end", "font-size": 12 }, "真 " + l); K.svg(svg, "text", { x: 150 + i * 64, y: 40, "text-anchor": "middle", "font-size": 11 }, "判 " + l); });
+        const cells = []; M.forEach((row, i) => row.forEach((v, j) => cells.push({ e: K.svg(svg, "rect", { x: 120 + j * 64, y: 50 + i * 48, width: 60, height: 44, rx: 3, fill: K.heat(0) }), v })));
+        K.svg(svg, "text", { x: 470, y: 90, "font-size": 13, "font-weight": 700 }, "颜色越深 = 比例越高");
+        K.svg(svg, "text", { x: 470, y: 120, "font-size": 12 }, "第一行：无缺陷几乎全被判成别的");
+        K.svg(svg, "text", { x: 470, y: 144, "font-size": 12 }, "Pastry、Dirt 大量流向 Bumps / Other");
+        K.svg(svg, "text", { x: 470, y: 190, "font-size": 11, class: "muted" }, "比例为示意，按作者第 84 格");
+        K.svg(svg, "text", { x: 470, y: 206, "font-size": 11, class: "muted" }, "的文字描述画出，非运行结果");
+        ctx.tween(1200, (t) => cells.forEach((c) => K.set(c.e, { fill: K.heat(c.v * t * 1.3) })));
+      },
+    },
+    {
+      title: "Optuna 贝叶斯调参，全量重训", kicker: "第 88–92 格 · 调参", cells: [88, 89, 90, 91, 92], highlight: ["TPESampler(n_startup_trials=30, multivariate=True", "best_value = 0.88887", "best optmized accuracy"],
+      html: `<p>用 <b>Optuna</b> 调 XGBoost 的 10 个超参数（树的数量、学习率、深度、采样比例、正则化……）：前 30 次随机试，之后用 <b>TPE 贝叶斯搜索</b>——根据已经试过的结果，推测哪片参数区域更可能好，就多往那里试，一共 100 次。</p><p>为了省时间，搜索开关默认关着，直接用写死的最优结果：<b>交叉验证 ROC-AUC 0.88887</b>，最优深度只有 3、785 棵树、学习率约 0.02。<span data-cell="90">出处</span> 然后用这组参数在全部训练数据上重训。</p><p class="callout">打印语句写的是 “best optmized accuracy”，但这个值是 ROC-AUC；study 名字 <code>multi_class_prediction_of_obesity_risk</code> 是从上一期比赛复制来的。</p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [0, 1], [0, 1], { xlabel: "学习率（示意参数轴）", ylabel: "深度（示意）" });
+        const score = (x, y) => Math.exp(-((x - 0.25) ** 2) / 0.02 - ((y - 0.3) ** 2) / 0.04);
+        for (let i = 0; i < 24; i++) for (let j = 0; j < 12; j++) K.svg(svg, "rect", { x: ax.sx(i / 24), y: ax.sy((j + 1) / 12), width: 25, height: 21, fill: K.heat(score((i + 0.5) / 24, (j + 0.5) / 12) * 0.6) });
+        const r = K.rng(11);
+        (async () => {
+          let best = { s: -1 };
+          for (let k = 0; k < 40; k++) {
+            let x, y; if (k < 15) { x = r(); y = r(); } else { x = K.clamp(best.x + K.randn(r) * 0.08, 0, 1); y = K.clamp(best.y + K.randn(r) * 0.1, 0, 1); }
+            const s = score(x, y); if (s > best.s) best = { s, x, y };
+            K.svg(svg, "circle", { cx: ax.sx(x), cy: ax.sy(y), r: 4, fill: k < 15 ? "var(--warn)" : "var(--c6)", stroke: "var(--panel)" });
+            if (!(await ctx.wait(90))) return;
+          }
+          K.svg(svg, "text", { x: 420, y: 60, "font-size": 12 }, "橙：前期随机试   红：TPE 往好区域集中");
+        })();
+      },
+    },
+    {
+      title: "SHAP：每一类靠什么判断", kicker: "第 93–98 格 · 可解释性", cells: [93, 94, 95, 97, 98], highlight: ["pred_contribs=True", "shap.summary_plot", "violin"],
+      html: `<p>用 XGBoost 自带的 <code>pred_contribs=True</code> 直接算出每个样本、每一类、每个特征的 <b>SHAP 值</b>：这个特征把“属于这一类”的分数推高了多少、还是拉低了多少。</p><p>作者先画了一张堆叠条形图，看每个特征对 8 个类别的总体贡献；再为每一类单独画一张小提琴图，看特征取值高低如何影响该类。具体排序在运行输出图里，源码不带，这里不列。</p>`,
+      draw(svg, ctx) {
+        const feats = ["特征 A", "特征 B", "特征 C", "特征 D", "特征 E"], r = K.rng(4);
+        K.svg(svg, "text", { x: 30, y: 28, "font-size": 13, "font-weight": 700 }, "堆叠条形图的样子：每段 = 对某一类的平均 |SHAP|（示意）");
+        const segs = [];
+        feats.forEach((f, i) => { K.svg(svg, "text", { x: 30, y: 72 + i * 50, "font-size": 13 }, f); let x = 110; for (let c = 0; c < 7; c++) { const w = (5 - i) * 10 * (0.3 + r()); segs.push({ e: K.svg(svg, "rect", { x, y: 56 + i * 50, width: 0, height: 24, fill: CC[c] }), w, x }); x += w; } });
+        CLS.forEach((c, k) => K.svg(svg, "text", { x: 30 + k * 95, y: 320, "font-size": 10, fill: CC[k] }, "■ " + c));
+        ctx.tween(1300, (t) => segs.forEach((s) => s.e.setAttribute("width", s.w * t)));
+      },
+    },
+    {
+      title: "XGBoost + LightGBM 按类融合，生成提交", kicker: "第 99–117 格 · 集成与提交", cells: [99, 100, 103, 105, 108, 110, 111, 112, 113, 114, 116], highlight: ["compute_oof", "LGBMClassifier", "Nelder-Mead", "optimal_weights"],
+      html: `<p>为了再提高一点，作者加入另一种梯度提升库 <b>LightGBM</b>（参数在别处调好），两个模型都算出 oof 和测试集预测。</p><ul class="tight"><li>先把每个模型的预测按列缩放到 0–1，避免某个模型的数值天然偏大而“说了算”</li><li>然后<b>每一类单独</b>用 Nelder-Mead（一种不需要求导的寻优方法）找 XGBoost 与 LightGBM 的最佳权重，让这一类的 ROC-AUC 最高</li><li>按这些权重混合测试集预测，写成提交文件</li></ul><p class="callout">权重是在 oof 上找的，又在同一份 oof 上算融合分数，这个分数会略偏乐观；更严格的做法是再留一份数据检验权重。</p>`,
+      draw(svg, ctx) {
+        const w = [0.7, 0.4, 0.55, 0.3, 0.8, 0.5, 0.6];
+        K.svg(svg, "text", { x: 30, y: 28, "font-size": 13, "font-weight": 700 }, "每一类单独找权重（示意）：蓝 = XGBoost，绿 = LightGBM");
+        const bars = CLS.map((c, i) => { K.svg(svg, "text", { x: 30, y: 70 + i * 38, "font-size": 12, fill: CC[i] }, c); return [K.svg(svg, "rect", { x: 160, y: 56 + i * 38, width: 0, height: 22, fill: "var(--c1)" }), K.svg(svg, "rect", { x: 160, y: 56 + i * 38, width: 0, height: 22, fill: "var(--c3)" })]; });
+        ctx.tween(1500, (t) => bars.forEach(([a, b], i) => { const W = 460 * t, wa = W * w[i]; a.setAttribute("width", wa); b.setAttribute("x", 160 + wa); b.setAttribute("width", W - wa); }));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：形状特征 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "kind", label: "缺陷形状", value: "scratch", options: [["scratch", "划痕（细长）"], ["spot", "凸起 / 小块（圆）"], ["stain", "污渍（不规则团）"], ["dirt", "脏污（零散颗粒）"]] },
+      { id: "size", label: "大小", min: 1, max: 6, step: 1, value: 3 },
+      { id: "ang", label: "方向（0° = 顺着轧制方向）", min: 0, max: 90, step: 15, value: 0 },
+    ],
+    note: "在 60×40 的像素网格上现场画出缺陷，然后像原数据那样“测量”：面积 = 像素数，X/Y 周长 = 横/纵方向的边界段数，X/Y 范围 = 边界框宽高。看作者造的面积/周长比怎样区分细长的划痕和紧凑的斑块；把划痕转到 90°，看 X_Range 和 Y_Range 互换（Z 向和 K 向划痕的区别就在方向上）。",
+    render(svg, v) {
+      const W = 60, H = 40, m = shape(v.kind, W, H, v.size, 7, v.ang), ms = measure(m, W, H), cs = 6.5;
+      K.svg(svg, "rect", { x: 10, y: 10, width: W * cs, height: H * cs, fill: "var(--panel-2)", stroke: "var(--line)" });
+      const col = { scratch: CC[1], spot: CC[5], stain: CC[3], dirt: CC[4] }[v.kind];
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (m[y * W + x]) K.svg(svg, "rect", { x: 10 + x * cs, y: 10 + y * cs, width: cs, height: cs, fill: col });
+      K.svg(svg, "text", { x: 10, y: 290, "font-size": 11, class: "muted" }, "→ 轧制方向（横轴）");
+      const ratio = ms.A / Math.max(1, ms.px + ms.py);
+      const tx = 420; [["Pixels_Areas", ms.A], ["X_Perimeter", ms.px], ["Y_Perimeter", ms.py], ["X_Range", ms.xr], ["Y_Range", ms.yr]].forEach((d, i) => { K.svg(svg, "text", { x: tx, y: 40 + i * 26, "font-size": 13, "font-family": "var(--mono)" }, d[0]); K.svg(svg, "text", { x: 630, y: 40 + i * 26, "font-size": 13, "font-family": "var(--mono)", "text-anchor": "end", "font-weight": 700 }, d[1]); });
+      return { readout: [
+        { k: "面积/周长比（作者新特征）", v: ratio.toFixed(2), color: ratio < 1.6 ? "var(--c2)" : "var(--c6)" },
+        { k: "X_Range / Y_Range", v: (ms.xr / Math.max(1, ms.yr)).toFixed(2) },
+        { k: "填充率 面积÷(X范围×Y范围)", v: (ms.A / Math.max(1, ms.xr * ms.yr)).toFixed(2) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：梯度提升（二分类，树桩） ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 376,
+    controls: [
+      { id: "n", label: "树的数量（每棵是只切一刀的树桩）", min: 1, max: 200, step: 1, value: 30 },
+      { id: "lr", label: "学习率（每棵树的话打几折）", min: 0.02, max: 1, step: 0.02, value: 0.2, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "换一批数据", button: true },
+    ],
+    note: "现场在模拟数据上训练梯度提升（对数损失，每棵树只在一个特征上切一刀）。两类 = “划痕”与“凸起”，横轴示意面积/周长比，纵轴示意亮度范围。背景色是模型给“凸起”的概率（偏红 = 凸起，偏橙 = 划痕）。试试：学习率 1.0 时几棵树就成形但边界生硬；学习率 0.05 要很多棵树才追上。作者调出的最优参数是学习率约 0.02、785 棵树、深度 3。",
+    render(svg, v) {
+      const r = K.rng(31 + v.seed * 5), X = [], y = [];
+      for (let i = 0; i < 260; i++) { const c = r() < 0.5 ? 1 : 0; const a = c ? [0.65 + 0.15 * K.randn(r), 0.6 + 0.18 * K.randn(r)] : [0.35 + 0.15 * K.randn(r), 0.4 + 0.18 * K.randn(r)]; if (r() < 0.1) a[0] = r(); X.push(a); y.push(c); }
+      const F = new Array(X.length).fill(0), trees = [];
+      const th = []; for (let s = 0.05; s < 1; s += 0.05) th.push(s);
+      for (let k = 0; k < v.n; k++) {
+        const g = X.map((_, i) => y[i] - K.sigmoid(F[i])), h = X.map((_, i) => { const p = K.sigmoid(F[i]); return p * (1 - p) + 1e-6; });
+        let best = null;
+        for (let f = 0; f < 2; f++) for (const s of th) { let gl = 0, hl = 0, gr = 0, hr = 0; X.forEach((x, i) => { if (x[f] < s) { gl += g[i]; hl += h[i]; } else { gr += g[i]; hr += h[i]; } }); const gain = gl * gl / (hl + 1) + gr * gr / (hr + 1); if (!best || gain > best.gain) best = { gain, f, s, wl: gl / (hl + 1), wr: gr / (hr + 1) }; }
+        trees.push(best); X.forEach((x, i) => (F[i] += v.lr * (x[best.f] < best.s ? best.wl : best.wr)));
+      }
+      const pred = (x) => { let s = 0; trees.forEach((t) => (s += v.lr * (x[t.f] < t.s ? t.wl : t.wr))); return K.sigmoid(s); };
+      const ax = K.axes(svg, { x: 50, y: 15, w: 560, h: 300 }, [0, 1], [0, 1], { xlabel: "面积/周长比（示意）", ylabel: "亮度范围（示意）" });
+      for (let i = 0; i < 40; i++) for (let j = 0; j < 20; j++) { const p = pred([(i + 0.5) / 40, (j + 0.5) / 20]); K.svg(svg, "rect", { x: ax.sx(i / 40), y: ax.sy((j + 1) / 20), width: 14.5, height: 15.5, fill: p > 0.5 ? "var(--c6)" : "var(--c2)", "fill-opacity": 0.08 + 0.4 * Math.abs(p - 0.5) * 2 }); }
+      X.forEach((x, i) => K.svg(svg, "circle", { cx: ax.sx(K.clamp(x[0], 0, 1)), cy: ax.sy(K.clamp(x[1], 0, 1)), r: 3, fill: y[i] ? "var(--c6)" : "var(--c2)", stroke: "var(--panel)", "stroke-width": 0.6 }));
+      let ll = 0, acc = 0; X.forEach((x, i) => { const p = K.clamp(pred(x), 1e-6, 1 - 1e-6); ll -= y[i] ? Math.log(p) : Math.log(1 - p); acc += (p > 0.5) === !!y[i] ? 1 : 0; });
+      K.svg(svg, "text", { x: 55, y: 368, "font-size": 12, class: "muted" }, "橙点 = 划痕   红点 = 凸起（模拟数据，含 10% 噪声点）");
+      return { readout: [
+        { k: "训练对数损失", v: (ll / X.length).toFixed(3) },
+        { k: "训练准确率", v: ((acc / X.length) * 100).toFixed(1) + "%" },
+        { k: "树的数量 × 学习率", v: (v.n * v.lr).toFixed(1) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

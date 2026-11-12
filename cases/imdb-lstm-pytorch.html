@@ -1,0 +1,629 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>影评情感分析</title>
+<meta name="description" content="Kaggle 案例拆解：用 PyTorch 把 5 万条 IMDB 影评编码成整数序列，经过词嵌入和两层 LSTM 判断好评还是差评。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">文本数据 · 二分类 · 循环神经网络</div>
+  <h1>影评情感分析：让 LSTM 一个词一个词地读完影评</h1>
+  <p class="en">Sentiment analysis using LSTM - PyTorch</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">分词与词表</span><span class="tag method">整数编码</span><span class="tag method">序列填充</span>
+    <span class="tag method">词嵌入 Embedding</span><span class="tag method">两层 LSTM</span><span class="tag method">梯度裁剪</span><span class="tag method">PyTorch DataLoader</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>arunmohan_003</b></span>
+    <span>Kaggle 点赞 <b>1,044</b>（2026-11 抓取）</span>
+    <span>数据集 <b>lakshmi25npathi/imdb-dataset-of-50k-movie-reviews</b></span>
+    <span><a href="https://www.kaggle.com/code/arunmohan003/sentiment-analysis-using-lstm-pytorch" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">5 万条英文电影评论</div><p>IMDB 影评数据集，每条是一段长短不一的影评原文和情感标签 positive / negative，好评、差评各 2.5 万条（来自数据集说明）。<span data-cell="3">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这条影评是好评还是差评</div><p>输出“好评”的概率，大于 0.5 判为 positive。和词袋模型不同，这里让模型按顺序读词，有机会理解 “not good” 这类依赖词序的表达。</p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">词表编码 → 嵌入 → 两层 LSTM</div><p>只保留最常见的 1000 个词并编号；每条影评左侧补 0 到 500 个位置；64 维词嵌入，两层 256 单元的 LSTM，取最后一步的输出接 sigmoid。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一条完整的 PyTorch 文本分类流程</div><p>从切分、分词、填充、批处理到训练循环、梯度裁剪、保存最优模型、单条推理都写全了。作者在末尾提出了改进方向：调参、用 GloVe 预训练词向量、双向 LSTM。<span data-cell="35">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>IMDB Dataset of 50K Movie Reviews</b>（Kaggle 上由 lakshmi25npathi 整理成 CSV），原始来源是斯坦福 Maas 等人发布的 Large Movie Review Dataset：来自 IMDB 网站的英文影评，按评分标成正面 / 负面。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">影评条数（行）</div><div class="v">50,000</div></div>
+        <div class="stat-tile"><div class="k">列数</div><div class="v">2</div></div>
+        <div class="stat-tile"><div class="k">好评 positive</div><div class="v" style="color:var(--c3)">25,000</div></div>
+        <div class="stat-tile"><div class="k">差评 negative</div><div class="v" style="color:var(--c6)">25,000</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">规模与正负各半来自数据集说明；作者在第 8 格画了训练集的正负数量柱状图 <span data-cell="8">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>review</code></td><td>影评原文（英文，长短不一，含 HTML 换行符和标点）</td><td>文本</td></tr>
+        <tr><td><code>sentiment</code></td><td><b>要预测的答案</b>：positive / negative，后面编码成 1 / 0</td><td>类别</td></tr>
+      </table></div>
+      <p style="font-size:13.5px;color:var(--ink-2)">作者在第 33、34 格各挑了原数据里的一条影评（第 30、32 条）演示预测，原文在运行输出里，源码不带。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="19">
+    <h3>动手试试 A · 输入一条影评，看它怎样变成 LSTM 的输入张量 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+    <details class="panel pad" style="margin-top:12px"><summary>查看实验 A 使用的 12 条示例影评</summary><div id="corpus"></div></details>
+  </div>
+  <div data-at="25">
+    <h3>动手试试 B · 手动调 LSTM 的遗忘门和输入门，看“记忆”怎样随句子流动 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者写下的内容</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>在最开始就切分训练 / 测试集，避免数据泄漏</td><td><span data-cell="5">第 5 格</span></td></tr>
+        <tr><td>影评长度（保留下来的词数）均值约 69，最短 2，少数极长</td><td><span data-cell="15">第 15 格</span></td></tr>
+        <tr><td>长度超过 500 的影评很少，所以统一填充 / 截断到 500</td><td><span data-cell="19">第 19 格</span></td></tr>
+        <tr><td>用嵌入层代替独热编码，嵌入可以随网络一起学</td><td><span data-cell="23">第 23 格</span></td></tr>
+        <tr><td>clip_grad_norm 用来防止 RNN / LSTM 的梯度爆炸</td><td><span data-cell="29">第 29 格</span></td></tr>
+        <tr><td>改进建议：超参数搜索、GloVe 预训练词向量、更深或双向 LSTM</td><td><span data-cell="35">第 35 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">每一轮的训练 / 验证准确率在第 29 格的运行输出里，源码不带输出，作者的文字里也没有写，所以这里不列准确率。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>输入一段评论文字，输出“正面”的概率，可以汇总成某部电影、某件商品的口碑走势。</li>
+        <li><b>同类问题：</b>电商评论、App 商店评分、微博舆情、客服对话满意度、股评情绪。</li>
+        <li><b>可迁移的套路：</b>任何“变长序列 → 一个标签”的问题都能套用：词表编码 → 填充成定长 → 嵌入 → RNN/LSTM → 取最后状态分类。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>预处理：去非字母字符和数字、去停用词、取前 1000 高频词 <span data-cell="10">第 10 格</span></li>
+        <li>填充：左侧补 0，长度 500 <span data-cell="18">第 18 格</span></li>
+        <li>批处理：TensorDataset + DataLoader，batch 50 <span data-cell="21">第 21 格</span></li>
+        <li>模型：Embedding(1001, 64) → LSTM(64→256, 2 层) → Dropout → Linear → Sigmoid <span data-cell="25">第 25 格</span> <span data-cell="26">第 26 格</span></li>
+        <li>训练：BCELoss + Adam(lr=0.001)，5 轮，梯度裁剪 5，按验证损失保存最优 <span data-cell="28">第 28 格</span> <span data-cell="29">第 29 格</span></li>
+        <li>推理：predict_text 单条预测 <span data-cell="32">第 32 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者去掉了停用词，而 “not”、“no” 都在 NLTK 停用词表里。这对情感分析有什么后果？“not good” 进入模型时还剩下什么？</li>
+      <li>为什么要在左边补 0，而不是右边？如果改成右边补 0，又只取最后一个时间步的输出，会发生什么？</li>
+      <li>词表只留 1000 个词，其余全部丢掉。一条影评平均剩约 69 个词，原文却长得多。丢掉的信息值得吗？怎么权衡词表大小？</li>
+      <li>embedding_dim=64 而词表是 1001：嵌入层有多少个参数？和独热编码相比省了多少？</li>
+      <li>梯度裁剪解决的是什么问题？为什么 RNN 特别容易梯度爆炸？</li>
+      <li>和 SMS 案例里的 TF-IDF + 朴素贝叶斯相比，LSTM 多付出了什么代价（数据量、算力、可解释性），换来了什么？</li>
+    </ol>
+  </div>
+</section>
+
+
+<footer class="foot">
+  原 notebook 作者 arunmohan_003，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Maas et al., Large Movie Review Dataset（Kaggle 上由 lakshmi25npathi 整理为 CSV）。
+</footer>
+</main>
+
+<script src="nb/imdb-lstm-pytorch.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* 调试用：地址后加 #fast 时动画瞬间完成（便于截图自查），正常访问不受影响 */
+  if (/fast/.test(location.hash + location.search)) { K.tween = (ms, fn, c) => { fn(1, 1); return Promise.resolve(!c || c.alive()); }; K.wait = (ms, c) => Promise.resolve(!c || c.alive()); }
+  if (/labsonly/.test(location.hash + location.search)) document.head.appendChild(K.el("style", null, ".hero,.topbar,section.block:not(#pipeline),.walk-top,.ch-head,.ch-body,.ch-cells>:not(.inline-lab),#pipeline>h2,#pipeline>.lead{display:none!important}.chapter{margin:0!important;padding:0!important;border:0!important}"));
+  if (/fast/.test(location.hash + location.search) && !/nofold/.test(location.hash + location.search)) setTimeout(() => { const b = document.querySelector('[data-a="fold"]'); if (b) b.click(); }, 50);
+  /* ---------- 本页文本类辅助函数（页面自带，不依赖外部库） ---------- */
+  const MONO = "font-family:var(--mono)";
+  const chipW = (t, fs) => Math.max(26, String(t).length * (fs || 13) * 0.61 + 14);
+  /* 词块：圆角矩形 + 等宽文字；返回 {g, rect, text, w} */
+  function chip(svg, x, y, t, opt) {
+    opt = opt || {};
+    const fs = opt.fs || 13, w = opt.w || chipW(t, fs), h = opt.h || 24;
+    const g = K.svg(svg, "g");
+    const color = opt.color || "var(--c1)";
+    const rect = K.svg(g, "rect", { x, y, width: w, height: h, rx: 5, fill: opt.fill || `color-mix(in srgb, ${color} 16%, var(--panel))`, stroke: opt.stroke || color, "stroke-width": 1.2 });
+    const text = K.svg(g, "text", { style: MONO, x: x + w / 2, y: y + h / 2 + fs * 0.36, "text-anchor": "middle", "font-size": fs, fill: opt.ink || "var(--ink)" }, t);
+    return { g, rect, text, w, h };
+  }
+  /* 一行词块，超宽自动换行；返回 [{...chip, x, y}] */
+  function chipRow(svg, x, y, tokens, maxW, opt) {
+    opt = opt || {};
+    const out = [], gap = opt.gap == null ? 6 : opt.gap, lh = (opt.h || 24) + 8;
+    let cx = x, cy = y;
+    tokens.forEach((t, i) => {
+      const o = typeof opt.style === "function" ? Object.assign({}, opt, opt.style(t, i)) : opt;
+      const w = chipW(t, o.fs);
+      if (cx + w > x + maxW && cx > x) { cx = x; cy += lh; }
+      const c = chip(svg, cx, cy, t, o);
+      c.x = cx; c.y = cy; out.push(c);
+      cx += w + gap;
+    });
+    return out;
+  }
+  /* 矩阵：rows×cols 的格子，vals[r][c]；返回 cells[r][c] = {rect, text} */
+  function matrix(svg, x, y, rowLab, colLab, vals, opt) {
+    opt = opt || {};
+    const cw = opt.cw || 46, ch = opt.ch || 28, lw = opt.lw || 70, fmt = opt.fmt || ((v) => String(v));
+    const max = opt.max || Math.max(1e-9, ...vals.flat().map(Math.abs));
+    colLab.forEach((c, j) => K.svg(svg, "text", { style: MONO, x: x + lw + j * cw + cw / 2, y: y - 8, "text-anchor": opt.rotate ? "start" : "middle", "font-size": opt.colFs || 12, fill: "var(--ink-2)", transform: opt.rotate ? `rotate(-40 ${x + lw + j * cw + cw / 2} ${y - 8})` : null }, c));
+    const cells = rowLab.map((r, i) => {
+      K.svg(svg, "text", { x: x + lw - 8, y: y + i * ch + ch / 2 + 4, "text-anchor": "end", "font-size": opt.rowFs || 12, fill: "var(--ink-2)" }, r);
+      return colLab.map((c, j) => {
+        const v = vals[i][j];
+        const rect = K.svg(svg, "rect", { x: x + lw + j * cw + 1, y: y + i * ch + 1, width: cw - 2, height: ch - 2, rx: 3, fill: v ? K.heat(Math.abs(v) / max * 0.85) : "var(--panel-2)", stroke: "var(--line)" });
+        const text = K.svg(svg, "text", { style: MONO, x: x + lw + j * cw + cw / 2, y: y + i * ch + ch / 2 + 4, "text-anchor": "middle", "font-size": opt.fs || 12, fill: v ? "var(--ink)" : "var(--ink-3)" }, fmt(v));
+        return { rect, text };
+      });
+    });
+    return cells;
+  }
+  /* sklearn CountVectorizer 默认分词：小写，token_pattern = \b\w\w+\b（单个字符的词被丢掉） */
+  const skTok = (s) => (String(s).toLowerCase().match(/\b\w\w+\b/g) || []);
+  /* NLTK 英文停用词表 */
+  const STOP = new Set(("i me my myself we our ours ourselves you you're you've you'll you'd your yours yourself yourselves he him his himself she she's her hers herself it it's its itself they them their theirs themselves what which who whom this that that'll these those am is are was were be been being have has had having do does did doing a an the and but if or because as until while of at by for with about against between into through during before after above below to from up down in out on off over under again further then once here there when where why how all any both each few more most other some such no nor not only own same so than too very s t can will just don don't should should've now d ll m o re ve y ain aren aren't couldn couldn't didn didn't doesn doesn't hadn hadn't hasn hasn't haven haven't isn isn't ma mightn mightn't mustn mustn't needn needn't shan shan't shouldn shouldn't wasn wasn't weren weren't won won't wouldn wouldn't").split(" "));
+  /* 在实验面板左侧插入一个文本输入框 */
+  function addTextInput(labEl, label, value, onChange, opt) {
+    opt = opt || {};
+    const ctrl = labEl.querySelector(".ctrl");
+    const wrap = K.el("div");
+    wrap.innerHTML = `<label>${K.esc(label)}</label>`;
+    const inp = K.el(opt.area ? "textarea" : "input", { type: "text", spellcheck: "false" });
+    inp.value = value;
+    inp.style.cssText = "width:100%;font:inherit;font-size:14px;padding:6px 8px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);resize:vertical;" + (opt.area ? "min-height:64px;" : "");
+    inp.addEventListener("input", () => onChange(inp.value));
+    wrap.appendChild(inp);
+    ctrl.insertBefore(wrap, ctrl.firstChild);
+    return inp;
+  }
+  const fadeIn = (els, t) => els.forEach((e) => e && (e.style.opacity = t));
+  const hide = (els) => els.forEach((e) => e && (e.style.opacity = 0));
+  /* 按 case.js 的切章规则（每章从 at 或 min(cells) 开始）自动生成 kicker 里的“第 a–b 格”，kicker 原文只保留“·”后面的阶段名 */
+  function autoKicker(steps) {
+    const N = (window.CASE_NB || { cells: [] }).cells.length;
+    const st = steps.map((s) => ({ s, a: s.at != null ? s.at : Math.min.apply(null, s.cells) })).sort((x, y) => x.a - y.a);
+    st.forEach((o, k) => {
+      const to = k + 1 < st.length ? st[k + 1].a - 1 : N - 1;
+      const stage = String(o.s.kicker || "").split("·").pop().trim();
+      o.s.kicker = (to > o.a ? `第 ${o.a}–${to} 格` : `第 ${o.a} 格`) + (stage ? " · " + stage : "");
+    });
+    return steps;
+  }
+
+  /* ---------- 示例影评（本页自编） ---------- */
+  const REVIEWS = [
+    ["This movie was great, the acting was wonderful and the story was moving.", 1],
+    ["A boring film with a terrible script and bad acting.", 0],
+    ["I loved the music and the story, a great film for the whole family.", 1],
+    ["The plot was weak and the ending was awful. Not worth the time.", 0],
+    ["Wonderful acting, beautiful music, one of the best movies this year.", 1],
+    ["Terrible movie. The story was boring and the actors were bad.", 0],
+    ["The film was funny and moving, I loved every minute.", 1],
+    ["Worst movie I have seen, awful script and boring scenes.", 0],
+    ["Great story and great acting, I would watch this movie again.", 1],
+    ["The music was bad and the film was too long and boring.", 0],
+    ["A beautiful and funny movie with a wonderful ending.", 1],
+    ["Bad plot, weak acting, the worst ending ever.", 0],
+  ];
+  document.getElementById("corpus").innerHTML = `<p class="muted" style="margin:6px 0">本页自编，仅用于演示词表与编码。</p><ol class="tight">${REVIEWS.map((r) => `<li><b style="color:${r[1] ? "var(--c3)" : "var(--c6)"}">${r[1] ? "positive" : "negative"}</b> ${K.esc(r[0])}</li>`).join("")}</ol>`;
+  /* 第 10 格 preprocess_string：去非字母数字字符、去空白、去数字 */
+  const prep = (w) => w.replace(/[^\w\s]/g, "").replace(/\s+/g, "").replace(/\d/g, "");
+  /* 第 10 格 tockenize：小写 → 按空格切 → preprocess → 去停用词 → 计数 → 取前 N 个，编号从 1 开始（0 留给填充） */
+  function buildVocab(texts, N) {
+    const cnt = new Map();
+    texts.forEach((t) => t.toLowerCase().split(/\s+/).forEach((w) => { w = prep(w); if (w && !STOP.has(w)) cnt.set(w, (cnt.get(w) || 0) + 1); }));
+    const top = [...cnt.keys()].sort((a, b) => cnt.get(b) - cnt.get(a) || a.localeCompare(b)).slice(0, N);
+    return { cnt, dict: new Map(top.map((w, i) => [w, i + 1])) };
+  }
+  const encode = (t, dict) => t.toLowerCase().split(/\s+/).map(prep).filter((w) => dict.has(w)).map((w) => dict.get(w));
+  /* 第 18 格 padding_：左侧补 0；过长时保留前 seq_len 个 */
+  function pad(seq, L, side) {
+    const out = new Array(L).fill(0), s = seq.slice(0, L);
+    if (side === "post") s.forEach((v, i) => (out[i] = v));
+    else s.forEach((v, i) => (out[L - s.length + i] = v));
+    return out;
+  }
+  const V0 = buildVocab(REVIEWS.map((r) => r[0]), 1000);
+
+  /* LSTM 单元示意图：画一个 cell，返回各部件 */
+  function lstmCell(svg, x, y, w, h, label) {
+    const g = K.svg(svg, "g");
+    K.svg(g, "rect", { x, y, width: w, height: h, rx: 10, fill: "color-mix(in srgb, var(--c4) 12%, var(--panel))", stroke: "var(--c4)", "stroke-width": 1.5 });
+    if (label) K.svg(g, "text", { x: x + w / 2, y: y + h / 2 + 4, "text-anchor": "middle", "font-size": 12 }, label);
+    return g;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "开场：工具与 GPU", kicker: "· 开场",
+      html: `<p>作者一句话说明目标：用 LSTM 对 IMDB 影评做情感分析。第 1 格导入 numpy、pandas、PyTorch、NLTK 停用词等；第 2 格检查有没有 GPU，有就用 GPU，没有就用 CPU。</p>`,
+      cells: [0],
+    },
+    {
+      at: 3,
+      title: "5 万条影评，正负各半", kicker: "第 3、7–8 格 · 数据",
+      html: `<p>CSV 只有两列：<code>review</code>（影评原文，常带 HTML 换行符和标点）和 <code>sentiment</code>（positive / negative）。作者画了训练集的标签柱状图：两类数量基本相同，是一个平衡的二分类问题。</p><p>平衡意味着可以放心用准确率当指标（对比信用卡欺诈那种 0.17% 的情况）。卡片里的影评是自编示例。</p>`,
+      cells: [3, 8],
+      async draw(svg, ctx) {
+        const ex = [["“This movie was great, the acting was wonderful…”", "positive", "var(--c3)"], ["“A boring film with a terrible script and bad acting.”", "negative", "var(--c6)"]];
+        for (let k = 0; k < 2; k++) {
+          const y = 30 + k * 80;
+          const g = K.svg(svg, "g", { opacity: 0 });
+          K.svg(g, "rect", { x: 20, y, width: 420, height: 62, rx: 8, fill: "var(--panel-2)", stroke: "var(--line)" });
+          K.svg(g, "text", { style: MONO, x: 34, y: y + 26, "font-size": 12 }, ex[k][0]);
+          chip(g, 34, y + 34, ex[k][1], { color: ex[k][2], fs: 12, h: 20 });
+          if (!(await ctx.tween(400, (t) => (g.style.opacity = t)))) return;
+        }
+        K.svg(svg, "text", { x: 20, y: 214, "font-size": 12, class: "muted" }, "示例影评（自编）");
+        const ax = K.axes(svg, { x: 520, y: 40, w: 170, h: 230 }, [0, 1], [0, 25000], { xticks: 0, yticks: 2, yfmt: (v) => (v / 1000).toFixed(0) + "k" });
+        const bs = [["neg", "var(--c6)", 545], ["pos", "var(--c3)", 615]].map(([l, c, x]) => { K.svg(svg, "text", { x: x + 20, y: 290, "text-anchor": "middle", "font-size": 12 }, l); return K.svg(svg, "rect", { x, y: ax.sy(0), width: 40, height: 0, fill: c }); });
+        await ctx.tween(900, (t) => bs.forEach((b) => { const H = (ax.sy(0) - ax.sy(25000)) * t; b.setAttribute("y", ax.sy(0) - H); b.setAttribute("height", H); }));
+        K.svg(svg, "text", { x: 520, y: 320, "font-size": 12, class: "muted" }, "各 2.5 万条（数据集说明）");
+      },
+    },
+    {
+      at: 4,
+      notes: {"8": "作者画训练集里正面、负面影评的数量柱状图：两类基本一样多。"},
+      title: "第一件事：先切分", kicker: "第 4–6 格 · 防泄漏",
+      html: `<p>作者在做任何处理<b>之前</b>就用 <code>train_test_split(..., stratify=y)</code> 切出测试集（默认 25%），并按标签分层，让两份数据的好评比例一致。</p><p>他特意写明理由：越早切分越能避免数据泄漏。后面的词表只用训练集统计，就是这个原则的体现。</p>`,
+      cells: [5, 6], highlight: ["stratify=y"],
+      async draw(svg, ctx) {
+        const r = K.rng(4), dots = [];
+        for (let i = 0; i < 80; i++) dots.push({ c: i % 2, x0: 60 + (i % 20) * 14, y0: 60 + Math.floor(i / 20) * 16, test: r() < 0.25 });
+        const els = dots.map((d) => K.svg(svg, "circle", { cx: d.x0, cy: d.y0, r: 5, fill: d.c ? "var(--c3)" : "var(--c6)" }));
+        K.svg(svg, "text", { x: 60, y: 36, "font-size": 13, class: "muted" }, "全部影评（绿 = 好评，红 = 差评，示意）");
+        if (!(await ctx.wait(500))) return;
+        let a = 0, b = 0;
+        const tgt = dots.map((d) => (d.test ? [430 + (b % 12) * 16, 120 + Math.floor(b++ / 12) * 16] : [60 + (a % 20) * 14, 160 + Math.floor(a++ / 20) * 16]));
+        await ctx.tween(1200, (t) => els.forEach((e, i) => { e.setAttribute("cx", K.lerp(dots[i].x0, tgt[i][0], t)); e.setAttribute("cy", K.lerp(dots[i].y0, tgt[i][1], t)); }));
+        K.svg(svg, "text", { x: 60, y: 146, "font-size": 13, "font-weight": 700, fill: "var(--c1)" }, "训练集 75% → 只在这里建词表、训练");
+        K.svg(svg, "text", { x: 430, y: 106, "font-size": 13, "font-weight": 700, fill: "var(--c2)" }, "测试集 25%");
+        K.svg(svg, "text", { x: 60, y: 300, "font-size": 12, class: "muted" }, "stratify=y：两边的好评 / 差评比例保持一致");
+      },
+    },
+    {
+      at: 9,
+      title: "逐词清洗", kicker: "第 9–10 格 · 预处理",
+      html: `<p>作者的 <code>preprocess_string</code> 对每个词做三件事：删掉所有非字母数字的字符（标点、HTML 符号），删掉空白，删掉数字。之后再按 NLTK 停用词表过滤。</p><p>注意 “wasn't” 会变成 “wasnt”，“not” 在停用词表里会被直接删除。动画按作者的规则在浏览器里真算。</p>`,
+      cells: [10], highlight: ["preprocess_string", "stop_words"],
+      async draw(svg, ctx) {
+        const s = "It wasn't GOOD... not at all! 2/10";
+        const words = s.split(/\s+/);
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 13, class: "muted" }, "示例影评（自编），按空格切开后逐词处理");
+        const cols = ["原词", "小写 + 去符号/数字", "停用词？", "保留"];
+        cols.forEach((c, i) => K.svg(svg, "text", { x: [20, 180, 380, 520][i], y: 58, "font-size": 12, class: "muted" }, c));
+        for (let i = 0; i < words.length; i++) {
+          const y = 72 + i * 32, w = words[i], p = prep(w.toLowerCase()), st = p && STOP.has(p);
+          K.svg(svg, "text", { style: MONO, x: 20, y: y + 16, "font-size": 13 }, w);
+          if (!(await ctx.wait(250))) return;
+          K.svg(svg, "text", { style: MONO, x: 180, y: y + 16, "font-size": 13, fill: p ? "var(--ink)" : "var(--ink-3)" }, p || "（空）");
+          if (!(await ctx.wait(200))) return;
+          K.svg(svg, "text", { x: 380, y: y + 16, "font-size": 13, fill: st ? "var(--bad)" : "var(--ink-3)" }, !p ? "—" : st ? "是，删掉" : "否");
+          if (p && !st) chip(svg, 520, y, p, { color: "var(--c3)", fs: 12, h: 22 });
+        }
+      },
+    },
+    {
+      at: 11,
+      title: "只要最常见的 1000 个词", kicker: "第 10–12 格 · 词表",
+      html: `<p>在训练集上用 <code>Counter</code> 数每个词出现的次数，按频率从高到低排序，<b>只保留前 1000 个</b>，编号 1–1000。编号 0 留给“填充”。</p><p>词频服从长尾分布：少数词出现极多，大量词只出现几次。截到 1000 个词让模型小而快，代价是罕见词全部被丢掉。</p><p>同一个函数接着把每条影评编码：只保留在词表里的词，换成它的编号，于是每条影评变成一串长短不一的整数（第 11 格调用，第 12 格打印词表长度）。动画中的频率是示意；编码过程可以在本章后面的实验 A 里自己试。</p>`,
+      cells: [10, 12], highlight: ["[:1000]", "onehot_dict"],
+      async draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 620, h: 230 }, [0, 3000], [0, 1], { yticks: 0, xlabel: "词的频率排名（示意）" });
+        const bars = [];
+        for (let k = 0; k < 120; k++) { const rank = 1 + k * 25, f = 1 / Math.pow(rank, 0.9); bars.push(K.svg(svg, "rect", { x: ax.sx(rank), y: ax.sy(0), width: 4, height: 0, fill: rank <= 1000 ? "var(--c1)" : "var(--ink-3)", opacity: rank <= 1000 ? 0.9 : 0.4, "data-f": f })); }
+        if (!(await ctx.tween(1000, (t) => bars.forEach((b) => { const H = 220 * Math.pow(+b.getAttribute("data-f"), 0.35) * t; b.setAttribute("y", ax.sy(0) - H); b.setAttribute("height", H); })))) return;
+        K.svg(svg, "line", { x1: ax.sx(1000), x2: ax.sx(1000), y1: 30, y2: 260, stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+        K.svg(svg, "text", { x: ax.sx(1000) + 6, y: 50, "font-size": 13, fill: "var(--warn)", "font-weight": 700 }, "第 1000 名：以后的词全部丢掉");
+        K.svg(svg, "text", { x: ax.sx(30), y: 100, "font-size": 12, fill: "var(--c1)" }, "编号 1…1000");
+        K.svg(svg, "text", { x: 60, y: 320, "font-size": 12, class: "muted" }, "0 号不分配给任何词，专门表示“这里是填充”；所以 vocab_size = 1000 + 1");
+      },
+    },
+    {
+      at: 13,
+      title: "看看序列有多长", kicker: "第 13–15 格 · 长度分布",
+      html: `<p>编码后每条影评剩下多少个词？作者画直方图并 <code>describe()</code>：均值约 <b>69</b>，最短 <b>2</b>，有少数极长的影评。</p><p>这个统计决定下一步“统一长度”该取多少。直方图形状是示意，69 和 2 来自作者的文字。</p>`,
+      cells: [14, 15],
+      async draw(svg, ctx) {
+        const r = K.rng(7), v = [];
+        for (let i = 0; i < 1200; i++) v.push(Math.max(2, Math.exp(K.randn(r) * 0.6 + 4.05)));
+        const ax = K.axes(svg, { x: 60, y: 30, w: 620, h: 240 }, [0, 600], [0, 1], { yticks: 0, xlabel: "编码后的序列长度（示意）" });
+        const h = new Array(40).fill(0); v.forEach((x) => { const b = Math.floor(x / 15); if (b < 40) h[b]++; });
+        const mx = Math.max(...h);
+        const R = h.map((c, i) => K.svg(svg, "rect", { x: ax.sx(i * 15) + 1, y: ax.sy(0), width: ax.sx(15) - ax.sx(0) - 2, height: 0, fill: "var(--c1)", "fill-opacity": 0.7 }));
+        if (!(await ctx.tween(1000, (t) => R.forEach((e, i) => { const H = (230 * h[i] / mx) * t; e.setAttribute("y", ax.sy(0) - H); e.setAttribute("height", H); })))) return;
+        K.svg(svg, "line", { x1: ax.sx(69), x2: ax.sx(69), y1: 30, y2: 270, stroke: "var(--c2)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: ax.sx(69) + 6, y: 46, "font-size": 13, fill: "var(--c2)", "font-weight": 700 }, "均值约 69（第 15 格）");
+        K.svg(svg, "line", { x1: ax.sx(500), x2: ax.sx(500), y1: 30, y2: 270, stroke: "var(--warn)", "stroke-dasharray": "5 3", "stroke-width": 2 });
+        K.svg(svg, "text", { x: ax.sx(500) - 6, y: 46, "text-anchor": "end", "font-size": 13, fill: "var(--warn)" }, "500：超过的很少");
+      },
+    },
+    {
+      at: 16,
+      title: "左侧补 0，统一成 500", kicker: "第 16–22 格 · 填充与批处理",
+      html: `<p>神经网络一次处理一个批次，要求每条序列一样长。作者的 <code>padding_</code> 生成一个全 0 的 500 列矩阵，把每条序列<b>靠右</b>放进去：短的左边补 0，长的只保留前 500 个。</p><p>然后用 <code>TensorDataset</code> + <code>DataLoader</code> 打乱并切成每批 50 条，所以一个批次的形状是 [50, 500]。动画把长度缩到 12 便于观看。</p>`,
+      cells: [18, 21], highlight: ["features[ii, -len(review):]", "batch_size = 50"],
+      async draw(svg, ctx) {
+        const seqs = [[12, 5, 33, 7], [3, 41, 9, 2, 18, 6, 27, 11], [8, 15], [21, 4, 30, 13, 9, 50, 2, 7, 16, 3, 44, 5, 19, 26]], L = 12, cw = 42, x0 = 150;
+        K.svg(svg, "text", { x: 20, y: 26, "font-size": 13, class: "muted" }, "序列长度 seq_len = 12（原文是 500）");
+        const rows = seqs.map((s, i) => {
+          const y = 50 + i * 50;
+          K.svg(svg, "text", { x: 20, y: y + 22, "font-size": 12, class: "muted" }, `影评 ${i + 1}（${s.length} 个词）`);
+          return s.map((v, j) => ({ v, el: chip(svg, x0 + j * cw, y, String(v), { w: cw - 4, color: "var(--c1)", fs: 12 }) }));
+        });
+        if (!(await ctx.wait(700))) return;
+        const padded = seqs.map((s) => pad(s, L, "pre"));
+        for (let i = 0; i < seqs.length; i++) {
+          const s = seqs[i], kept = Math.min(s.length, L), shift = L - kept, y = 50 + i * 50;
+          if (!(await ctx.tween(600, (t) => rows[i].forEach((c, j) => { if (j < kept) c.el.g.setAttribute("transform", `translate(${shift * cw * t},0)`); else c.el.g.style.opacity = 1 - t; })))) return;
+          for (let j = 0; j < shift; j++) chip(svg, x0 + j * cw, y, "0", { w: cw - 4, color: "var(--ink-3)", ink: "var(--ink-3)", fs: 12 });
+        }
+        K.svg(svg, "text", { x: 20, y: 270, "font-size": 12, fill: "var(--bad)" }, "影评 4 超长：只保留前 12 个，后面的被截掉");
+        K.svg(svg, "rect", { x: x0 - 6, y: 44, width: L * cw + 8, height: 196, rx: 8, fill: "none", stroke: "var(--accent)", "stroke-dasharray": "6 4" });
+        K.svg(svg, "text", { x: x0, y: 300, "font-size": 13, fill: "var(--accent)", "font-weight": 700 }, "堆起来就是一个批次：形状 [batch, seq_len]，原文为 [50, 500]");
+        void padded;
+      },
+    },
+    {
+      at: 23,
+      title: "嵌入层：编号 → 64 维向量", kicker: "第 23–26 格 · Embedding",
+      html: `<p>整数编号本身没有“大小”含义（编号 7 不比编号 3 更好）。作者用 <code>nn.Embedding(1001, 64)</code>：一张 1001 行 × 64 列的查找表，每个编号取出一行，变成 64 个实数。</p><p>这张表一开始是随机的，和网络一起训练，意思相近的词会慢慢靠近。作者说也可以先用 Word2Vec 训练好再载入。动画里的数值是随机示意。</p>`,
+      cells: [23, 26], highlight: ["nn.Embedding", "embedding_dim = 64"],
+      async draw(svg, ctx) {
+        const r = K.rng(17), rows = 9, cols = 16, x0 = 330, y0 = 40, cw = 22, ch = 26;
+        K.svg(svg, "text", { x: x0, y: 28, "font-size": 12, class: "muted" }, "嵌入表（只画了 9 行 × 16 列，原为 1001 × 64）");
+        const ids = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+        const cells = ids.map((id, i) => {
+          K.svg(svg, "text", { style: MONO, x: x0 - 8, y: y0 + i * ch + 17, "text-anchor": "end", "font-size": 11, class: "muted" }, String(id));
+          return Array.from({ length: cols }, (_, j) => K.svg(svg, "rect", { x: x0 + j * cw, y: y0 + i * ch, width: cw - 2, height: ch - 2, rx: 2, fill: K.heat(K.randn(r) * 0.5, true) }));
+        });
+        const seq = [0, 0, 3, 7, 5];
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 12, class: "muted" }, "输入序列（已填充）");
+        const cs = seq.map((v, i) => chip(svg, 20 + i * 52, 40, String(v), { w: 46, color: v ? "var(--c1)" : "var(--ink-3)" }));
+        for (let k = 0; k < seq.length; k++) {
+          const id = seq[k], hl = K.svg(svg, "rect", { x: x0 - 3, y: y0 + id * ch - 2, width: cols * cw + 4, height: ch + 2, rx: 4, fill: "none", stroke: "var(--warn)", "stroke-width": 2.5 });
+          cs[k].rect.style.stroke = "var(--warn)";
+          const vy = 120 + k * 36;
+          const vec = cells[id].map((c, j) => K.svg(svg, "rect", { x: 20 + j * 17, y: vy, width: 15, height: 26, rx: 2, fill: c.style.fill, opacity: 0 }));
+          if (!(await ctx.tween(450, (t) => vec.forEach((v) => (v.style.opacity = t))))) return;
+          hl.remove(); cs[k].rect.style.stroke = "";
+        }
+        K.svg(svg, "text", { x: 20, y: 318, "font-size": 12, class: "muted" }, "每个位置变成一行向量：形状 [50, 500] → [50, 500, 64]");
+      },
+    },
+    {
+      at: 25,
+      title: "两层 LSTM 逐词往后读", kicker: "第 25–26 格 · LSTM",
+      html: `<p><b>LSTM</b>（长短期记忆网络）按时间顺序一次读一个词向量，内部维护两样东西：<b>细胞状态 c</b>（长期记忆）和<b>隐藏状态 h</b>（当前输出）。三个“门”决定信息流：</p><ul class="tight"><li><b>遗忘门 f</b>：旧记忆留多少</li><li><b>输入门 i</b>：新信息写进多少</li><li><b>输出门 o</b>：记忆里拿出多少作为 h</li></ul><p>作者堆了两层（<code>no_layers = 2</code>），每层 256 个单元：第一层的 h 序列作为第二层的输入。初始状态由 <code>init_hidden</code> 置零。</p>`,
+      cells: [25, 26], highlight: ["nn.LSTM", "hidden_dim = 256", "no_layers = 2"],
+      async draw(svg, ctx) {
+        const words = ["the", "acting", "was", "wonderful"], n = words.length, x0 = 70, dx = 160;
+        const c1 = [], c2 = [];
+        words.forEach((w, t) => {
+          chip(svg, x0 + t * dx - 4, 296, w, { w: 100, color: "var(--c1)", fs: 12 });
+          c1.push(lstmCell(svg, x0 + t * dx, 200, 92, 52, "LSTM 层 1"));
+          c2.push(lstmCell(svg, x0 + t * dx, 100, 92, 52, "LSTM 层 2"));
+          K.arrow(svg, x0 + t * dx + 46, 294, x0 + t * dx + 46, 254, { color: "var(--ink-3)" });
+          K.arrow(svg, x0 + t * dx + 46, 198, x0 + t * dx + 46, 154, { color: "var(--ink-3)" });
+        });
+        K.svg(svg, "text", { x: 10, y: 230, "font-size": 11, class: "muted" }, "h0=0");
+        K.svg(svg, "text", { x: 10, y: 130, "font-size": 11, class: "muted" }, "h0=0");
+        const pulses = [];
+        for (let t = 0; t < n; t++) {
+          [[200, c1], [100, c2]].forEach(([y, arr], li) => {
+            arr[t].querySelector("rect").style.fill = "color-mix(in srgb, var(--c4) 45%, var(--panel))";
+            if (t < n - 1) {
+              const a = K.arrow(svg, x0 + t * dx + 92, y + 26, x0 + (t + 1) * dx - 2, y + 26, { color: "var(--c2)", sw: 2 });
+              pulses.push(a);
+            }
+          });
+          const lab = K.svg(svg, "text", { x: x0 + t * dx + 96, y: 186, "font-size": 11, fill: "var(--c2)" }, t < n - 1 ? "h, c →" : "");
+          if (!(await ctx.wait(650))) return;
+          c1[t].querySelector("rect").style.fill = ""; c2[t].querySelector("rect").style.fill = "";
+          void lab;
+        }
+        const last = K.node(svg, x0 + (n - 1) * dx + 6, 20, 80, 40, "h_T", { stroke: "var(--c3)", bold: true });
+        K.arrow(svg, x0 + (n - 1) * dx + 46, 98, x0 + (n - 1) * dx + 46, 62, { color: "var(--c3)", sw: 2 });
+        K.svg(svg, "text", { x: 20, y: 40, "font-size": 12, class: "muted" }, "橙色箭头 = 隐藏状态和细胞状态沿时间传递");
+        void last; void pulses;
+      },
+    },
+    {
+      at: 26,
+      title: "只看最后一步的输出", kicker: "第 25 格 · 输出层",
+      html: `<p>第 26 格设定超参数（2 层、嵌入 64 维、隐藏 256 维、输出 1 维）并打印模型。回到第 25 格的 forward：LSTM 在每个时间步都输出一个 256 维的 h。作者把它们都送进 Dropout(0.3) → Linear(256→1) → Sigmoid，然后用 <code>sig_out[:, -1]</code> <b>只取最后一个时间步</b>的概率作为整条影评的预测。</p><p>这正是左侧补 0 的原因：真正的词都挤在序列末尾，最后一步刚好读完最后一个真实的词。如果右侧补 0，最后一步看到的是一长串 0 之后的状态，信息可能已经被冲淡。</p>`,
+      cells: [25], highlight: ["sig_out[:, -1]", "nn.Dropout(0.3)"],
+      async draw(svg, ctx) {
+        const L = 10, cw = 54, x0 = 60;
+        const rowsDef = [["左侧补 0（作者）", [0, 0, 0, 0, 0, 0, 12, 5, 33, 7], 50], ["右侧补 0", [12, 5, 33, 7, 0, 0, 0, 0, 0, 0], 190]];
+        for (const [name, seq, y] of rowsDef) {
+          K.svg(svg, "text", { x: x0, y: y - 8, "font-size": 13, "font-weight": 700 }, name);
+          const cs = seq.map((v, j) => chip(svg, x0 + j * cw, y, String(v), { w: cw - 6, color: v ? "var(--c1)" : "var(--ink-3)", ink: v ? "var(--ink)" : "var(--ink-3)" }));
+          const sig = seq.map((v, j) => K.svg(svg, "circle", { cx: x0 + j * cw + (cw - 6) / 2, cy: y + 50, r: 0, fill: "var(--c4)" }));
+          for (let j = 0; j < L; j++) {
+            if (!(await ctx.tween(90, (t) => sig[j].setAttribute("r", 7 * t)))) return;
+          }
+          cs[L - 1].rect.style.stroke = seq[L - 1] ? "var(--good)" : "var(--bad)";
+          cs[L - 1].rect.style.strokeWidth = 3;
+          K.svg(svg, "text", { x: x0 + L * cw + 4, y: y + 56, "font-size": 12, fill: seq[L - 1] ? "var(--good)" : "var(--bad)" }, seq[L - 1] ? "← 取这里" : "← 取这里？");
+          K.svg(svg, "text", { x: x0, y: y + 84, "font-size": 12, fill: seq[L - 1] ? "var(--good)" : "var(--bad)" }, seq[L - 1] ? "最后一步刚读完最后一个真实的词" : "最后一步之前读了 6 个填充 0，有效信息可能被冲淡");
+        }
+        K.svg(svg, "text", { x: x0, y: 330, "font-size": 12, class: "muted" }, "紫点 = 每个时间步都有一个 sigmoid 输出，sig_out[:, -1] 只取最后一个");
+      },
+    },
+    {
+      at: 27,
+      title: "训练 5 轮：BCE + Adam + 梯度裁剪", kicker: "第 27–30 格 · 训练",
+      html: `<p>损失函数用二元交叉熵 <code>BCELoss</code>，优化器 <code>Adam(lr=0.001)</code>，训练 5 轮。每个批次都要把上一批的隐藏状态“断开”（<code>each.data</code>），否则反向传播会一路追溯到整个训练历史。</p><p><code>clip_grad_norm_(..., 5)</code> 把梯度的总长度限制在 5 以内，防止 LSTM 常见的<b>梯度爆炸</b>。每轮结束时，若验证损失创新低就保存模型。曲线是示意。</p>`,
+      cells: [29], highlight: ["clip_grad_norm_", "torch.save", "each.data"],
+      async draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 300, h: 240 }, [1, 5], [0.2, 0.7], { xticks: 4, yticks: 5, xlabel: "epoch", ylabel: "loss（示意）", xfmt: (v) => v.toFixed(0), yfmt: (v) => v.toFixed(1) });
+        const tr = [0.62, 0.45, 0.36, 0.3, 0.25], va = [0.55, 0.42, 0.38, 0.37, 0.39];
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 }), p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c2)", "stroke-width": 2.5 });
+        const save = [];
+        for (let e = 1; e <= 5; e++) {
+          if (!(await ctx.tween(350, (t) => {
+            const mk = (arr) => arr.slice(0, e).map((v, i) => (i ? "L" : "M") + ax.sx(i + 1) + "," + ax.sy(i === e - 1 && e > 1 ? K.lerp(arr[i - 1], v, t) : v)).join("");
+            p1.setAttribute("d", mk(tr)); p2.setAttribute("d", mk(va));
+          }))) return;
+          if (va[e - 1] <= Math.min(...va.slice(0, e))) save.push(K.svg(svg, "text", { x: ax.sx(e) - 6, y: ax.sy(va[e - 1]) - 10, "font-size": 14 }, "💾"));
+        }
+        K.svg(svg, "text", { x: 70, y: 320, "font-size": 12, fill: "var(--c1)" }, "— 训练损失");
+        K.svg(svg, "text", { x: 170, y: 320, "font-size": 12, fill: "var(--c2)" }, "— 验证损失（💾 = 创新低，保存）");
+        // 梯度裁剪
+        const cx = 540, cy = 170;
+        K.svg(svg, "circle", { cx, cy, r: 70, fill: "none", stroke: "var(--warn)", "stroke-dasharray": "5 3" });
+        K.svg(svg, "text", { x: cx, y: cy + 92, "text-anchor": "middle", "font-size": 12, fill: "var(--warn)" }, "梯度范数上限 = 5");
+        const g = K.arrow(svg, cx, cy, cx, cy, { color: "var(--bad)", sw: 3 });
+        const tx = K.svg(svg, "text", { x: cx, y: 70, "text-anchor": "middle", "font-size": 13 }, "");
+        const ang = -0.6;
+        if (!(await ctx.tween(700, (t) => { g.remove(); const L = 150 * t; svg.appendChild(g); g.innerHTML = ""; K.arrow(g, cx, cy, cx + L * Math.cos(ang), cy + L * Math.sin(ang), { color: "var(--bad)", sw: 3 }); tx.textContent = "某一步梯度太大"; }))) return;
+        if (!(await ctx.wait(400))) return;
+        await ctx.tween(600, (t) => { const L = K.lerp(150, 70, t); g.innerHTML = ""; K.arrow(g, cx, cy, cx + L * Math.cos(ang), cy + L * Math.sin(ang), { color: "var(--good)", sw: 3 }); tx.textContent = "方向不变，长度缩到上限"; });
+      },
+    },
+    {
+      at: 31,
+      title: "给一条新影评打分", kicker: "第 31–34 格 · 推理",
+      html: `<p><code>predict_text</code> 把推理串起来：用训练时的同一个词表编码 → 同样左侧补 0 到 500 → batch_size=1 的隐藏状态 → 前向计算得到“好评概率”。大于 0.5 判为 positive，否则把概率换成 1 − p 报告为 negative 的把握。</p><p>作者在第 33、34 格各挑了一条原数据集里的影评演示。关键原则：推理时的预处理必须和训练时<b>一模一样</b>。</p>`,
+      cells: [32, 33], highlight: ["padding_(word_seq,500)", "status"],
+      async draw(svg, ctx) {
+        const boxes = ["新影评文本", "同一词表编码", "左侧补 0\n到 500", "Embedding\n+ 2 层 LSTM", "最后一步\nsigmoid"];
+        const xs = boxes.map((_, i) => 20 + i * 140);
+        const nodes = boxes.map((b, i) => { const g = K.node(svg, xs[i], 120, 124, 60, b, { fs: 12 }); g.style.opacity = 0; return g; });
+        for (let i = 0; i < boxes.length; i++) {
+          if (i) K.arrow(svg, xs[i - 1] + 124, 150, xs[i] - 2, 150);
+          if (!(await ctx.tween(300, (t) => (nodes[i].style.opacity = t)))) return;
+        }
+        const p = 0.83;
+        const bar = K.svg(svg, "rect", { x: 100, y: 240, width: 0, height: 22, rx: 11, fill: "var(--c3)" });
+        K.svg(svg, "rect", { x: 100, y: 240, width: 520, height: 22, rx: 11, fill: "none", stroke: "var(--line)" });
+        const t1 = K.svg(svg, "text", { x: 100, y: 290, "font-size": 13 }, "");
+        await ctx.tween(800, (t) => { bar.setAttribute("width", 520 * p * t); t1.textContent = `P(好评) = ${(p * t).toFixed(2)}（示意）→ ${p * t > 0.5 ? "positive" : "negative"}`; });
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), autoKicker(steps));
+
+  /* ---------- 实验 A：影评 → 张量 ---------- */
+  let rev = "The story was not good, but the music was wonderful!";
+  const lab1 = K.lab(document.getElementById("lab1"), {
+    width: 640, height: 290,
+    controls: [
+      { id: "N", label: "词表大小（原文 1000）", min: 5, max: 60, step: 1, value: 30 },
+      { id: "L", label: "统一长度 seq_len（原文 500）", min: 4, max: 24, step: 1, value: 14 },
+      { id: "side", label: "在哪边补 0", value: "pre", options: [["pre", "左侧（作者的 padding_）"], ["post", "右侧"]] },
+    ],
+    note: "词表在 12 条自编影评上统计（去停用词后按词频取前 N 个）。橙框是模型最后一步看到的位置，作者正是只用这一步的输出做判断。",
+    render(svg, v) {
+      const { cnt, dict } = buildVocab(REVIEWS.map((r) => r[0]), v.N);
+      const raw = rev.toLowerCase().split(/\s+/).filter(Boolean);
+      K.svg(svg, "text", { x: 10, y: 18, "font-size": 13, class: "muted" }, "① 逐词清洗后：蓝 = 在词表里；灰 = 停用词；红框 = 不在词表（罕见词）");
+      const cs = chipRow(svg, 10, 28, raw.map((w) => prep(w) || "∅"), 620, { fs: 12, h: 22, style: (w) => (dict.has(w) ? { color: "var(--c1)" } : STOP.has(w) || w === "∅" ? { color: "var(--ink-3)", ink: "var(--ink-3)", fill: "var(--panel-2)" } : { color: "var(--bad)", ink: "var(--bad)", fill: "none" }) });
+      const y1 = (cs.length ? cs[cs.length - 1].y : 28) + 52;
+      const ids = encode(rev, dict);
+      K.svg(svg, "text", { x: 10, y: y1, "font-size": 13, class: "muted" }, `② 整数序列（长度 ${ids.length}）`);
+      const c2 = chipRow(svg, 10, y1 + 10, ids.map(String), 620, { fs: 12, h: 22, color: "var(--c2)" });
+      const y2 = (c2.length ? c2[c2.length - 1].y : y1 + 10) + 52;
+      const P = pad(ids, v.L, v.side);
+      K.svg(svg, "text", { x: 10, y: y2, "font-size": 13, class: "muted" }, `③ 填充 / 截断到 ${v.L}：这一行就是张量里的一行`);
+      const cw = Math.min(44, 620 / v.L);
+      P.forEach((x, j) => chip(svg, 10 + j * cw, y2 + 10, String(x), { w: cw - 4, fs: 11, h: 24, color: x ? "var(--c2)" : "var(--ink-3)", ink: x ? "var(--ink)" : "var(--ink-3)" }));
+      K.svg(svg, "rect", { x: 10 + (v.L - 1) * cw - 3, y: y2 + 6, width: cw + 2, height: 32, rx: 6, fill: "none", stroke: "var(--warn)", "stroke-width": 2.5 });
+      const lastPad = P[v.L - 1] === 0;
+      K.svg(svg, "text", { x: 10, y: y2 + 62, "font-size": 12, fill: lastPad ? "var(--bad)" : "var(--good)" }, lastPad ? "最后一个位置是填充 0：最后一步之前模型读了一串“空白”" : "最后一个位置是真实的词");
+      const cut = Math.max(0, ids.length - v.L);
+      K.svg(svg, "text", { x: 10, y: y2 + 84, "font-size": 12, class: "muted" }, `词表前几名：${[...dict.keys()].slice(0, 8).map((w) => w + "(" + cnt.get(w) + ")").join(" ")} …`);
+      return { readout: [
+        { k: "原始词数", v: String(raw.length) },
+        { k: "保留下来", v: String(ids.length), color: "var(--c2)" },
+        { k: "被截掉", v: String(cut), color: cut ? "var(--bad)" : "" },
+        { k: "填充 0 个数", v: String(P.filter((x) => x === 0).length) },
+      ] };
+    },
+  });
+  addTextInput(document.getElementById("lab1"), "输入一条英文影评", rev, (s) => { rev = s; lab1.update(); });
+
+  /* ---------- 实验 B：手工 1 维 LSTM ---------- */
+  const LEX = { good: 1, great: 1, wonderful: 1, loved: 1, love: 1, best: 1, beautiful: 1, funny: 0.8, moving: 0.8, fine: 0.5, bad: -1, terrible: -1, awful: -1, boring: -1, worst: -1, weak: -0.8, waste: -1, hate: -1, dull: -0.8 };
+  let lstmText = "The ending was boring but the acting was wonderful and the music was great";
+  const lab2 = K.lab(document.getElementById("lab2"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "bf", label: "遗忘门偏置 b_f（越大越不容易忘）", min: -4, max: 6, step: 0.1, value: 2, fmt: (v) => v.toFixed(1) + `  (f≈${K.sigmoid(v).toFixed(2)})` },
+      { id: "bi", label: "输入门偏置 b_i（越大越容易写入）", min: -6, max: 4, step: 0.1, value: -2, fmt: (v) => v.toFixed(1) },
+      { id: "wi", label: "情感词打开输入门的力度 w_i", min: 0, max: 8, step: 0.1, value: 5, fmt: (v) => v.toFixed(1) },
+    ],
+    note: "这是一个手工设定权重的 1 维 LSTM（真算公式，不是训练出来的）：输入 x = 情感词典分数，输入门 i = σ(w_i·|x| + b_i)，遗忘门 f = σ(b_f)，候选 g = tanh(2x)，c = f·c + i·g，h = σ(2)·tanh(c)，最后 P(好评) = σ(3h)。把 b_f 调小，看句首的 boring 怎样被忘掉。",
+    render(svg, v) {
+      const words = lstmText.toLowerCase().split(/\s+/).map(prep).filter(Boolean).slice(0, 18);
+      let c = 0, h = 0;
+      const C = [], H = [], I = [];
+      const o = K.sigmoid(2), f = K.sigmoid(v.bf);
+      words.forEach((w) => { const x = LEX[w] || 0; const i = K.sigmoid(v.wi * Math.abs(x) + v.bi), g = Math.tanh(2 * x); c = f * c + i * g; h = o * Math.tanh(c); C.push(c); H.push(h); I.push(i); });
+      const n = Math.max(1, words.length);
+      const ax = K.axes(svg, { x: 50, y: 20, w: 570, h: 200 }, [0, n], [-2, 2], { xticks: 0, yticks: 4, yfmt: (x) => x.toFixed(0) });
+      const sx = (k) => ax.sx(k + 0.5);
+      const path = (A) => A.map((y, k) => (k ? "L" : "M") + sx(k) + "," + ax.sy(K.clamp(y, -2, 2))).join("");
+      K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(n), y1: ax.sy(0), y2: ax.sy(0), stroke: "var(--ink-3)" });
+      I.forEach((iv, k) => K.svg(svg, "rect", { x: sx(k) - 8, y: ax.sy(-2) - 30 * iv, width: 16, height: 30 * iv, fill: "var(--c5)", "fill-opacity": 0.6 }));
+      K.svg(svg, "path", { d: path(C), fill: "none", stroke: "var(--c4)", "stroke-width": 2.5 });
+      K.svg(svg, "path", { d: path(H), fill: "none", stroke: "var(--c3)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+      words.forEach((w, k) => {
+        const x = LEX[w] || 0;
+        K.svg(svg, "text", { style: MONO, x: sx(k), y: 240, "text-anchor": "end", "font-size": 11, fill: x > 0 ? "var(--c3)" : x < 0 ? "var(--c6)" : "var(--ink-3)", transform: `rotate(-45 ${sx(k)} 240)` }, w);
+      });
+      K.svg(svg, "text", { x: 60, y: 340, "font-size": 12, fill: "var(--c4)" }, "— 细胞状态 c（记忆）");
+      K.svg(svg, "text", { x: 210, y: 340, "font-size": 12, fill: "var(--c3)" }, "-- 隐藏状态 h");
+      K.svg(svg, "text", { x: 330, y: 340, "font-size": 12, fill: "var(--c5)" }, "■ 输入门开度 i（底部柱）");
+      const p = K.sigmoid(3 * h);
+      return { readout: [
+        { k: "遗忘门 f", v: f.toFixed(2) },
+        { k: "最后的 c", v: c.toFixed(2), color: "var(--c4)" },
+        { k: "P(好评)", v: (p * 100).toFixed(1) + "%", color: p > 0.5 ? "var(--c3)" : "var(--c6)" },
+      ] };
+    },
+  });
+  addTextInput(document.getElementById("lab2"), "输入一句英文影评（最多读 18 个词）", lstmText, (s) => { lstmText = s; lab2.update(); });
+
+})();
+</script>
+</body>
+</html>

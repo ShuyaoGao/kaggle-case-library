@@ -1,0 +1,513 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>倒立摆 DQN</title>
+<meta name="description" content="Kaggle 案例拆解：用 PyTorch 从零搭 DQN，让小车把竖杆顶住不倒。回放记忆、ε 指数衰减、目标网络、终止状态处理，以及“看画面”和“看 4 个数”两种状态表示的对比。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">物理模拟环境 · 平衡控制 · 深度强化学习</div>
+  <h1>小车顶竖杆：用 PyTorch 从零搭一个 DQN</h1>
+  <p class="en">DQN - OpenAI Gym CartPole with PyTorch</p>
+  <div class="tags">
+    <span class="tag rl">强化学习</span><span class="tag dl">深度学习</span>
+    <span class="tag method">CartPole-v1</span><span class="tag method">DQN</span><span class="tag method">回放记忆</span>
+    <span class="tag method">目标网络</span><span class="tag method">ε 指数衰减</span><span class="tag method">画面差分 vs 状态特征</span><span class="tag method">移动平均</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Ahmed（dsxavier）</b>，跟随 DeepLizard 课程</span>
+    <span>Kaggle 点赞 <b>161</b>（2026-11 抓取）</span>
+    <span>环境 <b>Gym CartPole-v1</b>（无外部数据集）</span>
+    <span><a href="https://www.kaggle.com/code/dsxavier/dqn-openai-gym-cartpole-with-pytorch" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>问题是什么</h3><div class="big">推小车，别让竖杆倒下</div><p>一根杆子用不带动力的关节连在小车上，小车在无摩擦的轨道上滑。每一步只能往左或往右推一下，杆子不倒、小车不出界，就每步 +1 分。<span data-cell="4">出处</span></p></div>
+    <div class="card panel"><h3>要学什么</h3><div class="big">看 4 个数 → 选左推还是右推</div><p>状态是小车位置、小车速度、杆的角度、杆尖速度 4 个数；网络输出“左推”“右推”两个 Q 值，选大的。<span data-cell="17">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">DQN：回放记忆 + 目标网络</div><p>跟着 DeepLizard 课程，用 PyTorch 写出 DQN 的全部零件：网络、经验、回放记忆、ε-贪心、智能体、环境管理器、Q 值计算器，再训练最多 1000 局。<span data-cell="0">出处</span> <span data-cell="6">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">119 局达到 195 分及格线</div><p>作者写道：用“看画面”的方法 1000 局也没达到 100 局平均 195；改成直接用 4 个位置特征后，<b>119 局</b>就达到了。<span data-cell="72">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>问题长什么样</h2>
+  <p class="lead">没有数据集：数据是小车和 Gym 的 CartPole 环境一步步交互产生的。规则来自作者第 4 格引用的 Gym 说明。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">状态：4 个数</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>特征</th><th>含义</th><th>类型</th></tr>
+        <tr><td>cart_position</td><td>小车离轨道中心多远</td><td>小数</td></tr>
+        <tr><td>cart_velocity</td><td>小车往哪边、多快地移动</td><td>小数</td></tr>
+        <tr><td>pole_angle</td><td>杆子偏离竖直多少</td><td>小数（弧度）</td></tr>
+        <tr><td>pole_velocity_at_tip</td><td>杆尖在往哪边倒、多快</td><td>小数</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">特征名来自第 17 格的注释 <span data-cell="17">出处</span>。作者之前还试过用“相邻两帧画面的差”当状态 <span data-cell="30">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">动作、奖励、结束</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">动作</div><div class="v">2（左推 / 右推）</div></div>
+        <div class="stat-tile"><div class="k">每坚持一步</div><div class="v">+1</div></div>
+        <div class="stat-tile"><div class="k">及格线</div><div class="v">100 局平均 ≥ 195</div></div>
+        <div class="stat-tile"><div class="k">最多训练</div><div class="v">1000 局</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">一局在杆子偏离竖直太多、或小车离中心超过 2.4 时结束（第 4 格）<span data-cell="4">出处</span>；因为每步 +1，<b>一局坚持的步数 = 这局的总奖励</b>（第 52 格）<span data-cell="52">出处</span>；1000 局见第 60 格 <span data-cell="60">出处</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="30">
+    <h3>动手试试 A · 不学习，只靠规则能顶多久？ <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labA"></div>
+  </div>
+  <div data-at="71">
+    <h3>动手试试 B · 在浏览器里训练一个迷你 DQN <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labB"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>及格标准：连续 100 局平均奖励 ≥ 195；每步 +1，所以一局的步数就等于这局的奖励</td><td><span data-cell="52">第 52 格</span></td></tr>
+        <tr><td>用画面处理（相邻帧差）+ 全连接网络，1000 局内没能达到 195 的移动平均</td><td><span data-cell="72">第 72 格</span></td></tr>
+        <tr><td>改用 4 个位置特征后，<b>119 局</b>就达到了 195 的移动平均</td><td><span data-cell="72">第 72 格</span></td></tr>
+        <tr><td>把损失从 MSE 换成 Huber，速度和分数都没有改善</td><td><span data-cell="72">第 72 格</span></td></tr>
+        <tr><td>还可以尝试 CNN、迁移学习、图像增强等更强的画面处理方法</td><td><span data-cell="72">第 72 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">训练曲线图在作者贴的图片和运行输出里，源码不带输出；上表“119 局”“1000 局”是作者文字写明的。实验 B 的迷你 DQN 是浏览器里重写的简化版（单隐藏层、普通梯度下降），结果会和作者不同。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>根据几个传感器读数，实时决定往哪边施力，让一个本来不稳定的系统保持平衡。</li>
+        <li><b>同类问题：</b>平衡车、双足机器人站立、火箭垂直回收、无人机悬停、起重机吊物防摆。</li>
+        <li><b>可迁移套路：</b>先确定状态用什么表示（画面还是关键读数）→ 回放记忆 + 目标网络稳定训练 → ε 从 1 指数衰减 → 用 100 局移动平均判断是否达标。</li>
+        <li><b>经验教训：</b>同样的算法，状态表示选得好（4 个读数）比选得差（原始画面）学得快得多。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>DQN 网络 4 → 32 → 64 → 128 → 2 <span data-cell="17">第 17 格</span></li>
+        <li>回放记忆（容量 100000，满了覆盖最旧）<span data-cell="24">第 24 格</span> <span data-cell="60">第 60 格</span></li>
+        <li>ε 指数衰减：1 → 0.01，衰减率 0.001 <span data-cell="26">第 26 格</span></li>
+        <li>终止状态用全 0 表示，下一步 Q 记为 0 <span data-cell="30">第 30 格</span> <span data-cell="50">第 50 格</span></li>
+        <li>批量 256，γ = 0.999，Adam lr = 0.001，每 10 局更新目标网络 <span data-cell="60">第 60 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>同一个 DQN，“看画面”1000 局学不会，“看 4 个数”119 局就学会了。为什么？人学骑车时，是看整个画面还是只盯几个关键感觉？</li>
+      <li>“100 局平均 ≥ 195”是 CartPole-v0 的标准（v0 每局最多 200 步）；作者用的是 v1，而且用了 <code>.unwrapped</code> 去掉了步数上限。在没有上限的情况下用 195 当及格线，是变严了还是变松了？</li>
+      <li>第 71 格把 <code>timestep</code>（从 0 开始计数）当成这局的时长记录下来。真实坚持的步数是多少？这会影响“119 局”的结论吗？</li>
+      <li>终止状态被换成全 0 的张量，第 50 格再用“最大值是否等于 0”找出终止状态。如果一个正常状态的 4 个数恰好最大值是 0，会发生什么？有没有更稳妥的写法？</li>
+      <li>第 4 格引用的说明写“杆子偏离 15 度结束”，而 Gym 源码里的阈值是 12 度。读别人的说明时，怎样核对这类细节？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Ahmed（Kaggle：dsxavier），代码跟随 DeepLizard 强化学习课程，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意；小车物理按 Gym CartPole 的公式在浏览器中重写。
+</footer>
+</main>
+
+<script src="nb/cartpole-dqn-pytorch.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- Gym CartPole 物理（与 Gym 源码相同的欧拉积分） ---------- */
+  const TH = (12 * 2 * Math.PI) / 360;
+  function cpStep(s, a, force) {
+    const [x, xd, th, thd] = s, g = 9.8, mc = 1, mp = 0.1, tm = mc + mp, l = 0.5, pml = mp * l, F = (a ? 1 : -1) * (force || 10), tau = 0.02;
+    const c = Math.cos(th), sn = Math.sin(th), temp = (F + pml * thd * thd * sn) / tm;
+    const thacc = (g * sn - c * temp) / (l * (4 / 3 - (mp * c * c) / tm)), xacc = temp - (pml * thacc * c) / tm;
+    const ns = [x + tau * xd, xd + tau * xacc, th + tau * thd, thd + tau * thacc];
+    return [ns, Math.abs(ns[0]) > 2.4 || Math.abs(ns[2]) > TH];
+  }
+  const startState = (r) => [0, 0, 0, 0].map(() => (r() - 0.5) * 0.1);
+  function rollout(policy, r, cap, force) { let s = startState(r); const tr = [s]; for (let t = 0; t < cap; t++) { const a = policy(s, r); const [ns, d] = cpStep(s, a, force); tr.push(ns); s = ns; if (d) return { tr, steps: t + 1, fell: true }; } return { tr, steps: cap, fell: false }; }
+  function scene(svg, box) {
+    const sx = K.scale(-2.4, 2.4, box.x, box.x + box.w), gy = box.y + box.h;
+    K.svg(svg, "line", { x1: box.x, x2: box.x + box.w, y1: gy, y2: gy, stroke: "var(--ink-3)", "stroke-width": 2 });
+    [-2.4, 2.4].forEach((v) => K.svg(svg, "line", { x1: sx(v), x2: sx(v), y1: gy - 30, y2: gy + 6, stroke: "var(--bad)", "stroke-width": 2, "stroke-dasharray": "4 3" }));
+    K.svg(svg, "line", { x1: sx(0), x2: sx(0), y1: gy - 4, y2: gy + 6, stroke: "var(--ink-3)" });
+    const pole = K.svg(svg, "line", { stroke: "var(--c5)", "stroke-width": 7, "stroke-linecap": "round" });
+    const cart = K.svg(svg, "rect", { width: 60, height: 26, rx: 4, y: gy - 28, fill: "var(--c1)", stroke: "var(--ink)" });
+    const arrow = K.svg(svg, "path", { fill: "var(--warn)" });
+    const L = box.h * 0.75;
+    const place = (s, a) => { const cx = sx(s[0]); K.set(cart, { x: cx - 30 }); K.set(pole, { x1: cx, y1: gy - 28, x2: cx + L * Math.sin(s[2]), y2: gy - 28 - L * Math.cos(s[2]) }); if (a == null) arrow.setAttribute("d", ""); else { const d = a ? 1 : -1, ax = cx + d * 34; arrow.setAttribute("d", `M${ax},${gy - 20} L${ax + d * 16},${gy - 15} L${ax},${gy - 10} Z`); } };
+    place([0, 0, 0, 0]);
+    return { place, sx };
+  }
+  const pd = (kp, kd) => (s) => (kp * s[2] + kd * s[3] > 0 ? 1 : 0);
+  const pathD = (pts, sx, sy) => pts.map((p, i) => (i ? "L" : "M") + sx(p[0]).toFixed(1) + "," + sy(p[1]).toFixed(1)).join("");
+
+  /* ---------- 迷你 DQN（单隐藏层，浏览器内训练） ---------- */
+  const SC = [1 / 2.4, 1 / 3, 1 / 0.21, 1 / 3];
+  function newNet(r, H) { const W1 = [], W2 = []; for (let i = 0; i < H; i++) W1.push(Float64Array.from({ length: 4 }, () => K.randn(r) * 0.5)); for (let k = 0; k < 2; k++) W2.push(Float64Array.from({ length: H }, () => K.randn(r) / Math.sqrt(H))); return { W1, b1: new Float64Array(H), W2, b2: new Float64Array(2), H }; }
+  function clone(n) { return { W1: n.W1.map((a) => Float64Array.from(a)), b1: Float64Array.from(n.b1), W2: n.W2.map((a) => Float64Array.from(a)), b2: Float64Array.from(n.b2), H: n.H }; }
+  function fwd(n, s) { const x = s.map((v, i) => v * SC[i]), h = new Float64Array(n.H); for (let i = 0; i < n.H; i++) { let z = n.b1[i]; for (let j = 0; j < 4; j++) z += n.W1[i][j] * x[j]; h[i] = z > 0 ? z : 0; } const q = [0, 1].map((k) => { let z = n.b2[k]; for (let i = 0; i < n.H; i++) z += n.W2[k][i] * h[i]; return z; }); return { x, h, q }; }
+  function makeTrainer(o) {
+    const r = K.rng(o.seed), P = newNet(r, o.H); let T = clone(P); const mem = []; let step = 0; const durs = [];
+    function sgd() {
+      const H = o.H, gW1 = P.W1.map(() => new Float64Array(4)), gb1 = new Float64Array(H), gW2 = P.W2.map(() => new Float64Array(H)), gb2 = new Float64Array(2);
+      for (let b = 0; b < o.bs; b++) {
+        const [s0, a0, s1, rw, dn] = mem[Math.floor(r() * mem.length)], f = fwd(P, s0), y = rw + (dn ? 0 : o.gamma * Math.max(...fwd(T, s1).q));
+        const err = K.clamp(f.q[a0] - y, -1, 1);
+        gb2[a0] += err; for (let i = 0; i < H; i++) { gW2[a0][i] += err * f.h[i]; if (f.h[i] > 0) { const gh = err * P.W2[a0][i]; gb1[i] += gh; for (let j = 0; j < 4; j++) gW1[i][j] += gh * f.x[j]; } }
+      }
+      const lr = o.lr / o.bs;
+      for (let i = 0; i < H; i++) { P.b1[i] -= lr * gb1[i]; for (let j = 0; j < 4; j++) P.W1[i][j] -= lr * gW1[i][j]; }
+      for (let k = 0; k < 2; k++) { P.b2[k] -= lr * gb2[k]; for (let i = 0; i < H; i++) P.W2[k][i] -= lr * gW2[k][i]; }
+    }
+    function episode() {
+      let s = startState(r), t = 0;
+      for (; t < 500; t++) {
+        const e = 0.01 + 0.99 * Math.exp(-step * o.decay); step++;
+        const a = r() < e ? (r() < 0.5 ? 0 : 1) : (() => { const q = fwd(P, s).q; return q[1] > q[0] ? 1 : 0; })();
+        const [ns, d] = cpStep(s, a); mem.push([s, a, ns, 1, d]); if (mem.length > 10000) mem.shift(); s = ns;
+        if (mem.length >= o.bs) sgd();
+        if (step % o.tu === 0) T = clone(P);
+        if (d) break;
+      }
+      durs.push(t + 1);
+    }
+    return { episode, durs, P, eps: () => 0.01 + 0.99 * Math.exp(-step * o.decay), steps: () => step };
+  }
+
+  const steps = [
+    {
+      at: 0, title: "开场：让小车顶住竖杆", kicker: "第 0–4 格 · DeepLizard 课程项目",
+      html: `<p>这是作者跟着 DeepLizard 的“强化学习：开发智能体”课程做的项目：用 PyTorch 搭一个<b>深度 Q 网络</b>（DQN），学会在移动的小车上平衡一根杆子，也就是经典的 <b>CartPole</b> 问题。</p><p>作者引用的 Gym 说明：杆子通过无动力的关节连在小车上，小车在无摩擦的轨道上移动；每步给小车 +1 或 −1 的力；杆子从竖直开始，只要不倒，每步奖励 +1；杆子偏离竖直太多、或小车离中心超过 2.4，这局结束。动画先演示什么都不懂、随机推的结果，再演示一个会“顺着倒的方向推”的小车。</p>`,
+      cells: [0, 2, 4], highlight: [],
+      draw(svg, ctx) {
+        const S = scene(svg, { x: 40, y: 50, w: 640, h: 230 }), lab = K.svg(svg, "text", { x: 40, y: 30, "font-size": 14, "font-weight": 700 }, ""), cnt = K.svg(svg, "text", { x: 520, y: 30, "font-size": 14, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 40, y: 330, "font-size": 11, class: "muted" }, "按 Gym CartPole 公式在浏览器内模拟；红虚线 = ±2.4 边界");
+        (async () => {
+          for (const [name, pol, seed] of [["随机推：几步就倒", (s, r) => (r() < 0.5 ? 0 : 1), 3], ["杆往哪倒就往哪推（规则示意）", pd(1, 0.3), 5]]) {
+            const r = K.rng(seed), res = rollout(pol, r, 300); lab.textContent = name; lab.style.fill = "var(--ink)";
+            for (let i = 0; i < res.tr.length; i++) { const s = res.tr[i]; S.place(s); cnt.textContent = `坚持 ${i} 步`; if (!(await ctx.wait(20))) return; }
+            if (res.fell) { lab.textContent += "（倒了）"; lab.style.fill = "var(--bad)"; } else { lab.textContent += "（300 步还立着）"; lab.style.fill = "var(--good)"; }
+            if (!(await ctx.wait(1200))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 5, title: "DQN 的算法流程", kicker: "第 5–6 格 · 9 个步骤",
+      html: `<p>作者列出 DQN 的完整流程：①初始化回放记忆的容量；②随机初始化<b>策略网络</b>；③复制一份作为<b>目标网络</b>；④每一局：初始化状态，然后每一步——选动作（探索或利用）→ 在模拟器里执行 → 观察奖励和下一状态 → 存进回放记忆 → 随机抽一批 → 预处理 → 送进策略网络 → 计算输出 Q 值与目标 Q 值的损失（目标值要用目标网络算下一状态）→ 梯度下降更新策略网络；每隔 x 步，把策略网络的权重复制给目标网络。</p><p>后面的每一节代码，都对应这个流程里的一个零件。</p>`,
+      cells: [6], highlight: [],
+      draw(svg, ctx) {
+        const items = ["选动作（ε-贪心）", "模拟器执行", "得到奖励、下一状态", "存进回放记忆", "随机抽一批", "策略网络算 Q", "目标网络算目标", "算损失", "梯度下降"];
+        const pos = items.map((_, i) => { const a = -Math.PI / 2 + (i * 2 * Math.PI) / items.length; return [360 + 255 * Math.cos(a), 170 + 130 * Math.sin(a)]; });
+        const nodes = items.map((t, i) => K.node(svg, pos[i][0] - 72, pos[i][1] - 16, 144, 32, t, { fs: 12 }));
+        K.node(svg, 280, 140, 160, 60, "每一步都重复\n每 10 局同步目标网络", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)", fs: 12 });
+        (async () => { for (let k = 0; k < 27; k++) { nodes.forEach((n, i) => { const rc = n.querySelector("rect"); rc.style.stroke = i === k % 9 ? "var(--accent)" : "var(--line)"; rc.style.strokeWidth = i === k % 9 ? 3 : 1.2; }); if (!(await ctx.wait(450))) return; } })();
+      },
+    },
+    {
+      at: 7, title: "依赖：在没有屏幕的服务器上画画面", kicker: "第 7–14 格 · 库与虚拟显示器",
+      html: `<p>第 8 格装上 Gym 的各种环境、<code>pyvirtualdisplay</code> 等；第 10 格导入 PyTorch、torchvision 的图像变换、<code>namedtuple</code>、<code>count</code> 等工具。</p><p>Kaggle 的服务器没有显示器，而 Gym 的 <code>render()</code> 需要一块屏幕才能画出小车的画面。第 14 格启动一个 400×300 的<b>虚拟显示器</b>，让画面在后台“画”出来，后面才能取到画面像素、也能在训练图旁边显示小车。</p>`,
+      cells: [8, 10, 14], highlight: ["pyvirtualdisplay.Display(visible=0"],
+      notes: { 12: "判断是否在 Jupyter 里，方便实时刷新训练图" },
+      draw(svg, ctx) {
+        K.node(svg, 40, 90, 180, 120, "Kaggle 服务器\n（没有显示器）", { fs: 13, stroke: "var(--ink-3)" });
+        const vd = K.svg(svg, "g"); K.node(vd, 280, 90, 180, 120, "虚拟显示器\n400 × 300", { fs: 13, bold: true, stroke: "var(--accent)", fill: "var(--accent-soft)" }); vd.style.opacity = 0;
+        const sc = K.svg(svg, "g"); K.svg(sc, "rect", { x: 520, y: 90, width: 170, height: 120, rx: 6, fill: "var(--panel-2)", stroke: "var(--line)" }); K.svg(sc, "rect", { x: 585, y: 175, width: 40, height: 16, fill: "var(--c1)" }); K.svg(sc, "line", { x1: 605, y1: 175, x2: 615, y2: 115, stroke: "var(--c5)", "stroke-width": 5 }); K.svg(sc, "line", { x1: 530, x2: 680, y1: 192, y2: 192, stroke: "var(--ink-3)" }); sc.style.opacity = 0;
+        const a1 = K.arrow(svg, 222, 150, 276, 150, { sw: 2 }), a2 = K.arrow(svg, 462, 150, 516, 150, { sw: 2 }); a1.style.opacity = a2.style.opacity = 0;
+        K.svg(svg, "text", { x: 520, y: 235, "font-size": 12, class: "muted" }, "env.render('rgb_array')");
+        (async () => { for (const g of [a1, vd, a2, sc]) if (!(await ctx.tween(450, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      at: 15, title: "DQN 网络：4 个数进，2 个 Q 值出", kicker: "第 15–17 格 · 全连接网络",
+      html: `<p>网络的输入是环境返回的 4 个数：小车位置、小车速度、杆角度、杆尖速度。注释里保留了旧版本：原来输入的是画面（高 × 宽 × 3 个颜色通道），现在改成 4 个特征，不用再展平图像。</p><p>结构：4 → <b>32 → 64 → 128</b>（每层 ReLU）→ 2。输出层不加激活，因为 Q 值可以是任意大小；两个输出分别是“往左推”“往右推”的 Q 值。<span data-cell="17">第 17 格</span></p>`,
+      cells: [17], highlight: ["nn.Linear(in_features=num_state_features,", "out_features=2"],
+      draw(svg, ctx) {
+        const layers = [4, 6, 8, 10, 2], xs = [80, 220, 360, 500, 640], P = layers.map((n, i) => Array.from({ length: n }, (_, j) => [xs[i], 170 + (n === 1 ? 0 : (j - (n - 1) / 2) * (240 / Math.max(1, n - 1)))]));
+        const edges = []; for (let k = 0; k < 4; k++) P[k].forEach((a) => P[k + 1].forEach((b) => edges.push({ k, e: K.svg(svg, "line", { x1: a[0], y1: a[1], x2: b[0], y2: b[1], stroke: "var(--line)", "stroke-width": 0.6 }) })));
+        const nodes = P.map((ps) => ps.map((p) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 8, fill: "var(--panel-2)", stroke: "var(--ink-3)" })));
+        ["小车位置", "小车速度", "杆角度", "杆尖速度"].forEach((n, j) => K.svg(svg, "text", { x: 66, y: P[0][j][1] + 4, "text-anchor": "end", "font-size": 11 }, n));
+        ["32", "64", "128"].forEach((n, i) => K.svg(svg, "text", { x: xs[i + 1], y: 30, "text-anchor": "middle", "font-size": 12, class: "muted" }, n + " 个（示意）"));
+        const q = ["Q(左推)", "Q(右推)"].map((n, j) => K.svg(svg, "text", { x: 656, y: P[4][j][1] + 4, "font-size": 12 }, n));
+        (async () => { for (let rd = 0; rd < 3; rd++) for (let k = 0; k < 5; k++) { if (!(await ctx.tween(300, (t) => { nodes[k].forEach((c) => (c.style.fill = `color-mix(in srgb, var(--accent) ${Math.round(t * 70)}%, var(--panel-2))`)); edges.forEach((d) => (d.e.style.stroke = d.k === k - 1 ? `color-mix(in srgb, var(--accent) ${Math.round(t * 50)}%, var(--line))` : "var(--line)")); }))) return; } })();
+      },
+    },
+    {
+      at: 18, title: "经验与回放记忆", kicker: "第 18–24 格 · Experience + ReplayMemory",
+      html: `<p>每一步的经历打包成一个 <b>Experience</b>：<code>(state, action, next_state, reward)</code>，用 <code>namedtuple</code> 实现，像一条带字段名的小记录（第 22 格演示 <code>Experience(2,3,1,4)</code>）。</p><p><b>回放记忆</b>有固定容量：没满就往后追加；满了就从最早的位置开始<b>覆盖最旧的经验</b>（<code>push_count % capacity</code>，像一个环）。<code>sample</code> 随机抽一批；<code>can_provide_sample</code> 检查记忆里的经验够不够一批。动画演示一个容量为 12 的环形记忆。</p>`,
+      cells: [20, 24], highlight: ["self.memory[self.push_count % self.capacity] = experience", "random.sample(self.memory, batch_size)", "return len(self.memory) >= batch_size"],
+      notes: { 22: "演示一条经验长什么样" },
+      draw(svg, ctx) {
+        const N = 12, cx = 200, cy = 170, R = 120, slots = [], lab = [];
+        for (let i = 0; i < N; i++) { const a = -Math.PI / 2 + (i * 2 * Math.PI) / N, x = cx + R * Math.cos(a), y = cy + R * Math.sin(a); slots.push(K.svg(svg, "circle", { cx: x, cy: y, r: 22, fill: "var(--panel-2)", stroke: "var(--line)" })); lab.push(K.svg(svg, "text", { x, y: y + 4, "text-anchor": "middle", "font-size": 11, "font-family": "var(--mono)" }, "")); }
+        K.svg(svg, "text", { x: cx, y: cy + 4, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "容量 12（示意）");
+        const info = K.svg(svg, "text", { x: 380, y: 100, "font-size": 13 }, ""), info2 = K.svg(svg, "text", { x: 380, y: 130, "font-size": 13, "font-family": "var(--mono)" }, ""), smp = K.svg(svg, "text", { x: 380, y: 190, "font-size": 13, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 380, y: 60, "font-size": 13, "font-weight": 700 }, "Experience(state, action, next_state, reward)");
+        const r = K.rng(4);
+        (async () => {
+          let pushCount = 0; const mem = [];
+          for (let t = 1; t <= 30; t++) {
+            let idx; if (mem.length < N) { mem.push(t); idx = mem.length - 1; info.textContent = `没满：追加到第 ${idx} 格`; } else { idx = pushCount % N; mem[idx] = t; pushCount++; info.textContent = `满了：覆盖第 ${idx} 格（最旧的）`; }
+            slots.forEach((s, i) => K.set(s, { fill: i < mem.length ? "color-mix(in srgb, var(--c1) 35%, var(--panel))" : "var(--panel-2)", stroke: i === idx ? "var(--warn)" : "var(--line)", "stroke-width": i === idx ? 3 : 1 }));
+            lab.forEach((l, i) => (l.textContent = i < mem.length ? "e" + mem[i] : ""));
+            info2.textContent = `push_count = ${pushCount}`;
+            if (mem.length >= 4 && t % 4 === 0) { const pick = []; while (pick.length < 4) { const k = Math.floor(r() * mem.length); if (!pick.includes(k)) pick.push(k); } pick.forEach((k) => K.set(slots[k], { fill: "var(--warn)" })); smp.textContent = "随机抽 4 条：" + pick.map((k) => "e" + mem[k]).join(" "); }
+            if (!(await ctx.wait(330))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 25, title: "ε-贪心：探索率按指数衰减", kicker: "第 25–26 格 · EpsilonGreedyStrategy",
+      html: `<p>探索率按<b>步数</b>指数衰减：</p><p style="text-align:center"><b>ε = end + (start − end) · e<sup>−步数 × decay</sup></b></p><p>作者取 start = 1、end = 0.01、decay = 0.001（第 60 格）。也就是说：一开始 100% 随机推；走了 1000 步后约 37%；3000 步后约 6%；最后停在 1%。动画按这个公式画出 ε 随步数下降的曲线。</p>`,
+      cells: [26], highlight: ["math.exp(-1. * current_step * self.decay)"],
+      draw(svg, ctx) {
+        const A = K.axes(svg, { x: 70, y: 20, w: 600, h: 260 }, [0, 6000], [0, 1], { xticks: 6, yticks: 4, xlabel: "已走的总步数", ylabel: "ε" });
+        const pts = []; for (let s = 0; s <= 6000; s += 20) pts.push([s, 0.01 + 0.99 * Math.exp(-s * 0.001)]);
+        const L = K.svg(svg, "path", { fill: "none", stroke: "var(--c2)", "stroke-width": 2.5 });
+        const marks = [1000, 3000].map((s) => { const g = K.svg(svg, "g"); const e = 0.01 + 0.99 * Math.exp(-s * 0.001); K.svg(g, "circle", { cx: A.sx(s), cy: A.sy(e), r: 5, fill: "var(--c2)" }); K.svg(g, "text", { x: A.sx(s) + 8, y: A.sy(e) - 8, "font-size": 12, fill: "var(--c2)" }, `第 ${s} 步：ε ≈ ${e.toFixed(2)}`); g.style.opacity = 0; return [s, g]; });
+        ctx.tween(2500, (t, raw) => { const m = Math.max(2, Math.floor(raw * pts.length)); L.setAttribute("d", pathD(pts.slice(0, m), A.sx, A.sy)); marks.forEach(([s, g]) => { if (pts[m - 1][0] >= s) g.style.opacity = 1; }); });
+      },
+    },
+    {
+      at: 27, title: "智能体：掷骰子决定探索还是利用", kicker: "第 27–28 格 · Agent.select_action",
+      html: `<p><code>Agent</code> 记着自己走了多少步（<code>current_step</code>），每次选动作先算出当前的 ε，再掷一个 0~1 的随机数：</p><ul class="tight"><li>随机数 &lt; ε：<b>探索</b>，随便选左或右；</li><li>否则：<b>利用</b>，把状态送进策略网络，选 Q 值最大的动作。这时用 <code>torch.no_grad()</code>，只做推断、不记录梯度。</li></ul><p>动画模拟前 3000 步里，每 100 步中探索（橙）和利用（蓝）各占多少。</p>`,
+      cells: [28], highlight: ["if epsilon_rate > random.random():", "argmax(dim=1)", "torch.no_grad()"],
+      draw(svg, ctx) {
+        const r = K.rng(6), n = 30, bw = 19, bars = [];
+        for (let i = 0; i < n; i++) bars.push([K.svg(svg, "rect", { x: 70 + i * (bw + 2), y: 280, width: bw, height: 0, fill: "var(--warn)" }), K.svg(svg, "rect", { x: 70 + i * (bw + 2), y: 280, width: bw, height: 0, fill: "var(--c1)" })]);
+        K.svg(svg, "line", { x1: 66, x2: 700, y1: 280, y2: 280, stroke: "var(--ink-3)" });
+        K.svg(svg, "text", { x: 70, y: 300, "font-size": 12, class: "muted" }, "每根柱子 = 100 步（第 0–3000 步）；高度 200 px = 100 步");
+        K.svg(svg, "text", { x: 70, y: 40, "font-size": 13, fill: "var(--warn)", "font-weight": 700 }, "■ 探索：随机推");
+        K.svg(svg, "text", { x: 220, y: 40, "font-size": 13, fill: "var(--c1)", "font-weight": 700 }, "■ 利用：网络选 Q 最大");
+        (async () => {
+          for (let i = 0; i < n; i++) {
+            let ex = 0; for (let k = 0; k < 100; k++) { const e = 0.01 + 0.99 * Math.exp(-(i * 100 + k) * 0.001); if (e > r()) ex++; }
+            const he = ex * 2, hu = (100 - ex) * 2;
+            K.set(bars[i][0], { y: 280 - he, height: he }); K.set(bars[i][1], { y: 280 - he - hu, height: hu });
+            if (!(await ctx.wait(70))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 29, title: "环境管理器：把 Gym 包一层", kicker: "第 29–30 格 · CartPoleEnvManager",
+      html: `<p><code>CartPoleEnvManager</code> 把 Gym 环境包起来，提供 <code>reset</code>、<code>take_action</code>（执行动作，返回奖励张量）、<code>get_state</code>、<code>num_state_features</code> 等方法。注意它用了 <code>gym.make('CartPole-v1').unwrapped</code>，拿掉了外层包装，也就<b>去掉了每局的步数上限</b>。</p><p>一个关键约定：<b>这局结束时，<code>get_state</code> 返回全 0 的状态</b>，后面计算 Q 值时靠它认出“终止状态”。类里还保留了旧版本“看画面”的方法（裁剪、缩放、相邻帧相减），下一章细看。下面的实验先不学习，看看几种手写规则能顶多久。</p>`,
+      cells: [30], highlight: ["gym.make('CartPole-v1').unwrapped", "return torch.zeros_like(", "def num_state_features(self):"],
+      draw(svg, ctx) {
+        const S = scene(svg, { x: 40, y: 40, w: 400, h: 200 });
+        const st = K.svg(svg, "text", { x: 470, y: 60, "font-size": 13, "font-weight": 700 }, "get_state() 返回："), v = [0, 1, 2, 3].map((i) => K.svg(svg, "text", { x: 470, y: 90 + i * 26, "font-size": 13, "font-family": "var(--mono)" }, ""));
+        const names = ["位置", "速度", "角度", "角速度"];
+        const r = K.rng(8), res = rollout((s, rr) => (rr() < 0.5 ? 0 : 1), r, 200);
+        K.svg(svg, "text", { x: 40, y: 330, "font-size": 11, class: "muted" }, "随机推一局（浏览器内模拟）；结束时状态被换成全 0");
+        (async () => {
+          for (let i = 0; i < res.tr.length; i++) { S.place(res.tr[i]); res.tr[i].forEach((x, k) => (v[k].textContent = `${names[k]} ${x >= 0 ? " " : ""}${x.toFixed(3)}`)); if (!(await ctx.wait(60))) return; }
+          st.textContent = "这局结束 → get_state() 返回："; st.style.fill = "var(--bad)";
+          v.forEach((t, k) => { t.textContent = `${names[k]}  0.000`; t.style.fill = "var(--bad)"; });
+        })();
+      },
+    },
+    {
+      at: 31, title: "旧版本：用画面差当状态", kicker: "第 31–41 格 · 裁剪、缩放、相减",
+      html: `<p>作者先演示了“看画面”的旧方法：取渲染画面 → 只保留高度 40%~80% 那一条（小车和杆所在的带子）→ 缩放成 <b>40 × 90</b> 像素 → 用<b>当前帧减上一帧</b>作为状态。相减后，静止不动的背景变成 0，只剩“动了的地方”，这样一张图里就带上了运动方向的信息。</p><p>一局开始和结束时，状态都是全黑（全 0）的屏幕。第 39 格先往右推 5 步，再看画面差的样子。动画示意这条流水线。</p>`,
+      cells: [32, 34, 36, 39, 41], highlight: ["top = int(screen_height * 0.4)", "T.Resize((40,90))", "return s2 - s1"],
+      draw(svg, ctx) {
+        const box = (x, y, w, h, label) => { K.svg(svg, "rect", { x, y, width: w, height: h, fill: "var(--panel-2)", stroke: "var(--line)" }); K.svg(svg, "text", { x, y: y + h + 16, "font-size": 11, class: "muted" }, label); };
+        box(20, 40, 180, 135, "① 原始画面 400×600（示意）");
+        K.svg(svg, "rect", { x: 92, y: 133, width: 36, height: 14, fill: "var(--c1)" }); const p1 = K.svg(svg, "line", { x1: 110, y1: 133, x2: 116, y2: 80, stroke: "var(--c5)", "stroke-width": 5 });
+        const band = K.svg(svg, "rect", { x: 20, y: 94, width: 180, height: 54, fill: "none", stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "5 3", opacity: 0 });
+        const g2 = K.svg(svg, "g"); g2.style.opacity = 0; K.svg(g2, "rect", { x: 250, y: 80, width: 180, height: 80, fill: "var(--panel-2)", stroke: "var(--line)" }); K.svg(g2, "rect", { x: 322, y: 135, width: 36, height: 16, fill: "var(--c1)" }); K.svg(g2, "line", { x1: 340, y1: 135, x2: 346, y2: 88, stroke: "var(--c5)", "stroke-width": 5 }); K.svg(g2, "text", { x: 250, y: 176, "font-size": 11, class: "muted" }, "② 裁出 40%~80% 的带子，缩到 40×90");
+        const g3 = K.svg(svg, "g"); g3.style.opacity = 0; K.svg(g3, "rect", { x: 480, y: 80, width: 180, height: 80, fill: "#000", stroke: "var(--line)" }); K.svg(g3, "rect", { x: 552, y: 135, width: 6, height: 16, fill: "var(--c1)" }); K.svg(g3, "rect", { x: 588, y: 135, width: 6, height: 16, fill: "var(--c6)" }); K.svg(g3, "line", { x1: 570, y1: 120, x2: 578, y2: 88, stroke: "var(--c5)", "stroke-width": 3, opacity: 0.8 }); K.svg(g3, "text", { x: 480, y: 176, "font-size": 11, class: "muted" }, "③ 当前帧 − 上一帧：只剩动了的边缘");
+        const a1 = K.arrow(svg, 204, 120, 246, 120, { sw: 2 }), a2 = K.arrow(svg, 434, 120, 476, 120, { sw: 2 }); a1.style.opacity = a2.style.opacity = 0;
+        K.svg(svg, "text", { x: 20, y: 250, "font-size": 13 }, "一张 40×90 的彩色图 = 40 × 90 × 3 = 10800 个数，而且大部分是 0");
+        K.svg(svg, "text", { x: 20, y: 278, "font-size": 13, "font-weight": 700, fill: "var(--accent)" }, "对比：新版本只用 4 个数（位置、速度、角度、角速度）");
+        (async () => { for (const g of [band, a1, g2, a2, g3]) if (!(await ctx.tween(500, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      at: 42, title: "把一批经验转成张量", kicker: "第 42–48 格 · extract_tensors",
+      html: `<p>从记忆里抽出来的是“一批经验”（每条都有 state、action、next_state、reward）。训练时需要的却是“一批 state、一批 action……”。第 44 格用 <code>Experience(*zip(*experiences))</code> 把它<b>转置</b>过来，再用 <code>torch.stack</code> 把 4 维的状态叠成矩阵、用 <code>torch.cat</code> 拼起动作和奖励。</p><p>第 46、48 格用 3 条玩具经验演示：<code>[E(1,1,1,1), E(2,2,2,2), E(3,3,3,3)]</code> 变成 <code>E(state=(1,2,3), action=(1,2,3), …)</code>。动画演示这次“行变列”。</p>`,
+      cells: [44, 46, 48], highlight: ["batch = Experience(*zip(*experiences))", "torch.stack(batch.state)"],
+      draw(svg, ctx) {
+        const f = ["state", "action", "next_state", "reward"], cells = [];
+        K.svg(svg, "text", { x: 40, y: 40, "font-size": 13, "font-weight": 700 }, "一批经验（每行一条）");
+        K.svg(svg, "text", { x: 420, y: 40, "font-size": 13, "font-weight": 700 }, "一条“批量经验”（每行一个字段）");
+        for (let i = 0; i < 3; i++) for (let j = 0; j < 4; j++) cells.push({ i, j, el: K.node(svg, 40 + j * 80, 60 + i * 50, 70, 38, String(i + 1), { fs: 14, stroke: ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c5)"][j] }) });
+        f.forEach((n, j) => K.svg(svg, "text", { x: 75 + j * 80, y: 230, "text-anchor": "middle", "font-size": 11, class: "muted" }, n));
+        f.forEach((n, j) => K.svg(svg, "text", { x: 410, y: 85 + j * 50, "text-anchor": "end", "font-size": 12 }, n));
+        (async () => {
+          if (!(await ctx.wait(800))) return;
+          await ctx.tween(1500, (t) => cells.forEach((c) => { const x = K.lerp(40 + c.j * 80, 420 + c.i * 80, t), y = K.lerp(60 + c.i * 50, 60 + c.j * 50, t); c.el.setAttribute("transform", `translate(${x - (40 + c.j * 80)},${y - (60 + c.i * 50)})`); }));
+        })();
+      },
+    },
+    {
+      at: 49, title: "Q 值计算器：当前值与目标值", kicker: "第 49–50 格 · QValues",
+      html: `<p><code>QValues.get_current</code>：把一批状态送进策略网络，用 <code>gather</code> 取出<b>当时真正选的那个动作</b>的 Q 值。</p><p><code>QValues.get_next</code>：对一批下一状态，先找出哪些是<b>终止状态</b>（全 0，用“最大值是否等于 0”判断），终止状态的下一步价值直接记 0；其余的送进<b>目标网络</b>，取两个动作里较大的 Q 值。主程序再算 <b>目标 = 奖励 + γ × 下一步价值</b>（贝尔曼最优方程）。动画演示一个 4 条经验的小批量。</p>`,
+      cells: [50], highlight: ["gather(dim=1, index=actions.unsqueeze(-1))", ".max(dim=1)[0].eq(0)", "values[non_final_states_locations] = target_net(non_final_states).max(dim=1)[0].detach()"],
+      draw(svg, ctx) {
+        const rows = [[[0.02, 0.1, -0.03, 0.2], false, [8.1, 9.4]], [[0, 0, 0, 0], true, null], [[-0.4, -0.2, 0.05, 0.3], false, [7.2, 6.5]], [[0.1, 0.3, 0.12, -0.1], false, [3.3, 4.0]]];
+        ["下一状态（4 个数）", "终止？", "目标网络 Q(左, 右)", "下一步价值", "目标 = 1 + 0.999×价值"].forEach((h, j) => K.svg(svg, "text", { x: [30, 250, 330, 500, 580][j], y: 34, "font-size": 12, "font-weight": 700 }, h));
+        const outs = rows.map((r0, i) => {
+          const y = 66 + i * 58;
+          K.svg(svg, "text", { x: 30, y, "font-size": 12, "font-family": "var(--mono)" }, "[" + r0[0].map((v) => v.toFixed(2)).join(", ") + "]");
+          return [250, 330, 500, 580].map((x) => K.svg(svg, "text", { x, y, "font-size": 12, "font-family": "var(--mono)" }, ""));
+        });
+        K.svg(svg, "text", { x: 30, y: 320, "font-size": 11, class: "muted" }, "示意数字；γ = 0.999（第 60 格），每步奖励 = 1");
+        (async () => {
+          for (let i = 0; i < rows.length; i++) {
+            const [s, fin, q] = rows[i], o = outs[i]; if (!(await ctx.wait(600))) return;
+            o[0].textContent = fin ? "是（全 0）" : "否"; o[0].style.fill = fin ? "var(--bad)" : "var(--ink)";
+            if (!(await ctx.wait(400))) return;
+            o[1].textContent = fin ? "不送进网络" : `(${q[0]}, ${q[1]})`;
+            const v = fin ? 0 : Math.max(...q); o[2].textContent = v.toFixed(1);
+            o[3].textContent = (1 + 0.999 * v).toFixed(2); o[3].style.fill = "var(--good)";
+          }
+        })();
+      },
+    },
+    {
+      at: 51, title: "及格线 195 与 100 局移动平均", kicker: "第 51–57 格 · 怎么判断学会了",
+      html: `<p>作者给出的标准：<b>连续 100 局的平均奖励 ≥ 195</b> 就算解决了 CartPole。因为每坚持一步 +1，一局坚持的步数就等于这局的奖励。<span data-cell="52">第 52 格</span></p><p><code>get_moving_average</code> 用 <code>unfold</code> 把序列切成一段段长 100 的窗口取平均；前 99 局不够 100 个数，就补 0。第 56 格用 300 个随机数演示：蓝线是原始值，橙线是 100 期移动平均，前 99 个是 0，第 100 个是前 100 个数的平均。<span data-cell="57">第 57 格</span> 动画复现这个演示。</p>`,
+      cells: [53, 54, 56], highlight: ["values.unfold(dimension=0", "torch.cat((torch.zeros(period-1), moving_avg))"],
+      draw(svg, ctx) {
+        const r = K.rng(12), vals = Array.from({ length: 300 }, () => r()), ma = vals.map((_, i) => (i < 99 ? 0 : vals.slice(i - 99, i + 1).reduce((a, b) => a + b, 0) / 100));
+        const A = K.axes(svg, { x: 60, y: 20, w: 620, h: 260 }, [0, 300], [0, 1], { xticks: 6, yticks: 4, xlabel: "第几个值", yfmt: (v) => v.toFixed(2) });
+        const L1 = K.svg(svg, "path", { fill: "none", stroke: "var(--c1)", "stroke-width": 1, opacity: 0.7 }), L2 = K.svg(svg, "path", { fill: "none", stroke: "var(--c5)", "stroke-width": 2.6 });
+        K.svg(svg, "line", { x1: A.sx(99), x2: A.sx(99), y1: 20, y2: 280, stroke: "var(--ink-3)", "stroke-dasharray": "3 3" });
+        K.svg(svg, "text", { x: A.sx(99) + 4, y: 36, "font-size": 11, class: "muted" }, "第 100 个：第一次有真实平均");
+        K.svg(svg, "text", { x: 60, y: 325, "font-size": 11, class: "muted" }, "同作者第 56 格：300 个 0~1 的随机数（浏览器内生成）");
+        ctx.tween(2600, (t, raw) => { const m = Math.max(2, Math.floor(raw * 300)); L1.setAttribute("d", pathD(vals.slice(0, m).map((v, i) => [i, v]), A.sx, A.sy)); L2.setAttribute("d", pathD(ma.slice(0, m).map((v, i) => [i, v]), A.sx, A.sy)); });
+      },
+    },
+    {
+      at: 58, title: "超参数与主对象", kicker: "第 58–69 格 · 把零件装起来",
+      html: `<p>全局超参数：批量 <b>256</b>、折扣 γ = <b>0.999</b>、ε 从 1 衰减到 0.01（衰减率 0.001）、每 <b>10 局</b>同步一次目标网络、回放记忆容量 <b>100000</b>、学习率 0.001、最多 <b>1000 局</b>。<span data-cell="60">第 60 格</span></p><p>然后创建环境管理器、ε 策略、智能体、回放记忆、<b>策略网络</b>和<b>目标网络</b>；把策略网络的权重复制给目标网络，并把目标网络设成 <code>eval()</code>（只推断不训练）；优化器用 Adam，只更新策略网络。</p>`,
+      cells: [60, 62, 65, 67, 69], highlight: ["batch_size = 256", "gamma = 0.999", "target_update = 10", "memory_size = 100000", "target_net.load_state_dict(policy_net.state_dict())"],
+      draw(svg, ctx) {
+        const items = [["batch_size", "256", "每次抽多少条经验来学"], ["gamma", "0.999", "未来奖励几乎不打折"], ["eps_start / end", "1 → 0.01", "从全随机到几乎不随机"], ["eps_decay", "0.001", "按步数指数衰减"], ["target_update", "10 局", "多久同步一次目标网络"], ["memory_size", "100000", "回放记忆容量"], ["lr", "0.001", "Adam 学习率"], ["num_episodes", "1000", "最多训练局数"]];
+        const els = items.map((it, i) => { const g = K.svg(svg, "g"), x = i % 2 ? 370 : 30, y = 30 + Math.floor(i / 2) * 72; K.svg(g, "rect", { x, y, width: 320, height: 60, rx: 8, fill: "var(--panel-2)", stroke: "var(--line)" }); K.svg(g, "text", { x: x + 12, y: y + 24, "font-size": 13, "font-family": "var(--mono)", "font-weight": 700 }, it[0] + " = " + it[1]); K.svg(g, "text", { x: x + 12, y: y + 46, "font-size": 12, class: "muted" }, it[2]); g.style.opacity = 0; return g; });
+        (async () => { for (const g of els) if (!(await ctx.tween(260, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      at: 70, title: "训练循环与结果：119 局达标", kicker: "第 70–75 格 · 主程序",
+      html: `<p>主循环完全对应第 6 格的流程：每局重置环境 → 每一步渲染、选动作、执行、得到奖励和下一状态 → 存进回放记忆 → 记忆够一批（256 条）就抽样、算当前 Q 和目标 Q、用 MSE 损失反向传播更新策略网络 → 这局结束就记下时长、画训练图 → 每 10 局同步目标网络 → 最近 100 局平均 ≥ 195 就提前结束。</p><p>作者的结果：之前用<b>画面</b>的方法，1000 局都没达到 195；改用 <b>4 个位置特征</b>后，<b>119 局</b>就达到了。他还试过把 MSE 换成 Huber 损失，没有更快也没有更高分。<span data-cell="72">第 72 格</span></p><p class="callout warn">细节：记录时长用的是 <code>timestep</code>，它从 0 开始数，所以记下的数比实际坚持的步数少 1；而且 <code>.unwrapped</code> 去掉了 v1 每局 500 步的上限，“195”原本是 CartPole-v0（每局最多 200 步）的标准。</p>`,
+      cells: [71, 72], highlight: ["memory.push(Experience(state, action, next_states, reward))", "target_q_values = rewards + (gamma * next_q_values)", "if episode % target_update == 0:", "get_moving_average(100, episode_duration)[-1] >= 195", "episode_duration.append(timestep)"],
+      draw(svg, ctx) {
+        const sx = K.scale(0, 1000, 160, 680);
+        K.svg(svg, "text", { x: 30, y: 40, "font-size": 14, "font-weight": 700 }, "达到“100 局平均 ≥ 195”需要多少局？（作者第 72 格）");
+        const rows = [["看画面（帧差）", 1000, "1000 局内没达到", "var(--bad)"], ["看 4 个特征", 119, "119 局达到", "var(--good)"]];
+        const bars = rows.map((r0, i) => { const y = 90 + i * 90; K.svg(svg, "text", { x: 150, y: y + 26, "text-anchor": "end", "font-size": 13, "font-weight": 700 }, r0[0]); const b = K.svg(svg, "rect", { x: 160, y, width: 0, height: 40, rx: 6, fill: r0[3], opacity: 0.75 }); const t = K.svg(svg, "text", { x: 170, y: y + 26, "font-size": 13, "font-weight": 700 }, ""); return { b, t, r0 }; });
+        [0, 250, 500, 750, 1000].forEach((v) => { K.svg(svg, "line", { x1: sx(v), x2: sx(v), y1: 80, y2: 270, stroke: "var(--line)", "stroke-dasharray": "3 3" }); K.svg(svg, "text", { x: sx(v), y: 288, "text-anchor": "middle", "font-size": 11 }, v); });
+        K.svg(svg, "text", { x: 420, y: 310, "text-anchor": "middle", "font-size": 12, class: "muted" }, "局数（第一条“1000”表示到上限仍未达标）");
+        ctx.tween(1600, (t) => bars.forEach(({ b, t: tx, r0 }) => { const w = (sx(r0[1]) - 160) * t; K.set(b, { width: w }); tx.setAttribute("x", 166 + w); tx.textContent = t > 0.95 ? r0[2] : ""; }));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：规则控制 ---------- */
+  K.lab(document.getElementById("labA"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "pol", label: "规则", value: "pd", options: [["rand", "随机推"], ["angle", "只看角度：往倒的方向推"], ["pd", "角度 + 角速度"], ["full", "四个数都看"]] },
+      { id: "kd", label: "角速度的权重", min: 0, max: 2, step: 0.05, value: 0.3, fmt: (v) => v.toFixed(2) },
+      { id: "kx", label: "位置 / 速度的权重（四个数都看时）", min: 0, max: 0.5, step: 0.01, value: 0.05, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "换一个起始姿态", button: true },
+    ],
+    note: "按 Gym CartPole 公式在浏览器里模拟，每局最多 500 步。这些是人写的固定规则，不是 DQN。“成功率”= 20 个随机起始姿态里坚持满 500 步的比例。试试：只看角度为什么会被“荡”倒？加上角速度呢？为什么有的规则杆子不倒、小车却开出了边界？",
+    render(svg, v, api) {
+      const pol = v.pol === "rand" ? (s, r) => (r() < 0.5 ? 0 : 1) : v.pol === "angle" ? pd(1, 0) : v.pol === "pd" ? pd(1, v.kd) : (s) => (s[2] + v.kd * s[3] + v.kx * (s[0] + s[1]) > 0 ? 1 : 0);
+      const res = rollout(pol, K.rng(3 + v.seed * 7), 500), S = scene(svg, { x: 20, y: 30, w: 600, h: 150 });
+      const A = K.axes(svg, { x: 60, y: 220, w: 560, h: 80 }, [0, 500], [-TH, TH], { xticks: 5, yticks: 0 });
+      K.svg(svg, "path", { d: pathD(res.tr.map((s, i) => [i, K.clamp(s[2], -TH, TH)]), A.sx, A.sy), fill: "none", stroke: "var(--c5)", "stroke-width": 1.5 });
+      K.svg(svg, "text", { x: 26, y: 214, "font-size": 11, class: "muted" }, "杆角度随时间（上下边界 = ±12°）");
+      (async () => { const n = res.tr.length, st = Math.max(1, Math.ceil(n / 250)); for (let i = 0; i < n; i += st) { S.place(res.tr[i], pol(res.tr[i], K.rng(1))); if (!(await api.wait(20))) return; } S.place(res.tr[n - 1]); })();
+      let ok = 0, tot = 0; for (let k = 0; k < 20; k++) { const rr = rollout(pol, K.rng(100 + k), 500); tot += rr.steps; if (!rr.fell) ok++; }
+      const last = res.tr[res.tr.length - 1], why = !res.fell ? "坚持满 500 步" : Math.abs(last[0]) > 2.4 ? "小车出界" : "杆子倒了";
+      return { readout: [
+        { k: "这一局", v: why, color: res.fell ? "var(--bad)" : "var(--good)" },
+        { k: "坚持步数", v: res.steps },
+        { k: "20 局平均步数", v: (tot / 20).toFixed(0) },
+        { k: "20 局成功率", v: ok * 5 + "%" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：迷你 DQN ---------- */
+  K.lab(document.getElementById("labB"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "eps", label: "训练局数", min: 50, max: 500, step: 25, value: 300 },
+      { id: "lr", label: "学习率", min: 0.02, max: 0.4, step: 0.02, value: 0.2, fmt: (v) => v.toFixed(2) },
+      { id: "tu", label: "目标网络每隔几步同步", value: "500", options: [["1", "1 步（等于没有目标网络）"], ["100", "100 步"], ["500", "500 步"], ["2000", "2000 步"]] },
+      { id: "decay", label: "ε 衰减率", min: 0.0005, max: 0.01, step: 0.0005, value: 0.002, fmt: (v) => v.toFixed(4) },
+      { id: "H", label: "隐藏层神经元", value: "32", options: [["16", "16"], ["32", "32"], ["64", "64"]] },
+      { id: "seed", label: "换随机种子重训", button: true },
+    ],
+    note: "浏览器里重写的简化 DQN：4 → 隐藏层（ReLU）→ 2，回放记忆 10000 条，每步抽 32 条做一次梯度下降（误差裁剪到 ±1），γ = 0.99，ε 从 1 指数衰减到 0.01，每局最多 500 步。和作者的 3 隐藏层 + Adam + 批量 256 不同，结果不能直接对比。训练会边跑边画；柱子 = 每局坚持步数，黄线 = 最近 20 局平均，红虚线 = 195。DQN 训练本来就不稳定，换几个种子看看。",
+    render(svg, v, api) {
+      const tr = makeTrainer({ seed: 7 + v.seed * 13, H: +v.H, lr: v.lr, tu: +v.tu, decay: v.decay, bs: 32, gamma: 0.99 });
+      const A = K.axes(svg, { x: 55, y: 20, w: 400, h: 270 }, [0, v.eps], [0, 500], { xticks: 4, yticks: 5, xlabel: "第几局", ylabel: "坚持步数" });
+      K.svg(svg, "line", { x1: 55, x2: 455, y1: A.sy(195), y2: A.sy(195), stroke: "var(--bad)", "stroke-dasharray": "5 4" });
+      const g = K.svg(svg, "g"), ma = K.svg(svg, "path", { fill: "none", stroke: "var(--c5)", "stroke-width": 2.5 });
+      const S = scene(svg, { x: 480, y: 120, w: 150, h: 100 });
+      const st = K.svg(svg, "text", { x: 480, y: 40, "font-size": 13, "font-family": "var(--mono)" }, ""), st2 = K.svg(svg, "text", { x: 480, y: 64, "font-size": 13, "font-family": "var(--mono)" }, ""), st3 = K.svg(svg, "text", { x: 480, y: 270, "font-size": 12, class: "muted" }, "");
+      const bw = 400 / v.eps;
+      (async () => {
+        for (let e = 0; e < v.eps; e++) {
+          tr.episode(); const d = tr.durs[e];
+          K.svg(g, "rect", { x: A.sx(e), y: A.sy(d), width: Math.max(0.8, bw - 0.3), height: A.sy(0) - A.sy(d), fill: "var(--c1)", opacity: 0.55 });
+          if (e % 5 === 4 || e === v.eps - 1) {
+            ma.setAttribute("d", pathD(tr.durs.map((_, i) => [i + 0.5, tr.durs.slice(Math.max(0, i - 19), i + 1).reduce((a, b) => a + b, 0) / Math.min(20, i + 1)]), A.sx, A.sy));
+            st.textContent = `第 ${e + 1} 局：${d} 步`; st2.textContent = `ε = ${tr.eps().toFixed(3)}`;
+            if (!(await api.wait(0))) return;
+          }
+        }
+        st3.textContent = "训练完：贪心策略演示一局";
+        const res = rollout((s) => { const q = fwd(tr.P, s).q; return q[1] > q[0] ? 1 : 0; }, K.rng(55), 500);
+        for (let i = 0; i < res.tr.length; i += 2) { S.place(res.tr[i]); if (!(await api.wait(16))) return; }
+        st3.textContent = res.fell ? `演示局：坚持 ${res.steps} 步后倒下` : "演示局：坚持满 500 步";
+      })();
+      return { readout: [
+        { k: "训练局数", v: v.eps },
+        { k: "目标网络同步间隔", v: v.tu + " 步" },
+        { k: "隐藏层", v: v.H + " 个神经元" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,715 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>眼底照片预处理</title>
+<meta name="description" content="Kaggle 案例拆解：APTOS 糖尿病视网膜病变比赛里最受欢迎的预处理 notebook，用 Ben Graham 的高斯模糊相减法统一光照、自动裁掉黑边，让病灶更清楚。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">眼底照片 · 五级分级 · 图像预处理</div>
+  <h1>糖尿病视网膜病变：先把眼底照片“洗干净”，再让模型看</h1>
+  <p class="en">APTOS : Eye Preprocessing in Diabetic Retinopathy</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span><span class="tag ml">图像处理</span>
+    <span class="tag method">灰度转换</span><span class="tag method">高斯模糊</span><span class="tag method">Ben Graham 预处理</span>
+    <span class="tag method">自动裁黑边</span><span class="tag method">圆形裁剪</span><span class="tag method">分层切分</span><span class="tag method">标签噪声分析</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Neuron Engineer（ratthachat）</b></span>
+    <span>Kaggle 点赞 <b>2,347</b>（2026-11 抓取）</span>
+    <span>数据 <b>APTOS 2019 比赛</b> + 2015 年 DR 比赛数据</span>
+    <span><a href="https://www.kaggle.com/code/ratthachat/aptos-eye-preprocessing-in-diabetic-retinopathy" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">印度 Aravind 眼科医院的眼底照片</div><p>眼底照片是用特殊相机从瞳孔拍进去的视网膜照片。作者还对比了 2015 年另一场比赛的旧数据。<span data-cell="3">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">糖尿病视网膜病变的严重程度 0–4 级</div><p>0 级没有病变，4 级最严重。这份 notebook 本身<b>不训练模型</b>，专门研究“喂给模型之前，图片该怎么处理”。<span data-cell="1">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">高斯模糊相减 + 自动裁黑边</div><p>借用 2015 年冠军 Ben Graham 的办法：原图 ×4 减去模糊图 ×4 再加 128，统一光照；再按灰度阈值裁掉黑边。<span data-cell="22">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">病灶更清楚，并发现标签有噪声</div><p>出血、硬性渗出、棉絮斑在处理后更容易看见；旧比赛数据里有些 4 级照片看起来并不严重，提醒大家医生之间也会有分歧。<span data-cell="40">出处</span></p></div>
+  </div>
+  <p class="callout warn">本页只讲图像处理方法，不提供医疗建议。糖尿病患者应定期做眼底检查，结果以眼科医生的判断为准，模型只能辅助。</p>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">APTOS 2019 Blindness Detection 是 Kaggle 上的一场比赛，数据由印度 Aravind 眼科医院提供。作者另外用了 2015 年 Diabetic Retinopathy Detection 比赛的数据（别人整理的缩小版 jpeg 和 png 版）做对比。下面的信息来自作者的代码和文字。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">分级数</div><div class="v">5（0–4）</div></div>
+        <div class="stat-tile"><div class="k">作者统一的尺寸</div><div class="v">512×512</div></div>
+        <div class="stat-tile"><div class="k">验证集比例</div><div class="v">15%</div></div>
+        <div class="stat-tile"><div class="k">图片格式</div><div class="v">png</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">分级数和尺寸见第 1 格 <span data-cell="1">出处</span>，验证集比例见第 6 格 <span data-cell="6">出处</span>，文件格式见第 10 格的路径 <span data-cell="10">出处</span>。具体张数在运行输出里，这里不写。</p>
+      <h3>五个等级（白话）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>级别</th><th>含义</th></tr>
+        <tr><td>0</td><td>没有糖尿病视网膜病变</td></tr>
+        <tr><td>1</td><td>轻度：开始出现微小的血管鼓包（微动脉瘤）</td></tr>
+        <tr><td>2</td><td>中度：出血点、渗出变多</td></tr>
+        <tr><td>3</td><td>重度：大范围出血、血管异常</td></tr>
+        <tr><td>4</td><td>增殖期：长出脆弱的新生血管，可能致盲</td></tr>
+      </table></div>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">表格每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>文件 / 列</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>train.csv · id_code</code></td><td>照片编号，对应 train_images 里的一个 png</td><td>文本</td></tr>
+        <tr><td><code>train.csv · diagnosis</code></td><td><b>要预测的答案</b>：0–4 级</td><td>类别 / 有序</td></tr>
+        <tr><td><code>test.csv · id_code</code></td><td>测试照片编号（没有答案）</td><td>文本</td></tr>
+        <tr><td><code>trainLabels.csv · image, level</code></td><td>2015 年旧比赛的照片名和等级</td><td>文本 / 类别</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">列名见第 5 格和第 37 格 <span data-cell="5">出处</span> <span data-cell="37">出处</span>。页面中的眼底照片全部由代码画成示意图：橙红色的圆是视网膜，亮黄斑是视盘（视神经进入眼球的地方），暗红的线是血管。</p>
+      <h3>病变在照片上长什么样</h3>
+      <ul class="tight">
+        <li><b>微动脉瘤</b>：小血管壁鼓出的红色小点，最早期的迹象</li>
+        <li><b>出血</b>：暗红色的斑块</li>
+        <li><b>硬性渗出</b>：血管漏出的脂质，黄白色小亮点</li>
+        <li><b>棉絮斑</b>：神经纤维缺血，白色毛茸茸的斑</li>
+        <li><b>新生血管</b>：增殖期长出的细乱血管</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="16">
+    <h3>动手试试 A · Ben Graham 预处理的两个旋钮 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="18">
+    <h3>动手试试 B · 自动裁黑边：阈值多少才合适 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="47">
+    <h3>动手试试 C · 两位医生打分不一致有多严重 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>原图光照差别很大，有的很暗；还有大片没信息的黑边</td><td><span data-cell="9">第 9 格</span></td></tr>
+        <tr><td>灰度图能去掉颜色干扰，但 Ben Graham 的方法效果更好</td><td><span data-cell="11">第 11 格</span>、<span data-cell="15">第 15 格</span></td></tr>
+        <tr><td>图片尺寸很重要：缩小后有些病变看不见</td><td><span data-cell="13">第 13 格</span></td></tr>
+        <tr><td>作者最初认为灰度更好，改进裁剪后认为<b>彩色版更好</b></td><td><span data-cell="21">第 21 格</span></td></tr>
+        <tr><td>旧裁剪函数遇到极暗的图会裁成 0 像素，在私有测试集上出错；新版加了保护</td><td><span data-cell="20">第 20 格</span></td></tr>
+        <tr><td>圆形裁剪更整齐，但可能把边缘的病变裁掉</td><td><span data-cell="24">第 24 格</span></td></tr>
+        <tr><td>2015 年数据的分级可能和 Aravind 医生标准不一样，看起来更“吵”；有的细节无论 jpg 还是 png 都缺失</td><td><span data-cell="40">第 40 格</span>、<span data-cell="45">第 45 格</span></td></tr>
+        <tr><td>医生之间对同一只眼的分级也会不一致</td><td><span data-cell="47">第 47 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">这份 notebook 不训练模型，也没有写任何分数。作者提到用新裁剪函数拿到了“有效的排行榜成绩”，但没写具体数值，这里不列。</p>
+      <h3>原作者的问题（如实列出，原文未改）</h3>
+      <ul class="tight">
+        <li><code>circle_crop</code> 先调用 <code>crop_image_from_gray</code>，后转 RGB：此时图片还是 OpenCV 的 BGR 顺序，函数里却按 RGB 算灰度，红蓝两通道的权重用反了，只影响裁剪的判断，不影响后面的颜色。<span data-cell="25">第 25 格</span></li>
+        <li>第 16 格的灰度版用的模糊程度是 <code>IMG_SIZE/10</code>（约 51），后面彩色版默认是 10、展示时用 30，作者在第 21 格说明了 30 只是为了好看，不同 sigma 的效果差别很大。<span data-cell="16">第 16 格</span></li>
+        <li>附录 B 说“有医生甚至会说 5 级”，而分级只有 0–4，应理解为图中的示意。<span data-cell="47">第 47 格</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>给任何眼底照片做统一的预处理，再交给 CNN 分级；处理后的图也更方便医生自己看。</li>
+        <li><b>同类问题：</b>不同医院、不同相机拍的医学图像亮度不一（皮肤镜、内镜、病理切片的染色深浅），都可以先做“去光照、裁无用区域”。</li>
+        <li><b>可迁移的套路：</b>先看原图找问题（太暗、黑边、尺寸）→ 每个处理步骤都画出来对比 → 极端样本（全黑图）专门测试 → 预处理在训练集和测试集上保持完全一致。</li>
+        <li><b>边界：</b>预处理会放大细节，也会放大噪声和伪影；标签本身有医生间分歧，模型的上限受它限制。模型只是辅助，不能代替眼科医生。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>分层切分训练/验证 <span data-cell="6">第 6 格</span></li>
+        <li>灰度转换 <span data-cell="12">第 12 格</span></li>
+        <li>Ben Graham：<code>addWeighted(img, 4, GaussianBlur(img), -4, 128)</code> <span data-cell="16">第 16 格</span></li>
+        <li>按灰度阈值自动裁黑边（含全黑图保护）<span data-cell="18">第 18 格</span></li>
+        <li>彩色版预处理函数 <code>load_ben_color</code> <span data-cell="22">第 22 格</span></li>
+        <li>圆形裁剪 <span data-cell="25">第 25 格</span></li>
+        <li>旧比赛数据、jpg 与 png 对比 <span data-cell="37">第 37 格</span> <span data-cell="44">第 44 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>Ben Graham 的方法本质上是“原图减去模糊图”。它保留了什么、去掉了什么？为什么能抵消光照差异？</li>
+      <li>作者花了 13 次提交才找到“全黑图片让裁剪函数崩溃”这个 bug。你会怎样提前设计测试，发现这类极端情况？</li>
+      <li>圆形裁剪更整齐，却可能裁掉边缘的病变。在医学图像上，“好看”和“不丢信息”冲突时该怎么选？</li>
+      <li>如果两位眼科医生对同一张照片的分级经常差一级，模型的“正确答案”还可靠吗？比赛为什么常用“加权 kappa”而不是准确率？</li>
+      <li>用 2015 年的旧数据来补充训练，好处和风险分别是什么？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Neuron Engineer（ratthachat），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意，眼底照片由代码生成。数据：APTOS 2019 Blindness Detection（Aravind Eye Hospital）、Kaggle Diabetic Retinopathy Detection（2015）。本页内容不构成医疗建议。
+</footer>
+</main>
+
+<script src="nb/aptos-retina-preprocessing.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* 自查开关：网址带 ?fast 时动画直接跳到最后一帧（无界面截图用） */
+  if (/[?&]fast/.test(location.search)) { K.tween = (ms, fn, ctx) => { if (ctx && !ctx.alive()) return Promise.resolve(false); fn(1, 1); return Promise.resolve(true); }; K.wait = (ms, ctx) => Promise.resolve(!ctx || ctx.alive()); }
+  if (/[?&]fold/.test(location.search)) document.head.appendChild(Object.assign(document.createElement("style"), { textContent: ".walk .ch-cells > .cell, .walk .cell-note { display: none !important; }" }));
+  /* ===== 页面专用：像素图工具（用代码生成小图，在浏览器里真算卷积、模糊、池化、几何变换） ===== */
+  const PX = (function () {
+    function rgbOf(name, fb) {
+      let s = (K.css(name) || fb || "#888888").trim();
+      if (s[0] !== "#") return [128, 128, 128];
+      if (s.length === 4) s = "#" + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+      return [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
+    }
+    function grid(W, H, f) { const a = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) a[y * W + x] = f(x, y); return { W, H, a }; }
+    /* 彩色图：{W,H,rgb:[R,G,B]}，每个通道取值 0–1 */
+    function rgbGrid(W, H, f) { const R = new Float32Array(W * H), G = new Float32Array(W * H), B = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const c = f(x, y), i = y * W + x; R[i] = c[0]; G[i] = c[1]; B[i] = c[2]; } return { W, H, rgb: [R, G, B] }; }
+    const chan = (m, c) => ({ W: m.W, H: m.H, a: m.rgb[c] });
+    const fromChans = (ch) => ({ W: ch[0].W, H: ch[0].H, rgb: ch.map((c) => c.a) });
+    const gray = (m) => (m.rgb ? grid(m.W, m.H, (x, y) => { const i = y * m.W + x; return 0.299 * m.rgb[0][i] + 0.587 * m.rgb[1][i] + 0.114 * m.rgb[2][i]; }) : m);
+    function at(m, x, y) { return m.a[y * m.W + x]; }
+    function atClamp(m, x, y) { x = x < 0 ? 0 : x >= m.W ? m.W - 1 : x; y = y < 0 ? 0 : y >= m.H ? m.H - 1 : y; return m.a[y * m.W + x]; }
+    function atZero(m, x, y) { return x < 0 || y < 0 || x >= m.W || y >= m.H ? 0 : m.a[y * m.W + x]; }
+    /* padding='same'：边界外按 0 补 */
+    function conv(m, k) { const n = k.length, r = (n - 1) / 2; return grid(m.W, m.H, (x, y) => { let s = 0; for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) s += k[j][i] * atZero(m, x + i - r, y + j - r); return s; }); }
+    function map(m, f) { if (m.rgb) return { W: m.W, H: m.H, rgb: m.rgb.map((a) => { const o = new Float32Array(a.length); for (let i = 0; i < a.length; i++) o[i] = f(a[i], i); return o; }) }; const o = { W: m.W, H: m.H, a: new Float32Array(m.a.length) }; for (let i = 0; i < m.a.length; i++) o.a[i] = f(m.a[i], i); return o; }
+    const relu = (m) => map(m, (v) => (v > 0 ? v : 0));
+    function pool(m, s) { s = s || 2; const W = Math.ceil(m.W / s), H = Math.ceil(m.H / s); return grid(W, H, (x, y) => { let b = -Infinity; for (let j = 0; j < s; j++) for (let i = 0; i < s; i++) { const xx = x * s + i, yy = y * s + j; if (xx < m.W && yy < m.H) b = Math.max(b, at(m, xx, yy)); } return b; }); }
+    function range(m) { let lo = Infinity, hi = -Infinity; for (const v of m.a) { if (v < lo) lo = v; if (v > hi) hi = v; } return [lo, hi]; }
+    /* 可分离高斯模糊（边界用最近像素），彩色图逐通道做 */
+    function blur(m, sigma) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => blur(chan(m, c), sigma)));
+      if (sigma <= 0.01) return m;
+      const r = Math.max(1, Math.ceil(sigma * 3)), w = [];
+      let s = 0;
+      for (let i = -r; i <= r; i++) { const v = Math.exp((-i * i) / (2 * sigma * sigma)); w.push(v); s += v; }
+      for (let i = 0; i < w.length; i++) w[i] /= s;
+      const t = grid(m.W, m.H, (x, y) => { let a = 0; for (let i = -r; i <= r; i++) a += w[i + r] * atClamp(m, x + i, y); return a; });
+      return grid(m.W, m.H, (x, y) => { let a = 0; for (let i = -r; i <= r; i++) a += w[i + r] * atClamp(t, x, y + i); return a; });
+    }
+    function bilinear(m, x, y) {
+      const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+      return (atClamp(m, x0, y0) * (1 - fx) + atClamp(m, x0 + 1, y0) * fx) * (1 - fy) + (atClamp(m, x0, y0 + 1) * (1 - fx) + atClamp(m, x0 + 1, y0 + 1) * fx) * fy;
+    }
+    /* 绕中心旋转/缩放/平移/翻转；fill：'nearest' 用最近像素，数字表示边界外填这个值 */
+    function affine(m, p) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => affine(chan(m, c), p)));
+      const th = ((p.rot || 0) * Math.PI) / 180, c = Math.cos(th), s = Math.sin(th), z = p.zoom || 1;
+      const cx = (m.W - 1) / 2, cy = (m.H - 1) / 2, tx = (p.tx || 0) * m.W, ty = (p.ty || 0) * m.H;
+      return grid(m.W, m.H, (x, y) => {
+        let u = x - cx - tx, v = y - cy - ty;
+        if (p.flip) u = -u;
+        if (p.vflip) v = -v;
+        const a = (c * u + s * v) / z + cx, b = (-s * u + c * v) / z + cy;
+        if (p.fill != null && p.fill !== "nearest" && (a < -0.5 || b < -0.5 || a > m.W - 0.5 || b > m.H - 0.5)) return p.fill;
+        return bilinear(m, a, b);
+      });
+    }
+    function resize(m, W, H) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => resize(chan(m, c), W, H)));
+      return grid(W, H, (x, y) => bilinear(m, ((x + 0.5) * m.W) / W - 0.5, ((y + 0.5) * m.H) / H - 0.5));
+    }
+    function toURL(m, mode, lo, hi) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      if (m.rgb) {
+        for (let i = 0; i < m.W * m.H; i++) { for (let c = 0; c < 3; c++) d[i * 4 + c] = Math.max(0, Math.min(1, m.rgb[c][i])) * 255; d[i * 4 + 3] = 255; }
+      } else {
+        const P = rgbOf("--panel", "#ffffff"), A = rgbOf("--c1"), B = rgbOf("--c6");
+        if (lo == null || hi == null) { const r = range(m); if (lo == null) lo = r[0]; if (hi == null) hi = r[1]; }
+        const span = hi - lo || 1, amax = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+        for (let i = 0; i < m.a.length; i++) {
+          const v = m.a[i]; let r, gg, b;
+          if (mode === "div") { const t = Math.max(-1, Math.min(1, v / amax)), C = t >= 0 ? B : A, k = Math.abs(t); r = P[0] + (C[0] - P[0]) * k; gg = P[1] + (C[1] - P[1]) * k; b = P[2] + (C[2] - P[2]) * k; }
+          else if (mode === "heat") { const k = Math.max(0, Math.min(1, (v - lo) / span)); r = P[0] + (B[0] - P[0]) * k; gg = P[1] + (B[1] - P[1]) * k; b = P[2] + (B[2] - P[2]) * k; }
+          else { const k = Math.max(0, Math.min(1, (v - lo) / span)) * 255; r = gg = b = k; }
+          d[i * 4] = r; d[i * 4 + 1] = gg; d[i * 4 + 2] = b; d[i * 4 + 3] = 255;
+        }
+      }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    function draw(svg, x, y, w, h, m, mode, lo, hi, smooth) {
+      const e = K.svg(svg, "image", { x, y, width: w, height: h, preserveAspectRatio: "none" });
+      if (!smooth) e.style.imageRendering = "pixelated";
+      e.setAttribute("href", toURL(m, mode, lo, hi));
+      K.svg(svg, "rect", { x, y, width: w, height: h, fill: "none", stroke: "var(--line)" });
+      return e;
+    }
+    function update(e, m, mode, lo, hi) { e.setAttribute("href", toURL(m, mode, lo, hi)); }
+    function lines(svg, x, y, w, h, W, H, op) {
+      const g = K.svg(svg, "g");
+      for (let i = 0; i <= W; i++) K.svg(g, "line", { x1: x + (w * i) / W, x2: x + (w * i) / W, y1: y, y2: y + h, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      for (let j = 0; j <= H; j++) K.svg(g, "line", { y1: y + (h * j) / H, y2: y + (h * j) / H, x1: x, x2: x + w, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      return g;
+    }
+    const smooth = (e0, e1, x) => { const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+    const blob = (x, y, cx, cy, sx, sy) => Math.exp(-(((x - cx) * (x - cx)) / (2 * sx * sx) + ((y - cy) * (y - cy)) / (2 * sy * sy)));
+    /* 平滑噪声：几层不同频率的随机网格插值叠加，用来做纹理 */
+    function noise(W, H, seed, cells) {
+      const r = K.rng(seed || 1), n = cells || 6, g0 = grid(n + 1, n + 1, () => r());
+      return grid(W, H, (x, y) => bilinear(g0, (x / W) * n, (y / H) * n));
+    }
+    return { grid, rgbGrid, chan, fromChans, gray, at, atClamp, conv, map, relu, pool, range, blur, bilinear, affine, resize, toURL, draw, update, lines, smooth, blob, noise, rgbOf };
+  })();
+
+
+  /* ===== 用代码画一张示意眼底照片（RGB 0–1）=====
+   * o: {grade 0–4, bright 整体亮度, tint 偏色, grad 光照不均, border 左右黑边比例, seed} */
+  function fundus(W, H, o) {
+    o = Object.assign({ grade: 2, bright: 1, tint: 0, grad: 0.3, border: 0.12, seed: 3, ov: 1 }, o || {});
+    const r = K.rng(o.seed), R = 0.49 - o.border * 0.12;
+    const cx = 0.5, cy = 0.5, aspect = W / H;
+    const disc = [0.5 + (r() < 0.5 ? -1 : 1) * 0.17, 0.48];
+    const segs = [];
+    for (let b = 0; b < 8; b++) {
+      let x = disc[0], y = disc[1], ang = (b / 8) * 6.28 + r() * 0.5;
+      for (let s = 0; s < 9; s++) { const nx = x + Math.cos(ang) * 0.045, ny = y + Math.sin(ang) * 0.045; segs.push([x, y, nx, ny, 0.011 - s * 0.0009]); x = nx; y = ny; ang += (r() - 0.5) * 0.6; }
+    }
+    const les = [];
+    const n = [0, 3, 8, 14, 20][o.grade];
+    for (let i = 0; i < n; i++) {
+      const a = r() * 6.28, d = 0.08 + r() * 0.28, t = r();
+      const kind = o.grade === 1 ? "ma" : t < 0.35 ? "hem" : t < 0.7 ? "ex" : t < 0.85 && o.grade >= 2 ? "cw" : "ma";
+      les.push({ x: cx + Math.cos(a) * d * 0.9, y: cy + Math.sin(a) * d, s: kind === "ma" ? 0.007 : kind === "ex" ? 0.009 + r() * 0.006 : 0.016 + r() * 0.012, kind });
+    }
+    if (o.grade === 4) for (let k = 0; k < 10; k++) { const x = disc[0] + (r() - 0.5) * 0.12, y = disc[1] + (r() - 0.5) * 0.12; segs.push([x, y, x + (r() - 0.5) * 0.08, y + (r() - 0.5) * 0.08, 0.004]); }
+    const tex = PX.noise(W, H, o.seed + 9, 9);
+    return PX.rgbGrid(W, H, (px, py) => {
+      const x = (px + 0.5) / W, y = (py + 0.5) / H, i = py * W + px;
+      const dx = ((x - cx) * aspect) / o.ov, dy = y - cy, rr = Math.hypot(dx, dy) / R;
+      if (rr > 1) return [0, 0, 0];
+      let c = [0.78, 0.36, 0.16];
+      c = c.map((v) => v * (0.9 + 0.15 * tex.a[i]));
+      const mac = PX.blob(x, y, 1 - disc[0] > 0.5 ? 0.62 : 0.38, 0.5, 0.05, 0.06);
+      c = c.map((v) => v * (1 - 0.35 * mac));
+      const dd = PX.blob(x, y, disc[0], disc[1], 0.035 / aspect, 0.045);
+      c = [c[0] + (0.98 - c[0]) * dd, c[1] + (0.85 - c[1]) * dd, c[2] + (0.5 - c[2]) * dd];
+      let v = 0;
+      for (const s of segs) {
+        const ax = s[2] - s[0], ay = s[3] - s[1], L = ax * ax + ay * ay || 1e-9;
+        const t = Math.max(0, Math.min(1, ((x - s[0]) * ax + (y - s[1]) * ay) / L));
+        const dist = Math.hypot((x - s[0] - t * ax) * aspect, y - s[1] - t * ay);
+        v = Math.max(v, Math.exp(-(dist * dist) / (2 * s[4] * s[4])));
+      }
+      c = [c[0] * (1 - 0.45 * v), c[1] * (1 - 0.7 * v), c[2] * (1 - 0.6 * v)];
+      for (const l of les) {
+        const k = PX.blob(x * aspect, y, l.x * aspect, l.y, l.s, l.s);
+        if (k < 0.02) continue;
+        const col = l.kind === "hem" || l.kind === "ma" ? [0.45, 0.05, 0.05] : l.kind === "ex" ? [0.98, 0.9, 0.45] : [0.95, 0.92, 0.85];
+        c = c.map((q, j) => q + (col[j] - q) * k * (l.kind === "cw" ? 0.8 : 1));
+      }
+      const g = 1 + o.grad * ((x - 0.5) * 1.6 - (y - 0.5) * 0.6);
+      const edge = 1 - 0.55 * PX.smooth(0.7, 1, rr);
+      const L = o.bright * g * edge;
+      return [c[0] * L * (1 + o.tint), c[1] * L, c[2] * L * (1 - o.tint * 0.5)];
+    });
+  }
+  /* Ben Graham：4*img - 4*blur(img, sigma) + 128（0–1 尺度下 + 0.5），逐通道，截断到 0–1 */
+  function ben(img, sigmaPx, w) {
+    w = w == null ? 4 : w;
+    const b = PX.blur(img, sigmaPx);
+    if (img.rgb) return { W: img.W, H: img.H, rgb: img.rgb.map((a, c) => { const o = new Float32Array(a.length); for (let i = 0; i < a.length; i++) o[i] = Math.max(0, Math.min(1, w * a[i] - w * b.rgb[c][i] + 0.5)); return o; }) };
+    return PX.map(img, (v, i) => Math.max(0, Math.min(1, w * v - w * b.a[i] + 0.5)));
+  }
+  /* crop_image_from_gray：灰度 > tol 的行和列围成的框 */
+  function cropBox(img, tol) {
+    const g = PX.gray(img), rows = [], cols = [];
+    for (let y = 0; y < g.H; y++) for (let x = 0; x < g.W; x++) if (g.a[y * g.W + x] * 255 > tol) { rows[y] = 1; cols[x] = 1; }
+    const ys = Object.keys(rows).map(Number), xs = Object.keys(cols).map(Number);
+    if (!ys.length) return null;
+    return { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
+  }
+  function cropTo(img, b) {
+    if (!b) return img;
+    const W = b.x1 - b.x0 + 1, H = b.y1 - b.y0 + 1;
+    return PX.rgbGrid(W, H, (x, y) => { const i = (y + b.y0) * img.W + x + b.x0; return [img.rgb[0][i], img.rgb[1][i], img.rgb[2][i]]; });
+  }
+  const GR = ["0 无", "1 轻度", "2 中度", "3 重度", "4 增殖期"];
+
+  const steps = [
+    {
+      title: "读表格，分层切出验证集", kicker: "第 5–6 格 · 数据切分", at: 5,
+      html: `<p>读入 <code>train.csv</code>，打乱后用 <code>train_test_split(..., stratify=y)</code> 切出 15% 当验证集。<b>分层</b>（stratify）的意思是：每个等级在训练集和验证集里的比例保持一致。</p><p>作者坦白说这一步“其实没必要”，留着它只是因为用这个随机种子挑出来的几张示例图很有代表性，后面一直沿用。<span data-cell="4">第 4 格</span></p>`,
+      cells: [5, 6], highlight: ["stratify=y", "test_size=0.15"],
+      draw(svg, ctx) {
+        const props = [0.5, 0.1, 0.27, 0.05, 0.08], cols = ["var(--c3)", "var(--c5)", "var(--c2)", "var(--c6)", "var(--c4)"];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "分层切分：每个等级都按 85 : 15 分（比例为示意）");
+        let x = 30;
+        const parts = props.map((p, i) => { const w = p * 640; const g = { x, w, c: cols[i], i }; x += w; return g; });
+        parts.forEach((p) => { K.svg(svg, "rect", { x: p.x, y: 50, width: p.w - 2, height: 40, fill: p.c, opacity: 0.85 }); K.svg(svg, "text", { x: p.x + p.w / 2, y: 76, "text-anchor": "middle", "font-size": 12, fill: "var(--panel)" }, p.w > 40 ? GR[p.i] : String(p.i)); });
+        const tr = [], va = [];
+        parts.forEach((p) => {
+          tr.push(K.svg(svg, "rect", { x: p.x, y: 50, width: (p.w - 2) * 0.85, height: 40, fill: p.c, opacity: 0 }));
+          va.push(K.svg(svg, "rect", { x: p.x + (p.w - 2) * 0.85, y: 50, width: (p.w - 2) * 0.15, height: 40, fill: p.c, opacity: 0 }));
+        });
+        K.svg(svg, "text", { x: 30, y: 170, "font-size": 13, "font-weight": 700 }, "训练集 85%");
+        K.svg(svg, "text", { x: 30, y: 270, "font-size": 13, "font-weight": 700 }, "验证集 15%");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1400, (t) => {
+          parts.forEach((p, i) => {
+            K.set(tr[i], { opacity: 0.85 }); K.set(va[i], { opacity: 0.85 });
+            tr[i].setAttribute("y", K.lerp(50, 185, t)); va[i].setAttribute("y", K.lerp(50, 285, t));
+          });
+        }));
+      },
+    },
+    {
+      title: "糖尿病视网膜病变：要找哪几种迹象", kicker: "第 7–8 格 · 医学背景", at: 7,
+      html: `<p>糖尿病会损伤视网膜上的小血管，这叫<b>糖尿病视网膜病变</b>，严重时会致盲。作者引用了一张图，列出 5 种要找的迹象：微动脉瘤、出血、硬性渗出、棉絮斑、新生血管。</p><p>作者说前三种在数据里比较容易看到，后两种他还没找到明显例子；要赶上人类医生的水平，模型可能得学会这两种。动画是一张示意眼底图，依次标出这些迹象。</p>`,
+      at: 7, cells: [8],
+      draw(svg, ctx) {
+        const W = 120, H = 90, img = fundus(W, H, { grade: 3, seed: 21, grad: 0, border: 0 });
+        PX.draw(svg, 20, 20, 400, 300, img, null, null, null, true);
+        const tags = [["视盘：视神经入口（正常结构）", "var(--c5)"], ["暗红点 / 斑：微动脉瘤、出血", "var(--c6)"], ["黄白小亮点：硬性渗出", "var(--c5)"], ["白色绒毛斑：棉絮斑", "var(--ink-3)"], ["4 级才有：细乱的新生血管", "var(--c4)"]];
+        const els = tags.map((t, i) => { const e = K.svg(svg, "text", { x: 440, y: 70 + i * 50, "font-size": 13, "font-weight": 700, fill: t[1] }, "● " + t[0]); e.style.opacity = 0; return e; });
+        K.svg(svg, "text", { x: 440, y: 320, "font-size": 12, class: "muted" }, "示意图：由代码生成（3 级）");
+        (async () => { for (const e of els) { if (!(await ctx.tween(400, (t) => (e.style.opacity = t)))) return; if (!(await ctx.wait(300))) return; } })();
+      },
+    },
+    {
+      title: "原图的两个毛病：光照不一、黑边太多", kicker: "第 9–10 格 · 看原图", at: 9,
+      html: `<p>作者每个等级随机抽 5 张原图排成 5×5 的网格。两个问题一眼可见：</p><ul class="tight"><li><b>光照差别大</b>：有的照片很暗，有的偏色，同一个病变在不同照片上颜色差很多</li><li><b>黑边多</b>：照片四周有大片没有信息的黑色。图缩小后，有用的眼球部分就更小了</li></ul><p>动画里是 5 张代码生成的示意眼底图，亮度、偏色、光照方向各不相同。</p>`,
+      cells: [10], highlight: ["cv2.resize(image, (IMG_SIZE, IMG_SIZE))"],
+      draw(svg, ctx) {
+        const opts = [{ bright: 1.1, grade: 0, seed: 1 }, { bright: 0.45, grade: 2, seed: 2, grad: 0.5 }, { bright: 0.9, tint: 0.35, grade: 1, seed: 3 }, { bright: 0.7, grade: 3, seed: 4, grad: -0.5 }, { bright: 0.3, grade: 4, seed: 5 }];
+        opts.forEach((o, i) => {
+          const g = K.svg(svg, "g");
+          PX.draw(g, 14 + i * 140, 60, 132, 99, fundus(80, 60, Object.assign({ border: 0.25 }, o)), null, null, null, true);
+          K.svg(g, "text", { x: 80 + i * 140, y: 180, "text-anchor": "middle", "font-size": 12 }, `等级 ${o.grade}`);
+          g.style.opacity = 0;
+          ctx.wait(i * 250).then((ok) => ok && ctx.tween(400, (t) => (g.style.opacity = t)));
+        });
+        K.svg(svg, "text", { x: 20, y: 40, "font-size": 13 }, "示意：同一台机器拍出来，也可能亮暗、偏色差很多");
+        K.svg(svg, "text", { x: 20, y: 230, "font-size": 13, fill: "var(--warn)" }, "问题 1：太暗的图（第 2、5 张）几乎看不清病变");
+        K.svg(svg, "text", { x: 20, y: 256, "font-size": 13, fill: "var(--warn)" }, "问题 2：左右两侧的黑边不含信息，缩图时白白占地方");
+      },
+    },
+    {
+      title: "试试灰度图", kicker: "第 11–14 格 · 灰度转换", at: 11,
+      html: `<p>第一个尝试：把彩色图转成<b>灰度图</b>，去掉颜色的干扰。作者觉得有些图在灰度下更好认，比如 4 级那张上半部的出血。</p><p>第 14 格把一张图按原始分辨率放大看，作者发现缩小后看不见的棉絮斑或渗出，放大后能看到，于是得出结论：<b>图片尺寸对这个问题很重要</b>。</p><p class="note">灰度 = 0.299×红 + 0.587×绿 + 0.114×蓝。眼底照片的大部分信息在绿色通道，红色通道往往过曝。</p>`,
+      cells: [12], highlight: ["COLOR_BGR2GRAY"],
+      draw(svg, ctx) {
+        const img = fundus(120, 90, { grade: 3, seed: 8, bright: 0.75, border: 0.2 });
+        const chs = [["彩色", img], ["红 R", PX.chan(img, 0)], ["绿 G", PX.chan(img, 1)], ["蓝 B", PX.chan(img, 2)], ["灰度", PX.gray(img)]];
+        chs.forEach((c, i) => {
+          const x = 14 + i * 140;
+          const e = PX.draw(svg, x, 70, 132, 99, c[1], null, 0, i === 0 ? null : 1, true);
+          K.svg(svg, "text", { x: x + 66, y: 190, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, c[0]);
+          e.style.opacity = 0;
+          ctx.wait(i * 300).then((ok) => ok && ctx.tween(400, (t) => (e.style.opacity = t)));
+        });
+        K.svg(svg, "text", { x: 20, y: 40, "font-size": 13 }, "把一张彩色图拆成三个颜色通道，再合成灰度（浏览器现场计算）");
+        K.svg(svg, "text", { x: 20, y: 240, "font-size": 12.5, class: "muted" }, "绿色通道里血管和出血点的对比度最好；红色通道几乎一片亮。");
+      },
+    },
+    {
+      title: "Ben Graham 的办法：原图减去模糊图", kicker: "第 15–16 格 · 核心技巧", at: 15,
+      html: `<p>2015 年这类比赛的冠军 Ben Graham 用了一行代码：</p><p><code>addWeighted(image, 4, GaussianBlur(image, sigma), -4, 128)</code></p><p>即 <b>4×原图 − 4×模糊图 + 128</b>。模糊图只保留了“大片的明暗”（光照），原图减去它，剩下的就是“局部细节”（血管、出血点、渗出），再加 128 把结果挪到中间灰色附近。</p><p>动画演示三步：原图 → 高斯模糊（光照） → 相减放大（细节）。暗的、亮的、偏色的照片处理后看起来几乎一样。</p>`,
+      cells: [16], highlight: ["cv2.addWeighted ( image,4, cv2.GaussianBlur( image , (0,0) , IMG_SIZE/10) ,-4 ,128)"],
+      draw(svg, ctx) {
+        const imgs = [fundus(90, 68, { grade: 3, seed: 8, bright: 0.4, grad: 0.5, border: 0 }), fundus(90, 68, { grade: 3, seed: 8, bright: 1.1, tint: 0.3, grad: -0.4, border: 0 })];
+        ["原图", "高斯模糊（只剩光照）", "4×(原图−模糊)+128"].forEach((t, j) => K.svg(svg, "text", { x: 30 + j * 230 + 95, y: 26, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, t));
+        const slots = imgs.map((im, r) => [0, 1, 2].map((j) => { const e = PX.draw(svg, 30 + j * 230, 40 + r * 150, 190, 143, im, null, null, null, true); if (j) e.style.opacity = 0; return e; }));
+        (async () => {
+          for (let r = 0; r < 2; r++) {
+            const sig = 4.5, b = PX.blur(imgs[r], sig), o = ben(imgs[r], sig, 4);
+            slots[r][1].setAttribute("href", PX.toURL(b));
+            slots[r][2].setAttribute("href", PX.toURL(o));
+            if (!(await ctx.tween(500, (t) => (slots[r][1].style.opacity = t)))) return;
+            if (!(await ctx.tween(500, (t) => (slots[r][2].style.opacity = t)))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "自动裁掉黑边", kicker: "第 17–20 格 · 去掉无用区域", at: 17,
+      html: `<p>思路很朴素：先转灰度，凡是亮度大于阈值 <code>tol=7</code>（0–255 的尺度）的像素算“有内容”；找出至少含一个有内容像素的<b>所有行和列</b>，用它们围成的框裁图。</p><p>作者找了 4 段网上的代码，只有一段在灰度图上好用，他把它改成彩色版。V9 版本里他还发现一个 bug：私有测试集里有一张<b>极暗的图</b>，所有像素都低于阈值，裁完变成 0×0 的空图，程序崩溃。新版加了一句判断：裁出来是空的，就返回原图。</p>`,
+      cells: [18, 19], highlight: ["mask = gray_img>tol", "if (check_shape == 0)"],
+      draw(svg, ctx) {
+        const img = fundus(120, 72, { grade: 2, seed: 4, border: 0.35, bright: 0.9 });
+        const b = cropBox(img, 7), sc = 3.6;
+        PX.draw(svg, 20, 30, 120 * sc, 72 * sc, img, null, null, null, true);
+        const box = K.svg(svg, "rect", { x: 20, y: 30, width: 120 * sc, height: 72 * sc, fill: "none", stroke: "var(--warn)", "stroke-width": 3 });
+        const out = PX.draw(svg, 490, 70, (b.x1 - b.x0 + 1) * 2.2, (b.y1 - b.y0 + 1) * 2.2, cropTo(img, b), null, null, null, true);
+        out.style.opacity = 0;
+        K.svg(svg, "text", { x: 20, y: 22, "font-size": 13 }, "灰度 > 7 的行、列围出的框（黄色）");
+        K.svg(svg, "text", { x: 490, y: 60, "font-size": 13 }, "裁剪结果");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1200, (t) => { box.setAttribute("x", 20 + b.x0 * sc * t); box.setAttribute("width", (120 - b.x0 * t - (119 - b.x1) * t) * sc); box.setAttribute("y", 30 + b.y0 * sc * t); box.setAttribute("height", (72 - b.y0 * t - (71 - b.y1) * t) * sc); }))
+          .then((ok) => ok && ctx.tween(500, (t) => (out.style.opacity = t)));
+      },
+    },
+    {
+      title: "彩色版：裁剪 + Ben Graham 一步到位", kicker: "第 21–23 格 · 最终预处理函数", at: 21,
+      html: `<p>作者改了主意：裁剪能处理彩色图之后，他认为<b>彩色版比灰度版更好</b>。最终函数 <code>load_ben_color</code> 做四件事：读图 → BGR 转 RGB → 裁黑边 → 缩放到 512×512 → Ben Graham。</p><p>展示时他用了 <code>sigmaX=30</code>，说这样画出来像“漂亮的（有时带血的）黄月亮”，同时提醒 Ben 原本用的是 10，效果可能更好。动画对比 sigma 小和大的区别：sigma 越小，减掉的越多，只留下最细的线条。</p>`,
+      cells: [22], highlight: ["def load_ben_color", "crop_image_from_gray(image)"],
+      draw(svg, ctx) {
+        const img = fundus(96, 72, { grade: 3, seed: 15, bright: 0.6, grad: 0.4, border: 0.3 });
+        const c = cropTo(img, cropBox(img, 7)), sq = PX.resize(c, 72, 72);
+        const sig = [[10, 1.4], [30, 4.2], [50, 7]];
+        PX.draw(svg, 20, 60, 150, 150, sq, null, null, null, true);
+        K.svg(svg, "text", { x: 95, y: 230, "text-anchor": "middle", "font-size": 13 }, "裁剪 + 缩放后");
+        sig.forEach((s, i) => {
+          const e = PX.draw(svg, 200 + i * 170, 60, 150, 150, ben(sq, s[1]), null, null, null, true);
+          K.svg(svg, "text", { x: 275 + i * 170, y: 230, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, `sigmaX = ${s[0]}`);
+          e.style.opacity = 0;
+          ctx.wait(400 + i * 400).then((ok) => ok && ctx.tween(400, (t) => (e.style.opacity = t)));
+        });
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13 }, "示意（sigma 按 512 像素的比例换算到这张小图上）");
+        K.svg(svg, "text", { x: 20, y: 290, "font-size": 12.5, class: "muted" }, "sigma 越大，模糊图越“平”，减完保留的范围越宽，颜色越接近原图。");
+      },
+    },
+    {
+      title: "圆形裁剪：更整齐，但可能丢东西", kicker: "第 24–26 格 · 另一种裁法", at: 24,
+      html: `<p>另一位 Kaggler 提出<b>圆形裁剪</b>：以图片中心画一个内切圆，圆外全部涂黑，再裁一次黑边。结果每张图都是一个规整的“魔法圆”。</p><p>作者提醒：如果眼球本来不是正圆，或者病变长在边缘，圆形裁剪会把它们一起裁掉。</p><p class="note">这段代码先裁剪、后转 RGB。裁剪函数里按 RGB 算灰度，实际传进去的是 BGR，红蓝权重用反了，只会稍微影响裁剪位置的判断。</p>`,
+      cells: [25], highlight: ["cv2.circle", "img = crop_image_from_gray(img)    "],
+      draw(svg, ctx) {
+        const img = fundus(120, 80, { grade: 2, seed: 33, border: 0.08, ov: 1.3 });
+        const sq = cropTo(img, cropBox(img, 7));
+        const W = sq.W, H = sq.H, r0 = Math.min(W, H) / 2;
+        PX.draw(svg, 30, 50, W * 2.6, H * 2.6, sq, null, null, null, true);
+        const circ = K.svg(svg, "circle", { cx: 30 + W * 1.3, cy: 50 + H * 1.3, r: 0, fill: "none", stroke: "var(--warn)", "stroke-width": 3 });
+        const masked = PX.rgbGrid(W, H, (x, y) => { const i = y * W + x, inside = Math.hypot(x - W / 2, y - H / 2) <= r0; return inside ? [sq.rgb[0][i], sq.rgb[1][i], sq.rgb[2][i]] : [0, 0, 0]; });
+        const out = PX.draw(svg, 400, 50, W * 2.6, H * 2.6, ben(masked, 3), null, null, null, true);
+        out.style.opacity = 0;
+        K.svg(svg, "text", { x: 30, y: 36, "font-size": 13 }, "以中心画内切圆（黄色）");
+        K.svg(svg, "text", { x: 400, y: 36, "font-size": 13 }, "圆外涂黑 + Ben Graham");
+        K.svg(svg, "text", { x: 30, y: 320, "font-size": 12.5, fill: "var(--warn)" }, "圆的左右两侧被切掉了一条：如果病变长在那里，就看不到了");
+        ctx.tween(1000, (t) => circ.setAttribute("r", r0 * 2.6 * t)).then((ok) => ok && ctx.tween(600, (t) => (out.style.opacity = t)));
+      },
+    },
+    {
+      title: "放大看细节，再看看测试集", kicker: "第 27–32 格 · 检查效果", at: 27,
+      html: `<p>作者把处理后的一张图（sigma=10）按 512×512 原尺寸放大，之前看不清的病变现在清楚多了。</p><p>然后在<b>公开测试集</b>上随机抽 50 张做同样的处理，确认裁剪不会出错。作者还注意到：测试集里 2 级以上的严重病例<b>比训练集多</b>，也就是训练集和测试集的等级分布不一样。第 31 格额外给了 sigma=50 的版本。</p><p>动画演示：对测试图批量处理，每张都检查裁剪后不是空图。</p>`,
+      cells: [28, 30], highlight: ["load_ben_color(path,sigmaX=10)", "df_test.sample"],
+      draw(svg, ctx) {
+        const tiles = [];
+        for (let i = 0; i < 10; i++) {
+          const o = { grade: i % 5, seed: 50 + i, bright: 0.35 + (i * 0.37) % 0.8, border: 0.2, grad: ((i * 0.3) % 0.8) - 0.4 };
+          const raw = fundus(64, 48, o), x = 20 + (i % 5) * 138, y = 40 + Math.floor(i / 5) * 140;
+          const e = PX.draw(svg, x, y, 128, 96, raw, null, null, null, true);
+          const ok = K.svg(svg, "text", { x: x + 64, y: y + 116, "text-anchor": "middle", "font-size": 12, fill: "var(--good)" }, "");
+          tiles.push({ raw, e, ok });
+        }
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 13 }, "测试图逐张处理：裁剪 → 缩放 → Ben Graham（示意）");
+        (async () => {
+          for (const t of tiles) {
+            const c = cropTo(t.raw, cropBox(t.raw, 7));
+            t.e.setAttribute("href", PX.toURL(ben(PX.resize(c, 48, 48), 3)));
+            t.ok.textContent = `✓ 裁剪后 ${c.W}×${c.H}`;
+            if (!(await ctx.wait(220))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "2015 年旧比赛数据：更多图，也更“吵”", kicker: "第 33–41 格 · 外部数据", at: 33,
+      html: `<p>上一届（2015 年）同主题比赛的数据量更大。作者把同样的预处理用在别人整理好的旧数据上（等级列叫 <code>level</code>），并和不处理的原图对比。</p><p>结论：预处理照样有效；但两届比赛请的是不同的医生，<b>分级标准可能不一致</b>，作者觉得旧数据“更吵”。比如有一张标为 4 级的照片，看起来并不严重，可能是血管太多被判成了“新生血管”。</p><p>标签里混着错误或不一致，这叫<b>标签噪声</b>。动画示意：同样的病情，两拨医生给出的等级有偏差。</p>`,
+      cells: [37, 39], highlight: ["df_old.loc[df_old['level'] == class_id]"],
+      draw(svg, ctx) {
+        const r = K.rng(5);
+        const ax = K.axes(svg, { x: 70, y: 30, w: 580, h: 240 }, [-0.5, 4.5], [-0.5, 4.5], { xticks: 0, yticks: 0, xlabel: "真实病情（示意）", ylabel: "标出的等级" });
+        for (let g = 0; g <= 4; g++) { K.svg(svg, "text", { x: ax.sx(g), y: 288, "text-anchor": "middle", "font-size": 12 }, g); K.svg(svg, "text", { x: 58, y: ax.sy(g) + 4, "text-anchor": "end", "font-size": 12 }, g); }
+        const pts = [];
+        for (let i = 0; i < 90; i++) {
+          const g = Math.floor(r() * 5), old = i % 2 === 1;
+          const lab = K.clamp(Math.round(g + K.randn(r) * (old ? 0.75 : 0.35)), 0, 4);
+          pts.push({ x: g + (r() - 0.5) * 0.5 - (old ? -0.12 : 0.12), y: lab + (r() - 0.5) * 0.3, old });
+        }
+        const els = pts.map((p) => K.svg(svg, "circle", { cx: ax.sx(p.x), cy: ax.sy(p.x), r: 4, fill: p.old ? "var(--c2)" : "var(--c1)", opacity: 0.75 }));
+        K.svg(svg, "text", { x: 470, y: 320, "font-size": 12, fill: "var(--c1)" }, "● APTOS 医生（示意）");
+        K.svg(svg, "text", { x: 470, y: 336, "font-size": 12, fill: "var(--c2)" }, "● 2015 年医生（示意）");
+        K.svg(svg, "text", { x: 80, y: 320, "font-size": 12, class: "muted" }, "点越偏离对角线，标签越“吵”");
+        ctx.wait(400).then((ok) => ok && ctx.tween(1400, (t) => els.forEach((e, i) => e.setAttribute("cy", ax.sy(K.lerp(pts[i].x, pts[i].y, t))))));
+      },
+    },
+    {
+      title: "jpg 还是 png？细节是不是被压缩弄丢了", kicker: "第 42–45 格 · 排查原因", at: 42,
+      html: `<p>有些旧图处理后细节很少。作者怀疑是 jpg 有损压缩造成的，于是找来同一张图的 png 版本（无损）并排对比：原图、处理后，jpg 和 png 各一份。</p><p>结果：<b>两种格式都看不到那些细节</b>。所以不是压缩的问题，细节本来就不在图里，这张图更可能是一个标签有噪声的样本。</p><p>这是很好的科学习惯：先提出假设（压缩丢细节），再设计对照实验去验证或排除它。</p>`,
+      cells: [44], highlight: ["png format original", "jpg format original"],
+      draw(svg, ctx) {
+        const img = fundus(72, 72, { grade: 1, seed: 61, border: 0 });
+        const q = (m, step) => PX.map(m, (v) => Math.round(v * step) / step);
+        const jpg = PX.resize(q(PX.resize(img, 18, 18), 6), 72, 72);
+        const cells = [["png 原图", img], ["jpg 原图", jpg], ["png 处理后", ben(img, 2.5)], ["jpg 处理后", ben(jpg, 2.5)]];
+        cells.forEach((c, i) => {
+          const x = 30 + (i % 2) * 200, y = 30 + Math.floor(i / 2) * 150;
+          const e = PX.draw(svg, x, y, 120, 120, c[1], null, null, null, true);
+          K.svg(svg, "text", { x: x + 130, y: y + 64, "font-size": 13 }, c[0]);
+          e.style.opacity = 0;
+          ctx.wait(i * 350).then((ok) => ok && ctx.tween(400, (t) => (e.style.opacity = t)));
+        });
+        K.svg(svg, "text", { x: 460, y: 120, "font-size": 13, "font-weight": 700 }, "假设：压缩丢了细节？");
+        K.svg(svg, "text", { x: 460, y: 146, "font-size": 12.5 }, "对照：同一张图两种格式");
+        K.svg(svg, "text", { x: 460, y: 172, "font-size": 12.5, fill: "var(--good)" }, "结论：两边都没有 → 排除");
+        K.svg(svg, "text", { x: 460, y: 320, "font-size": 11.5, class: "muted" }, "示意：jpg 用降采样+量化模拟");
+      },
+    },
+    {
+      title: "附录：热力图、医生分歧和 Aravind 的故事", kicker: "第 46–49 格 · 延伸阅读", at: 46,
+      html: `<p>作者在附录里说了三件事：</p><ul class="tight"><li><b>热力图</b>：在另一份 notebook 里，他用预处理后的图配合热力图，看模型到底在看哪里</li><li><b>医生之间不一致</b>：引用 TensorFlow 大会的例子，同一只眼，有的医生判 1 级，有的判 3 级。这类问题天生“有噪声”</li><li><b>Aravind 眼科医院</b>：为穷人免费治眼病、同时能持续运营的医院，这场比赛的数据提供方</li></ul><p>动画示意：同一张照片，几位医生各自打分，分数散开。下方实验可以亲手算一算“一致性”。</p>`,
+      cells: [47], at: 46,
+      draw(svg, ctx) {
+        PX.draw(svg, 30, 60, 220, 165, fundus(80, 60, { grade: 2, seed: 77, border: 0.1 }), null, null, null, true);
+        const docs = [1, 2, 2, 3, 2, 1, 3];
+        K.svg(svg, "text", { x: 300, y: 40, "font-size": 13 }, "7 位医生对同一张照片的分级（示意）");
+        for (let g = 0; g <= 4; g++) { K.svg(svg, "text", { x: 320 + g * 75, y: 300, "text-anchor": "middle", "font-size": 13 }, GR[g]); }
+        const cnt = [0, 0, 0, 0, 0];
+        const dots = docs.map((g) => { const k = cnt[g]++; const d = K.svg(svg, "circle", { cx: 320 + g * 75, cy: 270 - k * 30, r: 0, fill: "var(--c1)" }); return d; });
+        (async () => { for (const d of dots) { if (!(await ctx.tween(250, (t) => d.setAttribute("r", 11 * t)))) return; } })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：Ben Graham ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 660, height: 330,
+    controls: [
+      { id: "bright", label: "原图亮度（模拟拍得暗或亮）", min: 0.2, max: 1.4, step: 0.05, value: 0.45, fmt: (v) => v.toFixed(2) },
+      { id: "grad", label: "光照不均（一边亮一边暗）", min: 0, max: 0.8, step: 0.05, value: 0.4, fmt: (v) => v.toFixed(2) },
+      { id: "sigma", label: "模糊程度 sigmaX（按 512 像素换算）", min: 2, max: 80, step: 1, value: 10, fmt: (v) => v },
+      { id: "w", label: "相减后的放大倍数（作者用 4）", min: 1, max: 8, step: 0.5, value: 4, fmt: (v) => v.toFixed(1) },
+      { id: "grade", label: "病变等级（示意）", value: "3", options: [["0", "0 无"], ["1", "1 轻度"], ["2", "2 中度"], ["3", "3 重度"], ["4", "4 增殖期"]] },
+    ],
+    note: "浏览器里对一张 96×96 的示意眼底图真算：高斯模糊 → 4×原图 − 4×模糊图 + 128 → 截断到 0–255。sigma 按 512 像素的图换算到这张小图上（÷512×96）。",
+    render(svg, v) {
+      const img = fundus(96, 96, { grade: +v.grade, seed: 15, bright: v.bright, grad: v.grad, border: 0 });
+      const sp = (v.sigma * 96) / 512, b = PX.blur(img, sp), o = ben(img, sp, v.w);
+      PX.draw(svg, 10, 30, 200, 200, img, null, null, null, true);
+      PX.draw(svg, 225, 30, 200, 200, b, null, null, null, true);
+      PX.draw(svg, 440, 30, 200, 200, o, null, null, null, true);
+      K.svg(svg, "text", { x: 10, y: 22, "font-size": 12 }, "原图（示意）");
+      K.svg(svg, "text", { x: 225, y: 22, "font-size": 12 }, `高斯模糊 sigma≈${sp.toFixed(1)} 像素`);
+      K.svg(svg, "text", { x: 440, y: 22, "font-size": 12 }, `${v.w}×(原图−模糊)+128`);
+      let clip = 0, n = 0, mean = 0;
+      o.rgb.forEach((a) => a.forEach((x) => { n++; mean += x; if (x <= 0 || x >= 1) clip++; }));
+      const g0 = PX.gray(img); let m0 = 0; g0.a.forEach((x) => (m0 += x));
+      K.svg(svg, "text", { x: 10, y: 260, "font-size": 12.5, class: "muted" }, "把“亮度”从 0.2 拉到 1.4：左图变化很大，右图几乎不变，这就是“统一光照”。");
+      K.svg(svg, "text", { x: 10, y: 282, "font-size": 12.5, class: "muted" }, "放大倍数拉到 8：细节更突出，但被截断成纯黑纯白的像素也更多。");
+      return { readout: [
+        { k: "原图平均亮度", v: ((m0 / g0.a.length) * 255).toFixed(0) },
+        { k: "处理后平均亮度", v: ((mean / n) * 255).toFixed(0) },
+        { k: "被截断的像素", v: ((clip / n) * 100).toFixed(1) + "%", color: clip / n > 0.15 ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：裁黑边 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 660, height: 320,
+    controls: [
+      { id: "tol", label: "阈值 tol（0–255，作者用 7）", min: 0, max: 120, step: 1, value: 7 },
+      { id: "bright", label: "照片亮度（拉到很低模拟“极暗图”）", min: 0.01, max: 1.2, step: 0.01, value: 0.9, fmt: (v) => v.toFixed(2) },
+      { id: "noise", label: "黑边里的噪点（相机噪声）", value: "0", options: [["0", "没有"], ["1", "少量亮噪点"]] },
+      { id: "fix", label: "是否有“空图保护”", value: "new", options: [["new", "新版：裁空就返回原图"], ["old", "旧版：直接裁"]] },
+    ],
+    note: "浏览器里真算 crop_image_from_gray：灰度 > tol 的像素算“有内容”，取这些像素所在的行和列围成框。把亮度拉到 0.02 以下、阈值调高，看看旧版会发生什么。",
+    render(svg, v) {
+      const r = K.rng(9);
+      let img = fundus(120, 80, { grade: 2, seed: 4, border: 0.3, bright: v.bright });
+      if (v.noise === "1") img = PX.map(img, (x) => (x < 0.01 && r() < 0.004 ? 0.2 : x));
+      const b = cropBox(img, v.tol), sc = 2.6;
+      PX.draw(svg, 10, 30, 120 * sc, 80 * sc, img, null, null, null, true);
+      K.svg(svg, "text", { x: 10, y: 22, "font-size": 12 }, "原图与裁剪框（黄色）");
+      let status, color = "var(--good)", outW = 0, outH = 0;
+      if (b) {
+        K.svg(svg, "rect", { x: 10 + b.x0 * sc, y: 30 + b.y0 * sc, width: (b.x1 - b.x0 + 1) * sc, height: (b.y1 - b.y0 + 1) * sc, fill: "none", stroke: "var(--warn)", "stroke-width": 2.5 });
+        const c = cropTo(img, b); outW = c.W; outH = c.H;
+        const s = Math.min(300 / c.W, 200 / c.H);
+        PX.draw(svg, 345, 30, c.W * s, c.H * s, c, null, null, null, true);
+        status = outW > 110 ? "几乎没裁掉黑边" : "正常裁剪";
+        if (outW > 110) color = "var(--warn)";
+      } else if (v.fix === "new") {
+        PX.draw(svg, 345, 30, 300, 200, img, null, null, null, true);
+        status = "裁空了 → 返回原图"; color = "var(--warn)";
+      } else {
+        K.svg(svg, "rect", { x: 345, y: 30, width: 300, height: 200, fill: "none", stroke: "var(--bad)", "stroke-dasharray": "6 4", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 495, y: 135, "text-anchor": "middle", "font-size": 15, "font-weight": 700, fill: "var(--bad)" }, "0×0 空图，后面的 resize 报错");
+        status = "程序崩溃"; color = "var(--bad)";
+      }
+      K.svg(svg, "text", { x: 345, y: 22, "font-size": 12 }, "裁剪结果");
+      return { readout: [
+        { k: "裁剪后尺寸", v: b ? `${outW}×${outH}` : "0×0" },
+        { k: "原图尺寸", v: "120×80" },
+        { k: "状态", v: status, color },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：医生间一致性（二次加权 kappa） ---------- */
+  function qwk(a, b) {
+    const N = 5, O = Array.from({ length: N }, () => Array(N).fill(0)), ha = Array(N).fill(0), hb = Array(N).fill(0);
+    a.forEach((x, i) => { O[x][b[i]]++; ha[x]++; hb[b[i]]++; });
+    let num = 0, den = 0;
+    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) { const w = ((i - j) * (i - j)) / 16, E = (ha[i] * hb[j]) / a.length; num += w * O[i][j]; den += w * E; }
+    return { k: den ? 1 - num / den : 1, O };
+  }
+  K.lab(document.getElementById("lab3"), {
+    width: 660, height: 330,
+    controls: [
+      { id: "sd", label: "医生 B 判断的随机波动（标准差，单位：级）", min: 0, max: 1.5, step: 0.05, value: 0.6, fmt: (v) => v.toFixed(2) },
+      { id: "shift", label: "医生 B 整体偏严（平均多判几级）", min: -1, max: 1, step: 0.1, value: 0, fmt: (v) => (v > 0 ? "+" : "") + v.toFixed(1) },
+      { id: "seed", label: "换一批病人", button: true },
+    ],
+    note: "浏览器里模拟 400 只眼：医生 A 按“真实病情”打分，医生 B 在此基础上加随机波动和整体偏差。左边是两人打分的对照表，右边算两种一致性：完全一致的比例，和 APTOS 比赛用的二次加权 kappa（差一级扣分少，差四级扣分多；1 = 完全一致，0 = 和瞎猜差不多）。这是本页加的延伸实验，原 notebook 没有计算 kappa。",
+    render(svg, v) {
+      const r = K.rng(100 + v.seed * 31), A = [], B = [];
+      const pri = [0.5, 0.1, 0.27, 0.05, 0.08];
+      for (let n = 0; n < 400; n++) {
+        let u = r(), g = 0; while (g < 4 && u > pri[g]) { u -= pri[g]; g++; }
+        A.push(g); B.push(K.clamp(Math.round(g + v.shift + K.randn(r) * v.sd), 0, 4));
+      }
+      const res = qwk(A, B), cs = 46, x0 = 90, y0 = 40;
+      let same = 0; A.forEach((a, i) => { if (a === B[i]) same++; });
+      for (let i = 0; i < 5; i++) {
+        K.svg(svg, "text", { x: x0 - 8, y: y0 + i * cs + 28, "text-anchor": "end", "font-size": 12 }, "A=" + i);
+        K.svg(svg, "text", { x: x0 + i * cs + 22, y: y0 + 5 * cs + 16, "text-anchor": "middle", "font-size": 12 }, "B=" + i);
+        const tot = res.O[i].reduce((a, b) => a + b, 0) || 1;
+        for (let j = 0; j < 5; j++) {
+          const p = res.O[i][j] / tot;
+          K.svg(svg, "rect", { x: x0 + j * cs, y: y0 + i * cs, width: cs - 3, height: cs - 3, rx: 4, fill: K.heat(p), stroke: i === j ? "var(--ink-3)" : "none" });
+          if (res.O[i][j]) K.svg(svg, "text", { x: x0 + j * cs + 21, y: y0 + i * cs + 27, "text-anchor": "middle", "font-size": 11, fill: p > 0.55 ? "var(--panel)" : "var(--ink)" }, res.O[i][j]);
+        }
+      }
+      K.svg(svg, "text", { x: x0, y: 26, "font-size": 12, class: "muted" }, "行 = 医生 A，列 = 医生 B，格内是人数");
+      K.svg(svg, "text", { x: 360, y: 80, "font-size": 13 }, "差一级：扣 1/16 分");
+      K.svg(svg, "text", { x: 360, y: 104, "font-size": 13 }, "差两级：扣 4/16 分");
+      K.svg(svg, "text", { x: 360, y: 128, "font-size": 13 }, "差四级：扣满分");
+      K.svg(svg, "text", { x: 360, y: 170, "font-size": 12.5, class: "muted" }, "所以“差一级”的分歧对 kappa 影响小，");
+      K.svg(svg, "text", { x: 360, y: 190, "font-size": 12.5, class: "muted" }, "“0 级判成 4 级”影响很大。");
+      return { readout: [
+        { k: "两人完全一致", v: ((same / 400) * 100).toFixed(1) + "%" },
+        { k: "二次加权 kappa", v: res.k.toFixed(3), color: res.k < 0.6 ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

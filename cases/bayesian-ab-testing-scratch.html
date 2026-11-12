@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>贝叶斯 A/B 测试</title>
+<meta name="description" content="Kaggle 案例拆解：从零做贝叶斯 A/B 测试，Beta 先验加点击数据得到后验，用蒙特卡洛算“B 比 A 好的概率”，用剩余价值决定何时停止实验。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">模拟数据 · 对照实验 · 贝叶斯推断</div>
+  <h1>贝叶斯 A/B 测试：新广告“有多大把握”比旧广告好？</h1>
+  <p class="en">A/B Testing from Scratch: Bayesian Approach</p>
+  <div class="tags">
+    <span class="tag st">统计分析</span>
+    <span class="tag method">A/B 测试</span><span class="tag method">贝叶斯定理</span><span class="tag method">Beta 先验</span>
+    <span class="tag method">伯努利 / 二项似然</span><span class="tag method">共轭后验</span><span class="tag method">蒙特卡洛抽样</span>
+    <span class="tag method">可信区间</span><span class="tag method">剩余价值停止规则</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>cstorm3000</b></span>
+    <span>Kaggle 点赞 <b>53</b>（2026-11 抓取）</span>
+    <span>数据集 <b>无外部数据（作者代码模拟两组广告的点击和转化）</b></span>
+    <span><a href="https://www.kaggle.com/code/cstorm3000/bayesian-a-b-testing-from-scratch" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">两条网络广告的每日点击与转化</div><p>受众随机分两半，一半看旧广告 A、一半看新广告 B。数据由作者代码模拟，作者“偷偷”设定 B 的真实转化率 10.5%、A 是 10%。<span data-cell="4">出处</span></p></div>
+    <div class="card panel"><h3>要回答什么</h3><div class="big">B 比 A 好的概率有多大？好多少？</div><p>不是问“有没有显著差异”，而是直接给出每条广告真实转化率的<b>概率分布</b>（后验），再算谁赢的概率。<span data-cell="9">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">Beta 先验 + 数据 = Beta 后验</div><p>推导共轭后验 <span data-cell="13">出处</span>，蒙特卡洛抽样比较两个后验 <span data-cell="22">出处</span>，用谷歌提出的“剩余价值”判断何时停止实验 <span data-cell="28">出处</span>。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">约 80% 的把握 A 不如 B</div><p>作者文字：A/B 比值分布里大约 80% 显示 A 比 B 差；万一判断错，A 最多比 B 好约 20%。<span data-cell="23">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">这个案例<b>没有下载任何真实数据</b>：作者写了一个函数 <code>gen_campaigns</code> 现场造数据，并且知道“标准答案”（作者注释里叫 god-mode，上帝视角）。这样做的好处是可以检验方法能不能找回真相。<span data-cell="5">出处</span></p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">模拟设定</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">A 真实转化率</div><div class="v">10%</div></div>
+        <div class="stat-tile"><div class="k">B 真实转化率</div><div class="v" style="color:var(--c3)">10.5%</div></div>
+        <div class="stat-tile"><div class="k">每天每组点击</div><div class="v" style="font-size:18px">50–150，最常见 100</div></div>
+        <div class="stat-tile"><div class="k">实验天数</div><div class="v" style="font-size:18px">24 天（后面 60 天）</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">转化率与天数见第 5 格 <span data-cell="5">出处</span>；60 天的两组实验（A=B=10%，以及 A 10% vs B 11%）见第 27 格 <span data-cell="27">出处</span>。每天点击数用三角分布 <code>triangular(50,100,150)</code> 生成，每天的转化率再加一点随机噪声。</p>
+      <p class="callout warn">作者第 4 格文字说“每天大约一千次点击”“实验跑了两个月”，但代码生成的是每天约 100 次、共 24 天。以代码为准。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么（第 5 格生成的表）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th></tr>
+        <tr><td><code>click_day</code></td><td>第几天</td></tr>
+        <tr><td><code>click_a</code> / <code>click_b</code></td><td>当天 A、B 广告各被点了多少次</td></tr>
+        <tr><td><code>conv_a</code> / <code>conv_b</code></td><td>当天点击后真正下单（转化）的次数</td></tr>
+        <tr><td><code>cumu_click_*</code>、<code>cumu_conv_*</code></td><td>从第 0 天累加到今天的点击、转化</td></tr>
+        <tr><td><code>cumu_rate_*</code></td><td>累计转化率 = 累计转化 / 累计点击</td></tr>
+      </table></div>
+      <p class="callout"><b>为什么 A/B 测试能谈因果：</b>受众是<b>随机</b>分成两半的，两组人除了看到的广告不同，其他方面平均来说一样。于是 A 组就是 B 组的“反事实”替身：B 组的人如果看的是 A，大概就会像 A 组那样转化。这是没有混杂因素的最干净的因果比较。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="16">
+    <h3>实验 A · 先验 + 数据 = 后验 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labA"></div>
+  </div>
+  <div data-at="22">
+    <h3>实验 B · 抽签比大小：B 赢的概率 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labB"></div>
+  </div>
+  <div data-at="31">
+    <h3>实验 C · 每天看一眼：什么时候该停 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labC"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>伯努利似然配 Beta 先验，后验仍是 Beta：Beta(α + 转化数, β + 未转化数)</td><td><span data-cell="13">第 13 格</span></td></tr>
+        <tr><td>同样代表 10%，Beta(10,90) 比 Beta(1,9) 更“尖”，表示更有把握</td><td><span data-cell="15">第 15 格</span></td></tr>
+        <tr><td>先验太离谱（如 Beta(999,1)）时，即使观察到约 10%，后验均值也会被拉到约 30%</td><td><span data-cell="18">第 18 格</span></td></tr>
+        <tr><td>A/B 比值分布里约 80% 显示 A 比 B 差；万一错了，A 最多好约 20%</td><td><span data-cell="23">第 23 格</span></td></tr>
+        <tr><td>两组真的一样时，“A 赢 B 的概率”一直在 50% 附近；真的有差时逐渐偏向一边</td><td><span data-cell="26">第 26 格</span></td></tr>
+        <tr><td>真实差 1% 时剩余价值逐渐降到 1% 阈值以下；两组一样时一直在 10% 左右徘徊</td><td><span data-cell="30">第 30 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">“A 赢的概率”“可信区间”“剩余价值”的具体数值由第 22、29 格打印在运行输出里，源码不带输出，这里只列作者文字里写到的近似值。</p>
+      <p class="callout warn"><b>原文值得注意的地方：</b>①第 4 格说每天约一千次点击、跑两个月，代码是每天约 100 次、24 天，第 6 格横轴还写成“小时”；第 4 格结尾说“用于我们的频率派 A/B 测试”，像是从作者的频率派版本里复制过来没改。②第 22 格把“A 比 B 大的概率”存进叫 <code>p_value</code> 的变量，容易和频率派的 p 值混淆（两者含义完全不同）。③第 26 格说贝叶斯方法“不受”样本越多越显著的问题困扰，但作者自己在参考文献里列的文章标题就是《贝叶斯 A/B 测试不怕偷看吗？并不完全》。④<code>gen_campaigns</code> 里点击数和噪声用同一个随机种子生成，第 27 格两组实验的噪声也一模一样。⑤第 19 格用的 <code>collections.MutableSequence</code> 在 Python 3.10 以后已删除，新环境会报错。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能回答：</b>“新版本比旧版本好的概率是多少”“最多可能差多少”，比“p &lt; 0.05”更贴近老板想听的话。</li>
+        <li><b>同类问题：</b>网页按钮颜色、App 推送文案、邮件标题、商品定价、医学上两种疗法的有效率比较。</li>
+        <li><b>可迁移的套路：</b>随机分组 → 用历史数据定一个温和的先验 → 每天更新后验 → 用“赢的概率”和“剩余价值 / 期望损失”决定继续还是停止 → 提前定好停止规则，别边看边改。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>模拟数据：三角分布点击数 + 带噪声转化率 <span data-cell="5">第 5 格</span></li>
+        <li>贝叶斯定理与先验、似然、后验 <span data-cell="9">第 9 格</span></li>
+        <li>Beta 分布与共轭后验 <span data-cell="11">第 11 格</span> <span data-cell="13">第 13 格</span></li>
+        <li>蒙特卡洛：后验抽样 10 万次比较大小、比值、可信区间 <span data-cell="22">第 22 格</span></li>
+        <li>停止规则：90% / 10% 概率线 <span data-cell="27">第 27 格</span>、剩余价值 95 分位数 &lt; 1% <span data-cell="29">第 29 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>如果广告公司没有随机分组，而是“工作日投 A、周末投 B”，比出来的差别还能说是广告带来的吗？会混进什么因素？</li>
+      <li>先验是“老经验”。同一份数据，两个分析师用了不同的先验，结论不一样，这算不算主观？什么时候先验影响大、什么时候几乎没影响？</li>
+      <li>“B 赢的概率是 80%”和频率派的“p = 0.2”说的是一回事吗？哪句话更容易被老板听懂？</li>
+      <li>每天看一眼结果，一超过 90% 就停，会不会经常停错？实验 C 里试试两组真实转化率完全一样的情况。</li>
+      <li>剩余价值的阈值设成 1%，意思是“就算判断错了，最多损失 1% 的转化”。这个数应该由谁来定？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 cstorm3000，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。原 notebook 的数据也是作者代码模拟生成的。
+</footer>
+</main>
+
+<script src="nb/bayesian-ab-testing-scratch.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const fade = (els, ctx, ms) => ctx.tween(ms || 500, (t) => els.forEach((e) => (e.style.opacity = t)));
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+
+  /* ---------- 概率小工具 ---------- */
+  function lgamma(x) { const g = [76.18009172947146, -86.50532032941677, 24.01409824083091, -1.231739572450155, 0.1208650973866179e-2, -0.5395239384953e-5]; let y = x, t = x + 5.5; t -= (x + 0.5) * Math.log(t); let s = 1.000000000190015; for (let j = 0; j < 6; j++) s += g[j] / ++y; return -t + Math.log(2.5066282746310005 * s / x); }
+  const betaPdf = (x, a, b) => (x <= 0 || x >= 1 ? 0 : Math.exp(lgamma(a + b) - lgamma(a) - lgamma(b) + (a - 1) * Math.log(x) + (b - 1) * Math.log(1 - x)));
+  function gammaS(r, k) { // Marsaglia–Tsang
+    if (k < 1) return gammaS(r, k + 1) * Math.pow(r(), 1 / k);
+    const d = k - 1 / 3, c = 1 / Math.sqrt(9 * d);
+    for (;;) { let x, v; do { x = K.randn(r); v = 1 + c * x; } while (v <= 0); v = v * v * v; const u = r(); if (u < 1 - 0.0331 * x * x * x * x || Math.log(u) < 0.5 * x * x + d * (1 - v + Math.log(v))) return d * v; }
+  }
+  const betaS = (r, a, b) => { const x = gammaS(r, a), y = gammaS(r, b); return x / (x + y); };
+  function binom(r, n, p) { if (n > 60) return Math.max(0, Math.round(n * p + Math.sqrt(n * p * (1 - p)) * K.randn(r))); let c = 0; for (let i = 0; i < n; i++) if (r() < p) c++; return c; }
+  // 作者的模拟方式（简化）：每天点击 50–150 的三角分布，转化按二项分布
+  function tri(r) { const u = r(); return Math.round(u < 0.5 ? 50 + Math.sqrt(u * 2) * 50 : 150 - Math.sqrt((1 - u) * 2) * 50); }
+  function simDays(r, pA, pB, days) { const out = []; let ca = 0, na = 0, cb = 0, nb = 0; for (let d = 0; d < days; d++) { const a = tri(r), b = tri(r); na += a; nb += b; ca += binom(r, a, pA); cb += binom(r, b, pB); out.push({ na, ca, nb, cb }); } return out; }
+  function curve(svg, ax, f, x0, x1, attrs) { let d = ""; for (let i = 0; i <= 300; i++) { const x = x0 + (x1 - x0) * i / 300, y = f(x); d += (d ? "L" : "M") + ax.sx(x).toFixed(1) + "," + ax.sy(y).toFixed(1); } return K.svg(svg, "path", Object.assign({ d, fill: "none", stroke: "var(--c1)", "stroke-width": 2 }, attrs || {})); }
+  const pct = (x, d) => (x * 100).toFixed(d == null ? 1 : d) + "%";
+
+  const steps = [
+    {
+      at: 0, title: "两条广告，哪条更能卖货", kicker: "第 0–3 格 · 开场",
+      html: `<p>作者要比较两条网络广告（也可以是两种疗法、两个界面、两台老虎机），并演示<b>贝叶斯 A/B 测试</b>和频率派做法有什么不同。<span data-cell="1">出处</span> 开头导入 numpy、scipy、plotnine 画图库和 ipywidgets 滑块控件。</p><p>动画是 A/B 测试的骨架：用户<b>随机</b>分到两边，一边看 A、一边看 B。因为是随机分的，两组人在年龄、喜好、手头宽不宽裕上平均来说都一样，差别只剩“看了哪条广告”。所以 A 组就是 B 组的<b>反事实替身</b>。</p>`,
+      cells: [1],
+      draw(svg, ctx) {
+        const r = K.rng(3), dots = [];
+        K.node(svg, 300, 20, 120, 40, "新来的用户", { bold: true });
+        const ga = K.node(svg, 60, 250, 220, 50, "看广告 A（旧）", { stroke: "var(--c1)", bold: true });
+        const gb = K.node(svg, 440, 250, 220, 50, "看广告 B（新）", { stroke: "var(--c3)", bold: true });
+        const coin = K.svg(svg, "text", { x: 360, y: 150, "text-anchor": "middle", "font-size": 30 }, "🪙");
+        K.svg(svg, "text", { x: 360, y: 180, "text-anchor": "middle", "font-size": 12, class: "muted" }, "抛硬币决定去哪边");
+        const msg = K.svg(svg, "text", { x: 360, y: 330, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "两组只差一件事：看了哪条广告 → 差别可以算到广告头上");
+        msg.style.opacity = 0;
+        (async () => {
+          for (let i = 0; i < 24; i++) {
+            const side = r() < 0.5, col = ["var(--c2)", "var(--c4)", "var(--c5)"][i % 3];
+            const c = K.svg(svg, "circle", { cx: 360, cy: 70, r: 7, fill: col });
+            const tx = side ? 90 + (i % 8) * 25 : 470 + (i % 8) * 25, ty = 225 - Math.floor(i / 8) * 0;
+            if (!(await ctx.tween(260, (t) => { K.set(c, { cx: K.lerp(360, tx, t), cy: K.lerp(70, ty - (i % 3) * 16, t) }); }))) return;
+          }
+          fade([msg], ctx, 600);
+        })();
+      },
+    },
+    {
+      at: 4, title: "上帝视角：先造一份知道答案的数据", kicker: "第 4–5 格 · 模拟数据",
+      html: `<p>作者写了 <code>gen_campaigns</code> 函数造数据：每天每组点击数从 50 到 150 之间抽（最常见 100），转化率在真实值上加一点每天的随机波动，再累加成“到今天为止”的点击和转化。<span data-cell="5">出处</span></p><p>真实值作者心里清楚：<b>A 是 10%，B 是 10.5%</b>，只差半个百分点。我们要假装不知道，看方法能不能把它找出来。<span data-cell="4">出处</span></p><p class="callout warn">第 4 格文字说“每天约一千次点击”“跑了两个月”，代码实际是每天约 100 次、24 天。</p>`,
+      cells: [4, 5], highlight: ["p1 = 0.10", "p2 = 0.105", "nb_days = 24", "triangular"],
+      draw(svg, ctx) {
+        const r = K.rng(14), ax = K.axes(svg, { x: 50, y: 30, w: 620, h: 230 }, [0, 24], [0, 160], { xticks: 4, yticks: 4, xlabel: "第几天", ylabel: "点击数" });
+        const bars = [];
+        for (let d = 0; d < 24; d++) {
+          const a = tri(r), b = tri(r), ca = binom(r, a, 0.1), cb = binom(r, b, 0.105), x = ax.sx(d) + 3, w = (ax.sx(1) - ax.sx(0)) / 2 - 3;
+          bars.push([K.svg(svg, "rect", { x, y: ax.sy(0), width: w, height: 0, fill: "var(--c1)", opacity: 0.45 }), a, K.svg(svg, "rect", { x, y: ax.sy(0), width: w, height: 0, fill: "var(--c1)" }), ca]);
+          bars.push([K.svg(svg, "rect", { x: x + w, y: ax.sy(0), width: w, height: 0, fill: "var(--c3)", opacity: 0.45 }), b, K.svg(svg, "rect", { x: x + w, y: ax.sy(0), width: w, height: 0, fill: "var(--c3)" }), cb]);
+        }
+        K.svg(svg, "text", { x: 60, y: 300, "font-size": 12, fill: "var(--c1)" }, "■ A 点击（深色 = 其中转化）");
+        K.svg(svg, "text", { x: 260, y: 300, "font-size": 12, fill: "var(--c3)" }, "■ B 点击（深色 = 其中转化）");
+        K.svg(svg, "text", { x: 60, y: 324, "font-size": 12, class: "muted" }, "浏览器现场模拟，真实转化率 A 10%、B 10.5%：肉眼几乎看不出差别");
+        ctx.tween(1600, (t) => bars.forEach((b, i) => { const k = K.clamp(t * 1.6 - i / 48 * 0.6, 0, 1); K.set(b[0], { y: ax.sy(b[1] * k), height: ax.sy(0) - ax.sy(b[1] * k) }); K.set(b[2], { y: ax.sy(b[3] * k), height: ax.sy(0) - ax.sy(b[3] * k) }); }));
+      },
+    },
+    {
+      title: "累计转化率：一开始乱跳，后来才稳", kicker: "第 6–7 格 · 看数据",
+      html: `<p>作者画出两条广告的<b>累计转化率</b>随天数的变化，再把 24 天加总成一张小表：点击数、转化数、转化率。<span data-cell="6">出处</span> <span data-cell="7">出处</span></p><p>动画里，前几天两条线上下乱跳、互相交叉，越往后越平稳。数据少的时候，偶然性很大：头两天 A 领先，不代表 A 真的更好。</p><p class="callout warn">第 6 格横轴标签写的是“实验运行的小时数”，实际单位是天；第 7 格注释写“两个月后加总”，实际是 24 天。</p>`,
+      cells: [6, 7], highlight: ["cumu_rate_a", "cumu_rate_b", "conv_per"],
+      draw(svg, ctx) {
+        const r = K.rng(21), D = simDays(r, 0.1, 0.105, 24);
+        const ax = K.axes(svg, { x: 60, y: 24, w: 600, h: 240 }, [0, 23], [0.06, 0.14], { xticks: 4, yticks: 4, yfmt: (v) => (v * 100).toFixed(0) + "%", xlabel: "第几天（浏览器现场模拟）" });
+        K.svg(svg, "line", { x1: 60, x2: 660, y1: ax.sy(0.1), y2: ax.sy(0.1), stroke: "var(--c1)", "stroke-dasharray": "3 4", opacity: 0.6 });
+        K.svg(svg, "line", { x1: 60, x2: 660, y1: ax.sy(0.105), y2: ax.sy(0.105), stroke: "var(--c3)", "stroke-dasharray": "3 4", opacity: 0.6 });
+        const pa = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 }), pb = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c3)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 70, y: 310, "font-size": 12, fill: "var(--c1)" }, "— A 累计转化率（虚线 = 真实 10%）");
+        K.svg(svg, "text", { x: 330, y: 310, "font-size": 12, fill: "var(--c3)" }, "— B 累计转化率（虚线 = 真实 10.5%）");
+        ctx.tween(2200, (t) => {
+          const n = Math.max(1, Math.round(t * 24));
+          let a = "", b = "";
+          for (let d = 0; d < n; d++) { a += (a ? "L" : "M") + ax.sx(d) + "," + ax.sy(K.clamp(D[d].ca / D[d].na, 0.06, 0.14)); b += (b ? "L" : "M") + ax.sx(d) + "," + ax.sy(K.clamp(D[d].cb / D[d].nb, 0.06, 0.14)); }
+          K.set(pa, { d: a }); K.set(pb, { d: b });
+        });
+      },
+    },
+    {
+      at: 8, title: "像贝叶斯派一样思考：先验、似然、后验", kicker: "第 8–9 格 · 贝叶斯定理",
+      html: `<p>贝叶斯 A/B 测试的核心：给每条广告的真实转化率画一个<b>概率分布</b>，叫<b>后验</b>。频率派则是先假设“两者没差别”，再看数据有多意外。<span data-cell="9">出处</span></p><ul class="tight"><li><b>先验</b> P(H)：看数据之前，我们对转化率的旧印象。</li><li><b>似然</b> P(D|H)：如果真实转化率是某个值，看到眼前这批数据的可能性有多大。</li><li><b>后验</b> P(H|D)：看完数据后更新过的看法，正比于 先验 × 似然。</li></ul><p>动画里三条曲线依次出现：宽宽的先验，乘上似然，变成一条更尖、更靠近数据的后验。</p>`,
+      cells: [9],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 30, w: 620, h: 220 }, [0, 0.3], [0, 1], { xticks: 6, yticks: 0, xfmt: (v) => (v * 100).toFixed(0) + "%", xlabel: "广告 A 的真实转化率可能是多少" });
+        const pr = (x) => betaPdf(x, 2, 12), lk = (x) => betaPdf(x, 25, 175), po = (x) => betaPdf(x, 26, 186);
+        const mx = (f) => { let m = 0; for (let i = 1; i < 300; i++) m = Math.max(m, f(i / 1000)); return m; };
+        const mP = mx(po);
+        const c1 = curve(svg, ax, (x) => pr(x) / mP, 0.001, 0.3, { stroke: "var(--ink-3)", "stroke-dasharray": "6 4" });
+        const c2 = curve(svg, ax, (x) => lk(x) / mx(lk) * 0.8, 0.001, 0.3, { stroke: "var(--c2)" });
+        const c3 = curve(svg, ax, (x) => po(x) / mP, 0.001, 0.3, { stroke: "var(--c1)", "stroke-width": 3 });
+        const t1 = K.svg(svg, "text", { x: 470, y: 230, "font-size": 13, fill: "var(--ink-3)", "font-weight": 700 }, "先验：大概 10% 上下，不太确定");
+        const t2 = K.svg(svg, "text", { x: 330, y: 70, "font-size": 13, fill: "var(--c2)", "font-weight": 700 }, "似然：数据说约 12.5%（200 次点击 25 次转化）");
+        const t3 = K.svg(svg, "text", { x: 330, y: 50, "font-size": 14, fill: "var(--c1)", "font-weight": 700 }, "后验 ∝ 先验 × 似然：更尖，夹在两者之间");
+        const f = K.svg(svg, "text", { x: 360, y: 310, "text-anchor": "middle", "font-size": 15, "font-weight": 700 }, "P(H | D) = P(D | H) × P(H) / P(D)");
+        hide([c1, c2, c3, t1, t2, t3]);
+        (async () => { if (!(await fade([c1, t1], ctx, 700))) return; await ctx.wait(400); if (!(await fade([c2, t2], ctx, 700))) return; await ctx.wait(400); fade([c3, t3], ctx, 800); })();
+      },
+    },
+    {
+      at: 10, title: "似然与 Beta 分布：用“成功几次、失败几次”描述把握", kicker: "第 10–12 格 · 两块积木",
+      html: `<p>每次点击要么转化（1）、要么没转化（0），这是<b>伯努利</b>试验；n 次点击里 x 次转化，似然就是 p<sup>转化数</sup>(1−p)<sup>未转化数</sup>。<span data-cell="11">出处</span></p><p>先验选 <b>Beta 分布</b>：它只在 0 到 1 之间，由两个数 α、β 控制，可以理解成“心里已经见过 α 次成功、β 次失败”。数越大，曲线越尖，越有把握。作者画了 Beta(1,1)、(2,3)、(4,6)、(20,30) 四条曲线对比。<span data-cell="12">出处</span></p>`,
+      cells: [11, 12], highlight: ["beta.pdf", "'20_30'"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 24, w: 620, h: 240 }, [0, 1], [0, 6], { xticks: 5, yticks: 3, xlabel: "转化率 p", ylabel: "概率密度" });
+        const P = [[1, 1, "var(--ink-3)"], [2, 3, "var(--c2)"], [4, 6, "var(--c4)"], [20, 30, "var(--c1)"]];
+        const cs = P.map((p, i) => { const c = curve(svg, ax, (x) => Math.min(6, betaPdf(x, p[0], p[1])), 0.001, 0.999, { stroke: p[2], "stroke-width": 2.5 }); K.svg(svg, "text", { x: 520, y: 50 + i * 22, "font-size": 13, fill: p[2], "font-weight": 700 }, `Beta(${p[0]}, ${p[1]})`); return c; });
+        K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 13, class: "muted" }, "后三条的平均值都是 40%，α、β 越大越尖 = 越有把握");
+        hide(cs);
+        (async () => { for (const c of cs) { if (!(await fade([c], ctx, 600))) return; } })();
+      },
+    },
+    {
+      title: "共轭：后验还是 Beta，只要做加法", kicker: "第 13 格 · 推导",
+      html: `<p>把似然和 Beta 先验相乘，作者推出一个漂亮的结论：<span data-cell="13">出处</span></p><p class="callout"><b>后验 = Beta(α + 转化数, β + 未转化数)</b></p><p>先验和后验是同一类分布，这叫<b>共轭</b>。好处是不用复杂计算：每来一批数据，只要把转化数加到 α 上、没转化的加到 β 上。动画里的计数器就在做这件事。</p>`,
+      cells: [13],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 70, w: 620, h: 200 }, [0, 0.3], [0, 1], { xticks: 6, yticks: 0, xfmt: (v) => (v * 100).toFixed(0) + "%" });
+        const lab = K.svg(svg, "text", { x: 360, y: 40, "text-anchor": "middle", "font-size": 18, "font-weight": 700, "font-family": "var(--mono)" }, "Beta(1, 9)");
+        const sub = K.svg(svg, "text", { x: 360, y: 310, "text-anchor": "middle", "font-size": 13, class: "muted" }, "先验 Beta(1, 9)：平均 10%，很没把握");
+        const path = K.svg(svg, "path", { d: "", fill: "color-mix(in srgb, var(--c1) 20%, transparent)", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const r = K.rng(5);
+        const drawB = (a, b) => { let m = 0; const xs = []; for (let i = 1; i < 300; i++) { const x = i / 1000, y = betaPdf(x, a, b); xs.push([x, y]); m = Math.max(m, y); } K.set(path, { d: "M" + ax.sx(0) + "," + ax.sy(0) + xs.map((p) => "L" + ax.sx(p[0]) + "," + ax.sy(p[1] / m)).join("") + "L" + ax.sx(0.3) + "," + ax.sy(0) + "Z" }); };
+        drawB(1, 9);
+        (async () => {
+          let a = 1, b = 9, n = 0;
+          for (let d = 0; d < 12; d++) {
+            if (!(await ctx.wait(520))) return;
+            const clicks = tri(r), c = binom(r, clicks, 0.105); a += c; b += clicks - c; n += clicks;
+            lab.textContent = `Beta(1 + ${a - 1}, 9 + ${b - 9})`;
+            sub.textContent = `第 ${d + 1} 天：累计 ${n} 次点击。后验平均 ${pct(a / (a + b))}，曲线越来越尖`;
+            drawB(a, b);
+          }
+        })();
+      },
+    },
+    {
+      at: 14, title: "选先验：同样是 10%，把握可以不同", kicker: "第 14–16 格 · 先验",
+      html: `<p>先验是贝叶斯 A/B 测试里<b>放入假设</b>的地方。作者建议参考过去的广告：如果以前同类广告平均转化 10%，就选平均值 10% 的 Beta，再按有多大把握决定“尖不尖”。<span data-cell="15">出处</span></p><p>Beta(1,9) 和 Beta(10,90) 平均都是 10%，但后者尖得多，相当于说“我很确定就在 10% 附近”。第 16 格是一个可以拖动 α、β、放大倍数的小控件，下面的实验 A 是它的升级版。<span data-cell="16">出处</span></p>`,
+      cells: [15, 16], highlight: ["plot_beta", "scaler"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 30, w: 620, h: 240 }, [0, 0.4], [0, 1], { xticks: 4, yticks: 0, xfmt: (v) => (v * 100).toFixed(0) + "%", xlabel: "转化率" });
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 3 });
+        const lab = K.svg(svg, "text", { x: 470, y: 60, "font-size": 16, "font-weight": 700, fill: "var(--c1)" }, "");
+        K.svg(svg, "line", { x1: ax.sx(0.1), x2: ax.sx(0.1), y1: 30, y2: 270, stroke: "var(--ink-3)", "stroke-dasharray": "4 4" });
+        K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 13, class: "muted" }, "放大倍数 scaler 从 1 到 30：平均值不变，越来越尖（纵轴按最高点缩放）");
+        ctx.tween(2600, (t) => {
+          const s = 1 + 29 * K.ease(t), a = s, b = 9 * s;
+          let m = 0, pts = []; for (let i = 1; i < 400; i++) { const x = i / 1000, y = betaPdf(x, a, b); pts.push([x, y]); m = Math.max(m, y); }
+          K.set(path, { d: "M" + pts.map((p) => ax.sx(p[0]) + "," + ax.sy(p[1] / m)).join("L") });
+          lab.textContent = `Beta(${a.toFixed(0)}, ${b.toFixed(0)})`;
+        });
+      },
+    },
+    {
+      at: 17, title: "先验太离谱会怎样", kicker: "第 17–19 格 · 先验的影响",
+      html: `<p>作者用 24 天的汇总数据画出 A、B 两条后验，并故意把默认先验设成 <b>Beta(999, 1)</b>，相当于“我坚信转化率是 99.9%”。<span data-cell="19">出处</span></p><p>作者说：即使观察到的转化率在 10% 左右，后验均值也会被拉到 30% 上下。<span data-cell="18">出处</span> 两千多次点击的证据，被一个固执的先验压住了大半。</p><p>动画下方的数字显示先验越来越“固执”，蓝色的后验被一点点拖离橙色虚线标出的数据位置。</p>`,
+      cells: [18, 19], highlight: ["value=999", "conv_cnt[v]"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 30, w: 620, h: 230 }, [0, 1], [0, 1], { xticks: 5, yticks: 0, xfmt: (v) => (v * 100).toFixed(0) + "%", xlabel: "转化率" });
+        const n = 2400, c = 240;
+        K.svg(svg, "line", { x1: ax.sx(0.1), x2: ax.sx(0.1), y1: 30, y2: 260, stroke: "var(--c2)", "stroke-width": 2, "stroke-dasharray": "5 4" });
+        K.svg(svg, "text", { x: ax.sx(0.1) + 6, y: 46, "font-size": 12, fill: "var(--c2)", "font-weight": 700 }, "数据：约 10%");
+        const path = K.svg(svg, "path", { d: "", fill: "color-mix(in srgb, var(--c1) 20%, transparent)", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const lab = K.svg(svg, "text", { x: 360, y: 310, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 360, y: 334, "text-anchor": "middle", "font-size": 11, class: "muted" }, "示意：约 2400 次点击、240 次转化");
+        ctx.tween(2600, (t) => {
+          const a0 = 1 + 998 * K.ease(t), b0 = 1, a = a0 + c, b = b0 + n - c;
+          let m = 0, pts = []; for (let i = 1; i < 500; i++) { const x = i / 500, y = Math.exp(Math.log(Math.max(1e-300, betaPdf(x, a, b)))); pts.push([x, y]); m = Math.max(m, y); }
+          K.set(path, { d: "M" + ax.sx(0) + "," + ax.sy(0) + pts.map((p) => "L" + ax.sx(p[0]) + "," + ax.sy(p[1] / m)).join("") + "L" + ax.sx(1) + "," + ax.sy(0) + "Z" });
+          lab.textContent = `先验 Beta(${a0.toFixed(0)}, 1) → 后验均值 ${pct(a / (a + b))}`;
+        });
+      },
+    },
+    {
+      at: 20, title: "B 赢的概率：从两个后验里抽签比大小", kicker: "第 20–22 格 · 蒙特卡洛",
+      html: `<p>只看两个后验的平均值，不知道差距有多可靠。作者用<b>蒙特卡洛模拟</b>：从 A 的后验抽 10 万个可能的转化率，从 B 的后验也抽 10 万个，一对一比大小，数一数 A 赢了几成。<span data-cell="21">出处</span> <span data-cell="22">出处</span></p><p>同时算 A/B 的比值和它的 95% <b>可信区间</b>。这里先验默认是 Beta(1, 9)。</p><p class="callout warn">作者把“A 比 B 大的概率”存进名叫 <code>p_value</code> 的变量。它和频率派的 p 值不是一回事：这里就是字面意思“A 更好的概率”。</p>`,
+      cells: [21, 22], highlight: ["np.random.beta", "(p1 > p2).mean()", "np.quantile"],
+      draw(svg, ctx) {
+        const r = K.rng(8), A = [], B = [];
+        K.svg(svg, "text", { x: 140, y: 30, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--c1)" }, "从 A 的后验抽一个");
+        K.svg(svg, "text", { x: 360, y: 30, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--c3)" }, "从 B 的后验抽一个");
+        K.svg(svg, "text", { x: 590, y: 30, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "谁大？");
+        const rows = [];
+        for (let i = 0; i < 8; i++) {
+          const y = 64 + i * 28;
+          rows.push([K.svg(svg, "text", { x: 140, y, "text-anchor": "middle", "font-size": 14, "font-family": "var(--mono)" }, ""), K.svg(svg, "text", { x: 360, y, "text-anchor": "middle", "font-size": 14, "font-family": "var(--mono)" }, ""), K.svg(svg, "text", { x: 590, y, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "")]);
+        }
+        const tally = K.svg(svg, "text", { x: 360, y: 312, "text-anchor": "middle", "font-size": 16, "font-weight": 700 }, "");
+        let win = 0, n = 0;
+        (async () => {
+          for (let k = 0; k < 40; k++) {
+            const a = betaS(r, 1 + 240, 9 + 2160), b = betaS(r, 1 + 255, 9 + 2175);
+            n++; if (b > a) win++;
+            const row = rows[k % 8];
+            row[0].textContent = pct(a, 2); row[1].textContent = pct(b, 2); row[2].textContent = b > a ? "B 赢" : "A 赢";
+            K.set(row[2], { fill: b > a ? "var(--c3)" : "var(--c1)" });
+            tally.textContent = `抽了 ${n} 次，B 赢 ${win} 次 → B 更好的概率约 ${pct(win / n, 0)}（示意，原 notebook 抽 10 万次）`;
+            if (!(await ctx.wait(170))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "比值分布与可信区间：好多少、最坏会怎样", kicker: "第 23–24 格 · 差距大小",
+      html: `<p>作者把 10 万个 A/B 比值画成直方图，红线画在 1（一样好），两条绿线是 95% 可信区间。<span data-cell="24">出处</span></p><p>作者的解读：大约 80% 的比值小于 1，也就是 A 不如 B；万一判断错，A 最多比 B 好约 20%。<span data-cell="23">出处</span></p><p><b>可信区间</b>的意思很直白：“真实比值有 95% 的概率落在这里面”。频率派的置信区间严格来说不能这样解读。</p>`,
+      cells: [23, 24], highlight: ["geom_vline", "credible"],
+      draw(svg, ctx) {
+        const r = K.rng(12), vals = [];
+        for (let i = 0; i < 4000; i++) vals.push(betaS(r, 1 + 240, 9 + 2160) / betaS(r, 1 + 255, 9 + 2175));
+        vals.sort((a, b) => a - b);
+        const lo = vals[100], hi = vals[3900], below = vals.filter((v) => v < 1).length / vals.length;
+        const ax = K.axes(svg, { x: 50, y: 30, w: 620, h: 230 }, [0.7, 1.3], [0, 1], { xticks: 6, yticks: 0, xfmt: (v) => v.toFixed(1), xlabel: "A 的转化率 / B 的转化率" });
+        const bins = new Array(40).fill(0); vals.forEach((v) => { const k = Math.floor((v - 0.7) / 0.015); if (k >= 0 && k < 40) bins[k]++; });
+        const mb = Math.max(...bins);
+        const rects = bins.map((c, k) => K.svg(svg, "rect", { x: ax.sx(0.7 + k * 0.015) + 1, y: ax.sy(0), width: ax.sx(0.715) - ax.sx(0.7) - 2, height: 0, fill: 0.7 + (k + 0.5) * 0.015 < 1 ? "var(--c3)" : "var(--c1)", opacity: 0.8 }));
+        const l1 = K.svg(svg, "line", { x1: ax.sx(1), x2: ax.sx(1), y1: 30, y2: 260, stroke: "var(--bad)", "stroke-width": 2.5 });
+        const l2 = [lo, hi].map((v) => K.svg(svg, "line", { x1: ax.sx(v), x2: ax.sx(v), y1: 30, y2: 260, stroke: "var(--good)", "stroke-width": 2, "stroke-dasharray": "5 4" }));
+        const t = K.svg(svg, "text", { x: 360, y: 312, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, `比值 < 1（A 不如 B）占 ${pct(below, 0)}；95% 可信区间 ${lo.toFixed(2)} ~ ${hi.toFixed(2)}（示意数据）`);
+        hide([l1, ...l2, t]);
+        ctx.tween(1400, (tt) => rects.forEach((rc, k) => { const h = (ax.sy(0) - ax.sy(bins[k] / mb)) * tt; K.set(rc, { y: ax.sy(0) - h, height: h }); })).then((ok) => ok && fade([l1, ...l2, t], ctx, 700));
+      },
+    },
+    {
+      at: 25, title: "边跑边看：“A 赢的概率”随天数怎么走", kicker: "第 25–27 格 · 两组对照实验",
+      html: `<p>作者又造了两组 60 天的实验：一组 A、B <b>真的一样</b>（都是 10%），一组 B 真的更好（11% 对 10%）。每天都用累计数据重算一次“A 赢 B 的概率”。<span data-cell="27">出处</span></p><p>作者的观察：两组一样时，这个概率一直在 50% 附近晃；真的有差时，逐渐往一边走。画了 90% 和 10% 两条线，越线就可以宣布赢家。<span data-cell="26">出处</span> <span data-cell="28">出处</span></p><p class="callout warn">作者说贝叶斯方法摆脱了“样本无限大总会显著”的问题。但如果<b>每天偷看、一过线就停</b>，两组一样时也可能某天碰巧越线，作者参考文献里的《贝叶斯 A/B 测试不怕偷看吗？并不完全》讨论的正是这一点。实验 C 可以亲手验证。</p>`,
+      cells: [26, 27], highlight: ["p1 = 0.10", "p2 = 0.11", "proportion_test_b", "0.9,0.1"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 24, w: 600, h: 240 }, [0, 60], [0, 1], { xticks: 6, yticks: 4, yfmt: (v) => (v * 100).toFixed(0) + "%", xlabel: "第几天（浏览器现场模拟）", ylabel: "A 赢的概率" });
+        [0.9, 0.1].forEach((v, i) => K.svg(svg, "line", { x1: 60, x2: 660, y1: ax.sy(v), y2: ax.sy(v), stroke: i ? "var(--bad)" : "var(--good)", "stroke-dasharray": "5 4" }));
+        const pw = (d) => { const a1 = 1 + d.ca, b1 = 9 + d.na - d.ca, a2 = 1 + d.cb, b2 = 9 + d.nb - d.cb; const m1 = a1 / (a1 + b1), m2 = a2 / (a2 + b2), v1 = m1 * (1 - m1) / (a1 + b1 + 1), v2 = m2 * (1 - m2) / (a2 + b2 + 1); return Phi((m1 - m2) / Math.sqrt(v1 + v2)); };
+        const S = simDays(K.rng(44), 0.1, 0.1, 60).map(pw), Dd = simDays(K.rng(45), 0.1, 0.11, 60).map(pw);
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--ink-3)", "stroke-width": 2.5 }), p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c3)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 70, y: 310, "font-size": 12, fill: "var(--ink-3)" }, "— A、B 真的一样（10% vs 10%）");
+        K.svg(svg, "text", { x: 330, y: 310, "font-size": 12, fill: "var(--c3)" }, "— B 真的更好（10% vs 11%）");
+        ctx.tween(2400, (t) => { const n = Math.max(1, Math.round(t * 60)); const pth = (arr) => arr.slice(0, n).map((v, i) => (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(v)).join(""); K.set(p1, { d: pth(S) }); K.set(p2, { d: pth(Dd) }); });
+      },
+    },
+    {
+      at: 28, title: "什么时候停：剩余价值", kicker: "第 28–33 格 · 停止规则",
+      html: `<p>除了 90% / 10% 两条线，作者介绍了谷歌提出的<b>剩余价值</b>（value remaining）：<span data-cell="28">出处</span></p><p class="callout">剩余价值 = (这次抽样里的最大转化率 − 我们选中的“最佳”广告的转化率) / 选中广告的转化率</p><p>意思是：“如果现在就宣布赢家，万一选错了，最多会少赚百分之几”。从后验抽很多次，取第 95 百分位，低于 1% 就停。<span data-cell="29">出处</span> 作者的观察：真实差 1% 的那组，剩余价值逐渐降到 1% 以下；两组一样时，一直在 10% 左右徘徊，永远停不下来。<span data-cell="30">出处</span></p>`,
+      cells: [28, 29, 30, 31], highlight: ["value_remaining", "np.percentile(vs,q)", "0.01"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 230 }, [0, 0.2], [0, 1], { xticks: 4, yticks: 0, xfmt: (v) => (v * 100).toFixed(0) + "%", xlabel: "可能的转化率" });
+        const pathA = K.svg(svg, "path", { d: "", fill: "color-mix(in srgb, var(--c1) 22%, transparent)", stroke: "var(--c1)", "stroke-width": 2 }), pathB = K.svg(svg, "path", { d: "", fill: "color-mix(in srgb, var(--c3) 22%, transparent)", stroke: "var(--c3)", "stroke-width": 2 });
+        const lab = K.svg(svg, "text", { x: 360, y: 310, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "");
+        const D = simDays(K.rng(9), 0.1, 0.11, 60), rr = K.rng(10);
+        const dr = (p, a, b) => { let m = 0, pts = []; for (let i = 1; i < 200; i++) { const x = i / 1000, y = betaPdf(x, a, b); pts.push([x, y]); m = Math.max(m, y); } return pts; };
+        (async () => {
+          for (const d of [0, 2, 5, 10, 20, 30, 45, 59]) {
+            const s = D[d], a1 = 1 + s.ca, b1 = 9 + s.na - s.ca, a2 = 1 + s.cb, b2 = 9 + s.nb - s.cb;
+            const pa = dr(0, a1, b1), pb = dr(0, a2, b2), m = Math.max(...pa.map((p) => p[1]), ...pb.map((p) => p[1]));
+            const toD = (pts) => "M" + ax.sx(0) + "," + ax.sy(0) + pts.map((p) => "L" + ax.sx(p[0]) + "," + ax.sy(p[1] / m)).join("") + "Z";
+            K.set(pathA, { d: toD(pa) }); K.set(pathB, { d: toD(pb) });
+            const best = a2 / (a2 + b2) > a1 / (a1 + b1) ? 1 : 0, vs = [];
+            for (let k = 0; k < 1500; k++) { const x = betaS(rr, a1, b1), y = betaS(rr, a2, b2), pb2 = best ? y : x; vs.push((Math.max(x, y) - pb2) / pb2); }
+            vs.sort((p, q) => p - q);
+            const vr = vs[Math.floor(0.95 * vs.length)];
+            lab.textContent = `第 ${d + 1} 天：剩余价值（95 分位）${pct(vr)} ${vr < 0.01 ? "< 1% → 可以停了" : "≥ 1% → 继续跑"}`;
+            K.set(lab, { fill: vr < 0.01 ? "var(--good)" : "var(--ink)" });
+            if (!(await ctx.wait(900))) return;
+          }
+        })();
+      },
+    },
+  ];
+  function erf(x) { const s = Math.sign(x); x = Math.abs(x); const t = 1 / (1 + 0.3275911 * x); const y = 1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x); return s * y; }
+  function Phi(x) { return 0.5 * (1 + erf(x / Math.SQRT2)); }
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：先验 + 数据 = 后验 ---------- */
+  K.lab(document.getElementById("labA"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "pm", label: "先验的平均转化率（老经验）", min: 1, max: 60, step: 1, value: 10, fmt: (v) => v + "%" },
+      { id: "ps", label: "先验有多坚定（相当于“见过”多少次点击）", min: 0, max: 3.5, step: 0.05, value: 1, fmt: (v) => Math.round(Math.pow(10, v)) + " 次" },
+      { id: "days", label: "已经跑了几天（每天约 100 次点击）", min: 0, max: 30, step: 1, value: 3 },
+      { id: "seed", label: "重新模拟数据", button: true },
+    ],
+    note: "真实转化率设为 12%（只有模拟器知道）。浏览器现场按作者的方式生成点击和转化，后验 = Beta(α + 转化数, β + 未转化数)。试试把先验平均拉到 60%、坚定程度拉满，再看要跑多少天数据才能把它拽回来。",
+    render(svg, v) {
+      const n0 = Math.pow(10, v.ps), a0 = Math.max(0.5, n0 * v.pm / 100), b0 = Math.max(0.5, n0 * (1 - v.pm / 100));
+      const r = K.rng(300 + v.seed * 11); let n = 0, c = 0;
+      for (let d = 0; d < v.days; d++) { const k = tri(r); n += k; c += binom(r, k, 0.12); }
+      const a = a0 + c, b = b0 + n - c;
+      const ax = K.axes(svg, { x: 50, y: 20, w: 560, h: 240 }, [0, 0.7], [0, 1], { xticks: 7, yticks: 0, xfmt: (q) => (q * 100).toFixed(0) + "%", xlabel: "转化率" });
+      const grid = []; for (let i = 1; i < 700; i++) grid.push(i / 1000);
+      const prior = grid.map((x) => betaPdf(x, a0, b0)), post = grid.map((x) => betaPdf(x, a, b));
+      const lik = grid.map((x) => (n ? Math.exp(c * Math.log(x) + (n - c) * Math.log(1 - x)) : 0));
+      const norm = (arr) => { const m = Math.max(...arr) || 1; return arr.map((y) => y / m); };
+      const dline = (arr, attrs) => K.svg(svg, "path", Object.assign({ d: "M" + grid.map((x, i) => ax.sx(x) + "," + ax.sy(arr[i])).join("L"), fill: "none" }, attrs));
+      dline(norm(prior).map((y) => y * 0.9), { stroke: "var(--ink-3)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+      if (n) dline(norm(lik).map((y) => y * 0.95), { stroke: "var(--c2)", "stroke-width": 2 });
+      dline(norm(post), { stroke: "var(--c1)", "stroke-width": 3 });
+      K.svg(svg, "line", { x1: ax.sx(0.12), x2: ax.sx(0.12), y1: 20, y2: 260, stroke: "var(--good)", "stroke-dasharray": "2 3" });
+      K.svg(svg, "text", { x: 50, y: 322, "font-size": 12, fill: "var(--ink-3)" }, "- - 先验");
+      K.svg(svg, "text", { x: 120, y: 322, "font-size": 12, fill: "var(--c2)" }, "— 似然（只看数据）");
+      K.svg(svg, "text", { x: 260, y: 322, "font-size": 12, fill: "var(--c1)" }, "— 后验");
+      K.svg(svg, "text", { x: 330, y: 322, "font-size": 12, fill: "var(--good)" }, "┆ 真实 12%（模拟器的秘密）");
+      K.svg(svg, "text", { x: 50, y: 346, "font-size": 12, class: "muted" }, "三条曲线各自按最高点缩放，只比较位置和胖瘦");
+      // 95% 可信区间：网格累积
+      const tot = post.reduce((s, y) => s + y, 0); let cum = 0, lo = 0, hi = 0;
+      grid.forEach((x, i) => { const p = cum; cum += post[i] / tot; if (p < 0.025 && cum >= 0.025) lo = x; if (p < 0.975 && cum >= 0.975) hi = x; });
+      return { readout: [
+        { k: "先验", v: `Beta(${a0.toFixed(1)}, ${b0.toFixed(1)})` },
+        { k: "数据：转化 / 点击", v: `${c} / ${n}` },
+        { k: "后验平均", v: pct(a / (a + b)), color: Math.abs(a / (a + b) - 0.12) < 0.02 ? "var(--good)" : "var(--bad)" },
+        { k: "95% 可信区间", v: pct(lo) + " ~ " + pct(hi) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：P(B > A) ---------- */
+  K.lab(document.getElementById("labB"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "pa", label: "A 的真实转化率", min: 5, max: 15, step: 0.1, value: 10, fmt: (v) => v.toFixed(1) + "%" },
+      { id: "pb", label: "B 的真实转化率", min: 5, max: 15, step: 0.1, value: 10.5, fmt: (v) => v.toFixed(1) + "%" },
+      { id: "days", label: "实验天数（每组每天约 100 次点击）", min: 1, max: 120, step: 1, value: 24 },
+      { id: "seed", label: "重新做一次实验", button: true },
+    ],
+    note: "默认值就是作者的设定（10% vs 10.5%，24 天，先验 Beta(1, 9)）。浏览器现场模拟点击，再从两个后验各抽 20000 个样本比大小。多点几次“重新做一次实验”，看“B 赢的概率”每次差多少。",
+    render(svg, v) {
+      const r = K.rng(900 + v.seed * 17), D = simDays(r, v.pa / 100, v.pb / 100, v.days), s = D[D.length - 1];
+      const N = 20000, ratio = []; let win = 0;
+      for (let i = 0; i < N; i++) { const a = betaS(r, 1 + s.ca, 9 + s.na - s.ca), b = betaS(r, 1 + s.cb, 9 + s.nb - s.cb); if (b > a) win++; ratio.push(a / b); }
+      ratio.sort((p, q) => p - q);
+      const lo = ratio[Math.floor(0.025 * N)], hi = ratio[Math.floor(0.975 * N)];
+      const x0 = Math.min(0.7, ratio[50]), x1 = Math.max(1.3, ratio[N - 50]);
+      const ax = K.axes(svg, { x: 40, y: 16, w: 580, h: 240 }, [x0, x1], [0, 1], { xticks: 6, yticks: 0, xfmt: (q) => q.toFixed(2), xlabel: "A / B 转化率之比（< 1 表示 B 更好）" });
+      const nb = 50, bins = new Array(nb).fill(0), w = (x1 - x0) / nb;
+      ratio.forEach((q) => { const k = Math.floor((q - x0) / w); if (k >= 0 && k < nb) bins[k]++; });
+      const m = Math.max(...bins);
+      bins.forEach((c, k) => K.svg(svg, "rect", { x: ax.sx(x0 + k * w) + 0.5, y: ax.sy(c / m), width: ax.sx(x0 + w) - ax.sx(x0) - 1, height: ax.sy(0) - ax.sy(c / m), fill: x0 + (k + 0.5) * w < 1 ? "var(--c3)" : "var(--c1)", opacity: 0.8 }));
+      K.svg(svg, "line", { x1: ax.sx(1), x2: ax.sx(1), y1: 16, y2: 256, stroke: "var(--bad)", "stroke-width": 2 });
+      [lo, hi].forEach((q) => K.svg(svg, "line", { x1: ax.sx(q), x2: ax.sx(q), y1: 16, y2: 256, stroke: "var(--good)", "stroke-width": 2, "stroke-dasharray": "5 4" }));
+      K.svg(svg, "text", { x: 46, y: 318, "font-size": 12, class: "muted" }, "绿色虚线 = 95% 可信区间；红线 = 两者一样好");
+      const truth = v.pb > v.pa ? "B 更好" : v.pb < v.pa ? "A 更好" : "一样好";
+      return { readout: [
+        { k: "B 赢的概率", v: pct(win / N), color: win / N > 0.9 ? "var(--good)" : win / N < 0.1 ? "var(--bad)" : "var(--ink)" },
+        { k: "A / B 95% 可信区间", v: lo.toFixed(3) + " ~ " + hi.toFixed(3) },
+        { k: "观察到 A / B 转化率", v: pct(s.ca / s.na) + " / " + pct(s.cb / s.nb) },
+        { k: "真相（只有模拟器知道）", v: truth },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：边看边停 ---------- */
+  K.lab(document.getElementById("labC"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "pb", label: "B 的真实转化率（A 固定 10%）", min: 9, max: 12, step: 0.1, value: 11, fmt: (v) => v.toFixed(1) + "%" },
+      { id: "thr", label: "剩余价值阈值", min: 0.5, max: 5, step: 0.5, value: 1, fmt: (v) => v + "%" },
+      { id: "seed", label: "重新做一次实验", button: true },
+    ],
+    note: "上图：浏览器现场模拟一次 60 天的实验，每天用累计数据算“A 赢的概率”（蓝线，蒙特卡洛 1500 次）和剩余价值的 95 分位（橙线）。下方读数“偷看误判率”：把同样的规则用在 200 次 A、B 完全一样的实验上（正态近似），数一数有多少次在 60 天内某天越过 90% / 10% 线被宣布“有赢家”。",
+    render(svg, v) {
+      const r = K.rng(4000 + v.seed * 23), D = simDays(r, 0.1, v.pb / 100, 60), P = [], VR = [];
+      D.forEach((s) => {
+        const a1 = 1 + s.ca, b1 = 9 + s.na - s.ca, a2 = 1 + s.cb, b2 = 9 + s.nb - s.cb, best = a2 / (a2 + b2) > a1 / (a1 + b1) ? 1 : 0;
+        let w = 0; const vs = [];
+        for (let k = 0; k < 1500; k++) { const x = betaS(r, a1, b1), y = betaS(r, a2, b2); if (x > y) w++; const pb = best ? y : x; vs.push((Math.max(x, y) - pb) / pb); }
+        vs.sort((p, q) => p - q); P.push(w / 1500); VR.push(vs[Math.floor(0.95 * vs.length)]);
+      });
+      const ax = K.axes(svg, { x: 50, y: 16, w: 560, h: 150 }, [0, 60], [0, 1], { xticks: 6, yticks: 2, yfmt: (q) => (q * 100).toFixed(0) + "%", ylabel: "A 赢的概率" });
+      [0.9, 0.1].forEach((q) => K.svg(svg, "line", { x1: 50, x2: 610, y1: ax.sy(q), y2: ax.sy(q), stroke: "var(--ink-3)", "stroke-dasharray": "4 4" }));
+      K.svg(svg, "path", { d: "M" + P.map((p, i) => ax.sx(i) + "," + ax.sy(p)).join("L"), fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+      const vmax = Math.max(0.12, ...VR);
+      const ax2 = K.axes(svg, { x: 50, y: 196, w: 560, h: 120 }, [0, 60], [0, vmax], { xticks: 6, yticks: 2, yfmt: (q) => (q * 100).toFixed(0) + "%", xlabel: "第几天", ylabel: "剩余价值" });
+      K.svg(svg, "line", { x1: 50, x2: 610, y1: ax2.sy(v.thr / 100), y2: ax2.sy(v.thr / 100), stroke: "var(--bad)", "stroke-dasharray": "4 4" });
+      K.svg(svg, "path", { d: "M" + VR.map((p, i) => ax2.sx(i) + "," + ax2.sy(p)).join("L"), fill: "none", stroke: "var(--c2)", "stroke-width": 2.5 });
+      const stopVR = VR.findIndex((x) => x < v.thr / 100), stopP = P.findIndex((p) => p > 0.9 || p < 0.1);
+      if (stopVR >= 0) K.svg(svg, "circle", { cx: ax2.sx(stopVR), cy: ax2.sy(VR[stopVR]), r: 6, fill: "var(--good)" });
+      if (stopP >= 0) K.svg(svg, "circle", { cx: ax.sx(stopP), cy: ax.sy(P[stopP]), r: 6, fill: "var(--good)" });
+      // A/A 偷看误判率（正态近似）
+      const rr = K.rng(77 + v.seed); let fp = 0;
+      for (let e = 0; e < 200; e++) {
+        const S = simDays(rr, 0.1, 0.1, 60);
+        if (S.some((s) => { const a1 = 1 + s.ca, b1 = 9 + s.na - s.ca, a2 = 1 + s.cb, b2 = 9 + s.nb - s.cb, m1 = a1 / (a1 + b1), m2 = a2 / (a2 + b2); const p = Phi((m1 - m2) / Math.sqrt(m1 * (1 - m1) / (a1 + b1 + 1) + m2 * (1 - m2) / (a2 + b2 + 1))); return p > 0.9 || p < 0.1; })) fp++;
+      }
+      return { readout: [
+        { k: "概率越线的第一天", v: stopP >= 0 ? `第 ${stopP + 1} 天` : "60 天内没有" },
+        { k: "剩余价值低于阈值", v: stopVR >= 0 ? `第 ${stopVR + 1} 天` : "60 天内没有" },
+        { k: "第 60 天 A 赢的概率", v: pct(P[59]) },
+        { k: "偷看误判率（A=B 时）", v: pct(fp / 200, 0), color: fp / 200 > 0.2 ? "var(--bad)" : "var(--ink)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

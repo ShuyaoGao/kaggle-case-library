@@ -1,0 +1,606 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>电力负荷预测</title>
+<meta name="description" content="Kaggle 案例拆解：只用日期时间特征和 XGBoost，预测美国 PJM 东部电网逐小时用电负荷；重点是按时间切分训练集和测试集。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">时间序列 · 回归预测 · 电力负荷</div>
+  <h1>电网明天几点最忙？用日期特征和 XGBoost 预测逐小时用电量</h1>
+  <p class="en">Time Series Forecasting with Machine Learning [YT]</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">按时间切分</span><span class="tag method">日期时间特征</span><span class="tag method">箱线图探索</span>
+    <span class="tag method">XGBoost 回归</span><span class="tag method">早停</span><span class="tag method">特征重要性</span><span class="tag method">RMSE</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Rob Mulla</b></span>
+    <span>Kaggle 点赞 <b>5,094</b>（2026-11 抓取）</span>
+    <span>数据集 <b>robikscube/hourly-energy-consumption</b></span>
+    <span><a href="https://www.kaggle.com/code/robikscube/time-series-forecasting-with-machine-learning-yt" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">PJM 东部电网每小时的用电负荷</div><p>PJM 是美国东部的区域电网运营商。文件 <code>PJME_hourly.csv</code> 只有两列：时间 <code>Datetime</code> 和负荷 <code>PJME_MW</code>（兆瓦），时间跨度十几年。<span data-cell="3">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">未来每个小时的用电量（连续数值）</div><p>这是一个回归问题。电网要提前安排发电机组，预测偏低会缺电，偏高会浪费燃料。作者把 2015 年 1 月 1 日之后的数据全部留作测试集。<span data-cell="6">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">把时间戳拆成“几点、星期几、几月”，交给 XGBoost</div><p>不用任何外部数据，只从时间戳里造出小时、星期、季度、月份、年份、一年中的第几天等特征，用梯度提升树回归。<span data-cell="9">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一条能跟上日内、周内、季节规律的预测曲线</div><p>作者用测试集 RMSE 评价，并找出误差最大的日期；他自己列出的下一步是更稳健的交叉验证、加入天气和节假日特征。<span data-cell="25">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>Hourly Energy Consumption</b>（Kaggle 用户 robikscube 整理），收录美国 PJM 电网若干区域的逐小时负荷，每个区域一个 CSV 文件。本 notebook 只用其中的 <code>PJME_hourly.csv</code>（PJM 东部区域）。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">原始列数</div><div class="v">2</div></div>
+        <div class="stat-tile"><div class="k">时间粒度</div><div class="v">每小时 1 行</div></div>
+        <div class="stat-tile"><div class="k">时间跨度</div><div class="v">十余年，到 2018 年</div></div>
+        <div class="stat-tile"><div class="k">训练 / 测试分界</div><div class="v">2015-01-01</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">两列结构见第 3 格读数代码 <span data-cell="3">出处</span>；切分日期见第 6 格 <span data-cell="6">出处</span>；时间跨度来自数据集说明。精确行数在作者的运行输出里，源码不带，这里不写。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>Datetime</code></td><td>时间点，精确到小时（读入后设为索引）</td><td>日期时间</td></tr>
+        <tr><td><code>PJME_MW</code></td><td><b>要预测的答案</b>：这一小时 PJM 东部区域的用电负荷，单位兆瓦</td><td>数值</td></tr>
+        <tr><td colspan="3" style="color:var(--ink-2)">作者后来从 <code>Datetime</code> 造出的新列：hour、dayofweek、quarter、month、year、dayofyear、dayofmonth、weekofyear <span data-cell="9">第 9 格</span></td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead">按原 notebook 的顺序，从上往下一章一章讲。每章先看动画和讲解，再看作者的代码。动画里的负荷曲线是按“日内、周内、季节”规律生成的示意数据，不是原数据。</p>
+  <div id="pipe"></div>
+  <div data-at="15">
+    <h3>动手试试 · 日期特征 + 梯度提升：树的数量、学习率和深度 <span class="sim-badge">浏览器内模拟</span></h3>
+    <p>浏览器生成三年模拟负荷（每 3 小时一个点），前两年训练、最后一年测试，<b>现场训练一个梯度提升回归树</b>（和 XGBoost 同类方法的简化版）。数字是模拟结果，不是原数据集的分数。</p>
+    <div id="lab1"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者做了什么、说了什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>要点</th><th>出处</th></tr>
+        <tr><td>以 2015-01-01 为界：之前是训练集，之后是测试集，没有打乱顺序</td><td><span data-cell="6">第 6 格</span></td></tr>
+        <tr><td>从时间戳造了 8 个特征，建模时实际用了其中 6 个：dayofyear、hour、dayofweek、quarter、month、year</td><td><span data-cell="9">第 9 格</span> <span data-cell="14">第 14 格</span></td></tr>
+        <tr><td>XGBoost：最多 1000 棵树、学习率 0.01、树深 3、测试集上 50 轮不改善就早停</td><td><span data-cell="15">第 15 格</span></td></tr>
+        <tr><td>用测试集 RMSE 打分，并按天汇总绝对误差，列出误差最大的 10 天</td><td><span data-cell="22">第 22 格</span> <span data-cell="24">第 24 格</span></td></tr>
+        <tr><td>作者列出的改进方向：更稳健的交叉验证；加入天气预报、节假日等特征</td><td><span data-cell="25">第 25 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">原 notebook 的 RMSE、特征重要性排序、误差最大的日期都在运行输出里。Kaggle 下载的源码不带输出，作者的文字里也没写具体数值，所以这里不列分数。想看可以点上方链接在 Kaggle 上看作者的运行结果。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给定未来某个时刻（例如下周三 18 点），直接算出它的日期特征，模型就能给出负荷预测；不需要知道前几个小时的真实值。</li>
+        <li><b>同类问题：</b>城市供水量、燃气用量、地铁客流、外卖订单量、呼叫中心来电量，都有很强的“几点、星期几、几月”规律。</li>
+        <li><b>可迁移的套路：</b>按时间切分 → 从时间戳造日历特征 → 树模型 + 早停 → 看特征重要性 → 找误差最大的日子，倒推缺了哪类信息（天气、节假日）。</li>
+        <li><b>局限：</b>只靠日历特征，模型对同一个“几点几号”只能给出同一种规律，碰到寒潮、热浪、停电就会失手。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>读入与时间索引：<code>pd.to_datetime</code> + <code>set_index</code> <span data-cell="3">第 3 格</span></li>
+        <li>按日期切分训练/测试 <span data-cell="6">第 6 格</span></li>
+        <li>日期特征：hour、dayofweek、quarter、month、year、dayofyear 等 <span data-cell="9">第 9 格</span></li>
+        <li>探索：按小时、按月份的箱线图 <span data-cell="11">第 11 格</span> <span data-cell="12">第 12 格</span></li>
+        <li>模型：<code>xgb.XGBRegressor</code> + early stopping <span data-cell="15">第 15 格</span></li>
+        <li>评估：RMSE、按天误差排名 <span data-cell="22">第 22 格</span> <span data-cell="24">第 24 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>如果把所有小时随机打乱再按 8:2 切分，测试分数会比按日期切分好还是差？哪一种更接近“真的预测未来”？</li>
+      <li>作者的早停用的是测试集（<code>eval_set</code> 里放了 <code>X_test</code>）。这样选出来的树的数量，再在同一个测试集上算 RMSE，有什么问题？应该怎么改？</li>
+      <li>特征里有 <code>year</code>。测试集里的年份（2015 以后）训练时从没见过，树模型会怎么处理这些“没见过的年份”？</li>
+      <li>只用日期特征，模型对“2018 年 7 月第一个周一 18 点”的预测，和对“2017 年 7 月第一个周一 18 点”的预测会差多少？这说明它学到的是什么？</li>
+      <li>误差最大的那些日子，你猜会是什么日子？要把它们预测好，需要额外收集什么数据？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Rob Mulla，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：PJM Hourly Energy Consumption（Kaggle：robikscube/hourly-energy-consumption）。
+</footer>
+</main>
+
+<script src="nb/energy-xgboost-forecast.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---- 页面辅助 ---- */
+  function pathOf(ax, xs, ys) {
+    let d = "";
+    for (let i = 0; i < ys.length; i++) { if (ys[i] == null || !isFinite(ys[i])) continue; d += (d ? "L" : "M") + ax.sx(xs[i]).toFixed(1) + "," + ax.sy(ys[i]).toFixed(1); }
+    return d;
+  }
+  function line(svg, ax, xs, ys, color, opt) {
+    opt = opt || {};
+    return K.svg(svg, "path", { d: pathOf(ax, xs, ys), fill: "none", stroke: color, "stroke-width": opt.sw || 1.8, "stroke-dasharray": opt.dash || null, opacity: opt.opacity == null ? 1 : opt.opacity });
+  }
+  function drawOn(ctx, p, ms) {
+    const L = p.getTotalLength();
+    p.style.strokeDasharray = L; p.style.strokeDashoffset = L;
+    return ctx.tween(ms, (t) => (p.style.strokeDashoffset = L * (1 - t)));
+  }
+  const range = (n) => Array.from({ length: n }, (_, i) => i);
+  const mean = (a) => a.reduce((s, v) => s + v, 0) / (a.length || 1);
+
+  /* 示意负荷：日内 + 周内 + 季节（冬夏双峰）+ 天气噪声 */
+  function hourShape(h) { return 0.55 * Math.cos((2 * Math.PI * (h - 18)) / 24) + 0.25 * Math.cos((4 * Math.PI * (h - 10)) / 24); }
+  function loadAt(hour, dow, doy) {
+    const season = 2600 * Math.cos((4 * Math.PI * (doy - 20)) / 365) + 1600 * Math.cos((2 * Math.PI * (doy - 200)) / 365);
+    const weekend = dow >= 5 ? -2600 * (0.5 + 0.5 * Math.max(0, Math.sin((Math.PI * (hour - 6)) / 16))) : 0;
+    return 31500 + season + 4200 * hourShape(hour) + weekend;
+  }
+  function weatherNoise(n, seed, sd, rho) {
+    const r = K.rng(seed), out = []; let e = 0;
+    for (let i = 0; i < n; i++) { e = rho * e + Math.sqrt(1 - rho * rho) * K.randn(r) * sd; out.push(e + K.randn(r) * sd * 0.25); }
+    return out;
+  }
+  const yearsSeries = (() => { // 2002–2018 每 5 天一个点
+    const xs = [], ys = [], r = K.rng(4), w = weatherNoise(1250, 9, 2200, 0.8);
+    for (let i = 0; i < 1250; i++) { const t = 2002 + (i * 5) / 365.25, doy = (i * 5) % 365; xs.push(t); ys.push(loadAt(13 + Math.floor(r() * 6), Math.floor(r() * 5), doy) + w[i] * 0.7 + (t - 2002) * 60); }
+    return { xs, ys };
+  })();
+
+  /* 日期特征（与 pandas 一致：dayofweek 周一=0；weekofyear 用 ISO 周） */
+  function feats(s) {
+    const d = new Date(s + "Z");
+    const y = d.getUTCFullYear(), m = d.getUTCMonth() + 1, day = d.getUTCDate();
+    const doy = Math.round((Date.UTC(y, m - 1, day) - Date.UTC(y, 0, 1)) / 864e5) + 1;
+    const dow = (d.getUTCDay() + 6) % 7;
+    const th = new Date(Date.UTC(y, m - 1, day + 3 - dow)); // ISO 周：本周四所在年
+    const wk = 1 + Math.round((th - Date.UTC(th.getUTCFullYear(), 0, 4)) / 864e5 / 7 - ((new Date(Date.UTC(th.getUTCFullYear(), 0, 4)).getUTCDay() + 6) % 7 - 3) / 7);
+    return { hour: d.getUTCHours(), dayofweek: dow, quarter: Math.ceil(m / 3), month: m, year: y, dayofyear: doy, dayofmonth: day, weekofyear: wk };
+  }
+
+  /* 一维回归树桩提升（演示用） */
+  function boostStumps(xs, ys, rounds, lr) {
+    let F = xs.map(() => mean(ys));
+    const hist = [F.slice()];
+    for (let k = 0; k < rounds; k++) {
+      const r = ys.map((y, i) => y - F[i]);
+      let best = null;
+      const cands = [...new Set(xs)].sort((a, b) => a - b);
+      for (let c = 0; c < cands.length - 1; c++) {
+        const thr = (cands[c] + cands[c + 1]) / 2;
+        const L = [], R = [];
+        xs.forEach((x, i) => (x <= thr ? L : R).push(r[i]));
+        const mL = mean(L), mR = mean(R);
+        const sse = L.reduce((s, v) => s + (v - mL) ** 2, 0) + R.reduce((s, v) => s + (v - mR) ** 2, 0);
+        if (!best || sse < best.sse) best = { thr, mL, mR, sse };
+      }
+      F = F.map((f, i) => f + lr * (xs[i] <= best.thr ? best.mL : best.mR));
+      hist.push(F.slice());
+    }
+    return hist;
+  }
+
+  const steps = [
+    {
+      title: "读入数据，设好时间索引", kicker: "第 3–4 格 · 数据准备",
+      html: `<p>原始文件只有时间和负荷两列。作者把 <code>Datetime</code> 转成真正的时间类型并设为索引，这样后面才能“按日期切片”、取出“几点、星期几”。</p><p>画出来是一大片点：能看出每年冬夏各有一个高峰，偶尔有异常低的点。</p>`,
+      cells: [3, 4], highlight: ["to_datetime", "set_index"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 620, h: 250 }, [2002, 2019], [18000, 46000], { xticks: 17, yticks: 4, xfmt: (v) => (Math.round(v) % 2 ? "" : Math.round(v)), yfmt: (v) => Math.round(v / 1000) + "k", xlabel: "年份", ylabel: "负荷 MW（示意）" });
+        const dots = yearsSeries.xs.map((x, i) => K.svg(svg, "circle", { cx: ax.sx(x), cy: ax.sy(yearsSeries.ys[i]), r: 0, fill: "var(--c1)", opacity: 0.55 }));
+        ctx.tween(2200, (t) => dots.forEach((d, i) => d.setAttribute("r", K.clamp(t * dots.length - i, 0, 1) * 1.8)));
+        K.svg(svg, "text", { x: 80, y: 22, "font-size": 12, class: "muted" }, "每个点 = 某个小时的用电负荷（示意，原数据约每小时一条）");
+      },
+    },
+    {
+      at: 5, title: "按日期切一刀：2015 年之前训练，之后测试", kicker: "第 6 格 · 时间切分",
+      html: `<p>时间序列不能随机打乱后切分。随机切分时，测试集里的某个小时，前后相邻的小时都在训练集里，模型等于“偷看了答案附近的数据”，分数会虚高。</p><p>作者直接以 <b>2015-01-01</b> 为界：之前的全部用于训练，之后的全部用于测试，模拟“站在 2015 年初预测未来”。</p>`,
+      cells: [6], highlight: ["'01-01-2015'"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 24, w: 620, h: 180 }, [2002, 2019], [18000, 46000], { xticks: 17, yticks: 2, xfmt: (v) => (Math.round(v) % 2 ? "" : Math.round(v)), yfmt: (v) => Math.round(v / 1000) + "k" });
+        const xs = yearsSeries.xs, ys = yearsSeries.ys;
+        const pTr = line(svg, ax, xs, ys.map((y, i) => (xs[i] < 2015 ? y : null)), "var(--c1)", { sw: 1 });
+        const pTe = line(svg, ax, xs, ys.map((y, i) => (xs[i] >= 2015 ? y : null)), "var(--c2)", { sw: 1 });
+        pTe.style.opacity = 0.15;
+        const cut = K.svg(svg, "line", { x1: ax.sx(2002), x2: ax.sx(2002), y1: 20, y2: 206, stroke: "var(--ink)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+        const lab1 = K.svg(svg, "text", { x: ax.sx(2008.5), y: 40, "text-anchor": "middle", "font-size": 13, fill: "var(--c1)", "font-weight": 700 }, "训练集");
+        const lab2 = K.svg(svg, "text", { x: ax.sx(2016.8), y: 40, "text-anchor": "middle", "font-size": 13, fill: "var(--c2)", "font-weight": 700 }, "测试集");
+        lab1.style.opacity = lab2.style.opacity = 0;
+        // 下方：随机切分 vs 时间切分的条带
+        const rowY = [258, 300];
+        K.svg(svg, "text", { x: 66, y: rowY[0] + 12, "text-anchor": "end", "font-size": 12 }, "随机切分");
+        K.svg(svg, "text", { x: 66, y: rowY[1] + 12, "text-anchor": "end", "font-size": 12 }, "按时间切分");
+        const r = K.rng(3), n = 62, w = 620 / n, ticksR = [], ticksT = [];
+        for (let i = 0; i < n; i++) {
+          const isTest = r() < 0.2;
+          ticksR.push(K.svg(svg, "rect", { x: 70 + i * w, y: rowY[0], width: w - 1, height: 16, fill: isTest ? "var(--c2)" : "var(--c1)", opacity: 0 }));
+          ticksT.push(K.svg(svg, "rect", { x: 70 + i * w, y: rowY[1], width: w - 1, height: 16, fill: i >= n * 0.79 ? "var(--c2)" : "var(--c1)", opacity: 0 }));
+        }
+        const warn = K.svg(svg, "text", { x: 70, y: rowY[0] - 6, "font-size": 11, fill: "var(--bad)" }, "测试点夹在训练点中间：相邻小时几乎一样 → 分数虚高");
+        warn.style.opacity = 0;
+        (async () => {
+          if (!(await ctx.tween(1200, (t) => { const x = ax.sx(K.lerp(2002, 2015, t)); cut.setAttribute("x1", x); cut.setAttribute("x2", x); }))) return;
+          if (!(await ctx.tween(600, (t) => { pTe.style.opacity = 0.15 + 0.85 * t; lab1.style.opacity = lab2.style.opacity = t; }))) return;
+          if (!(await ctx.tween(900, (t) => ticksR.forEach((e, i) => (e.style.opacity = K.clamp(t * n - i, 0, 1) * 0.85))))) return;
+          warn.style.opacity = 1;
+          await ctx.tween(900, (t) => ticksT.forEach((e, i) => (e.style.opacity = K.clamp(t * n - i, 0, 1) * 0.85)));
+        })();
+      },
+    },
+    {
+      title: "放大看一周：每天一个起伏", kicker: "第 7 格 · 观察周期",
+      html: `<p>作者截取 2010 年 1 月的一周来看。可以看到明显的<b>日内周期</b>：凌晨最低，白天爬升，傍晚前后最高；周末整体略低。</p><p>这说明“现在几点”“今天星期几”本身就带有大量信息，这正是下一步要造的特征。</p>`,
+      cells: [7],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 620, h: 250 }, [0, 168], [22000, 42000], { xticks: 7, yticks: 4, xfmt: (v) => ["周一", "周二", "周三", "周四", "周五", "周六", "周日", ""][Math.round(v / 24)] || "", yfmt: (v) => Math.round(v / 1000) + "k", ylabel: "负荷 MW（示意）" });
+        const hs = range(169), w = weatherNoise(169, 5, 500, 0.95);
+        const ys = hs.map((h) => loadAt(h % 24, Math.floor(h / 24) % 7, 10) + w[h]);
+        for (let d = 5; d < 7; d++) K.svg(svg, "rect", { x: ax.sx(d * 24), y: 30, width: ax.sx(24) - ax.sx(0), height: 250, fill: "var(--c4)", "fill-opacity": 0.08 });
+        K.svg(svg, "text", { x: ax.sx(144), y: 46, "text-anchor": "middle", "font-size": 12, fill: "var(--c4)" }, "周末");
+        const p = line(svg, ax, hs, ys, "var(--c1)", { sw: 2 });
+        const peaks = [];
+        for (let d = 0; d < 7; d++) { let bi = d * 24; for (let h = d * 24; h < d * 24 + 24; h++) if (ys[h] > ys[bi]) bi = h; peaks.push(K.svg(svg, "circle", { cx: ax.sx(bi), cy: ax.sy(ys[bi]), r: 0, fill: "var(--c2)" })); }
+        drawOn(ctx, p, 2200).then((ok) => ok && ctx.tween(600, (t) => peaks.forEach((c) => c.setAttribute("r", 5 * t))));
+      },
+    },
+    {
+      at: 8, title: "把时间戳拆成日期特征", kicker: "第 9 格 · 特征工程",
+      html: `<p><code>create_features</code> 从索引里取出 8 个数：小时、星期几（周一=0）、季度、月份、年份、一年中第几天、一个月中第几天、一年中第几周。</p><p>树模型不懂“时间”，但懂数字比大小；拆开以后，“18 点”“周六”“7 月”都变成可以用来分裂的列。注意最后建模只用了其中 6 个（<span data-cell="14">第 14 格</span>）。</p>`,
+      cells: [9], highlight: ["df.index.hour", "dayofweek", "dayofyear"],
+      draw(svg, ctx) {
+        const stamps = ["2014-12-31T23:00:00", "2015-01-01T00:00:00", "2015-07-04T18:00:00", "2018-04-02T09:00:00"];
+        const cols = ["hour", "dayofweek", "quarter", "month", "year", "dayofyear", "dayofmonth", "weekofyear"];
+        const used = { hour: 1, dayofweek: 1, quarter: 1, month: 1, year: 1, dayofyear: 1 };
+        const x0 = 10, tw = 150, cw = 69.5, y0 = 50, rh = 50;
+        K.svg(svg, "text", { x: x0 + 6, y: y0 - 12, "font-size": 12, "font-weight": 700 }, "Datetime（索引）");
+        stamps.forEach((s, i) => {
+          K.svg(svg, "rect", { x: x0, y: y0 + i * rh, width: tw - 6, height: rh - 8, rx: 5, fill: "var(--panel-2)", stroke: "var(--line)" });
+          K.svg(svg, "text", { x: x0 + 8, y: y0 + i * rh + 27, "font-size": 12, "font-family": "var(--mono)" }, s.replace("T", " ").slice(0, 16));
+        });
+        const groups = cols.map((c, j) => {
+          const g = K.svg(svg, "g"); g.style.opacity = 0;
+          const x = x0 + tw + j * cw;
+          K.svg(g, "text", { x: x + cw / 2, y: y0 - 12, "text-anchor": "middle", "font-size": 10.5, "font-weight": 700, fill: used[c] ? "var(--accent)" : "var(--ink-3)" }, c);
+          stamps.forEach((s, i) => {
+            K.svg(g, "rect", { x: x + 2, y: y0 + i * rh, width: cw - 4, height: rh - 8, rx: 5, fill: used[c] ? "var(--accent-soft)" : "var(--panel-2)", stroke: used[c] ? "var(--accent)" : "var(--line)" });
+            K.svg(g, "text", { x: x + cw / 2, y: y0 + i * rh + 27, "text-anchor": "middle", "font-size": 13, "font-family": "var(--mono)" }, String(feats(s)[c]));
+          });
+          return g;
+        });
+        const note = K.svg(svg, "text", { x: x0, y: 290, "font-size": 12, fill: "var(--ink-3)" }, "蓝色 = 第 14 格 FEATURES 里实际用到的 6 列；灰色两列造了但没用。数值由浏览器按 pandas 规则现场计算。");
+        const arrow = K.arrow(svg, x0 + tw - 4, 30, x0 + tw + 30, 30, { color: "var(--accent)" });
+        note.style.opacity = 0; arrow.style.opacity = 0;
+        (async () => {
+          if (!(await ctx.tween(400, (t) => (arrow.style.opacity = t)))) return;
+          for (const g of groups) if (!(await ctx.tween(320, (t) => (g.style.opacity = t)))) return;
+          await ctx.tween(500, (t) => (note.style.opacity = t));
+        })();
+      },
+    },
+    {
+      at: 10, title: "按小时看负荷分布", kicker: "第 11 格 · 特征与目标的关系",
+      html: `<p>把所有记录按 <code>hour</code> 分组画箱线图：每个箱子是某个钟点的全部负荷值，箱子中间横线是中位数。</p><p>不同钟点的箱子高低差别很大，说明 <code>hour</code> 对预测很有用。这也是做特征工程前后都该做的检查：<b>新特征和目标之间到底有没有关系</b>。</p>`,
+      cells: [11], highlight: ["boxplot", "'hour'"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 24, w: 630, h: 260 }, [-0.5, 23.5], [18000, 46000], { xticks: 0, yticks: 4, yfmt: (v) => Math.round(v / 1000) + "k", ylabel: "负荷 MW（示意）" });
+        const r = K.rng(12), bw = (ax.sx(1) - ax.sx(0)) * 0.62, items = [];
+        for (let h = 0; h < 24; h++) {
+          const v = [];
+          for (let i = 0; i < 120; i++) v.push(loadAt(h, Math.floor(r() * 7), Math.floor(r() * 365)) + K.randn(r) * 1800);
+          v.sort((a, b) => a - b);
+          const q = (p) => v[Math.floor(p * (v.length - 1))];
+          const g = K.svg(svg, "g"); g.style.opacity = 0;
+          const cx = ax.sx(h);
+          K.svg(g, "line", { x1: cx, x2: cx, y1: ax.sy(q(0.02)), y2: ax.sy(q(0.98)), stroke: "var(--ink-3)" });
+          K.svg(g, "rect", { x: cx - bw / 2, y: ax.sy(q(0.75)), width: bw, height: ax.sy(q(0.25)) - ax.sy(q(0.75)), fill: "color-mix(in srgb, var(--c1) 30%, var(--panel))", stroke: "var(--c1)" });
+          K.svg(g, "line", { x1: cx - bw / 2, x2: cx + bw / 2, y1: ax.sy(q(0.5)), y2: ax.sy(q(0.5)), stroke: "var(--ink)", "stroke-width": 2 });
+          if (h % 3 === 0) K.svg(svg, "text", { x: cx, y: 300, "text-anchor": "middle", "font-size": 12 }, h + "点");
+          items.push(g);
+        }
+        ctx.tween(1800, (t) => items.forEach((g, i) => (g.style.opacity = K.clamp(t * 24 - i, 0, 1))));
+        K.svg(svg, "text", { x: 70, y: 326, "font-size": 12, class: "muted" }, "凌晨低、傍晚高：同一个钟点的负荷集中在一个范围里（示意）");
+      },
+    },
+    {
+      title: "按月份看：冬夏两个高峰", kicker: "第 12 格 · 季节性",
+      html: `<p>同样的方法按 <code>month</code> 分组。美国东部夏天开空调、冬天取暖，用电通常会出现冬、夏两个高峰，春秋较低。</p><p>这种“双峰”不是一条直线能描述的，树模型通过多次分裂就能学到；这也是作者选树模型而不是线性回归的一个理由。</p>`,
+      cells: [12], highlight: ["'month'"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 24, w: 630, h: 260 }, [0.5, 12.5], [18000, 46000], { xticks: 0, yticks: 4, yfmt: (v) => Math.round(v / 1000) + "k", ylabel: "负荷 MW（示意）" });
+        const r = K.rng(21), bw = (ax.sx(1) - ax.sx(0)) * 0.6, meds = [], items = [];
+        for (let m = 1; m <= 12; m++) {
+          const v = [];
+          for (let i = 0; i < 160; i++) v.push(loadAt(Math.floor(r() * 24), Math.floor(r() * 7), (m - 1) * 30.4 + r() * 30) + K.randn(r) * 1500);
+          v.sort((a, b) => a - b);
+          const q = (p) => v[Math.floor(p * (v.length - 1))];
+          const g = K.svg(svg, "g"); g.style.opacity = 0;
+          const cx = ax.sx(m), shade = 25 + Math.round(((q(0.5) - 26000) / 12000) * 60);
+          K.svg(g, "line", { x1: cx, x2: cx, y1: ax.sy(q(0.02)), y2: ax.sy(q(0.98)), stroke: "var(--ink-3)" });
+          K.svg(g, "rect", { x: cx - bw / 2, y: ax.sy(q(0.75)), width: bw, height: ax.sy(q(0.25)) - ax.sy(q(0.75)), fill: `color-mix(in srgb, var(--c1) ${K.clamp(shade, 15, 85)}%, var(--panel))`, stroke: "var(--c1)" });
+          K.svg(g, "line", { x1: cx - bw / 2, x2: cx + bw / 2, y1: ax.sy(q(0.5)), y2: ax.sy(q(0.5)), stroke: "var(--ink)", "stroke-width": 2 });
+          K.svg(svg, "text", { x: cx, y: 300, "text-anchor": "middle", "font-size": 12 }, m + "月");
+          meds.push([m, q(0.5)]); items.push(g);
+        }
+        const p = line(svg, ax, meds.map((d) => d[0]), meds.map((d) => d[1]), "var(--c2)", { sw: 2.5, dash: "6 4" });
+        p.style.opacity = 0;
+        ctx.tween(1500, (t) => items.forEach((g, i) => (g.style.opacity = K.clamp(t * 12 - i, 0, 1)))).then((ok) => ok && ctx.tween(700, (t) => (p.style.opacity = t)));
+        K.svg(svg, "text", { x: 70, y: 326, "font-size": 12, class: "muted" }, "橙色虚线连起各月中位数：冬、夏两头高，春秋低（示意）");
+      },
+    },
+    {
+      at: 13, title: "XGBoost：一棵棵小树去补上一轮的残差", kicker: "第 14–15 格 · 建模",
+      html: `<p>梯度提升树的思路：先猜一个平均值，然后每棵新树只学“上一轮还差多少”（残差），把它的预测乘上学习率加到总预测里。</p><p>作者的设置：最多 <code>n_estimators=1000</code> 棵树、<code>learning_rate=0.01</code>（每棵树只补 1%）、<code>max_depth=3</code>，并在测试集上 <code>early_stopping_rounds=50</code>：连续 50 棵树都没改善就停。动画用“小时 → 负荷”这一个特征、深度 1 的树演示（学习率放大到 0.3 便于观看）。</p>`,
+      cells: [15], highlight: ["n_estimators=1000", "early_stopping_rounds=50", "max_depth=3", "learning_rate=0.01"],
+      draw(svg, ctx) {
+        const r = K.rng(31), xs = [], ys = [];
+        for (let i = 0; i < 96; i++) { const h = i % 24; xs.push(h); ys.push(loadAt(h, 2, 30) + K.randn(r) * 1300); }
+        const ax = K.axes(svg, { x: 70, y: 30, w: 400, h: 250 }, [-0.5, 23.5], [22000, 42000], { xticks: 4, yticks: 4, xfmt: (v) => Math.round(v) + "点", yfmt: (v) => Math.round(v / 1000) + "k", xlabel: "hour" });
+        xs.forEach((x, i) => K.svg(svg, "circle", { cx: ax.sx(x + ((i * 7) % 5 - 2) * 0.06), cy: ax.sy(ys[i]), r: 2.6, fill: "var(--c1)", opacity: 0.5 }));
+        const hist = boostStumps(xs, ys, 30, 0.3);
+        const hrs = range(24), predAt = (k) => hrs.map((h) => hist[k][xs.indexOf(h)]);
+        const p = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c2)", "stroke-width": 2.5 });
+        const stepPath = (vals) => { let d = ""; vals.forEach((v, h) => { d += (h ? "L" : "M") + ax.sx(h - 0.5) + "," + ax.sy(v) + "L" + ax.sx(h + 0.5) + "," + ax.sy(v); }); return d; };
+        const lab = K.svg(svg, "text", { x: 80, y: 22, "font-size": 13, "font-weight": 700, fill: "var(--c2)" }, "");
+        // 右侧：误差随树的数量下降
+        const rm = hist.map((F) => Math.sqrt(mean(F.map((f, i) => (f - ys[i]) ** 2))));
+        const ax2 = K.axes(svg, { x: 540, y: 60, w: 160, h: 190 }, [0, 30], [0, rm[0] * 1.05], { xticks: 3, yticks: 0, xlabel: "树的数量" });
+        K.svg(svg, "text", { x: 540, y: 48, "font-size": 12, class: "muted" }, "训练误差 RMSE");
+        const p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c3)", "stroke-width": 2 });
+        (async () => {
+          for (let k = 0; k <= 30; k++) {
+            p.setAttribute("d", stepPath(predAt(k)));
+            lab.textContent = k === 0 ? "第 0 步：全猜平均值" : `已加入 ${k} 棵树（每棵只补 30% 的残差）`;
+            p2.setAttribute("d", rm.slice(0, k + 1).map((v, i) => (i ? "L" : "M") + ax2.sx(i) + "," + ax2.sy(v)).join(""));
+            if (!(await ctx.wait(k < 6 ? 650 : 160))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 16, title: "特征重要性：哪些列被用得最多", kicker: "第 17 格 · 解释模型",
+      html: `<p>训练好的 XGBoost 可以给出每个特征的重要性 <code>feature_importances_</code>：粗略地说，就是这个特征在所有树的分裂里一共带来了多少误差下降。</p><p>动画演示“累加”的过程：每次某棵树用某个特征分裂，就给它记一笔功劳。<b>条形长短是示意</b>，真实排序见原 notebook 的输出图。</p>`,
+      cells: [17], highlight: ["feature_importances_"],
+      draw(svg, ctx) {
+        const F = ["hour", "dayofyear", "dayofweek", "month", "year", "quarter"];
+        const r = K.rng(5), gains = F.map(() => 0);
+        const bars = F.map((f, i) => {
+          K.svg(svg, "text", { x: 480, y: 66 + i * 40, "text-anchor": "end", "font-size": 13 }, f);
+          return K.svg(svg, "rect", { x: 490, y: 52 + i * 40, width: 0, height: 22, rx: 3, fill: K.colors[i] });
+        });
+        K.svg(svg, "text", { x: 400, y: 30, "font-size": 12, class: "muted" }, "累计分裂增益（示意）");
+        // 左侧：一棵深度 3 的树，节点上写分裂特征
+        const nodes = [[200, 60], [110, 140], [290, 140], [65, 220], [155, 220], [245, 220], [335, 220]];
+        const edges = [[0, 1], [0, 2], [1, 3], [1, 4], [2, 5], [2, 6]];
+        edges.forEach(([a, b]) => K.svg(svg, "line", { x1: nodes[a][0], y1: nodes[a][1], x2: nodes[b][0], y2: nodes[b][1], stroke: "var(--line)", "stroke-width": 1.5 }));
+        const labs = nodes.map(([x, y]) => { K.svg(svg, "rect", { x: x - 42, y: y - 14, width: 84, height: 28, rx: 6, fill: "var(--panel-2)", stroke: "var(--ink-3)" }); return K.svg(svg, "text", { x, y: y + 4, "text-anchor": "middle", "font-size": 12 }, ""); });
+        const treeNo = K.svg(svg, "text", { x: 200, y: 290, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "");
+        const bias = [3, 2, 1.4, 1, 0.6, 0.3];
+        (async () => {
+          for (let t = 1; t <= 12; t++) {
+            treeNo.textContent = `第 ${t} 棵树（深度 3）`;
+            for (let n = 0; n < nodes.length; n++) {
+              let pick = 0, tot = bias.reduce((a, b) => a + b, 0), u = r() * tot;
+              for (let j = 0; j < F.length; j++) { u -= bias[j]; if (u <= 0) { pick = j; break; } }
+              labs[n].textContent = F[pick] + (n < 3 ? " ≤ ?" : "");
+              labs[n].style.fill = K.colors[pick];
+              gains[pick] += (n === 0 ? 3 : n < 3 ? 1.5 : 0.7) * (1 - t / 20);
+            }
+            const mx = Math.max(...gains);
+            bars.forEach((b, i) => b.setAttribute("width", (gains[i] / mx) * 200));
+            if (!(await ctx.wait(520))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 18, title: "在测试集上预测，和真实值叠在一起看", kicker: "第 19–20 格 · 预测",
+      html: `<p>对 2015 年以后的每个小时算出日期特征，交给模型预测，再把预测值合并回原表，与真实负荷画在一起；作者还专门放大了 2018 年 4 月的一周。</p><p>只有日期特征时，模型给出的是“这个钟点、这一天、这个季节通常是多少”，所以预测曲线很规整；真实曲线会因为天气突然变化而偏离。</p>`,
+      cells: [19, 20], highlight: ["reg.predict", "merge"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 620, h: 250 }, [0, 168], [20000, 42000], { xticks: 7, yticks: 4, xfmt: (v) => (v < 168 ? "第" + (Math.round(v / 24) + 1) + "天" : ""), yfmt: (v) => Math.round(v / 1000) + "k" });
+        const hs = range(168), w = weatherNoise(168, 77, 1500, 0.97);
+        const truth = hs.map((h) => loadAt(h % 24, Math.floor(h / 24) % 7, 95) + w[h]), pred = hs.map((h) => loadAt(h % 24, Math.floor(h / 24) % 7, 95));
+        const pT = line(svg, ax, hs, truth, "var(--c1)", { sw: 2 });
+        const dots = hs.filter((h) => h % 2 === 0).map((h) => K.svg(svg, "circle", { cx: ax.sx(h), cy: ax.sy(pred[h]), r: 0, fill: "var(--c2)" }));
+        K.svg(svg, "text", { x: 80, y: 24, "font-size": 12, fill: "var(--c1)" }, "— 真实负荷（示意）");
+        K.svg(svg, "text", { x: 230, y: 24, "font-size": 12, fill: "var(--c2)" }, "● 模型预测（只看日期）");
+        const note = K.svg(svg, "text", { x: 70, y: 318, "font-size": 12, fill: "var(--warn)" }, "偏差连续好几天朝同一个方向：这是天气这类“日期里没有的信息”造成的");
+        note.style.opacity = 0;
+        drawOn(ctx, pT, 1600).then((ok) => ok && ctx.tween(1400, (t) => dots.forEach((d, i) => d.setAttribute("r", K.clamp(t * dots.length - i, 0, 1) * 3)))).then((ok) => ok && ctx.tween(500, (t) => (note.style.opacity = t)));
+      },
+    },
+    {
+      at: 21, title: "用 RMSE 打分", kicker: "第 22 格 · 评估",
+      html: `<p>RMSE（均方根误差）= 把每个小时的误差平方、求平均、再开根号。单位和负荷一样是 MW，可以理解为“典型的一个小时大约差多少兆瓦”。</p><p>平方会放大大误差，所以 RMSE 对偶尔的大偏差很敏感。作者在第 22 格打印了测试集 RMSE（数值在运行输出里，本页不列）。</p>`,
+      cells: [22], highlight: ["mean_squared_error", "np.sqrt"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 400, h: 230 }, [0, 24], [24000, 40000], { xticks: 4, yticks: 4, xfmt: (v) => Math.round(v) + "点", yfmt: (v) => Math.round(v / 1000) + "k" });
+        const hs = range(24), w = weatherNoise(24, 8, 1500, 0.7);
+        const truth = hs.map((h) => loadAt(h, 2, 95) + w[h]), pred = hs.map((h) => loadAt(h, 2, 95));
+        line(svg, ax, hs, truth, "var(--c1)", { sw: 2 });
+        line(svg, ax, hs, pred, "var(--c2)", { sw: 2, dash: "5 3" });
+        const segs = hs.map((h) => K.svg(svg, "line", { x1: ax.sx(h), x2: ax.sx(h), y1: ax.sy(pred[h]), y2: ax.sy(pred[h]), stroke: "var(--bad)", "stroke-width": 2 }));
+        const errs = hs.map((h) => truth[h] - pred[h]);
+        const sq = errs.map((e) => e * e), rmse = Math.sqrt(mean(sq));
+        const t1 = K.svg(svg, "text", { x: 500, y: 80, "font-size": 14 }, "① 误差 e = 真实 − 预测");
+        const t2 = K.svg(svg, "text", { x: 500, y: 130, "font-size": 14 }, "② 平方 e²，求平均");
+        const t3 = K.svg(svg, "text", { x: 500, y: 180, "font-size": 14 }, "③ 开根号");
+        const t4 = K.svg(svg, "text", { x: 500, y: 230, "font-size": 20, "font-weight": 700, fill: "var(--accent)" }, `RMSE ≈ ${Math.round(rmse)} MW`);
+        const t5 = K.svg(svg, "text", { x: 500, y: 252, "font-size": 11, class: "muted" }, "（这一天示意数据的值）");
+        [t1, t2, t3, t4, t5].forEach((e) => (e.style.opacity = 0));
+        (async () => {
+          if (!(await ctx.tween(300, (t) => (t1.style.opacity = t)))) return;
+          if (!(await ctx.tween(1200, (t) => segs.forEach((s, i) => s.setAttribute("y2", ax.sy(K.lerp(pred[i], truth[i], t))))))) return;
+          if (!(await ctx.tween(400, (t) => (t2.style.opacity = t)))) return;
+          if (!(await ctx.tween(400, (t) => (t3.style.opacity = t)))) return;
+          await ctx.tween(500, (t) => (t4.style.opacity = t5.style.opacity = t));
+        })();
+      },
+    },
+    {
+      at: 23, title: "找出预测最差的日子", kicker: "第 24–25 格 · 误差分析",
+      html: `<p>作者把每小时的绝对误差按日期求平均，再从大到小排序，列出误差最大的 10 天。这一步很实用：看看这些日子有什么共同点（节假日？极端天气？），就知道模型缺什么信息。</p><p>作者在最后写下的下一步正是：<b>更稳健的交叉验证</b>，以及<b>加入天气预报、节假日特征</b>。</p>`,
+      cells: [24, 25], highlight: ["groupby", "sort_values(ascending=False)"],
+      draw(svg, ctx) {
+        const r = K.rng(42), n = 30, days = range(n).map((i) => ({ i, e: 700 + Math.abs(K.randn(r)) * 600 + (i === 6 || i === 19 ? 2600 : 0) + (i === 25 ? 1900 : 0) }));
+        const bw = 620 / n, maxE = Math.max(...days.map((d) => d.e));
+        K.svg(svg, "text", { x: 50, y: 24, "font-size": 12, class: "muted" }, "每根柱 = 一天的平均绝对误差（示意）");
+        const bars = days.map((d) => K.svg(svg, "rect", { x: 50 + d.i * bw, y: 290 - (d.e / maxE) * 230, width: bw - 3, height: (d.e / maxE) * 230, rx: 2, fill: "var(--c1)" }));
+        const sorted = days.slice().sort((a, b) => b.e - a.e);
+        const lab = K.svg(svg, "text", { x: 50, y: 316, "font-size": 13, "font-weight": 700, fill: "var(--bad)" }, "");
+        ctx.wait(900).then((ok) => ok && ctx.tween(1400, (t) => sorted.forEach((d, rank) => bars[d.i].setAttribute("x", K.lerp(50 + d.i * bw, 50 + rank * bw, t))))).then((ok) => {
+          if (!ok) return;
+          sorted.slice(0, 10).forEach((d) => (bars[d.i].style.fill = "var(--bad)"));
+          lab.textContent = "排序后前 10 天 = 最该研究的日子：节假日？寒潮热浪？";
+        });
+      },
+    },
+    {
+      at: 0, title: "开场：导入工具包", kicker: "第 0–2 格 · 准备",
+      html: `<p>导入 pandas、numpy、matplotlib、seaborn、xgboost，以及计算误差用的 <code>mean_squared_error</code>。第 2 格是作者放的一张“时间序列有哪些类型”的示意图链接。</p>`,
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验：直方图梯度提升树（深度可调） ---------- */
+  const STEP = 3, YEARS = 3, N = (365 * YEARS * 24) / STEP;
+  function makeLoad(seed) {
+    const w = weatherNoise(N, seed, 1700, 0.985), rows = [];
+    for (let i = 0; i < N; i++) {
+      const hourIdx = i % (24 / STEP), hour = hourIdx * STEP, day = Math.floor(i / (24 / STEP));
+      const dow = (day + 2) % 7, doy = day % 365, year = Math.floor(day / 365);
+      rows.push({ hourIdx, dow, doy, year, y: loadAt(hour, dow, doy) + year * 250 + w[i] });
+    }
+    return rows;
+  }
+  function trainGBT(Xtr, ytr, Xte, yte, nb, rounds, lr, depth) {
+    const nF = nb.length, ntr = ytr.length, nte = yte.length;
+    const base = mean(ytr);
+    const Ftr = new Float64Array(ntr).fill(base), Fte = new Float64Array(nte).fill(base);
+    const curveTr = [], curveTe = [];
+    const rmse = (F, y) => { let s = 0; for (let i = 0; i < y.length; i++) s += (y[i] - F[i]) ** 2; return Math.sqrt(s / y.length); };
+    curveTr.push(rmse(Ftr, ytr)); curveTe.push(rmse(Fte, yte));
+    const res = new Float64Array(ntr);
+    for (let k = 0; k < rounds; k++) {
+      for (let i = 0; i < ntr; i++) res[i] = ytr[i] - Ftr[i];
+      const leafTr = new Int32Array(ntr), leafTe = new Int32Array(nte);
+      let leaves = 1; const leafVal = [];
+      // 逐层生长
+      for (let d = 0; d < depth; d++) {
+        const S = [], C = [];
+        for (let l = 0; l < leaves; l++) { S.push(nb.map((b) => new Float64Array(b))); C.push(nb.map((b) => new Int32Array(b))); }
+        for (let i = 0; i < ntr; i++) { const l = leafTr[i]; for (let f = 0; f < nF; f++) { const b = Xtr[f][i]; S[l][f][b] += res[i]; C[l][f][b]++; } }
+        const splits = [];
+        for (let l = 0; l < leaves; l++) {
+          let best = null;
+          for (let f = 0; f < nF; f++) {
+            let st = 0, ct = 0; for (let b = 0; b < nb[f]; b++) { st += S[l][f][b]; ct += C[l][f][b]; }
+            let sl = 0, cl = 0;
+            for (let b = 0; b < nb[f] - 1; b++) {
+              sl += S[l][f][b]; cl += C[l][f][b];
+              const cr = ct - cl; if (cl < 5 || cr < 5) continue;
+              const g = (sl * sl) / cl + ((st - sl) * (st - sl)) / cr - (st * st) / ct;
+              if (!best || g > best.g) best = { f, b, g };
+            }
+          }
+          splits.push(best);
+        }
+        const map = []; let nl = 0;
+        for (let l = 0; l < leaves; l++) map.push(splits[l] ? [nl++, nl++] : [nl, nl++]);
+        const assign = (X, leaf, n) => { for (let i = 0; i < n; i++) { const l = leaf[i], s = splits[l]; leaf[i] = s ? (X[s.f][i] <= s.b ? map[l][0] : map[l][1]) : map[l][0]; } };
+        assign(Xtr, leafTr, ntr); assign(Xte, leafTe, nte);
+        leaves = nl;
+      }
+      const sum = new Float64Array(leaves), cnt = new Int32Array(leaves);
+      for (let i = 0; i < ntr; i++) { sum[leafTr[i]] += res[i]; cnt[leafTr[i]]++; }
+      for (let l = 0; l < leaves; l++) leafVal.push(cnt[l] ? (lr * sum[l]) / cnt[l] : 0);
+      for (let i = 0; i < ntr; i++) Ftr[i] += leafVal[leafTr[i]];
+      for (let i = 0; i < nte; i++) Fte[i] += leafVal[leafTe[i]];
+      curveTr.push(rmse(Ftr, ytr)); curveTe.push(rmse(Fte, yte));
+    }
+    return { Ftr, Fte, curveTr, curveTe };
+  }
+  const FEAT = {
+    hour: { key: "hourIdx", nb: 24 / STEP },
+    dow: { key: "dow", nb: 7 },
+    doy: { key: "doy", nb: 365 },
+    year: { key: "year", nb: YEARS },
+  };
+  const SETS = { h: ["hour"], hd: ["hour", "dow"], hdy: ["hour", "dow", "doy"], all: ["hour", "dow", "doy", "year"] };
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 420,
+    controls: [
+      { id: "fs", label: "使用哪些日期特征", value: "hdy", options: [["h", "只用 hour"], ["hd", "hour + dayofweek"], ["hdy", "hour + dayofweek + dayofyear"], ["all", "再加 year"]] },
+      { id: "rounds", label: "树的数量", min: 5, max: 300, step: 5, value: 120 },
+      { id: "lr", label: "学习率", min: 0.01, max: 0.8, step: 0.01, value: 0.1, fmt: (v) => (+v).toFixed(2) },
+      { id: "depth", label: "树深", min: 1, max: 4, step: 1, value: 3 },
+      { id: "seed", label: "换一批模拟天气", button: true },
+    ],
+    note: "前 2 年训练，第 3 年测试（按时间切分）。右下的两条曲线是每加一棵树后的训练/测试 RMSE；绿色竖线是测试误差最低处，相当于 early stopping 会停在附近。天气噪声日期特征里没有，所以测试 RMSE 降不到 0。",
+    render(svg, v) {
+      const rows = makeLoad(200 + v.seed * 13);
+      const cut = (365 * 2 * 24) / STEP;
+      const tr = rows.slice(0, cut), te = rows.slice(cut);
+      const fs = SETS[v.fs].map((k) => FEAT[k]);
+      const Xtr = fs.map((f) => Int32Array.from(tr, (r) => r[f.key])), Xte = fs.map((f) => Int32Array.from(te, (r) => Math.min(r[f.key], f.nb - 1)));
+      const m = trainGBT(Xtr, tr.map((r) => r.y), Xte, te.map((r) => r.y), fs.map((f) => f.nb), v.rounds, v.lr, v.depth);
+      // 上：测试年中的两周
+      const s0 = 100 * (24 / STEP), L = 14 * (24 / STEP);
+      const ax = K.axes(svg, { x: 56, y: 22, w: 570, h: 200 }, [0, L], [18000, 46000], { xticks: 7, yticks: 4, xfmt: (x) => (x >= L ? "" : "第" + Math.round(x / (24 / STEP) + 1) + "天"), yfmt: (y) => Math.round(y / 1000) + "k" });
+      const xs = range(L);
+      line(svg, ax, xs, xs.map((i) => te[s0 + i].y), "var(--c1)", { sw: 1.6 });
+      line(svg, ax, xs, xs.map((i) => m.Fte[s0 + i]), "var(--c2)", { sw: 2 });
+      K.svg(svg, "text", { x: 62, y: 16, "font-size": 12, fill: "var(--c1)" }, "— 测试年真实值");
+      K.svg(svg, "text", { x: 172, y: 16, "font-size": 12, fill: "var(--c2)" }, "— 模型预测（测试年中的两周）");
+      // 下：RMSE 曲线
+      const all = m.curveTr.concat(m.curveTe), ymax = Math.max(...all) * 1.05;
+      const ax2 = K.axes(svg, { x: 56, y: 272, w: 570, h: 110 }, [0, v.rounds], [0, ymax], { xticks: 5, yticks: 2, yfmt: (y) => Math.round(y), xlabel: "树的数量" });
+      const it = range(v.rounds + 1);
+      line(svg, ax2, it, m.curveTr, "var(--c3)", { sw: 2 });
+      line(svg, ax2, it, m.curveTe, "var(--c6)", { sw: 2 });
+      let bi = 0; m.curveTe.forEach((e, i) => { if (e < m.curveTe[bi]) bi = i; });
+      K.svg(svg, "line", { x1: ax2.sx(bi), x2: ax2.sx(bi), y1: 272, y2: 382, stroke: "var(--good)", "stroke-dasharray": "4 3" });
+      K.svg(svg, "text", { x: 62, y: 266, "font-size": 12, fill: "var(--c3)" }, "— 训练 RMSE");
+      K.svg(svg, "text", { x: 160, y: 266, "font-size": 12, fill: "var(--c6)" }, "— 测试 RMSE");
+      const last = m.curveTe[v.rounds];
+      return { readout: [
+        { k: "训练 RMSE", v: Math.round(m.curveTr[v.rounds]) + " MW" },
+        { k: "测试 RMSE", v: Math.round(last) + " MW", color: last > m.curveTe[bi] * 1.03 ? "var(--warn)" : "var(--good)" },
+        { k: "测试误差最低在", v: "第 " + bi + " 棵树" },
+        { k: "相对平均负荷", v: ((last / mean(te.map((r) => r.y))) * 100).toFixed(1) + "%" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,570 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>流量日志找内鬼</title>
+<meta name="description" content="Kaggle 案例拆解：2019 趋势科技 CTF 防守方数据题，只用分组、计数、z 分数和图上的团，在内网流量日志里找出数据外泄、隐蔽回连和横向扫描。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">网络流量日志 · 异常检测 · 威胁狩猎</div>
+  <h1>流量日志里找内鬼：十道题学会看懂网络异常</h1>
+  <p class="en">Data Analysis for Network Security 101 (Solution)</p>
+  <div class="tags">
+    <span class="tag ml">数据挖掘</span><span class="tag ml">统计分析</span>
+    <span class="tag method">分组聚合</span><span class="tag method">z 分数离群</span><span class="tag method">长尾计数</span>
+    <span class="tag method">图与最大团</span><span class="tag method">周期性检测</span><span class="tag method">扫描检测</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Pepe Berba（hawkcurry）</b></span>
+    <span>Kaggle 点赞 <b>81</b>（2026-11 抓取）</span>
+    <span>数据集 <b>hawkcurry/2019-trendmicro-ctf-wildcard-400</b></span>
+    <span><a href="https://www.kaggle.com/code/hawkcurry/data-analysis-for-network-security-101-solution" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">一家公司内网的“通话记录”</div><p>每一行是一次网络连接：什么时间、谁连谁、用哪个端口、传了多少字节。只有这五列，没有内容。<span data-cell="2">出处</span></p></div>
+    <div class="card panel"><h3>要找什么</h3><div class="big">十种可疑行为</div><p>大量外传数据、半夜外传、异常端口、隐蔽控制通道、内网互连的病毒网、定时“报平安”的僵尸主机、挨个敲门的扫描者……<span data-cell="12">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">没有训练任何模型</div><p>全靠分组求和、计数、排名、z 分数、看长尾、建图找团。题目原话：不需要懂网络协议，只需要“堆叠、切片、异常检测”。<span data-cell="2">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">十道题全部找到答案</div><p>作者每题都写出了答案（IP 或端口），最后用题目给的校验码核对通过。<span data-cell="110">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据来自 2019 年趋势科技 CTF（网络安全竞赛）的 Wildcard 400 题，是为比赛<b>构造的合成数据</b>（作者原话：“The data used here is highly synthetic”<span data-cell="10">出处</span>）。题目设定：你是中型公司 XYZcorp 的网络安全管理员，手里只有汇总后的连接记录。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">原始字段</div><div class="v">5 列</div></div>
+        <div class="stat-tile"><div class="k">内网地址</div><div class="v">12.* ～ 14.*</div></div>
+        <div class="stat-tile"><div class="k">题目数</div><div class="v">10 道</div></div>
+        <div class="stat-tile"><div class="k">需要的知识</div><div class="v" style="font-size:18px">切片 + 异常检测</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">字段与内外网规则见题目说明 <span data-cell="2">出处</span>。总行数、IP 数量在作者的运行输出里（第 5、9 格打印），源码不带输出，这里不写具体数字。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>timestamp</code> → <code>ts</code></td><td>连接发生的时间（毫秒时间戳）</td><td>时间</td></tr>
+        <tr><td><code>src</code></td><td>发起连接的一方（源 IP）</td><td>类别</td></tr>
+        <tr><td><code>dst</code></td><td>被连接的一方（目的 IP）</td><td>类别</td></tr>
+        <tr><td><code>port</code></td><td>目的端口，好比大楼里的“房间号”，不同服务用不同房间</td><td>整数</td></tr>
+        <tr><td><code>bytes</code></td><td>这次连接传了多少字节</td><td>数值</td></tr>
+        <tr><td><i>src_int / dst_int</i></td><td>作者新加：这一端是不是内网（以 12./13./14. 开头）</td><td>真/假</td></tr>
+        <tr><td><i>hour / minute</i></td><td>作者新加：从时间里拆出的小时、分钟</td><td>整数</td></tr>
+      </table></div>
+      <p style="font-size:13px;color:var(--ink-2)">没有“答案列”：这不是有标签的分类问题，每道题要自己从数据里把异常“挖”出来。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead">每一章对应 CTF 的一道题。看点不在答案本身，而在于“这种可疑行为在日志里会留下什么痕迹、用哪一招统计能把它挑出来”。</p>
+  <div id="pipe"></div>
+  <div data-at="37">
+    <h3>动手试试 A · 用 z 分数揪出“某个端口上传太多”的主机 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="87">
+    <h3>动手试试 B · 定时“报平安”的心跳，加了抖动还认得出吗 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="105">
+    <h3>动手试试 C · 大声扫描和安静扫描，用哪把尺子量 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的答案与线索</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>题目</th><th>作者的找法 → 答案</th><th>出处</th></tr>
+        <tr><td>1 数据外泄</td><td>出站总字节第一名 → 13.37.84.125</td><td><span data-cell="18">第 18 格</span></td></tr>
+        <tr><td>2 下班时间外泄</td><td>只看 0–16 点的出站字节 → 12.55.77.96</td><td><span data-cell="28">第 28 格</span></td></tr>
+        <tr><td>3 借端口外传</td><td>每个端口内算 z 分数，取最大 → 端口 124</td><td><span data-cell="41">第 41 格</span></td></tr>
+        <tr><td>4 私有 C&amp;C 端口</td><td>外部来源最少的端口 → 113</td><td><span data-cell="48">第 48 格</span></td></tr>
+        <tr><td>5 内网 P2P</td><td>按端口建图找最大团 → 端口 83</td><td><span data-cell="59">第 59 格</span></td></tr>
+        <tr><td>6 恶意控制端</td><td>只连一台内网主机的外部 IP 都连向谁 → 14.45.67.46</td><td><span data-cell="67">第 67 格</span></td></tr>
+        <tr><td>7 受感染主机</td><td>同样连 14.45.67.46 的 27 端口 → 14.51.84.50</td><td><span data-cell="72">第 72 格</span></td></tr>
+        <tr><td>8 隐蔽僵尸网络</td><td>连接分钟数极少的目的地 → 端口 51；回连大小恒为 1337 字节</td><td><span data-cell="80">第 80 格</span>、<span data-cell="81">第 81 格</span></td></tr>
+        <tr><td>9 大声扫描</td><td>连接不同内网主机最多的源 → 13.42.70.40</td><td><span data-cell="95">第 95 格</span></td></tr>
+        <tr><td>10 安静扫描</td><td>只有它一个人连过的 (目的, 端口) 最多 → 12.49.123.62</td><td><span data-cell="108">第 108 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">这里没有“准确率”。每道题的答案由 CTF 的校验码确认（第 110 格），各种排名表、直方图的具体数值在运行输出里，源码不带输出，这里不列。数据是比赛构造的，作者自己也说“答对时应该很明显”；真实网络里的异常远没有这么突出。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做：</b>给安全值班人员一份“今日可疑清单”：出站流量异常大的主机、半夜还在往外传的主机、定时回连陌生地址的主机、到处敲门的主机。</li>
+        <li><b>同类问题：</b>银行卡异常消费、公司内部的异常登录、服务器日志里的异常访问、物联网设备异常上报。</li>
+        <li><b>可迁移的套路：</b>先把一方分成“内/外”→ 按主体分组求和或计数 → 在“同类”内部比较（每个端口内、每个时段内）→ 看最高的和最稀有的 → 已确认的先拉黑，再找下一个。</li>
+        <li><b>局限：</b>每一招都依赖一个假设（周期是整数分钟、正常服务会有很多访问者），对方稍加伪装就可能失效，作者在第 78 格也承认了这一点。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>内外网标记、时间拆分 <span data-cell="7">第 7 格</span></li>
+        <li>分组求和排名：出站字节 <span data-cell="14">第 14 格</span></li>
+        <li>按时段切片 <span data-cell="22">第 22 格</span></li>
+        <li>组内 z 分数 <span data-cell="37">第 37 格</span></li>
+        <li>长尾计数（最少来源的端口）<span data-cell="44">第 44 格</span></li>
+        <li>图论：团的上界剪枝 + 近似最大团 <span data-cell="54">第 54 格</span>、<span data-cell="57">第 57 格</span></li>
+        <li>周期性：不同分钟数、字节标准差、时间差直方图 <span data-cell="75">第 75 格</span>、<span data-cell="82">第 82 格</span>、<span data-cell="87">第 87 格</span></li>
+        <li>扫描检测：不同目的数、孤立 (目的, 端口) 对 <span data-cell="91">第 91 格</span>、<span data-cell="105">第 105 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>第 1 题只看“谁往外传得最多”。如果公司里本来就有一台备份服务器每天往云端传大量数据，这个办法会出什么问题？你会怎么改？</li>
+      <li>作者每找到一个答案就把它加进黑名单，后面的题都排除它们。这样做有什么好处？会不会让后面漏掉同一台机器的其他坏行为？</li>
+      <li>第 8 题作者假设心跳间隔是整分钟。如果对方让间隔在 25 到 35 分钟之间随机，哪些线索还能用？（提示：大小、端口、时间差的分布）</li>
+      <li>第 10 题的思路是“正常服务会有很多人来访，只有一个访客的 (主机, 端口) 很可疑”。新上线的服务、只给一个人用的打印机会不会被误报？</li>
+      <li>作者在第 7 格把端口转成了 uint8（只能存 0–255）。真实网络的端口最大到 65535，这样转换会发生什么？为什么在这份数据上没出事？</li>
+      <li>这些方法都没有用到机器学习模型。你觉得在网络安全里，“简单统计 + 人的判断”和“训练一个模型”各自适合什么场合？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Pepe Berba（Kaggle：hawkcurry），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：2019 Trend Micro CTF Wildcard 400（比赛构造的合成流量数据）。本页只讨论如何从日志中发现异常，不涉及任何攻击方法。
+</footer>
+</main>
+
+<script src="nb/network-threat-hunting.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const T = (svg, x, y, s, o) => K.svg(svg, "text", Object.assign({ x, y, "font-size": 13 }, o || {}), s);
+  const fade = (els, ctx, ms) => ctx.tween(ms || 500, (t) => els.forEach((e) => (e.style.opacity = t)));
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+
+  const steps = [
+    {
+      title: "给每条记录贴上“内 / 外”标签", kicker: "第 7–11 格 · 预处理",
+      html: `<p>题目只给了五列。作者先加两列 <code>src_int</code>、<code>dst_int</code>：IP 以 12.、13.、14. 开头就是公司内网。有了这两列，就能一句话筛出<b>出站</b>（内 → 外）、<b>入站</b>（外 → 内）、<b>内网互连</b>（内 → 内）三类流量。</p><p>再把毫秒时间戳转成时间，拆出小时和分钟，后面找“半夜外传”和“定时回连”都要用。IP 转成类别类型只是为了省内存。</p>`,
+      cells: [7, 9], highlight: ["is_internal", "startswith"],
+      draw(svg, ctx) {
+        const rows = [["13.37.x.x", "84.1.x.x"], ["14.2.x.x", "12.9.x.x"], ["99.5.x.x", "14.4.x.x"], ["12.5.x.x", "77.3.x.x"], ["13.1.x.x", "13.8.x.x"]];
+        const isIn = (s) => /^1[234]\./.test(s);
+        T(svg, 40, 30, "src", { "font-weight": 700 }); T(svg, 160, 30, "dst", { "font-weight": 700 });
+        T(svg, 300, 30, "src_int", { "font-weight": 700, fill: "var(--c1)" }); T(svg, 400, 30, "dst_int", { "font-weight": 700, fill: "var(--c1)" }); T(svg, 510, 30, "类型", { "font-weight": 700, fill: "var(--accent)" });
+        const late = [];
+        rows.forEach((r, i) => {
+          const y = 66 + i * 50;
+          T(svg, 40, y, r[0], { "font-family": "var(--mono)" }); T(svg, 160, y, r[1], { "font-family": "var(--mono)" });
+          const a = isIn(r[0]), b = isIn(r[1]);
+          const e1 = T(svg, 300, y, a ? "True" : "False", { fill: a ? "var(--good)" : "var(--ink-3)", "font-family": "var(--mono)" });
+          const e2 = T(svg, 400, y, b ? "True" : "False", { fill: b ? "var(--good)" : "var(--ink-3)", "font-family": "var(--mono)" });
+          const kind = a && !b ? "出站 内→外" : !a && b ? "入站 外→内" : a && b ? "内网互连" : "外→外";
+          const e3 = T(svg, 510, y, kind, { fill: a && !b ? "var(--c6)" : "var(--accent)", "font-weight": 700 });
+          late.push([e1, e2, e3]);
+        });
+        late.flat().forEach((e) => (e.style.opacity = 0));
+        (async () => { for (const g of late) { if (!(await fade(g, ctx, 350))) return; } })();
+        T(svg, 40, 320, "规则：IP 以 12. / 13. / 14. 开头 = 内网（示意 IP）", { class: "muted", "font-size": 12 });
+      },
+    },
+    {
+      title: "第 1 题：谁往外传得最多", kicker: "第 12–18 格 · 分组求和",
+      html: `<p>题目：有台内网机器在把设计图大批外传。作者的做法最朴素：筛出<b>出站</b>流量，按源 IP 把字节数加起来，从大到小排。</p><p>第一名 13.37.84.125 的总量在直方图里远远甩开其他人，作者画了一条虚线标出它。这一招叫“堆叠”（stacking）：把同一个人的所有记录堆在一起再比。</p>`,
+      cells: [14, 16], highlight: [".bytes.sum()", "sort_values(ascending=False)"],
+      draw(svg, ctx) {
+        const r = K.rng(4), vals = [];
+        for (let i = 0; i < 9; i++) vals.push(30 + r() * 40);
+        vals.push(250);
+        const ax = K.axes(svg, { x: 120, y: 30, w: 560, h: 260 }, [0, 280], [0, 1], { yticks: 0, xlabel: "出站总字节（示意）" });
+        const order = vals.map((v, i) => i).sort((a, b) => vals[b] - vals[a]);
+        const bars = vals.map((v, i) => {
+          const y = 34 + i * 25;
+          const lab = T(svg, 112, y + 14, i === 9 ? "13.37.84.125" : "主机 " + (i + 1), { "text-anchor": "end", "font-size": 12, fill: i === 9 ? "var(--c6)" : "var(--ink)" });
+          return { rect: K.svg(svg, "rect", { x: 120, y, width: 0, height: 18, rx: 3, fill: i === 9 ? "var(--c6)" : "var(--c1)" }), lab, y0: y };
+        });
+        ctx.tween(1300, (t) => bars.forEach((b, i) => b.rect.setAttribute("width", ax.sx(vals[i] * t) - 120)))
+          .then((ok) => ok && ctx.wait(400))
+          .then((ok) => ok && ctx.tween(900, (t) => order.forEach((idx, rank) => {
+            const y = K.lerp(bars[idx].y0, 34 + rank * 25, t);
+            bars[idx].rect.setAttribute("y", y); bars[idx].lab.setAttribute("y", y + 14);
+          })));
+      },
+    },
+    {
+      title: "第 2 题：下班时间偷偷外传", kicker: "第 19–28 格 · 按时段切片",
+      html: `<p>第二台机器是在“非工作时间”定时导出内部资料。总量上它不一定排第一，混在白天的大流量里看不出来。</p><p>作者先画每小时的连接数，看出这家公司的上班时段是 16 点到 23 点（时间是 UTC），于是只保留 0–16 点的出站流量再排名，并<b>排除第 1 题已找到的 IP</b>。第 26 格把 12.55.77.96 放回“全天总量”的直方图里，它并不显眼：这就是切片的价值。</p>`,
+      cells: [21, 22, 26], highlight: ["(df['hour'] < 16)", "~df['src'].isin(blacklist_ips)"],
+      draw(svg, ctx) {
+        const r = K.rng(8);
+        const ax = K.axes(svg, { x: 50, y: 30, w: 620, h: 240 }, [0, 24], [0, 1], { yticks: 0, xticks: 6, xlabel: "小时（示意）" });
+        const bw = 620 / 24 - 3;
+        const norm = [], sus = [];
+        for (let h = 0; h < 24; h++) {
+          const work = h >= 16 && h < 23;
+          const v = work ? 0.6 + r() * 0.3 : 0.08 + r() * 0.06;
+          const s = !work ? 0.1 + r() * 0.05 : 0.02;
+          norm.push(K.svg(svg, "rect", { x: ax.sx(h) + 1.5, y: ax.sy(v), width: bw, height: ax.sy(0) - ax.sy(v), fill: "var(--c1)", opacity: 0.8 }));
+          sus.push(K.svg(svg, "rect", { x: ax.sx(h) + 1.5, y: ax.sy(v + s), width: bw, height: ax.sy(v) - ax.sy(v + s), fill: "var(--c6)", opacity: 0 }));
+        }
+        const shade = K.svg(svg, "rect", { x: ax.sx(0), y: 30, width: 0, height: 240, fill: "var(--warn)", opacity: 0.12 });
+        const lab = T(svg, 60, 22, "", { fill: "var(--warn)", "font-weight": 700 });
+        T(svg, ax.sx(16) + 4, 48, "上班时段 16–23 点", { "font-size": 12, fill: "var(--c1)" });
+        ctx.wait(500).then((ok) => ok && ctx.tween(800, (t) => shade.setAttribute("width", (ax.sx(16) - ax.sx(0)) * t)))
+          .then((ok) => { if (ok) lab.textContent = "只看 0–16 点：红色那一截（某主机的外传）就显出来了"; return ok && ctx.tween(800, (t) => sus.forEach((s) => (s.style.opacity = t))); });
+      },
+    },
+    {
+      title: "第 3 题：在“每个端口内部”找离群", kicker: "第 29–41 格 · 组内 z 分数",
+      html: `<p>第三台机器把通讯录通过一个本来用于别的用途的端口送出去（题目类比“滥用 DNS 外传”）。作者先按 <b>(源 IP, 端口)</b> 求出站字节，再在<b>每个端口内部</b>算 z 分数：(这台主机的量 − 这个端口的平均) ÷ 标准差，取每个端口的最大值排名。</p><p>为什么要分端口？不同端口的“正常量”差别很大，直接比总量，大流量端口会把小端口里的异常淹没。作者还提醒：分布如果很偏，先取对数再算 z 分数更合适。结果端口 124 的最大 z 分数最高，对应主机 12.30.96.87。</p>`,
+      cells: [30, 34, 37], highlight: ["(x.bytes - x.bytes.mean()) / x.bytes.std()", "groupby('port')"],
+      draw(svg, ctx) {
+        const r = K.rng(12), ports = [{ p: "端口 A", m: 220, s: 25 }, { p: "端口 B", m: 120, s: 15 }, { p: "端口 124", m: 40, s: 6, out: 85 }];
+        const ax = K.axes(svg, { x: 110, y: 40, w: 560, h: 220 }, [0, 300], [0, 3], { yticks: 0, xlabel: "每台主机在该端口的出站字节（示意）" });
+        const dots = [];
+        ports.forEach((P, k) => {
+          T(svg, 100, ax.sy(k + 0.5) + 4, P.p, { "text-anchor": "end", "font-weight": 700, fill: P.out ? "var(--c6)" : "var(--ink)" });
+          for (let i = 0; i < 26; i++) { const v = P.m + K.randn(r) * P.s; dots.push({ v, k, z: (v - P.m) / P.s, e: K.svg(svg, "circle", { cx: ax.sx(v), cy: ax.sy(k + 0.5) + (r() - 0.5) * 34, r: 3.5, fill: "var(--c1)", opacity: 0.6 }) }); }
+          if (P.out) dots.push({ v: P.out, k, z: (P.out - P.m) / P.s, e: K.svg(svg, "circle", { cx: ax.sx(P.out), cy: ax.sy(k + 0.5), r: 5, fill: "var(--c1)", opacity: 0.6 }) });
+        });
+        const lab = T(svg, 110, 300, "", { "font-weight": 700, fill: "var(--c6)" });
+        ctx.wait(900).then((ok) => ok && ctx.tween(1000, (t) => dots.forEach((d) => { if (d.z > 4) { K.set(d.e, { fill: "var(--c6)", opacity: 1 }); d.e.setAttribute("r", 5 + 4 * t); } })))
+          .then((ok) => { if (ok) lab.textContent = "绝对量不大，但在自己端口里 z ≈ 7：最异常"; });
+      },
+      notes: { 32: "这一格单独查看端口 113，和本题无关，像是作者调试时留下的（113 是第 4 题的答案）" },
+    },
+    {
+      title: "第 4 题：最冷门的对外端口", kicker: "第 42–48 格 · 看长尾",
+      html: `<p>被感染的机器会通过一个“私有频道”接收外部控制服务器的指令（C&amp;C，命令与控制）。作者的思路：公司对外提供的正常服务（网站、邮件）会被<b>很多不同的外部来源</b>访问；只有极少数外部来源才用的入站端口，就可疑。</p><p>代码把入站记录按 (源 IP, 端口) 去重，再数每个端口有几个不同的外部来源，取最少的几个。端口 113 只有一个外部 IP 在用，第 46 格进一步看这对 IP 之间的连接确认。</p>`,
+      cells: [44, 46], highlight: ["drop_duplicates(('src', 'port'))", "groupby('port').size()"],
+      draw(svg, ctx) {
+        const items = [["80", 48], ["443", 44], ["25", 31], ["22", 18], ["53", 12], ["113", 1]];
+        const ax = K.axes(svg, { x: 90, y: 30, w: 580, h: 250 }, [0, 50], [0, 1], { yticks: 0, xlabel: "使用该端口的不同外部来源数（示意）" });
+        const bars = items.map((d, i) => {
+          T(svg, 80, 52 + i * 40, "端口 " + d[0], { "text-anchor": "end", "font-weight": d[0] === "113" ? 700 : 400, fill: d[0] === "113" ? "var(--c6)" : "var(--ink)" });
+          return K.svg(svg, "rect", { x: 90, y: 36 + i * 40, width: 0, height: 24, rx: 3, fill: d[0] === "113" ? "var(--c6)" : "var(--c3)" });
+        });
+        const ring = T(svg, 120, 300, "", { fill: "var(--c6)", "font-weight": 700 });
+        ctx.tween(1400, (t) => bars.forEach((b, i) => b.setAttribute("width", Math.max(3, ax.sx(items[i][1] * t) - 90))))
+          .then((ok) => { if (ok) ring.textContent = "← 长尾：只有 1 个外部来源，像是专用频道"; });
+      },
+    },
+    {
+      title: "第 5 题：内网里的“小圈子”", kicker: "第 49–59 格 · 图与最大团",
+      html: `<p>某种病毒在内网互相转发命令，形成一个 P2P 网络：一群机器<b>两两都互相连接</b>。在图论里，这样的一群点叫<b>团</b>（clique）。题目问：哪个端口上的内网互连图，包含最大的团？</p><p>精确找最大团很慢，作者用了两招：①用度数算一个上界：大小为 K 的团，至少要有 K 个点的度数 ≥ K−1；②按上界从大到小试，用 networkx 的近似算法 <code>large_clique_size</code> 估团的大小，一旦当前最好结果超过剩下端口的上界就停。答案是端口 83。</p>`,
+      cells: [52, 54, 57], highlight: ["large_clique_size", "max_clique_size + 1", "if curr_max_clique > max_clique_upper_bound: break"],
+      draw(svg, ctx) {
+        const r = K.rng(21), N = 14, P = [];
+        for (let i = 0; i < N; i++) { const a = (i / N) * Math.PI * 2; P.push([360 + Math.cos(a) * 140, 175 + Math.sin(a) * 130]); }
+        const clique = [1, 3, 5, 8, 11];
+        const E = [];
+        for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) {
+          const inC = clique.includes(i) && clique.includes(j);
+          if (inC || r() < 0.1) E.push({ i, j, inC });
+        }
+        const lines = E.map((e) => K.svg(svg, "line", { x1: P[e.i][0], y1: P[e.i][1], x2: P[e.j][0], y2: P[e.j][1], stroke: "var(--line)", "stroke-width": 1.5 }));
+        const nodes = P.map((p, i) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 9, fill: "var(--panel-2)", stroke: "var(--ink-3)" }));
+        T(svg, 20, 28, "端口 83 上的内网互连（示意）", { "font-weight": 700 });
+        const lab = T(svg, 20, 330, "", { fill: "var(--c6)", "font-weight": 700 });
+        ctx.wait(700).then((ok) => ok && ctx.tween(1200, (t) => {
+          E.forEach((e, k) => { if (e.inC) K.set(lines[k], { stroke: `color-mix(in srgb, var(--c6) ${Math.round(t * 100)}%, var(--line))`, "stroke-width": 1.5 + t * 1.5 }); });
+          clique.forEach((i) => K.set(nodes[i], { fill: `color-mix(in srgb, var(--c6) ${Math.round(t * 80)}%, var(--panel-2))` }));
+        })).then((ok) => { if (ok) lab.textContent = "红色 5 台机器两两相连：一个大小为 5 的团"; });
+      },
+    },
+    {
+      title: "第 6 题：只认识一个人的外部地址", kicker: "第 60–67 格 · 反向追问",
+      html: `<p>公司被 IP 信誉服务拉黑了，因为内网有一台机器在当“僵尸网络的控制端”，接收外部被控机器的回连。题目给的线索是：这些外部主机“和公司没有别的理由来往”。</p><p>作者把线索翻译成查询：找出<b>只和一台内网主机通过信</b>的外部 IP（第 62 格），然后反过来问“它们都在找谁？”（第 64 格）。结果这些外部 IP 不约而同都连向 14.45.67.46。</p>`,
+      cells: [62, 64], highlight: ["x[x == 1]", "groupby('dst').size()"],
+      draw(svg, ctx) {
+        const ext = [], ins = [];
+        for (let i = 0; i < 8; i++) ext.push([90, 40 + i * 38]);
+        for (let i = 0; i < 5; i++) ins.push([560, 60 + i * 60]);
+        const target = 2;
+        const edges = [];
+        ext.forEach((e, i) => {
+          if (i % 2 === 0) edges.push({ a: i, b: target, single: true });
+          else { edges.push({ a: i, b: (i + 1) % 5, single: false }); edges.push({ a: i, b: (i + 3) % 5, single: false }); }
+        });
+        const ls = edges.map((d) => K.svg(svg, "line", { x1: ext[d.a][0] + 10, y1: ext[d.a][1], x2: ins[d.b][0] - 10, y2: ins[d.b][1], stroke: "var(--line)", "stroke-width": 1.5 }));
+        const en = ext.map((p) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 9, fill: "var(--panel-2)", stroke: "var(--ink-3)" }));
+        ins.forEach((p, i) => { K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 11, fill: i === target ? "var(--panel-2)" : "var(--panel-2)", stroke: "var(--c1)" }); T(svg, p[0] + 18, p[1] + 4, i === target ? "14.45.67.46" : "内网主机", { "font-size": 12 }); });
+        T(svg, 40, 24, "外部 IP", { "font-weight": 700 }); T(svg, 540, 24, "内网", { "font-weight": 700 });
+        const lab = T(svg, 200, 330, "", { fill: "var(--c6)", "font-weight": 700 });
+        ctx.wait(700).then((ok) => ok && ctx.tween(800, (t) => edges.forEach((d, k) => { if (d.single) { K.set(en[d.a], { fill: `color-mix(in srgb, var(--warn) ${Math.round(t * 80)}%, var(--panel-2))` }); } else ls[k].style.opacity = 1 - 0.75 * t; })))
+          .then((ok) => { if (ok) lab.textContent = "只认识一个人的外部 IP（黄）都指向同一台"; return ok && ctx.tween(800, (t) => edges.forEach((d, k) => { if (d.single) K.set(ls[k], { stroke: `color-mix(in srgb, var(--c6) ${Math.round(t * 100)}%, var(--line))`, "stroke-width": 1.5 + t * 1.5 }); })); });
+      },
+    },
+    {
+      title: "第 7 题：顺藤摸瓜找受感染主机", kicker: "第 68–72 格 · 行为匹配",
+      html: `<p>第 6 题知道了：僵尸网络成员会去连 14.45.67.46 的 <b>27 端口</b>。那么内网里谁也在做同样的事？</p><p>作者筛选“内网 → 14.45.67.46、端口 27”的记录，按源 IP 去重，找到 14.51.84.50。这就是安全分析里的常见动作：确认一个坏行为的“指纹”后，拿指纹去全网比对。</p>`,
+      cells: [70], highlight: ["(df['port'] == 27)", "drop_duplicates('src')"],
+      draw(svg, ctx) {
+        const rows = [["12.8.x.x", "14.45.67.46", 80], ["14.51.84.50", "14.45.67.46", 27], ["13.2.x.x", "12.33.x.x", 27], ["12.1.x.x", "14.45.67.46", 443], ["13.9.x.x", "14.7.x.x", 22]];
+        T(svg, 60, 36, "src", { "font-weight": 700 }); T(svg, 250, 36, "dst", { "font-weight": 700 }); T(svg, 440, 36, "port", { "font-weight": 700 });
+        const els = rows.map((r, i) => {
+          const y = 76 + i * 46;
+          const bg = K.svg(svg, "rect", { x: 40, y: y - 22, width: 520, height: 36, rx: 6, fill: "var(--panel-2)" });
+          [r[0], r[1], String(r[2])].forEach((s, j) => T(svg, [60, 250, 440][j], y + 2, s, { "font-family": "var(--mono)" }));
+          return { bg, hit: r[1] === "14.45.67.46" && r[2] === 27 };
+        });
+        T(svg, 590, 90, "过滤条件：", { "font-weight": 700, "font-size": 12 });
+        T(svg, 590, 110, "dst == 14.45.67.46", { "font-size": 12, "font-family": "var(--mono)" });
+        T(svg, 590, 130, "且 port == 27", { "font-size": 12, "font-family": "var(--mono)" });
+        ctx.wait(600).then((ok) => ok && ctx.tween(1000, (t) => els.forEach((e) => { e.bg.style.opacity = e.hit ? 1 : 1 - 0.7 * t; if (e.hit) K.set(e.bg, { fill: `color-mix(in srgb, var(--c6) ${Math.round(t * 30)}%, var(--panel-2))` }); })));
+      },
+    },
+    {
+      title: "第 8 题：定时“报平安”的隐蔽僵尸网络", kicker: "第 73–80 格 · 周期性",
+      html: `<p>更隐蔽的僵尸网络会<b>低频、定时</b>地向外部控制服务器回连（俗称“心跳”或 beaconing），中间夹杂一些高频调用。作者先做一个强假设：周期是 15、30、60 分钟这样的整数。那么回连只会落在很少几个“分钟数”上，比如每次都在 xx:17。</p><p>代码统计每个外部目的地被连接时出现过几个不同的分钟数，只有 1–4 个的就是嫌疑（第 75 格），再把按分钟计数的连接曲线画出来，和一个正常目的地对比，周期一目了然。答案是端口 51。作者也承认：如果回连间隔加了随机抖动，这招就不灵了（第 78 格）。</p>`,
+      cells: [75, 77], highlight: ["drop_duplicates(['dst', 'minute'])", "(x <= 4)"],
+      draw(svg, ctx) {
+        const ax1 = K.axes(svg, { x: 60, y: 30, w: 600, h: 110 }, [0, 240], [0, 1], { yticks: 0, xticks: 0 });
+        const ax2 = K.axes(svg, { x: 60, y: 190, w: 600, h: 110 }, [0, 240], [0, 1], { yticks: 0, xlabel: "时间（分钟，示意）" });
+        T(svg, 60, 24, "到可疑目的地的连接：每 30 分钟一次（都在 :17 分）", { "font-size": 12, fill: "var(--c6)", "font-weight": 700 });
+        T(svg, 60, 184, "到正常目的地的连接：时间随机", { "font-size": 12, fill: "var(--c1)", "font-weight": 700 });
+        const r = K.rng(5), a = [], b = [];
+        for (let m = 17; m < 240; m += 30) a.push(m);
+        for (let i = 0; i < 9; i++) b.push(r() * 240);
+        const A = a.map((m) => K.svg(svg, "line", { x1: ax1.sx(m), x2: ax1.sx(m), y1: ax1.sy(0), y2: ax1.sy(0), stroke: "var(--c6)", "stroke-width": 3 }));
+        const B = b.map((m) => K.svg(svg, "line", { x1: ax2.sx(m), x2: ax2.sx(m), y1: ax2.sy(0), y2: ax2.sy(0), stroke: "var(--c1)", "stroke-width": 3 }));
+        const la = T(svg, 560, 70, "", { "font-weight": 700, fill: "var(--c6)", "font-size": 12 }), lb = T(svg, 560, 230, "", { "font-weight": 700, fill: "var(--c1)", "font-size": 12 });
+        ctx.tween(1600, (t) => { A.forEach((l, i) => l.setAttribute("y2", ax1.sy(t * 0.8))); B.forEach((l) => l.setAttribute("y2", ax2.sy(t * 0.8))); })
+          .then((ok) => { if (ok) { la.textContent = "不同分钟数：1"; lb.textContent = "不同分钟数：" + new Set(b.map((m) => Math.floor(m) % 60)).size; } });
+      },
+    },
+    {
+      title: "如果周期不整齐：看大小和时间差", kicker: "第 81–88 格 · 更稳的指纹",
+      html: `<p>作者接着讨论“万一间隔是 17 分钟这种怪数”的情况，给出另外两条线索：</p><ul class="tight"><li><b>每次回连的大小几乎一样</b>（“我还活着”“有什么指令”这种固定消息）。按目的地算字节数的标准差，前面找到的那几个目的地标准差为 0，每次都是 1337 字节（第 81 格作者原文）。</li><li><b>冷门端口</b>：出站端口按次数从少到多排，51 和 31 端口少得可疑（第 83 格）。</li><li><b>时间差分布</b>：把相邻两次连接的时间差画成直方图，会集中在几个峰上，而不是均匀散开（第 86–87 格）。</li></ul>`,
+      cells: [82, 84, 87], highlight: ["bytes.std()", ".ts.diff()"],
+      draw(svg, ctx) {
+        const r = K.rng(31);
+        const ax = K.axes(svg, { x: 60, y: 30, w: 270, h: 240 }, [0, 3000], [0, 1], { yticks: 0, xticks: 2, xlabel: "每次连接的字节数" });
+        const ax2 = K.axes(svg, { x: 400, y: 30, w: 280, h: 240 }, [0, 3], [0, 1], { yticks: 0, xticks: 3, xlabel: "相邻两次连接的间隔" });
+        T(svg, 60, 24, "大小：心跳几乎一模一样", { "font-size": 12, "font-weight": 700 });
+        T(svg, 400, 24, "间隔：集中在几个峰（示意）", { "font-size": 12, "font-weight": 700 });
+        const dots = [];
+        for (let i = 0; i < 18; i++) { dots.push(K.svg(svg, "circle", { cx: ax.sx(1337), cy: 260 - i * 12, r: 4, fill: "var(--c6)", opacity: 0 })); dots.push(K.svg(svg, "circle", { cx: ax.sx(200 + r() * 2700), cy: 260 - (i % 9) * 22, r: 4, fill: "var(--c1)", opacity: 0 })); }
+        T(svg, ax.sx(1337) + 8, 50, "1337 字节，标准差 0", { "font-size": 11, fill: "var(--c6)" });
+        const peaks = [[0.05, 0.9], [1, 0.55], [2, 0.35]], bars = [];
+        for (let i = 0; i < 30; i++) {
+          const x = i * 0.1; let h = 0.02;
+          peaks.forEach((p) => (h += p[1] * Math.exp(-((x - p[0]) ** 2) / 0.006)));
+          bars.push({ h, e: K.svg(svg, "rect", { x: ax2.sx(x), y: ax2.sy(0), width: 8, height: 0, fill: "var(--c6)" }) });
+        }
+        T(svg, ax2.sx(0) + 2, 60, "同时", { "font-size": 11 }); T(svg, ax2.sx(1) - 8, 120, "高频", { "font-size": 11 }); T(svg, ax2.sx(2) - 8, 160, "低频", { "font-size": 11 });
+        ctx.tween(1200, (t) => dots.forEach((d, i) => (d.style.opacity = K.clamp(t * 36 - i, 0, 1))))
+          .then((ok) => ok && ctx.tween(1200, (t) => bars.forEach((b) => { b.e.setAttribute("y", ax2.sy(b.h * t)); b.e.setAttribute("height", ax2.sy(0) - ax2.sy(b.h * t)); })));
+      },
+    },
+    {
+      title: "第 9 题：挨家挨户敲门的大声扫描", kicker: "第 89–95 格 · 不同目的数",
+      html: `<p>一台机器被攻破后，常被用来探查内网里还能连上哪些主机（横向移动）。作者列出扫描的典型痕迹：<b>连接的不同目的端口特别多</b>，或<b>连接的不同目的主机特别多</b>。</p><p>按源 IP 数它连过多少台不同的内网主机，13.42.70.40 明显排第一；再按小时画它的活动量，能看到非工作时间的尖峰（第 93 格）。</p>`,
+      cells: [91, 93], highlight: ["drop_duplicates(['src', 'dst'])", "resample('1h')"],
+      draw(svg, ctx) {
+        const S = [200, 175], H = [];
+        for (let i = 0; i < 16; i++) { const a = (i / 16) * Math.PI * 2; H.push([360 + Math.cos(a) * 250, 175 + Math.sin(a) * 140]); }
+        H.forEach((p) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 8, fill: "var(--panel-2)", stroke: "var(--ink-3)" }));
+        K.svg(svg, "circle", { cx: 360, cy: 175, r: 14, fill: "var(--c6)" });
+        T(svg, 380, 180, "13.42.70.40", { "font-size": 12, "font-weight": 700, fill: "var(--c6)" });
+        const cnt = T(svg, 20, 330, "", { "font-weight": 700 });
+        const ls = H.map((p) => K.svg(svg, "line", { x1: 360, y1: 175, x2: 360, y2: 175, stroke: "var(--c6)", "stroke-width": 1.2, opacity: 0.7 }));
+        (async () => {
+          for (let i = 0; i < H.length; i++) {
+            if (!(await ctx.tween(140, (t) => { ls[i].setAttribute("x2", K.lerp(360, H[i][0], t)); ls[i].setAttribute("y2", K.lerp(175, H[i][1], t)); }))) return;
+            cnt.textContent = "连过的不同内网主机数：" + (i + 1) + "（普通主机一般只连几台常用服务器）";
+          }
+        })();
+      },
+    },
+    {
+      title: "第 10 题：安静的扫描者", kicker: "第 96–111 格 · 孤立的 (目的, 端口)",
+      html: `<p>最后一台机器扫描得很克制，按“不同目的数”“不同端口数”排名都看不出离群（第 99、100 格）。作者换了个角度：<b>正常的服务</b>（某台主机的某个端口）会有很多人来访；而被扫描的端口大多根本没开，<b>除了扫描者没人会去连</b>。</p><p>于是把每个 (目的主机, 端口) 的访客列表收集起来，只留下“只有一个访客”的组合，再数这些组合的访客是谁。12.49.123.62 出现得最多。最后作者把十个答案拼起来，用题目给的校验码核对（第 110 格）。</p>`,
+      cells: [97, 103, 105], highlight: ["x.map(len) == 1", "groupby(['dst', 'port'])"],
+      draw(svg, ctx) {
+        const cols = 6, rowsN = 4, cells = [];
+        T(svg, 40, 26, "每格 = 一个 (内网主机, 端口)；数字 = 来访的不同源主机数（示意）", { "font-size": 12, class: "muted" });
+        const r = K.rng(77);
+        for (let i = 0; i < rowsN; i++) for (let j = 0; j < cols; j++) {
+          const x = 40 + j * 105, y = 44 + i * 64;
+          const lonely = r() < 0.35;
+          const n = lonely ? 1 : 3 + Math.floor(r() * 9);
+          const bg = K.svg(svg, "rect", { x, y, width: 96, height: 54, rx: 6, fill: "var(--panel-2)", stroke: "var(--line)" });
+          T(svg, x + 48, y + 33, String(n), { "text-anchor": "middle", "font-size": 18, "font-weight": 700 });
+          cells.push({ bg, lonely });
+        }
+        const lab = T(svg, 40, 330, "", { "font-weight": 700, fill: "var(--c6)" });
+        ctx.wait(800).then((ok) => ok && ctx.tween(1000, (t) => cells.forEach((c) => { if (c.lonely) K.set(c.bg, { fill: `color-mix(in srgb, var(--c6) ${Math.round(t * 35)}%, var(--panel-2))`, stroke: "var(--c6)" }); else c.bg.style.opacity = 1 - 0.5 * t; })))
+          .then((ok) => { if (ok) lab.textContent = "红格只有 1 个访客 → 数一数这些访客是谁，同一个名字反复出现"; });
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：组内 z 分数 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "z", label: "判为异常的 z 分数阈值", min: 2, max: 8, step: 0.1, value: 4, fmt: (v) => v.toFixed(1) },
+      { id: "mag", label: "可疑主机在端口 124 上多传了多少（倍于该端口平均）", min: 1, max: 8, step: 0.1, value: 4, fmt: (v) => v.toFixed(1) + " 倍" },
+      { id: "mode", label: "怎么比", value: "group", options: [["group", "每个端口内部算 z（作者做法）"], ["global", "所有端口混在一起算 z"], ["log", "先取对数，再在端口内部算 z"]] },
+      { id: "seed", label: "重新生成一批主机", button: true },
+    ],
+    note: "模拟 4 个端口、每个端口 60 台主机的出站字节（对数正态分布，有长尾）。端口 124 上藏了一台可疑主机（红圈）。被判为异常的主机画成实心红点。",
+    render(svg, v) {
+      const r = K.rng(300 + v.seed * 13);
+      const ports = [{ p: "80", m: 6.2 }, { p: "443", m: 5.8 }, { p: "53", m: 3.6 }, { p: "124", m: 2.6 }];
+      const data = [];
+      ports.forEach((P, k) => {
+        for (let i = 0; i < 60; i++) data.push({ k, x: Math.exp(P.m + K.randn(r) * 0.45), bad: false });
+      });
+      const mean124 = data.filter((d) => d.k === 3).reduce((s, d) => s + d.x, 0) / 60;
+      data.push({ k: 3, x: mean124 * v.mag, bad: true });
+      const f = v.mode === "log" ? Math.log : (x) => x;
+      const groups = v.mode === "global" ? [data] : [0, 1, 2, 3].map((k) => data.filter((d) => d.k === k));
+      groups.forEach((g) => {
+        const vals = g.map((d) => f(d.x)), mu = vals.reduce((a, b) => a + b, 0) / vals.length;
+        const sd = Math.sqrt(vals.reduce((a, b) => a + (b - mu) ** 2, 0) / (vals.length - 1));
+        g.forEach((d, i) => (d.z = (vals[i] - mu) / sd));
+      });
+      const maxX = Math.max(...data.map((d) => d.x));
+      const ax = K.axes(svg, { x: 80, y: 20, w: 540, h: 270 }, [0, Math.log10(maxX) + 0.2], [0, 4], { yticks: 0, xlabel: "出站字节（对数刻度，10 的几次方）", xfmt: (x) => x.toFixed(1) });
+      ports.forEach((P, k) => T(svg, 72, ax.sy(k + 0.5) + 4, "端口 " + P.p, { "text-anchor": "end", "font-size": 12, "font-weight": 700 }));
+      let flagged = 0, caught = false;
+      const rr = K.rng(9);
+      data.forEach((d) => {
+        const hit = d.z > v.z;
+        if (hit) flagged++;
+        if (hit && d.bad) caught = true;
+        const cy = ax.sy(d.k + 0.5) + (d.bad ? 0 : (rr() - 0.5) * 40);
+        K.svg(svg, "circle", { cx: ax.sx(Math.log10(d.x)), cy, r: d.bad ? 5 : 3.3, fill: hit ? "var(--c6)" : "var(--c1)", opacity: hit ? 1 : 0.45 });
+        if (d.bad) K.svg(svg, "circle", { cx: ax.sx(Math.log10(d.x)), cy, r: 10, fill: "none", stroke: "var(--c6)", "stroke-width": 2 });
+      });
+      const badZ = data[data.length - 1].z;
+      T(svg, 80, 352, "红圈 = 藏起来的可疑主机；实心红点 = 超过阈值被标出的主机", { "font-size": 12, class: "muted" });
+      return { readout: [
+        { k: "可疑主机的 z 分数", v: badZ.toFixed(2) },
+        { k: "抓到可疑主机了吗", v: caught ? "抓到" : "漏掉", color: caught ? "var(--good)" : "var(--bad)" },
+        { k: "误报的正常主机", v: String(flagged - (caught ? 1 : 0)), color: flagged - (caught ? 1 : 0) > 0 ? "var(--warn)" : "var(--good)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：心跳检测 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "period", label: "心跳间隔（分钟）", min: 5, max: 60, step: 1, value: 30 },
+      { id: "jit", label: "每次随机抖动（± 分钟）", min: 0, max: 20, step: 0.5, value: 0, fmt: (v) => "±" + v },
+      { id: "seed", label: "重新生成", button: true },
+    ],
+    note: "模拟 24 小时：可疑目的地按“间隔 + 随机抖动”收到回连；正常目的地的访问时间随机（泊松过程，次数相同）。用作者的“不同分钟数”法和“间隔的变异系数”（标准差 ÷ 平均，越小越规律）两把尺子同时量。",
+    render(svg, v) {
+      const r = K.rng(500 + v.seed * 7), T0 = 24 * 60;
+      const beacon = [];
+      for (let t = 3 + r() * 5; t < T0; t += v.period) beacon.push(Math.max(0, t + (r() * 2 - 1) * v.jit));
+      beacon.sort((a, b) => a - b);
+      const normal = [];
+      for (let i = 0; i < beacon.length; i++) normal.push(r() * T0);
+      normal.sort((a, b) => a - b);
+      const stats = (ts) => {
+        const d = []; for (let i = 1; i < ts.length; i++) d.push(ts[i] - ts[i - 1]);
+        const mu = d.reduce((a, b) => a + b, 0) / d.length, sd = Math.sqrt(d.reduce((a, b) => a + (b - mu) ** 2, 0) / d.length);
+        return { d, cv: sd / mu, mins: new Set(ts.map((t) => Math.floor(t) % 60)).size };
+      };
+      const sb = stats(beacon), sn = stats(normal);
+      const tl = (y, ts, color, title) => {
+        T(svg, 20, y - 8, title, { "font-size": 12, "font-weight": 700, fill: color });
+        K.svg(svg, "line", { x1: 20, x2: 620, y1: y + 20, y2: y + 20, stroke: "var(--line)" });
+        ts.forEach((t) => K.svg(svg, "line", { x1: 20 + (t / T0) * 600, x2: 20 + (t / T0) * 600, y1: y, y2: y + 20, stroke: color, "stroke-width": 1.5 }));
+      };
+      tl(26, beacon, "var(--c6)", "可疑目的地收到的连接（24 小时）");
+      tl(86, normal, "var(--c1)", "正常目的地收到的连接（24 小时）");
+      const maxD = Math.max(...sb.d, ...sn.d, 1), nb = 24, bw = maxD / nb;
+      const hist = (d) => { const h = new Array(nb).fill(0); d.forEach((x) => h[Math.min(nb - 1, Math.floor(x / bw))]++); return h; };
+      const hb = hist(sb.d), hn = hist(sn.d), hm = Math.max(...hb, ...hn, 1);
+      const ax = K.axes(svg, { x: 50, y: 150, w: 570, h: 180 }, [0, maxD], [0, hm], { yticks: 2, xlabel: "相邻两次连接的间隔（分钟）" });
+      for (let i = 0; i < nb; i++) {
+        const x = ax.sx(i * bw), w = (ax.sx(bw) - ax.sx(0)) / 2 - 1;
+        K.svg(svg, "rect", { x, y: ax.sy(hb[i]), width: w, height: ax.sy(0) - ax.sy(hb[i]), fill: "var(--c6)" });
+        K.svg(svg, "rect", { x: x + w + 1, y: ax.sy(hn[i]), width: w, height: ax.sy(0) - ax.sy(hn[i]), fill: "var(--c1)" });
+      }
+      const caught = sb.cv < 0.3;
+      return { readout: [
+        { k: "不同分钟数（可疑 / 正常）", v: sb.mins + " / " + sn.mins, color: sb.mins <= 4 ? "var(--good)" : "var(--bad)" },
+        { k: "间隔变异系数（可疑）", v: sb.cv.toFixed(2), color: caught ? "var(--good)" : "var(--bad)" },
+        { k: "间隔变异系数（正常）", v: sn.cv.toFixed(2) },
+        { k: "作者的分钟法（≤4 个）", v: sb.mins <= 4 ? "能发现" : "失效", color: sb.mins <= 4 ? "var(--good)" : "var(--bad)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：扫描检测 ---------- */
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "quiet", label: "安静扫描者探查的 (主机, 端口) 个数", min: 2, max: 40, step: 1, value: 5 },
+      { id: "noise", label: "正常主机偶尔连错的概率（配置错误等）", min: 0, max: 0.3, step: 0.01, value: 0.05, fmt: (v) => Math.round(v * 100) + "%" },
+      { id: "seed", label: "重新生成", button: true },
+    ],
+    note: "模拟 20 台内网主机：每台正常主机只访问几台服务器上开着的服务；L 是大声扫描者（把每台主机的一个端口都敲一遍），Q 是安静扫描者（只随机探查少量未开放的端口）。左图量“不同目的数”，右图量“只有自己一个访客的 (目的, 端口) 数”。",
+    render(svg, v) {
+      const r = K.rng(900 + v.seed * 11), N = 20, servers = [0, 1, 2, 3], openPorts = [80, 443, 22, 445];
+      const conn = new Set(), add = (s, d, p) => conn.add(s + "|" + d + "|" + p);
+      const names = []; for (let i = 0; i < N; i++) names.push(i === 18 ? "L" : i === 19 ? "Q" : "h" + i);
+      for (let s = 0; s < 18; s++) {
+        servers.forEach((d) => { if (d !== s && r() < 0.8) add(s, d, openPorts[d]); });
+        if (r() < v.noise * 4) add(s, Math.floor(r() * N), 1000 + Math.floor(r() * 50));
+      }
+      for (let d = 0; d < N; d++) if (d !== 18) add(18, d, 3000 + d);
+      for (let k = 0; k < v.quiet; k++) { let d = Math.floor(r() * 18); add(19, d, 2000 + Math.floor(r() * 400)); }
+      const dsts = new Array(N).fill(0).map(() => new Set()), pairVisitors = {};
+      conn.forEach((c) => { const [s, d, p] = c.split("|"); dsts[s].add(d); const key = d + "|" + p; (pairVisitors[key] = pairVisitors[key] || new Set()).add(s); });
+      const lonely = new Array(N).fill(0);
+      Object.values(pairVisitors).forEach((set) => { if (set.size === 1) lonely[[...set][0]]++; });
+      const draw = (x0, vals, title) => {
+        T(svg, x0, 20, title, { "font-size": 12, "font-weight": 700 });
+        const mx = Math.max(...vals, 1), bh = 15;
+        vals.forEach((val, i) => {
+          const y = 32 + i * 17, w = (val / mx) * 220;
+          T(svg, x0 + 22, y + 12, names[i], { "text-anchor": "end", "font-size": 11, "font-weight": i >= 18 ? 700 : 400, fill: i >= 18 ? "var(--c6)" : "var(--ink)" });
+          K.svg(svg, "rect", { x: x0 + 28, y, width: Math.max(1, w), height: bh - 2, rx: 2, fill: i === 18 ? "var(--warn)" : i === 19 ? "var(--c6)" : "var(--c1)" });
+          T(svg, x0 + 32 + w, y + 11, String(val), { "font-size": 10, class: "muted" });
+        });
+      };
+      const nd = dsts.map((s) => s.size);
+      draw(10, nd, "不同目的主机数（作者第 91 格）");
+      draw(330, lonely, "孤立 (目的, 端口) 数（作者第 105 格）");
+      const rankOf = (arr, i) => arr.filter((x) => x > arr[i]).length + 1;
+      return { readout: [
+        { k: "L 在左图排名", v: "第 " + rankOf(nd, 18) },
+        { k: "Q 在左图排名（除去 L）", v: "第 " + (nd.filter((x, i) => i !== 18 && x > nd[19]).length + 1), color: nd.filter((x, i) => i !== 18 && x > nd[19]).length === 0 ? "var(--good)" : "var(--bad)" },
+        { k: "Q 在右图排名（除去 L）", v: "第 " + (lonely.filter((x, i) => i !== 18 && x > lonely[19]).length + 1), color: lonely.filter((x, i) => i !== 18 && x > lonely[19]).length === 0 ? "var(--good)" : "var(--bad)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

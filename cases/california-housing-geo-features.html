@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>加州房价地理特征</title>
+<meta name="description" content="Kaggle 案例拆解：给加州 1990 年人口普查的房价数据补上“最近的城市、离城市多远、最近的大城市”等地理特征，再用 XGBoost 预测，RMSE 从约 46146 美元降到约 40782 美元。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">经纬度 + 人口普查表格 · 回归 · 地理特征工程</div>
+  <h1>加州房价：离城市多远，值多少钱</h1>
+  <p class="en">Geospatial Feature Engineering and Visualization</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">Vincenty 球面距离</span><span class="tag method">最近邻城市</span><span class="tag method">最近大城市（泰森多边形）</span>
+    <span class="tag method">比率特征</span><span class="tag method">分层抽样</span><span class="tag method">独热编码</span><span class="tag method">XGBoost</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Cam Nugent</b></span>
+    <span>Kaggle 点赞 <b>347</b>（2026-11 抓取）</span>
+    <span>数据集 <b>camnugent/california-housing-prices</b> + 作者整理的城市坐标、人口表</span>
+    <span><a href="https://www.kaggle.com/code/camnugent/geospatial-feature-engineering-and-visualization" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">1990 年加州人口普查的街区统计</div><p>每行是一个街区（district）：经纬度、房龄、房间数、人口、户数、收入中位数、离海多近，以及房价中位数。作者另外找来加州各城市的坐标和 1990 年人口。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">街区的房价中位数（美元）</div><p>回归问题。数据里本来就有经纬度，但两个数字本身说不出“这里离市中心多远”“附近是大城市还是小镇”。</p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">从坐标“造”出 5 个地理特征</div><p>最近城市的名字、到它的距离、它的人口；最近大城市（1990 年人口超过 50 万）的名字和距离。再加比率特征、独热编码、标准化，交给 XGBoost。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">测试 RMSE：约 46146 → 约 40782 美元</div><p>作者说原始特征的单个 XGBoost 误差为 46146.47 美元；加了地理特征后，学习率 0.05 时 41476.90，学习率 0.01 时 40781.61，约减少 12%。<span data-cell="37">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">主数据集 <b>California Housing Prices</b> 来自 1990 年加州人口普查，是《机器学习实战》（Géron）第 2 章用的数据；数据集说明写明它最早出现在论文 Pace &amp; Barry (1997) <i>Sparse spatial autoregressions</i>，这篇论文研究的正是“空间自回归”。以下列名来自数据集说明页。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">用到的三份数据</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>文件</th><th>内容</th></tr>
+        <tr><td><code>housing.csv</code></td><td>每个街区一行，10 列（见右表）</td></tr>
+        <tr><td><code>cal_cities_lat_long.csv</code></td><td>加州城市名 + 纬度 + 经度</td></tr>
+        <tr><td><code>cal_populations_city.csv</code></td><td>城市历年人口，作者用 1990 年 4 月那一列</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">后两份是作者从加州政府和网上的表格整理后传到 Kaggle 的 <span data-cell="0">出处</span>。作者也提醒：城市坐标表和人口表并不完全对得上，一些小镇会缺失，只保留两边都有的城市 <span data-cell="4">出处</span>。数据集说明没有写总行数，这里不列。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">housing.csv 每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th></tr>
+        <tr><td><code>longitude</code> / <code>latitude</code></td><td>街区的经度、纬度</td></tr>
+        <tr><td><code>housing_median_age</code></td><td>房龄中位数</td></tr>
+        <tr><td><code>total_rooms</code> / <code>total_bedrooms</code></td><td>街区房间总数 / 卧室总数（卧室有缺失）</td></tr>
+        <tr><td><code>population</code> / <code>households</code></td><td>人口 / 户数</td></tr>
+        <tr><td><code>median_income</code></td><td>收入中位数（数据集里已缩放）</td></tr>
+        <tr><td><code>ocean_proximity</code></td><td>离海远近的类别（如 &lt;1H OCEAN、INLAND）</td></tr>
+        <tr><td><code>median_house_value</code></td><td><b>要预测的答案</b>：房价中位数（美元）</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="16">
+    <h3>动手试试 A · 空间自相关：近的地方房价像不像 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="22">
+    <h3>动手试试 B · “最近的大城市”把地图切成几块 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="34">
+    <h3>动手试试 C · 只给经纬度 vs 加上“到城市的距离” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>原始数据上的单个 XGBoost：测试 RMSE 46146.47 美元</td><td><span data-cell="37">第 37 格</span></td></tr>
+        <tr><td>加地理特征后，学习率 0.05、1648 轮：41476.90 美元</td><td><span data-cell="37">第 37 格</span></td></tr>
+        <tr><td>加地理特征后，学习率 0.01、10039 轮：40781.61 美元</td><td><span data-cell="37">第 37 格</span></td></tr>
+        <tr><td>相比之前的模型约改进 12%，说明新特征确实有用</td><td><span data-cell="37">第 37 格</span></td></tr>
+        <tr><td>“最近大城市”恰好把加州大致切成四块，可能额外加了结构</td><td><span data-cell="21">第 21 格</span></td></tr>
+        <tr><td>离城镇越远房子越便宜是普遍规律（有很多例外）</td><td><span data-cell="19">第 19 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">以上数字是作者在本地运行后写进文字里的。交叉验证在 Kaggle 上因超时被注释掉了（第 27、33 格），所以 Kaggle 页面上的运行结果可能只有 1648 轮那一组。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一个街区的坐标和普查统计，估计房价中位数。</li>
+        <li><b>同类问题：</b>二手房估价、门店选址（离商圈多远）、学区房、外卖覆盖范围、医院可达性。</li>
+        <li><b>可迁移的套路：</b>找一份“地标表”（城市、地铁站、学校），对每个样本算“最近的是谁、多远、它有多大”，作为新特征。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>Vincenty 椭球面距离（geopy） <span data-cell="6">第 6 格</span></li>
+        <li>逐个比较求最近城市 <span data-cell="8">第 8 格</span></li>
+        <li>大城市门槛：1990 年人口 &gt; 50 万 <span data-cell="11">第 11 格</span></li>
+        <li>按收入分层抽样切分训练 / 测试 <span data-cell="24">第 24 格</span></li>
+        <li>比率特征、中位数填补缺失 <span data-cell="24">第 24 格</span></li>
+        <li>LabelBinarizer 独热编码 + StandardScaler <span data-cell="25">第 25 格</span></li>
+        <li>XGBoost（eta 0.05、max_depth 8） <span data-cell="32">第 32 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>数据里已经有经纬度了，为什么作者还要“造”出到城市的距离？树模型只看经纬度，会遇到什么困难？</li>
+      <li>“大城市”的门槛定在 50 万人。如果改成 20 万或 100 万，地图会被切成几块？哪种更合理？</li>
+      <li>作者用的是 1990 年的城市人口，和房价数据同一年。如果误用了 2010 年的人口，会有什么问题？</li>
+      <li>“最近城市的名字”被独热编码成几百列。这些列对 XGBoost 有帮助吗？有没有更省事的表示方法？</li>
+      <li>房价在地图上“近的相似”（空间自相关）。随机切分训练集和测试集时，测试集里的街区旁边就有训练集的邻居，这会让分数显得更好还是更差？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Cam Nugent，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意；加州轮廓与城市位置为手绘近似，城市人口为示意量级，不是数据集数值。数据集：California Housing Prices（1990 年加州人口普查，CC0）。
+</footer>
+</main>
+
+<script src="nb/california-housing-geo-features.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 手绘加州轮廓（经度, 纬度，近似） ---------- */
+  const CA = [[-124.2,42.0],[-120.0,42.0],[-120.0,39.0],[-114.6,35.0],[-114.6,34.3],[-114.4,32.7],[-117.1,32.5],[-117.3,33.1],[-118.4,33.8],[-119.2,34.1],[-120.6,34.55],[-120.9,35.4],[-121.9,36.6],[-122.4,37.2],[-122.5,37.8],[-123.0,38.0],[-123.8,39.0],[-123.8,40.0],[-124.4,40.4],[-124.1,41.0]];
+  // 城市：名称、纬度、经度、示意人口（万，仅示意量级）
+  const CITIES = [
+    ["Los Angeles", 34.05, -118.24, 350], ["San Diego", 32.72, -117.16, 110], ["San Jose", 37.34, -121.89, 78], ["San Francisco", 37.77, -122.42, 72],
+    ["Long Beach", 33.77, -118.19, 43], ["Oakland", 37.80, -122.27, 37], ["Sacramento", 38.58, -121.49, 37], ["Fresno", 36.74, -119.79, 35],
+    ["Santa Ana", 33.75, -117.87, 29], ["Riverside", 33.95, -117.40, 23], ["Stockton", 37.96, -121.29, 21], ["Bakersfield", 35.37, -119.02, 17],
+    ["Modesto", 37.64, -121.0, 16], ["Salinas", 36.68, -121.66, 11], ["Santa Rosa", 38.44, -122.71, 11], ["Santa Barbara", 34.42, -119.70, 9],
+    ["Redding", 40.59, -122.39, 7], ["Chico", 39.73, -121.84, 4], ["Palm Springs", 33.83, -116.55, 4], ["Eureka", 40.80, -124.16, 3],
+    ["Willows", 39.52, -122.19, 0.5], ["Barstow", 34.90, -117.02, 2], ["El Centro", 32.79, -115.56, 3], ["San Luis Obispo", 35.28, -120.66, 4],
+  ];
+  const BBX = [-124.6, -113.9, 32.3, 42.2];
+  function proj(box, BB) {
+    const k = Math.cos(((BB[2] + BB[3]) / 2) * Math.PI / 180);
+    const wD = (BB[1] - BB[0]) * k, hD = BB[3] - BB[2], s = Math.min(box.w / wD, box.h / hD);
+    const ox = box.x + (box.w - wD * s) / 2, oy = box.y + (box.h - hD * s) / 2;
+    return { x: (lon) => ox + (lon - BB[0]) * k * s, y: (lat) => oy + (BB[3] - lat) * s, s, k, ox, oy, w: wD * s, h: hD * s };
+  }
+  function drawCA(svg, P) {
+    const d = CA.map((p, i) => (i ? "L" : "M") + P.x(p[0]).toFixed(1) + "," + P.y(p[1]).toFixed(1)).join("") + "Z";
+    return K.svg(svg, "path", { d, fill: "color-mix(in srgb, var(--c3) 10%, var(--panel))", stroke: "var(--ink-3)", "stroke-width": 1 });
+  }
+  function inPoly(pt, poly) {
+    let c = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) { const a = poly[i], b = poly[j]; if ((a[1] > pt[1]) !== (b[1] > pt[1]) && pt[0] < ((b[0] - a[0]) * (pt[1] - a[1])) / (b[1] - a[1]) + a[0]) c = !c; }
+    return c;
+  }
+  // 大圆距离（km），Vincenty 的球面近似
+  function km(lat1, lon1, lat2, lon2) { const p = Math.PI / 180, a = 0.5 - Math.cos((lat2 - lat1) * p) / 2 + Math.cos(lat1 * p) * Math.cos(lat2 * p) * (1 - Math.cos((lon2 - lon1) * p)) / 2; return 12742 * Math.asin(Math.sqrt(a)); }
+  function nearest(lat, lon, list) { let best = null; list.forEach((c) => { const d = km(lat, lon, c[1], c[2]); if (!best || d < best[1]) best = [c, d]; }); return best; }
+  // 模拟街区：多在城市周围，房价随离大城市、离海岸的距离下降
+  function simDistricts(seed, n) {
+    const r = K.rng(seed), out = [];
+    while (out.length < n) {
+      let lat, lon;
+      if (r() < 0.75) { const c = CITIES[Math.floor(Math.pow(r(), 1.8) * CITIES.length)]; lat = c[1] + K.randn(r) * 0.35; lon = c[2] + K.randn(r) * 0.4; }
+      else { lat = 32.5 + r() * 9.5; lon = -124.4 + r() * 10.3; }
+      if (!inPoly([lon, lat], CA)) continue;
+      const big = nearest(lat, lon, CITIES.slice(0, 4))[1];
+      const coast = Math.max(0, (lon + 124.3 - (42 - lat) * 0.95)); // 粗略的“离海岸”度数
+      const v = 80 + 330 * Math.exp(-big / 70) + 90 * Math.exp(-coast / 0.8) + K.randn(r) * 30;
+      out.push({ lat, lon, v: K.clamp(v, 15, 500) });
+    }
+    return out;
+  }
+  const priceColor = (v) => `color-mix(in srgb, var(--c6) ${Math.round(K.clamp((v - 40) / 360, 0, 1) * 100)}%, var(--c1))`;
+
+  const steps = [
+    {
+      at: 0, title: "开场：旧数据，加两份新表", kicker: "第 0–2 格 · 作者的目标",
+      html: `<p>这份房价数据很多人都用过。作者之前在 R 语言学习小组里讲过它，留的课后题是：<b>不换算法，靠更好的数据能不能把预测做准？</b></p><p>他找来两份新表：加州城市的经纬度、加州城市 1990 年的人口（和房价数据同一年）。目标是给每个街区加上 5 个地理特征：最近城市的名字、距离、人口，最近大城市的名字、距离。<span data-cell="0">第 0 格</span></p>`,
+      cells: [2],
+      draw(svg, ctx) {
+        const a = K.node(svg, 30, 40, 200, 80, "housing.csv\n经纬度 + 普查统计 + 房价", { bold: true });
+        const b = K.node(svg, 30, 150, 200, 60, "城市坐标表");
+        const c = K.node(svg, 30, 230, 200, 60, "城市人口表（1990）");
+        const feats = ["最近城市名", "到最近城市距离", "最近城市人口", "最近大城市名", "到最近大城市距离"];
+        const fs = feats.map((f, i) => { const g = K.node(svg, 480, 30 + i * 58, 210, 44, f, { fill: "color-mix(in srgb, var(--c2) 14%, var(--panel))", stroke: "var(--c2)" }); g.style.opacity = 0; return g; });
+        const arr = [K.arrow(svg, 232, 80, 470, 160), K.arrow(svg, 232, 180, 470, 160), K.arrow(svg, 232, 260, 470, 160)];
+        [b, c, ...arr].forEach((e) => (e.style.opacity = 0));
+        K.svg(svg, "text", { x: 300, y: 330, "font-size": 12, class: "muted" }, "目标：靠更好的特征，而不是换算法");
+        ctx.tween(600, (t) => { b.style.opacity = t; c.style.opacity = t; })
+          .then((ok) => ok && ctx.tween(500, (t) => arr.forEach((x) => (x.style.opacity = t))))
+          .then(async (ok) => { if (!ok) return; for (const f of fs) if (!(await ctx.tween(260, (t) => (f.style.opacity = t)))) return; });
+      },
+    },
+    {
+      title: "把城市整理成“名字 → 坐标”的字典", kicker: "第 3–4 格 · 两张表对齐",
+      html: `<p>作者逐行读城市坐标表，做成字典：城市名 → (纬度, 经度)。但他发现坐标表里有些城市在人口表里找不到，所以<b>只保留两张表都有的城市</b>。代码里还留着他发现这个问题时写的检查代码（被注释掉的那段）。</p><p>这是合并多源数据时最常见的坑：名字对不上。</p>`,
+      cells: [4], highlight: ["not in city_pop_data['City'].values"],
+      draw(svg, ctx) {
+        const L = ["Fresno", "Willows", "Alturas", "Oakland", "Lone Pine"], R = ["Fresno", "Oakland", "Willows", "Redding"];
+        K.svg(svg, "text", { x: 60, y: 40, "font-size": 13, "font-weight": 700 }, "坐标表");
+        K.svg(svg, "text", { x: 470, y: 40, "font-size": 13, "font-weight": 700 }, "人口表");
+        const lr = L.map((n, i) => K.node(svg, 40, 56 + i * 52, 170, 40, n));
+        R.forEach((n, i) => K.node(svg, 450, 56 + i * 52, 170, 40, n));
+        const lines = [];
+        L.forEach((n, i) => { const j = R.indexOf(n); if (j >= 0) { const l = K.svg(svg, "line", { x1: 210, y1: 76 + i * 52, x2: 210, y2: 76 + i * 52, stroke: "var(--good)", "stroke-width": 2 }); lines.push([l, 450, 76 + j * 52]); } });
+        ctx.tween(1200, (t) => lines.forEach(([l, x, y]) => { K.set(l, { x2: K.lerp(210, x, t), y2: K.lerp(+l.getAttribute("y1"), y, t) }); }))
+          .then((ok) => ok && ctx.tween(700, (t) => L.forEach((n, i) => { if (R.indexOf(n) < 0) lr[i].style.opacity = 1 - 0.8 * t; })))
+          .then((ok) => { if (ok) K.svg(svg, "text", { x: 40, y: 330, "font-size": 12, fill: "var(--bad)" }, "两张表对不上的城市被丢掉（名字为示意）"); });
+      },
+    },
+    {
+      title: "在地球上量距离，再找最近的城市", kicker: "第 5–9 格 · Vincenty 距离 + 逐个比较",
+      html: `<p>量两点距离用的是 geopy 的 <code>vincenty</code>：它把地球当成<b>略扁的椭球</b>来算，比当成圆球更准。文档里的例子是罗得岛纽波特到俄亥俄克利夫兰。<span data-cell="6">第 6 格</span></p><p><code>closest_point</code> 拿一个点去和字典里每个城市都量一遍，留下最近的那个。作者在注释里自嘲“这个 O(n) 的复杂度让我想哭”：街区有上万个、城市有几百个，要算几百万次距离。第 9 格用一个坐标测试，注释写着“可能是 Willows”。</p>`,
+      cells: [6, 8, 9], highlight: ["vincenty", "closest_point"],
+      draw(svg, ctx) {
+        const P = proj({ x: 20, y: 10, w: 400, h: 320 }, BBX);
+        drawCA(svg, P);
+        CITIES.forEach((c) => K.svg(svg, "circle", { cx: P.x(c[2]), cy: P.y(c[1]), r: 3 + Math.sqrt(c[3]) / 3, fill: "var(--c1)", opacity: 0.6 }));
+        const q = [39.524325, -122.293592];
+        K.svg(svg, "circle", { cx: P.x(q[1]), cy: P.y(q[0]), r: 5, fill: "var(--c6)" });
+        const ln = K.svg(svg, "line", { x1: P.x(q[1]), y1: P.y(q[0]), x2: P.x(q[1]), y2: P.y(q[0]), stroke: "var(--ink-3)", "stroke-width": 1.2 });
+        const tx = K.svg(svg, "text", { x: 450, y: 60, "font-size": 14, "font-family": "var(--mono)" }, "");
+        const best = K.svg(svg, "text", { x: 450, y: 100, "font-size": 15, "font-weight": 700, fill: "var(--good)" }, "");
+        K.svg(svg, "text", { x: 450, y: 30, "font-size": 12, class: "muted" }, "测试点 (39.52, −122.29)，逐个量距离：");
+        const order = CITIES.slice().sort(() => 0.5 - Math.random()).slice(0, 12).concat([CITIES.find((c) => c[0] === "Willows")]);
+        (async () => {
+          let b = null;
+          for (const c of order) {
+            const d = km(q[0], q[1], c[1], c[2]);
+            if (!(await ctx.tween(220, (t) => K.set(ln, { x2: K.lerp(P.x(q[1]), P.x(c[2]), t), y2: K.lerp(P.y(q[0]), P.y(c[1]), t) })))) return;
+            tx.textContent = `${c[0]}: ${d.toFixed(0)} km`;
+            if (!b || d < b[1]) { b = [c, d]; best.textContent = `目前最近：${c[0]}（${d.toFixed(1)} km）`; }
+          }
+          K.set(ln, { stroke: "var(--good)", "stroke-width": 2.5, x2: P.x(b[0][2]), y2: P.y(b[0][1]) });
+        })();
+        K.svg(svg, "text", { x: 450, y: 320, "font-size": 11, class: "muted" }, "距离为浏览器内用大圆公式现算（近似）");
+      },
+    },
+    {
+      title: "给每个街区挂上 5 个新特征", kicker: "第 10–14 格 · apply 批量计算",
+      html: `<p>先做“城市 → 1990 年人口”的字典，再挑出人口超过 50 万的<b>大城市</b>单独做一个坐标字典。代码注释写的是“100 万人”，实际门槛是 500000，注释和代码不一致。<span data-cell="11">第 11 格</span></p><p>然后用 <code>housing.apply</code> 对每一行调用 <code>closest_point</code> 两次（找最近城市、最近大城市），拆成 5 列新特征。</p>`,
+      cells: [11, 13], highlight: ["> 500000", "close_city_dist", "big_city_dist"],
+      draw(svg, ctx) {
+        const cols = ["经度", "纬度", "…", "房价"], add = ["最近城市", "距离", "人口", "最近大城市", "距离"];
+        const rows = 6, cells = [];
+        cols.forEach((c, j) => { K.node(svg, 20 + j * 72, 30, 70, 30, c, { fs: 12 }); for (let i = 0; i < rows; i++) K.svg(svg, "rect", { x: 20 + j * 72, y: 64 + i * 34, width: 70, height: 32, fill: "var(--panel-2)", stroke: "var(--line)" }); });
+        add.forEach((c, j) => {
+          const x = 320 + j * 80;
+          const h = K.node(svg, x, 30, 78, 30, c, { fs: 12, fill: "color-mix(in srgb, var(--c2) 18%, var(--panel))", stroke: "var(--c2)" }); h.style.opacity = 0;
+          cells.push(h);
+          for (let i = 0; i < rows; i++) { const e = K.svg(svg, "rect", { x, y: 64 + i * 34, width: 78, height: 32, fill: "color-mix(in srgb, var(--c2) 10%, var(--panel))", stroke: "var(--line)" }); e.style.opacity = 0; cells.push(e); }
+        });
+        K.svg(svg, "text", { x: 20, y: 300, "font-size": 12, class: "muted" }, "每一行调用两次 closest_point：一次对全部城市，一次只对大城市");
+        ctx.tween(1800, (t) => cells.forEach((e, k) => (e.style.opacity = K.clamp(t * cells.length - k, 0, 1))));
+      },
+    },
+    {
+      title: "原始地图：哪里的房子贵", kicker: "第 15–16 格 · 气泡 + 颜色地图",
+      html: `<p>先复刻 Géron 书里的经典图：横轴经度、纵轴纬度，每个街区一个圆，圆的大小是人口，颜色是房价，背景叠一张加州地图。</p><p>一眼可见：<b>沿海、尤其是湾区和洛杉矶一带最贵</b>，内陆便宜。而且贵的点挨着贵的点，便宜的挨着便宜的。这种“近的相似”有个专门的名字：<b>空间自相关</b>。这份数据最早出现的论文就叫《稀疏空间自回归》。</p>`,
+      cells: [16],
+      draw(svg, ctx) {
+        const P = proj({ x: 20, y: 10, w: 680, h: 320 }, BBX);
+        drawCA(svg, P);
+        const D = simDistricts(3, 700);
+        const dots = D.map((d) => K.svg(svg, "circle", { cx: P.x(d.lon), cy: P.y(d.lat), r: 0, fill: priceColor(d.v), opacity: 0.65 }));
+        K.svg(svg, "text", { x: 470, y: 60, "font-size": 12, fill: "var(--c1)" }, "● 便宜");
+        K.svg(svg, "text", { x: 470, y: 80, "font-size": 12, fill: "var(--c6)" }, "● 贵");
+        K.svg(svg, "text", { x: 470, y: 320, "font-size": 11, class: "muted" }, "模拟街区，手绘轮廓");
+        ctx.tween(1800, (t) => dots.forEach((e, i) => e.setAttribute("r", K.clamp(t * D.length - i, 0, 1) * 3.2)));
+      },
+    },
+    {
+      title: "每个街区连到最近的城镇", kicker: "第 17–20 格 · 新特征可视化",
+      html: `<p>先画城市本身的位置和大小，再给每个街区画一条细黑线，连到离它最近的城镇。线的长度 = “到最近城镇的距离”，线落到的那个点 = “最近城镇是谁、有多少人”。</p><p>作者的解释 <span data-cell="19">第 19 格</span>：离市中心越远，房子通常越便宜；“最近的城镇”还能间接代表通勤时间、向哪个市政府交房产税、当地基础设施好不好。</p><p class="note">第 18 格画城市时，点的大小用的是 <code>housing_plot['population']/50</code>，即街区人口而不是城市人口，两者行数不同，圆的大小和城市并不对应；作者刚算好的城市人口 <code>Population</code> 列没有用上。</p>`,
+      cells: [18, 20],
+      draw(svg, ctx) {
+        const P = proj({ x: 20, y: 10, w: 680, h: 320 }, BBX);
+        drawCA(svg, P);
+        const D = simDistricts(5, 420);
+        CITIES.forEach((c) => K.svg(svg, "circle", { cx: P.x(c[2]), cy: P.y(c[1]), r: 2 + Math.sqrt(c[3]) / 2.5, fill: "var(--c1)", opacity: 0.55 }));
+        const L = D.map((d) => { const n = nearest(d.lat, d.lon, CITIES)[0]; return { d, n, e: K.svg(svg, "line", { x1: P.x(d.lon), y1: P.y(d.lat), x2: P.x(d.lon), y2: P.y(d.lat), stroke: "var(--ink)", "stroke-width": 0.6, opacity: 0.6 }) }; });
+        ctx.wait(400).then((ok) => ok && ctx.tween(1800, (t) => L.forEach((l) => K.set(l.e, { x2: K.lerp(P.x(l.d.lon), P.x(l.n[2]), t), y2: K.lerp(P.y(l.d.lat), P.y(l.n[1]), t) }))));
+        K.svg(svg, "text", { x: 470, y: 320, "font-size": 11, class: "muted" }, "蓝圆 = 城市（示意大小）");
+      },
+    },
+    {
+      title: "最近的大城市：加州被切成四块", kicker: "第 21–22 格 · 空间分区",
+      html: `<p>1990 年人口超过 50 万的只有四座：旧金山、圣何塞、圣迭戈、洛杉矶。每个街区再连到这四座里最近的一座。</p><p>作者发现一个“副作用”：这四个类别<b>恰好把加州大致切成了四块</b>，“最近大城市是旧金山”约等于“在北部”，“是圣迭戈”约等于“在最南部”。<span data-cell="21">第 21 格</span></p><p>按“离谁最近”切地图，得到的区域叫<b>泰森多边形</b>（Voronoi 图）。这其实是一种空间聚类：每座大城市当一个“中心”，地图上每个点归到最近的中心，和 K-Means 分配样本的规则一模一样。</p>`,
+      cells: [22],
+      draw(svg, ctx) {
+        const P = proj({ x: 20, y: 10, w: 680, h: 320 }, BBX);
+        const big = CITIES.slice(0, 4), col = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c5)"];
+        const cells = [], step = 0.14;
+        for (let lat = BBX[2]; lat < BBX[3]; lat += step) for (let lon = BBX[0]; lon < BBX[1]; lon += step) {
+          if (!inPoly([lon + step / 2, lat + step / 2], CA)) continue;
+          const n = nearest(lat + step / 2, lon + step / 2, big)[0];
+          cells.push(K.svg(svg, "rect", { x: P.x(lon), y: P.y(lat + step), width: P.x(lon + step) - P.x(lon) + 0.4, height: P.y(lat) - P.y(lat + step) + 0.4, fill: col[big.indexOf(n)], opacity: 0 }));
+        }
+        drawCA(svg, P).style.fill = "none";
+        big.forEach((c, i) => { K.svg(svg, "circle", { cx: P.x(c[2]), cy: P.y(c[1]), r: 7, fill: col[i], stroke: "var(--panel)", "stroke-width": 2 }); K.svg(svg, "text", { x: P.x(c[2]) + 10, y: P.y(c[1]) + (i === 3 ? -8 : 12), "font-size": 12, "font-weight": 700 }, c[0]); });
+        K.svg(svg, "text", { x: 470, y: 320, "font-size": 11, class: "muted" }, "颜色 = 最近的大城市（现算）");
+        ctx.tween(1600, (t) => cells.forEach((e, k) => (e.style.opacity = 0.35 * K.clamp(t * 2 - k / cells.length, 0, 1))));
+      },
+    },
+    {
+      title: "清理、分层切分、比率特征", kicker: "第 23–24 格 · 预处理",
+      html: `<p>这一大格做了好几件事：</p><ul class="tight"><li>把收入分成 5 档，按档<b>分层抽样</b>切出 20% 测试集（StratifiedShuffleSplit），保证训练集、测试集里穷街区和富街区的比例一样；</li><li>把类别名 <code>&lt;1H OCEAN</code> 改成 <code>LessThan1h</code>，因为 XGBoost 的列名不能含 &lt;；</li><li>造比率特征：每户房间数、每户卧室数、卧室占房间比、每户人口；</li><li>缺失值（卧室数）用<b>训练集</b>的中位数填，测试集也用训练集的中位数，避免泄漏。</li></ul><p class="note">小毛病：<code>fill_value(dataframe, col, val)</code> 函数体里用的是外部循环变量 <code>i</code> 而不是参数 <code>col</code>，碰巧能跑；<code>fill_median</code> 的说明写的是“均值”，实际填的是中位数。</p>`,
+      cells: [24], highlight: ["StratifiedShuffleSplit", "rooms_per_household", "X_train[i].median"],
+      draw(svg, ctx) {
+        const cats = [1, 2, 3, 4, 5], share = [0.04, 0.32, 0.35, 0.18, 0.11];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "按收入档分层：每档都按 8:2 切");
+        const bars = [];
+        cats.forEach((c, i) => {
+          const y = 50 + i * 52, w = share[i] * 900;
+          K.svg(svg, "text", { x: 30, y: y + 22, "font-size": 12 }, "收入第 " + c + " 档");
+          const tr = K.svg(svg, "rect", { x: 110, y, width: 0, height: 32, fill: "var(--c1)", rx: 3 });
+          const te = K.svg(svg, "rect", { x: 110, y, width: 0, height: 32, fill: "var(--c3)", rx: 3 });
+          bars.push([tr, te, w]);
+        });
+        K.svg(svg, "text", { x: 470, y: 320, "font-size": 12, fill: "var(--c1)" }, "■ 训练 80%");
+        K.svg(svg, "text", { x: 570, y: 320, "font-size": 12, fill: "var(--c3)" }, "■ 测试 20%");
+        K.svg(svg, "text", { x: 30, y: 320, "font-size": 11, class: "muted" }, "各档比例为示意");
+        ctx.tween(1400, (t) => bars.forEach(([a, b, w]) => { a.setAttribute("width", w * 0.8 * t); b.setAttribute("x", 110 + w * 0.8 * t + 2); b.setAttribute("width", w * 0.2 * t); }));
+      },
+    },
+    {
+      title: "独热编码与标准化", kicker: "第 25–26 格 · 变成模型能吃的数字",
+      html: `<p>三列类别要变成数字：离海远近、最近城市名、最近大城市名。作者用 <code>LabelBinarizer</code> 做<b>独热编码</b>：有几个类别就拆成几列，属于哪个就在那列写 1，其余写 0。测试集只用 <code>transform</code>，保证列的顺序和训练集一致。</p><p>数值列用 <code>StandardScaler</code> 缩放（同样只在训练集上 fit），最后把两部分拼回一张表。</p><p>最近城市名有几百个，独热之后会多出几百列，绝大部分是 0。</p>`,
+      cells: [25, 26], highlight: ["LabelBinarizer", "transform(X_test"],
+      draw(svg, ctx) {
+        const names = ["San Francisco", "San Jose", "San Diego", "Los Angeles"], rows = ["Los Angeles", "San Jose", "Los Angeles", "San Francisco", "San Diego"];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "big_city_name");
+        rows.forEach((r, i) => K.node(svg, 30, 44 + i * 50, 150, 40, r, { fs: 12 }));
+        const cells = [];
+        names.forEach((n, j) => {
+          K.svg(svg, "text", { x: 300 + j * 100 + 45, y: 30, "font-size": 11, "text-anchor": "middle" }, n.replace("San ", "S. ") + "_Bigcity");
+          rows.forEach((r, i) => {
+            const one = r === n;
+            const g = K.node(svg, 300 + j * 100, 44 + i * 50, 90, 40, one ? "1" : "0", { fill: one ? "color-mix(in srgb, var(--c2) 25%, var(--panel))" : "var(--panel-2)", bold: one });
+            g.style.opacity = 0; cells.push(g);
+          });
+        });
+        const a = K.arrow(svg, 185, 160, 290, 160); a.style.opacity = 0;
+        ctx.tween(400, (t) => (a.style.opacity = t)).then((ok) => ok && ctx.tween(1400, (t) => cells.forEach((g, k) => (g.style.opacity = K.clamp(t * cells.length - k, 0, 1)))));
+      },
+    },
+    {
+      title: "XGBoost：一棵接一棵地改错", kicker: "第 27–37 格 · 训练与评估",
+      html: `<p>模型是 XGBoost（梯度提升树）：学习率 0.05、每棵树最深 8 层、每轮随机用 80% 的样本，起点（base_score）设为训练集房价平均值，训练 1648 轮。</p><p>为什么是 1648？作者在本地用 5 折交叉验证 + 早停找出来的：学习率 0.05 时 1648 轮最好，0.01 时 10039 轮最好。Kaggle 上交叉验证会超时，所以那段被注释掉了。<span data-cell="27">第 27 格</span></p><p>结果：加了地理特征后测试 RMSE 为 41476.90（0.05）和 40781.61（0.01），原始特征是 46146.47，约改进 12%。<span data-cell="37">第 37 格</span></p>`,
+      cells: [32, 34, 36], highlight: ["'eta' :  0.05", "num_boost_round=1648", "'max_depth' :  8"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 330, h: 260 }, [0, 10], [0, 1.1], { xticks: 0, yticks: 0, xlabel: "到最近大城市的距离（示意）" });
+        const r = K.rng(4), X = [], Y = [];
+        for (let i = 0; i < 70; i++) { const x = r() * 10; X.push(x); Y.push(0.2 + 0.8 * Math.exp(-x / 2.5) + K.randn(r) * 0.06); }
+        X.forEach((x, i) => K.svg(svg, "circle", { cx: ax.sx(x), cy: ax.sy(Y[i]), r: 3, fill: "var(--c1)", opacity: 0.6 }));
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        const lab = K.svg(svg, "text", { x: 70, y: 22, "font-size": 13, "font-weight": 700 }, "");
+        const mean = Y.reduce((a, b) => a + b, 0) / Y.length;
+        let F = X.map(() => mean); const stumps = [];
+        const draw = () => { let d = ""; for (let x = 0; x <= 10; x += 0.05) { let v = mean; stumps.forEach((s) => (v += 0.5 * (x < s.t ? s.l : s.r))); d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(v); } path.setAttribute("d", d); };
+        const bars = K.axes(svg, { x: 450, y: 30, w: 240, h: 260 }, [0, 3], [0, 50000], { xticks: 0, yticks: 2, yfmt: (v) => Math.round(v / 1000) + "k" });
+        const vals = [["原始特征", 46146.47, "var(--ink-3)"], ["+地理 eta0.05", 41476.90, "var(--c1)"], ["+地理 eta0.01", 40781.61, "var(--c3)"]];
+        const bs = vals.map((v, i) => { K.svg(svg, "text", { x: 450 + i * 80 + 35, y: 306, "font-size": 10, "text-anchor": "middle" }, v[0]); return K.svg(svg, "rect", { x: 450 + i * 80 + 10, y: bars.sy(0), width: 50, height: 0, fill: v[2] }); });
+        K.svg(svg, "text", { x: 450, y: 22, "font-size": 12 }, "测试 RMSE（美元，作者原文）");
+        (async () => {
+          draw();
+          for (let k = 0; k < 12; k++) {
+            const res = Y.map((y, i) => y - F[i]); let best = null;
+            for (let t = 0.3; t < 10; t += 0.3) { const L = [], R = []; X.forEach((x, i) => (x < t ? L : R).push(res[i])); if (!L.length || !R.length) continue; const ml = L.reduce((a, b) => a + b, 0) / L.length, mr = R.reduce((a, b) => a + b, 0) / R.length; const sse = L.reduce((a, b) => a + (b - ml) ** 2, 0) + R.reduce((a, b) => a + (b - mr) ** 2, 0); if (!best || sse < best.sse) best = { t, l: ml, r: mr, sse }; }
+            stumps.push(best); F = F.map((f, i) => f + 0.5 * (X[i] < best.t ? best.l : best.r));
+            lab.textContent = `第 ${k + 1} 棵树（浏览器内现算的简化版）`;
+            draw();
+            if (!(await ctx.wait(260))) return;
+          }
+          await ctx.tween(900, (t) => bs.forEach((b, i) => { const h = (bars.sy(0) - bars.sy(vals[i][1])) * t; K.set(b, { y: bars.sy(0) - h, height: h }); }));
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：空间自相关（Moran's I） ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 390,
+    controls: [
+      { id: "smooth", label: "房价的“地域性”有多强（平滑半径）", min: 0, max: 6, step: 1, value: 3 },
+      { id: "shuffle", label: "打乱位置", value: "no", options: [["no", "保持原位"], ["yes", "把房价随机打乱到别的格子"]] },
+      { id: "seed", label: "重新生成", button: true },
+    ],
+    note: "24×16 个格子当作街区，先撒随机噪声，再按半径做邻域平均，模拟“近的相似”。Moran's I 用上下左右 4 个邻居现场计算：接近 0 表示没有空间规律，越接近 1 表示邻居越像。打乱位置后，房价分布不变，空间规律却消失了。",
+    render(svg, v) {
+      const W = 24, H = 16, r = K.rng(11 + v.seed * 7);
+      let g = Array.from({ length: H }, () => Array.from({ length: W }, () => K.randn(r)));
+      for (let it = 0; it < v.smooth; it++) {
+        const n = g.map((row, i) => row.map((_, j) => { let s = 0, c = 0; for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) { const a = i + di, b = j + dj; if (a >= 0 && a < H && b >= 0 && b < W) { s += g[a][b]; c++; } } return s / c; }));
+        g = n;
+      }
+      let flat = g.flat();
+      if (v.shuffle === "yes") { const rr = K.rng(99 + v.seed); for (let i = flat.length - 1; i > 0; i--) { const j = Math.floor(rr() * (i + 1)); [flat[i], flat[j]] = [flat[j], flat[i]]; } }
+      const at = (i, j) => flat[i * W + j];
+      const mean = flat.reduce((a, b) => a + b, 0) / flat.length, mn = Math.min(...flat), mx = Math.max(...flat);
+      let num = 0, den = 0, wsum = 0;
+      for (let i = 0; i < H; i++) for (let j = 0; j < W; j++) {
+        den += (at(i, j) - mean) ** 2;
+        [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(([a, b]) => { const p = i + a, q = j + b; if (p >= 0 && p < H && q >= 0 && q < W) { num += (at(i, j) - mean) * (at(p, q) - mean); wsum++; } });
+      }
+      const I = (flat.length / wsum) * (num / den);
+      const cs = 22;
+      for (let i = 0; i < H; i++) for (let j = 0; j < W; j++) K.svg(svg, "rect", { x: 20 + j * cs, y: 10 + i * cs, width: cs - 1, height: cs - 1, fill: priceColor(40 + ((at(i, j) - mn) / (mx - mn || 1)) * 360) });
+      K.svg(svg, "text", { x: 20, y: 382, "font-size": 11, class: "muted" }, "颜色：蓝 = 便宜，红 = 贵（模拟）");
+      return { readout: [
+        { k: "Moran's I（空间自相关）", v: I.toFixed(3), color: I > 0.3 ? "var(--c6)" : "var(--ink-3)" },
+        { k: "解读", v: I > 0.5 ? "邻居很像" : I > 0.2 ? "有一定地域性" : "几乎随机" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：最近大城市分区 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 400,
+    controls: [
+      { id: "th", label: "“大城市”门槛（示意人口，万人）", min: 5, max: 120, step: 1, value: 50, fmt: (v) => v + " 万" },
+      { id: "pt", label: "查询点的纬度", min: 32.8, max: 41.8, step: 0.1, value: 36.5, fmt: (v) => v.toFixed(1) + "°" },
+      { id: "pl", label: "查询点的经度", min: -124, max: -115, step: 0.1, value: -119.5, fmt: (v) => v.toFixed(1) + "°" },
+    ],
+    note: "城市人口为示意量级（不是数据集数值），门槛 50 万时正好是作者那四座大城市。每个小格都现场算一遍“离哪座大城市最近”，颜色相同的区域就是一块泰森多边形。门槛降低，大城市变多，地图被切得越细，“到大城市的距离”也普遍变短。",
+    render(svg, v) {
+      const P = proj({ x: 10, y: 10, w: 620, h: 380 }, BBX);
+      const big = CITIES.filter((c) => c[3] >= v.th);
+      const palette = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c5)", "var(--c6)"];
+      const step = 0.16;
+      for (let lat = BBX[2]; lat < BBX[3]; lat += step) for (let lon = BBX[0]; lon < BBX[1]; lon += step) {
+        if (!inPoly([lon + step / 2, lat + step / 2], CA) || !big.length) continue;
+        const n = nearest(lat + step / 2, lon + step / 2, big)[0];
+        K.svg(svg, "rect", { x: P.x(lon), y: P.y(lat + step), width: P.x(lon + step) - P.x(lon) + 0.5, height: P.y(lat) - P.y(lat + step) + 0.5, fill: palette[big.indexOf(n) % 6], opacity: 0.32 });
+      }
+      drawCA(svg, P).style.fill = "none";
+      big.forEach((c, i) => { K.svg(svg, "circle", { cx: P.x(c[2]), cy: P.y(c[1]), r: 5, fill: palette[i % 6], stroke: "var(--panel)", "stroke-width": 1.5 }); });
+      const inside = inPoly([v.pl, v.pt], CA);
+      let nb = big.length ? nearest(v.pt, v.pl, big) : null, nc = nearest(v.pt, v.pl, CITIES);
+      if (nb) K.svg(svg, "line", { x1: P.x(v.pl), y1: P.y(v.pt), x2: P.x(nb[0][2]), y2: P.y(nb[0][1]), stroke: "var(--ink)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+      K.svg(svg, "line", { x1: P.x(v.pl), y1: P.y(v.pt), x2: P.x(nc[0][2]), y2: P.y(nc[0][1]), stroke: "var(--warn)", "stroke-width": 2 });
+      K.svg(svg, "circle", { cx: P.x(v.pl), cy: P.y(v.pt), r: 6, fill: inside ? "var(--ink)" : "var(--bad)" });
+      K.svg(svg, "text", { x: 400, y: 30, "font-size": 11, class: "muted" }, "黄线 = 最近城市；黑虚线 = 最近大城市");
+      return { readout: [
+        { k: "大城市数量", v: String(big.length) },
+        { k: "最近城市", v: nc[0][0] + " · " + nc[1].toFixed(0) + " km", color: "var(--warn)" },
+        { k: "最近大城市", v: nb ? nb[0][0] + " · " + nb[1].toFixed(0) + " km" : "无" },
+        { k: "查询点", v: inside ? "在加州内" : "在加州外（海上或外州）", color: inside ? "var(--good)" : "var(--bad)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：经纬度 vs 距离特征 ---------- */
+  function boost(X, y, rounds, lr) {
+    const base = y.reduce((a, b) => a + b, 0) / y.length; let F = y.map(() => base); const trees = [];
+    const p = X[0].length;
+    for (let k = 0; k < rounds; k++) {
+      const res = y.map((v, i) => v - F[i]); let best = null;
+      for (let f = 0; f < p; f++) {
+        const idx = X.map((_, i) => i).sort((a, b) => X[a][f] - X[b][f]);
+        let sL = 0, nL = 0; const sT = res.reduce((a, b) => a + b, 0), n = res.length;
+        for (let q = 0; q < n - 1; q++) {
+          sL += res[idx[q]]; nL++;
+          if (X[idx[q]][f] === X[idx[q + 1]][f] || q % 4) continue;
+          const sR = sT - sL, nR = n - nL, gain = (sL * sL) / nL + (sR * sR) / nR;
+          if (!best || gain > best.gain) best = { f, t: (X[idx[q]][f] + X[idx[q + 1]][f]) / 2, l: sL / nL, r: sR / nR, gain };
+        }
+      }
+      trees.push(best); F = F.map((v, i) => v + lr * (X[i][best.f] < best.t ? best.l : best.r));
+    }
+    return (x) => trees.reduce((s, t) => s + lr * (x[t.f] < t.t ? t.l : t.r), base);
+  }
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "rounds", label: "提升轮数（每轮一棵只切一刀的小树）", min: 5, max: 150, step: 5, value: 40 },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "在模拟的加州街区上（房价主要由“离最近大城市多远”决定），浏览器里现场训练两个梯度提升模型：A 只给经度、纬度；B 再加上“到最近大城市的距离”。树只能横着或竖着切，用经纬度要切很多刀才能拼出一个“圆圈”，有了距离特征一刀就行。",
+    render(svg, v) {
+      const D = simDistricts(200 + v.seed * 3, 900);
+      const big = CITIES.slice(0, 4);
+      const fA = (d) => [d.lon, d.lat], fB = (d) => [d.lon, d.lat, nearest(d.lat, d.lon, big)[1]];
+      const tr = D.slice(0, 600), te = D.slice(600);
+      const mA = boost(tr.map(fA), tr.map((d) => d.v), v.rounds, 0.3), mB = boost(tr.map(fB), tr.map((d) => d.v), v.rounds, 0.3);
+      const rm = (m, f) => Math.sqrt(te.reduce((s, d) => s + (m(f(d)) - d.v) ** 2, 0) / te.length);
+      const ra = rm(mA, fA), rb = rm(mB, fB);
+      const PA = proj({ x: 10, y: 24, w: 300, h: 290 }, BBX), PB = proj({ x: 330, y: 24, w: 300, h: 290 }, BBX);
+      [[PA, mA, fA, "A：只有经纬度"], [PB, mB, fB, "B：+ 到大城市的距离"]].forEach(([P, m, f, t]) => {
+        const st = 0.3;
+        for (let lat = BBX[2]; lat < BBX[3]; lat += st) for (let lon = BBX[0]; lon < BBX[1]; lon += st) {
+          if (!inPoly([lon + st / 2, lat + st / 2], CA)) continue;
+          const d = { lat: lat + st / 2, lon: lon + st / 2 };
+          K.svg(svg, "rect", { x: P.x(lon), y: P.y(lat + st), width: P.x(lon + st) - P.x(lon) + 0.5, height: P.y(lat) - P.y(lat + st) + 0.5, fill: priceColor(m(f(d))) });
+        }
+        drawCA(svg, P).style.fill = "none";
+        K.svg(svg, "text", { x: P.ox, y: 16, "font-size": 12, "font-weight": 700 }, t);
+      });
+      K.svg(svg, "text", { x: 10, y: 326, "font-size": 11, class: "muted" }, "地图颜色 = 模型对每个位置预测的房价（蓝便宜、红贵）");
+      return { readout: [
+        { k: "A 测试 RMSE（千美元）", v: ra.toFixed(1) },
+        { k: "B 测试 RMSE（千美元）", v: rb.toFixed(1), color: "var(--c6)" },
+        { k: "B 比 A 少", v: ((1 - rb / ra) * 100).toFixed(1) + "%", color: rb < ra ? "var(--good)" : "var(--bad)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

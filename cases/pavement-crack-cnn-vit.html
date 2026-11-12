@@ -1,0 +1,616 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>路面裂缝巡检</title>
+<meta name="description" content="Kaggle 案例拆解：3 万张混凝土与路面照片，判断有没有裂缝。同一份数据上对比一个小型 CNN 和一个从零训练的 Vision Transformer，并找出原 notebook 里评估环节的几处错误。">
+<link rel="stylesheet" href="../assets/case.css">
+<style>.pixi { image-rendering: pixelated; }</style>
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">混凝土表面照片 · 二分类 · CNN 对比 Vision Transformer</div>
+  <h1>路面裂缝巡检：小卷积网络和 ViT 谁更会“找裂缝”</h1>
+  <p class="en">Pavement Crack Inspection | CNN | ViT</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">卷积神经网络</span><span class="tag method">L1/L2 正则 + Dropout</span><span class="tag method">类别权重</span>
+    <span class="tag method">Vision Transformer</span><span class="tag method">图块切分与位置编码</span><span class="tag method">多头自注意力</span>
+    <span class="tag method">数据增强</span><span class="tag method">AdamW</span><span class="tag method">混淆矩阵</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Mir Tahmid</b></span>
+    <span>Kaggle 点赞 <b>597</b>（2026-11 抓取）</span>
+    <span>数据集 <b>oluwaseunad/concrete-and-pavement-crack-images</b></span>
+    <span><a href="https://www.kaggle.com/code/tahmidmir/pavement-crack-inspection-cnn-vit" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">3 万张混凝土 / 路面的近景照片</div><p>无人机和手机拍摄，统一缩成 227×227 的彩色图，分成“有裂缝”和“没裂缝”两个文件夹（数据集说明）。</p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这张照片里有没有裂缝</div><p>Positive = 有裂缝，Negative = 没裂缝。作者把图缩放到 240×240，按 8 : 2 切出测试集。<span data-cell="11">出处</span> <span data-cell="13">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">一个小 CNN，一个从零训练的 ViT</div><p>CNN：两层卷积 + 池化 + 带正则的全连接。ViT：把图切成 144 个 20×20 的小块，8 层 Transformer 编码器，AdamW 优化。<span data-cell="18">出处</span> <span data-cell="32">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">作者文字里没写分数</div><p>准确率在运行输出里。作者提醒：ViT 参数多、在小数据上容易过拟合，最好用大数据预训练后再微调。<span data-cell="43">出处</span> <span data-cell="47">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>Concrete &amp; Pavement Crack Dataset</b>：尼日利亚博尔诺州 Biu 的尼日利亚陆军大学一名土木工程专业学生为毕业设计拍摄，高处用 DJI Mavic 2 Enterprise 无人机，低处用手机。以下规模信息来自数据集说明页（许可：CC BY-SA 4.0）。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">图片总数</div><div class="v">30,000</div></div>
+        <div class="stat-tile"><div class="k">类别</div><div class="v">2</div></div>
+        <div class="stat-tile"><div class="k">原始尺寸</div><div class="v">227 × 227</div></div>
+        <div class="stat-tile"><div class="k">作者缩放到</div><div class="v">240 × 240</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">两类各有多少张，数据集说明和作者文字里都没写；作者用 <code>class_weight="balanced"</code> 自动按比例补偿 <span data-cell="22">出处</span>。数据集说明提到原作者自己的模型“超过 99%”，但那不是本 notebook 的成绩。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">文件夹里是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>文件夹</th><th>含义</th><th>作者给的标签</th></tr>
+        <tr><td><code>Negative/</code></td><td>没有裂缝的混凝土 / 路面照片</td><td>0</td></tr>
+        <tr><td><code>Positive/</code></td><td>有裂缝的照片</td><td><b>1（要找的目标）</b></td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">每张图是 RGB 三个颜色通道；作者读入后统一缩放成 240×240，于是一张图 = 240×240×3 = 172,800 个数 <span data-cell="11">出处</span>。</p>
+      <p class="callout">本页的“混凝土照片”都是代码生成的纹理加裂缝，只用来示意，不是数据集里的真实照片。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="18">
+    <h3>动手试试 A · 卷积核怎么“看见”裂缝 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="44">
+    <h3>动手试试 B · 切图块与自注意力：一块图在“看”谁 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>CNN 擅长提取边缘、纹理等局部特征，但可能难以把握长距离、全局的关系</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>ViT 用自注意力捕捉全局关系，可能更适合形态复杂多变的裂缝</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>ViT 参数远多于 CNN，在小数据集上容易过拟合，非常依赖数据增强</td><td><span data-cell="43">第 43 格</span></td></tr>
+        <tr><td>论文里的好成绩来自在 JFT-300M 上预训练再微调；实际应用建议直接微调预训练好的 ViT</td><td><span data-cell="47">第 47 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">CNN 和 ViT 的测试准确率都只在运行输出里（第 26、45 格打印），作者文字里没写，Kaggle 下载的源码也不带输出，所以这里不列分数。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li><b>ViT 的混淆矩阵画成了 CNN 的</b>：第 51 格用的是 CNN 的预测 <code>y_pred</code>，而不是上一格算好的 <code>vit_y_pred</code> <span data-cell="51">第 51 格</span>。</li>
+        <li>第 18 格的 <code>input_shape=(pic_size,pic_size,3)</code> 里 <code>pic_size</code> 从未定义（前面定义的是 <code>image_size</code>），按顺序运行会报错 <span data-cell="18">第 18 格</span>。</li>
+        <li>没有单独的验证集：两个模型都把测试集当 <code>validation_data</code>，ViT 还按测试集准确率挑最好的那一轮权重，测试分数会偏乐观 <span data-cell="23">第 23 格</span> <span data-cell="45">第 45 格</span>。</li>
+        <li>两分类问题算“前 5 名准确率”（top-5）永远是 100%，没有意义 <span data-cell="45">第 45 格</span>。</li>
+        <li>第 29 格的三角形遮罩把对角线（判对的格子）也遮掉了；第 30 格的“六边形遮罩”实际上什么也没遮 <span data-cell="29">第 29 格</span> <span data-cell="30">第 30 格</span>。</li>
+        <li>参数写着 <code>epochs = 15</code>、<code>num_epochs = 100</code>，实际 CNN 训练 100 轮、ViT 训练 10 轮，这两个变量都没被用到 <span data-cell="7">第 7 格</span> <span data-cell="32">第 32 格</span>。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>无人机或巡检车拍下的路面、桥面、隧道壁照片，自动标出“这块有裂缝”，再派人复查。</li>
+        <li><b>同类问题：</b>墙体渗水、钢结构锈蚀、光伏板隐裂、输电线异物、PCB 焊点缺陷，都是“表面有没有异常”的二分类。</li>
+        <li><b>可迁移的套路：</b>先用一个小 CNN 做基线 → 不平衡时加类别权重 → 留出独立的验证集选模型 → 再试更大的模型（ViT 最好用预训练权重）→ 用混淆矩阵看“漏检”和“误报”。</li>
+        <li><b>再进一步：</b>只知道“有没有”还不够，工程上常要知道裂缝在哪、有多长多宽，这需要分割模型（如 U-Net、DeepLabV3+）。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>读图、缩放、切分：<span data-cell="11">第 11 格</span> <span data-cell="13">第 13 格</span></li>
+        <li>小型 CNN + L1/L2 正则 + Dropout：<span data-cell="18">第 18 格</span></li>
+        <li>类别权重：<span data-cell="22">第 22 格</span></li>
+        <li>ViT 超参数：<span data-cell="32">第 32 格</span></li>
+        <li>数据增强（归一化、翻转、旋转、缩放）：<span data-cell="34">第 34 格</span></li>
+        <li>图块切分 / 图块编码：<span data-cell="38">第 38 格</span> <span data-cell="41">第 41 格</span></li>
+        <li>Transformer 编码器 × 8：<span data-cell="44">第 44 格</span></li>
+        <li>AdamW 训练：<span data-cell="45">第 45 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者把测试集同时当验证集用，还按它挑最好的一轮。为什么这样得到的“测试准确率”不能完全相信？应该怎么切数据？</li>
+      <li>对养路部门来说，“把有裂缝判成没裂缝”和“把没裂缝判成有裂缝”，哪个代价更大？阈值 0.5 合适吗？</li>
+      <li>同样的数据，作者认为从零训练的 ViT 不一定比小 CNN 好。为什么“模型越大越好”在这里不成立？</li>
+      <li>第 51 格把 ViT 的混淆矩阵画成了 CNN 的。如果你只看图，会得出什么错误结论？怎样的代码习惯能避免这种错误？</li>
+      <li>只判断“有没有裂缝”对修路够用吗？如果要估算修补用多少材料，还需要模型告诉我们什么？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Mir Tahmid，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的混凝土纹理、裂缝和注意力权重均为模拟示意。数据集：Omoebamije Oluwaseun, Concrete &amp; Pavement Crack Dataset（CC BY-SA 4.0）。
+</footer>
+</main>
+
+<script src="nb/pavement-crack-cnn-vit.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 示意：混凝土纹理 + 裂缝 ---------- */
+  function concrete(seed, S, crack, o) {
+    o = Object.assign({ width: 1.2, contrast: 0.45, rough: 0.12 }, o || {});
+    const r = K.rng(seed), img = new Float32Array(S * S);
+    // 多尺度随机纹理
+    const oct = [4, 8, 16].map((g) => { const a = []; for (let i = 0; i <= g; i++) { a.push([]); for (let j = 0; j <= g; j++) a[i].push(r() - 0.5); } return { g, a }; });
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      let v = 0.62;
+      oct.forEach(({ g, a }, k) => { const fx = (x / S) * g, fy = (y / S) * g, i = Math.floor(fy), j = Math.floor(fx), u = fx - j, w = fy - i;
+        v += ((a[i][j] * (1 - u) + a[i][j + 1] * u) * (1 - w) + (a[i + 1][j] * (1 - u) + a[i + 1][j + 1] * u) * w) * o.rough * (k === 2 ? 0.8 : 1.2); });
+      v += (r() - 0.5) * o.rough * 0.9;
+      if (r() < 0.004) v -= 0.25;
+      img[y * S + x] = v;
+    }
+    const path = [];
+    if (crack) {
+      const vert = r() < 0.5;
+      let p = vert ? [r() * S, 0] : [0, r() * S], ang = vert ? Math.PI / 2 + (r() - 0.5) * 0.6 : (r() - 0.5) * 0.6;
+      while (p[0] >= -2 && p[0] <= S + 2 && p[1] >= -2 && p[1] <= S + 2) {
+        path.push(p.slice());
+        ang += (r() - 0.5) * 0.7;
+        const base = vert ? Math.PI / 2 : 0; ang = base + K.clamp(ang - base, -0.9, 0.9);
+        p = [p[0] + Math.cos(ang) * 1.5, p[1] + Math.sin(ang) * 1.5];
+      }
+      path.forEach(([px, py], k) => {
+        const w = o.width * (0.7 + 0.6 * Math.sin(k * 0.13 + seed));
+        for (let y = Math.floor(py - 3); y <= py + 3; y++) for (let x = Math.floor(px - 3); x <= px + 3; x++) {
+          if (x < 0 || y < 0 || x >= S || y >= S) continue;
+          const d = Math.hypot(x + 0.5 - px, y + 0.5 - py), f = K.clamp(1 - (d - w * 0.5) / 0.9, 0, 1);
+          img[y * S + x] = Math.min(img[y * S + x], img[y * S + x] - o.contrast * f);
+        }
+      });
+    }
+    return { img, path };
+  }
+  const cv = document.createElement("canvas");
+  function draw(svg, arr, S, x, y, w, opt) {
+    opt = opt || {};
+    cv.width = S; cv.height = S;
+    const g = cv.getContext("2d"), im = g.createImageData(S, S);
+    let lo = 0, hi = 1;
+    if (opt.norm) { lo = Infinity; hi = -Infinity; for (const a of arr) { lo = Math.min(lo, a); hi = Math.max(hi, a); } if (hi - lo < 1e-9) hi = lo + 1; }
+    for (let i = 0; i < S * S; i++) {
+      const t = K.clamp((arr[i] - lo) / (hi - lo), 0, 1);
+      if (opt.heat) { im.data[i * 4] = 255 * Math.min(1, t * 2); im.data[i * 4 + 1] = 255 * Math.max(0, t * 2 - 1); im.data[i * 4 + 2] = 40 * (1 - t); }
+      else { im.data[i * 4] = 255 * t * 1.02; im.data[i * 4 + 1] = 255 * t * 0.98; im.data[i * 4 + 2] = 255 * t * 0.9; }
+      im.data[i * 4 + 3] = 255;
+    }
+    g.putImageData(im, 0, 0);
+    return K.svg(svg, "image", { x, y, width: w, height: w, href: cv.toDataURL(), class: "pixi", preserveAspectRatio: "none" });
+  }
+  function conv(img, S, k) {
+    const out = new Float32Array(S * S), n = Math.round(Math.sqrt(k.length)), h = (n - 1) / 2;
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      let s = 0;
+      for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) { const yy = K.clamp(y + i - h, 0, S - 1), xx = K.clamp(x + j - h, 0, S - 1); s += img[yy * S + xx] * k[i * n + j]; }
+      out[y * S + x] = s;
+    }
+    return out;
+  }
+  const relu = (a) => a.map((v) => Math.max(0, v));
+  function pool(a, S, p) { const T = Math.floor(S / p), o = new Float32Array(T * T); for (let y = 0; y < T; y++) for (let x = 0; x < T; x++) { let m = -Infinity; for (let i = 0; i < p; i++) for (let j = 0; j < p; j++) m = Math.max(m, a[(y * p + i) * S + x * p + j]); o[y * T + x] = m; } return { a: o, S: T }; }
+  const KERNELS = {
+    dark: [-1, -1, -1, -1, 8, -1, -1, -1, -1].map((v) => -v / 8),
+    sobelx: [1, 0, -1, 2, 0, -2, 1, 0, -1],
+    sobely: [1, 2, 1, 0, 0, 0, -1, -2, -1],
+    blur: [1, 2, 1, 2, 4, 2, 1, 2, 1].map((v) => v / 16),
+  };
+
+  const steps = [
+    {
+      at: 0, title: "两种看图方式：CNN 与 ViT", kicker: "第 0–1 格 · 作者的开场介绍",
+      html: `<p>作者先介绍两类模型。<b>CNN（卷积神经网络）</b>用一个个小卷积核在图上滑动，擅长抓边缘、纹理这种<b>局部</b>特征；缺点是难以把握图上相距很远的两块之间的关系。</p><p><b>ViT（Vision Transformer）</b>把图切成一个个小方块，当成一串“词”，用<b>自注意力</b>让每一块都能直接“看”到其他所有块，擅长抓<b>全局</b>关系。作者认为它可能更适合形态复杂多变的裂缝。</p>`,
+      cells: [0, 1],
+      draw(svg, ctx) {
+        const S = 48, im = concrete(11, S, true, { width: 1.6, contrast: 0.5 }).img;
+        K.svg(svg, "text", { x: 170, y: 24, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "CNN：小窗口一格格扫");
+        K.svg(svg, "text", { x: 540, y: 24, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "ViT：切块后互相“看”");
+        draw(svg, im, S, 50, 40, 240); draw(svg, im, S, 420, 40, 240);
+        const win = K.svg(svg, "rect", { x: 50, y: 40, width: 30, height: 30, fill: "var(--c1)", "fill-opacity": 0.25, stroke: "var(--c1)", "stroke-width": 2 });
+        for (let k = 1; k < 6; k++) { K.svg(svg, "line", { x1: 420 + k * 40, y1: 40, x2: 420 + k * 40, y2: 280, stroke: "var(--panel)", "stroke-width": 2 }); K.svg(svg, "line", { x1: 420, y1: 40 + k * 40, x2: 660, y2: 40 + k * 40, stroke: "var(--panel)", "stroke-width": 2 }); }
+        const q = [2, 3], links = [];
+        for (let i = 0; i < 6; i++) for (let j = 0; j < 6; j++) if (i !== q[0] || j !== q[1]) links.push(K.svg(svg, "line", { x1: 420 + q[1] * 40 + 20, y1: 40 + q[0] * 40 + 20, x2: 420 + j * 40 + 20, y2: 40 + i * 40 + 20, stroke: "var(--warn)", "stroke-width": 1, opacity: 0 }));
+        K.svg(svg, "text", { x: 170, y: 310, "text-anchor": "middle", "font-size": 12, class: "muted" }, "每次只看 3×3 的一小片，层层叠加才看到大范围");
+        K.svg(svg, "text", { x: 540, y: 310, "text-anchor": "middle", "font-size": 12, class: "muted" }, "第一层就能让任意两块“对话”");
+        (async () => {
+          const ok = await ctx.tween(2600, (t) => { const k = Math.floor(t * 63.99), cx = k % 8, cy = Math.floor(k / 8); K.set(win, { x: 50 + cx * 30, y: 40 + cy * 30 }); });
+          if (!ok) return;
+          await ctx.tween(1200, (t) => links.forEach((l, i) => (l.style.opacity = K.clamp(t * links.length - i, 0, 1) * 0.7)));
+        })();
+      },
+    },
+    {
+      at: 2, title: "装工具、定参数", kicker: "第 2–7 格 · 准备工作",
+      html: `<p>作者先装了 <code>tensorflow-addons</code>（后面要用里面的 AdamW 优化器）和画网络结构图的 <code>visualkeras</code>，用 <code>nvidia-smi</code> 看一眼 GPU，然后导入一大串库。</p><p>第 7 格设了两个通用参数：<code>epochs = 15</code>、<code>image_size = 240</code>，并固定随机种子。注意：这个 <code>epochs = 15</code> 后面<b>一次也没用上</b>，CNN 实际训练 100 轮、ViT 训练 10 轮，读代码时要以实际调用的数字为准。</p>`,
+      cells: [5, 7], highlight: ["epochs = 15", "image_size = 240"],
+      draw(svg, ctx) {
+        const items = [["tensorflow / keras", "搭网络、训练"], ["tensorflow-addons", "AdamW 优化器"], ["opencv (cv2)", "读图、缩放"], ["scikit-learn", "切分、类别权重、混淆矩阵"], ["visualkeras", "画网络结构"]];
+        items.forEach((it, i) => { const g = K.node(svg, 30, 24 + i * 58, 210, 44, it[0], { fs: 13, bold: true }); g.style.opacity = 0; const t = K.svg(svg, "text", { x: 254, y: 52 + i * 58, "font-size": 12, class: "muted" }, it[1]); t.style.opacity = 0; ctx.wait(i * 250).then((ok) => ok && (g.style.opacity = t.style.opacity = 1)); });
+        const p1 = K.node(svg, 470, 70, 220, 56, "epochs = 15", { fs: 15 });
+        K.node(svg, 470, 150, 220, 56, "image_size = 240", { fs: 15, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const x = K.svg(svg, "text", { x: 580, y: 250, "text-anchor": "middle", "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "");
+        ctx.wait(1700).then((ok) => { if (!ok) return; p1.querySelector("rect").style.stroke = "var(--bad)"; p1.querySelector("text").style.textDecoration = "line-through"; x.textContent = "定义了却没用：实际训练 100 轮 / 10 轮"; });
+      },
+    },
+    {
+      at: 8, title: "读入图片，切出测试集", kicker: "第 8–13 格 · 数据加载",
+      html: `<p><code>load_and_process_dataset</code> 依次进入 <code>Negative</code>、<code>Positive</code> 两个文件夹，每张图用 OpenCV 读入、把 BGR 转成 RGB、缩放到 240×240，标签就是文件夹的序号（0 = 没裂缝，1 = 有裂缝）。</p><p>然后 <code>train_test_split(test_size=0.2)</code> 随机切出 20% 当测试集。没有单独切验证集，这一点后面会出问题。</p><p class="callout">小细节：循环里每读一张图都要重新 <code>os.listdir</code> 一次整个文件夹，图片多时会很慢，先列一次目录再循环更好。</p>`,
+      cells: [11, 13], highlight: ["cv2.resize(image, (240, 240))", "labels.append(class_index)", "test_size=0.2"],
+      draw(svg, ctx) {
+        const S = 20;
+        K.node(svg, 20, 40, 130, 46, "Negative/  → 0", { fs: 12 });
+        K.node(svg, 20, 200, 130, 46, "Positive/  → 1", { fs: 12, fill: "color-mix(in srgb, var(--c6) 15%, var(--panel))", stroke: "var(--c6)" });
+        const tiles = [];
+        for (let i = 0; i < 40; i++) { const crack = i >= 20, e = draw(svg, concrete(100 + i, S, crack, { width: 1.3, contrast: 0.55 }).img, S, 170 + (i % 10) * 34, crack ? 180 + Math.floor((i - 20) / 10) * 36 : 24 + Math.floor(i / 10) * 36, 30); e.style.opacity = 0; tiles.push(e); }
+        const tr = K.svg(svg, "text", { x: 540, y: 120, "font-size": 14, "font-weight": 700, fill: "var(--c1)" }, "");
+        const te = K.svg(svg, "text", { x: 540, y: 150, "font-size": 14, "font-weight": 700, fill: "var(--c3)" }, "");
+        K.svg(svg, "text", { x: 540, y: 196, "font-size": 12, class: "muted" }, "（没有单独的验证集）");
+        (async () => {
+          if (!(await ctx.tween(1400, (t) => tiles.forEach((e, i) => (e.style.opacity = K.clamp(t * 40 - i, 0, 1)))))) return;
+          const r = K.rng(4);
+          tiles.forEach((e) => { if (r() < 0.2) { e.style.outline = "2px solid"; K.svg(svg, "rect", { x: +e.getAttribute("x") - 1, y: +e.getAttribute("y") - 1, width: 32, height: 32, fill: "none", stroke: "var(--c3)", "stroke-width": 3 }); } });
+          tr.textContent = "训练集 80%"; te.textContent = "测试集 20%（绿框）";
+        })();
+      },
+    },
+    {
+      at: 14, title: "看看有裂缝和没裂缝的样子", kicker: "第 14–16 格 · 可视化",
+      html: `<p><code>plot_state</code> 从指定文件夹里取前 9 张图，排成 3×3 显示。作者分别看了 <code>Positive</code>（有裂缝）和 <code>Negative</code>（没裂缝）。</p><p>有裂缝的图里通常有一条细长、弯弯曲曲的暗线；没裂缝的图只有颗粒、斑点和明暗不均。难点是：混凝土本身就有很多暗斑、污渍、阴影，模型要学会区分“细长连续的暗线”和“零散的暗点”。</p>`,
+      cells: [14, 15, 16], highlight: ["[:9]"],
+      draw(svg, ctx) {
+        const S = 40;
+        K.svg(svg, "text", { x: 170, y: 22, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--c6)" }, "Positive：有裂缝（示意）");
+        K.svg(svg, "text", { x: 540, y: 22, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "Negative：没裂缝（示意）");
+        const all = [];
+        for (let i = 0; i < 9; i++) {
+          all.push(draw(svg, concrete(300 + i, S, true, { width: 1.4 + (i % 3) * 0.6, contrast: 0.4 + (i % 4) * 0.08 }).img, S, 70 + (i % 3) * 68, 34 + Math.floor(i / 3) * 68, 64));
+          all.push(draw(svg, concrete(400 + i, S, false, { rough: 0.1 + (i % 3) * 0.05 }).img, S, 440 + (i % 3) * 68, 34 + Math.floor(i / 3) * 68, 64));
+        }
+        all.forEach((e) => (e.style.opacity = 0));
+        K.svg(svg, "text", { x: 360, y: 260, "text-anchor": "middle", "font-size": 13 }, "要区分的是：细长、连续的暗线  vs  零散的暗点、污渍和阴影");
+        ctx.tween(1400, (t) => all.forEach((e, i) => (e.style.opacity = K.clamp(t * 18 - i, 0, 1))));
+      },
+    },
+    {
+      at: 17, title: "一个很小的 CNN", kicker: "第 17–21 格 · 搭卷积网络",
+      html: `<p>CNN 只有两组“卷积 + 池化”：</p><ul class="tight"><li>卷积 32 个 3×3 核，<b>步长 2</b>（每次跳两格扫），再 2×2 最大池化；重复一次；</li><li>摊平后接 64 个神经元的全连接层，同时加了三种正则（权重的 L1+L2、偏置的 L2、输出的 L2）和 50% Dropout，专门防过拟合；</li><li>最后 1 个 sigmoid 输出“有裂缝的概率”。</li></ul><p>步长 2 加池化，图在每组之后缩小约 4 倍，很快就缩到十几乘十几。</p><p class="callout warn">第 18 格写的是 <code>input_shape=(pic_size,pic_size,3)</code>，但 <code>pic_size</code> 从没定义过（前面叫 <code>image_size</code>），按顺序运行会报 <code>NameError</code>。作者大概是在别的版本里定义过它。</p>`,
+      cells: [18, 19], highlight: ["strides=(2,2)", "pic_size", "regularizers.L1L2(l1=1e-3, l2=1e-3)", "Dropout(0.5)"],
+      draw(svg, ctx) {
+        const S = 48, im = concrete(21, S, true, { width: 1.5, contrast: 0.55 }).img;
+        draw(svg, im, S, 20, 60, 150);
+        K.svg(svg, "text", { x: 95, y: 228, "text-anchor": "middle", "font-size": 12 }, "输入 240×240×3");
+        const f1 = relu(conv(im, S, KERNELS.dark)), p1 = pool(f1, S, 2), f2 = relu(conv(p1.a, p1.S, KERNELS.dark)), p2 = pool(f2, p1.S, 2);
+        const fm1 = draw(svg, f1, S, 220, 75, 120, { norm: true, heat: true });
+        const fm2 = draw(svg, p2.a, p2.S, 380, 95, 80, { norm: true, heat: true });
+        [fm1, fm2].forEach((e) => (e.style.opacity = 0));
+        K.svg(svg, "text", { x: 280, y: 228, "text-anchor": "middle", "font-size": 12 }, "卷积 32 核 · 步长 2");
+        K.svg(svg, "text", { x: 420, y: 228, "text-anchor": "middle", "font-size": 12 }, "再卷积 + 池化");
+        const fc = K.node(svg, 500, 100, 90, 70, "全连接 64\nL1/L2 正则\nDropout 0.5", { fs: 11 });
+        const out = K.node(svg, 610, 112, 90, 46, "sigmoid", { fs: 12, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        [fc, out].forEach((e) => (e.style.opacity = 0));
+        const win = K.svg(svg, "rect", { x: 20, y: 60, width: 14, height: 14, fill: "none", stroke: "var(--warn)", "stroke-width": 2 });
+        const prob = K.svg(svg, "text", { x: 655, y: 190, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--c6)" }, "");
+        K.svg(svg, "text", { x: 20, y: 300, "font-size": 12, class: "muted" }, "特征图：亮 = 这个位置像“暗线”（这里用一个找暗线的卷积核示意，真实网络的 32 个核是学出来的）");
+        (async () => {
+          if (!(await ctx.tween(1800, (t) => { const k = Math.floor(t * 99.99), cx = k % 10, cy = Math.floor(k / 10); K.set(win, { x: 20 + cx * 14, y: 60 + cy * 14 }); fm1.style.opacity = t; }))) return;
+          win.style.opacity = 0;
+          if (!(await ctx.tween(600, (t) => (fm2.style.opacity = t)))) return;
+          if (!(await ctx.tween(600, (t) => (fc.style.opacity = out.style.opacity = t)))) return;
+          prob.textContent = "P(有裂缝)";
+        })();
+      },
+    },
+    {
+      at: 22, title: "类别权重，然后训练 100 轮", kicker: "第 22–23 格 · 训练 CNN",
+      html: `<p>两类图片数量不一定一样多。<code>compute_class_weight("balanced")</code> 给少的那一类更大的权重：少数类每答错一次，扣的分更多，模型就不会偏向多数类。</p><p>然后训练 100 轮。注意 <code>validation_data=(x_test, y_test)</code>：作者拿<b>测试集</b>当验证集，一边训练一边看测试集成绩。如果据此调整模型或挑轮次，测试集就不再“没见过”，分数会偏乐观。规范做法是从训练集里再切一份验证集。</p>`,
+      cells: [22, 23], highlight: ["class_weight = \"balanced\"", "epochs = 100", "validation_data=(x_test, y_test)"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "类别权重（示意：多数类 60%、少数类 40%）");
+        const bars = [["没裂缝", 0.6, "var(--ink-3)"], ["有裂缝", 0.4, "var(--c6)"]];
+        const els = bars.map(([n, p, c], i) => { K.svg(svg, "text", { x: 30, y: 66 + i * 40, "font-size": 12 }, n); return K.svg(svg, "rect", { x: 90, y: 52 + i * 40, width: p * 300, height: 22, fill: c, opacity: 0.8 }); });
+        const wt = bars.map(([n, p], i) => K.svg(svg, "text", { x: 400, y: 68 + i * 40, "font-size": 13, "font-family": "var(--mono)" }, ""));
+        K.svg(svg, "text", { x: 30, y: 160, "font-size": 13, "font-weight": 700 }, "数据怎么用");
+        const parts = [["训练集 80%", "var(--c1)", 0.8], ["测试集 20%", "var(--c3)", 0.2]];
+        let x = 30; parts.forEach(([n, c, w]) => { K.svg(svg, "rect", { x, y: 172, width: w * 600, height: 36, fill: c, opacity: 0.7 }); K.svg(svg, "text", { x: x + w * 300, y: 195, "text-anchor": "middle", "font-size": 12, fill: "#fff" }, n); x += w * 600; });
+        const ar = K.svg(svg, "path", { d: "M570,214 C570,260 300,260 300,214", fill: "none", stroke: "var(--bad)", "stroke-width": 2, "stroke-dasharray": "5 3" }); ar.style.opacity = 0;
+        const warn = K.svg(svg, "text", { x: 30, y: 290, "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "");
+        ctx.wait(500).then((ok) => ok && ctx.tween(900, (t) => { bars.forEach(([n, p], i) => { const w = 0.5 / p; els[i].setAttribute("width", K.lerp(p * 300, p * w * 300 * 0.8, t)); wt[i].textContent = "权重 " + K.lerp(1, w, t).toFixed(2); }); }))
+          .then((ok) => ok && ctx.wait(500)).then((ok) => { if (!ok) return; ar.style.opacity = 1; warn.textContent = "测试集被拿去当验证集，每轮都“偷看”一次成绩"; });
+      },
+    },
+    {
+      at: 24, title: "评估 CNN：学习曲线和混淆矩阵", kicker: "第 24–30 格 · 看效果",
+      html: `<p>第 25 格画出训练集和“验证集”（其实是测试集）的损失、准确率曲线；第 26 格打印测试准确率；第 27、28 格用 0.5 当阈值把概率变成 0/1（两格做的是同一件事）。</p><p>接着画混淆矩阵，但作者两次都在遮罩上出了问题：</p><ul class="tight"><li>第 29 格用 <code>np.triu</code> 遮掉“上三角含对角线”，<b>判对的两个格子正好在对角线上，被遮掉了</b>，只剩左下角一个格子可看；</li><li>第 30 格的“六边形遮罩” <code>triu &amp; tril(k=-1)</code> 是两个不重叠区域的交集，结果全是 False，<b>什么也没遮</b>。</li></ul>`,
+      cells: [25, 26, 29, 30], highlight: ["mask = np.triu(np.ones_like(cnf_matrix_norm, dtype=bool))", "np.tril(np.ones_like(cnf_matrix, dtype=bool), k=-1)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 30, w: 260, h: 200 }, [0, 100], [0, 1], { xlabel: "训练轮次", ylabel: "准确率", yfmt: (v) => Math.round(v * 100) + "%" });
+        let d1 = "", d2 = ""; const r = K.rng(3);
+        for (let e = 0; e <= 100; e += 2) { const a = 1 - 0.45 * Math.exp(-e / 12), b = a - 0.02 - 0.03 * (e / 100) + (r() - 0.5) * 0.03; d1 += (e ? "L" : "M") + ax.sx(e) + "," + ax.sy(a); d2 += (e ? "L" : "M") + ax.sx(e) + "," + ax.sy(b); }
+        const p1 = K.svg(svg, "path", { d: d1, fill: "none", stroke: "var(--c1)", "stroke-width": 2 }), p2 = K.svg(svg, "path", { d: d2, fill: "none", stroke: "var(--c3)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 60, y: 22, "font-size": 11, class: "muted" }, "曲线形状为示意，蓝 = 训练，绿 = “验证”");
+        const mats = [["第 29 格的遮罩", [[0, 1], [0, 0]]], ["第 30 格的遮罩", [[0, 0], [0, 0]]]];
+        const cells = [];
+        mats.forEach(([nm, m], k) => {
+          const ox = 380 + k * 170, oy = 60;
+          K.svg(svg, "text", { x: ox + 60, y: 44, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, nm);
+          for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) {
+            const diag = i === j;
+            const masked = k === 0 ? j >= i : false;
+            const c = K.svg(svg, "rect", { x: ox + j * 60, y: oy + i * 60, width: 56, height: 56, fill: diag ? "var(--good)" : "var(--warn)", opacity: 0.8 });
+            K.svg(svg, "text", { x: ox + j * 60 + 28, y: oy + i * 60 + 33, "text-anchor": "middle", "font-size": 11, fill: "#fff" }, diag ? "判对" : "判错");
+            cells.push({ c, masked });
+          }
+        });
+        const t1 = K.svg(svg, "text", { x: 380, y: 210, "font-size": 12, fill: "var(--bad)" }, ""), t2 = K.svg(svg, "text", { x: 550, y: 210, "font-size": 12, fill: "var(--warn)" }, "");
+        K.svg(svg, "text", { x: 380, y: 260, "font-size": 12, class: "muted" }, "灰色 = 被遮罩隐藏的格子");
+        ctx.wait(900).then((ok) => { if (!ok) return; cells.forEach((o) => { if (o.masked) { o.c.style.fill = "var(--panel-2)"; o.c.style.opacity = 1; } }); t1.textContent = "判对的格子被遮了"; t2.textContent = "什么都没遮"; });
+      },
+    },
+    {
+      at: 31, title: "ViT 的参数：240 的图切成 144 块", kicker: "第 31–32 格 · 超参数",
+      html: `<p>ViT 的关键参数：</p><ul class="tight"><li><code>patch_size = 20</code>：把 240×240 的图切成 20×20 的小块，一共 (240/20)² = <b>144 块</b>，每块 20×20×3 = 1200 个数；</li><li><code>projection_dim = 64</code>：每块先压成 64 个数的向量；</li><li><code>num_heads = 4</code>：4 个注意力“头”，各看各的关系；</li><li><code>transformer_layers = 8</code>：8 层 Transformer 编码器；</li><li>分类头是 2048 → 1024 两层全连接，参数很多。</li></ul><p><code>num_epochs = 100</code> 写在这里，但后面训练函数里实际写死了 <code>epochs=10</code>。</p>`,
+      cells: [32], highlight: ["patch_size = 20", "num_patches = (image_size // patch_size) ** 2", "transformer_layers = 8"],
+      draw(svg, ctx) {
+        const S = 60, im = concrete(31, S, true, { width: 1.4, contrast: 0.5 }).img;
+        draw(svg, im, S, 30, 30, 240);
+        const lines = [];
+        for (let k = 1; k < 12; k++) { lines.push(K.svg(svg, "line", { x1: 30 + k * 20, y1: 30, x2: 30 + k * 20, y2: 30, stroke: "var(--panel)", "stroke-width": 1.5 })); lines.push(K.svg(svg, "line", { x1: 30, y1: 30 + k * 20, x2: 30, y2: 30 + k * 20, stroke: "var(--panel)", "stroke-width": 1.5 })); }
+        const facts = [["图 240 × 240", ""], ["块 20 × 20", ""], ["块数 12 × 12 = 144", "var(--accent)"], ["每块 20×20×3 = 1200 个数", ""], ["压成 64 维向量", ""], ["8 层 · 4 个头", ""]];
+        const ft = facts.map(([t, c], i) => { const e = K.svg(svg, "text", { x: 320, y: 60 + i * 38, "font-size": 15, "font-weight": c ? 700 : 400, fill: c || "var(--ink)" }, t); e.style.opacity = 0; return e; });
+        ctx.tween(1200, (t) => lines.forEach((l, i) => { if (i % 2 === 0) l.setAttribute("y2", 30 + 240 * t); else l.setAttribute("x2", 30 + 240 * t); }))
+          .then(async (ok) => { for (let i = 0; ok && i < ft.length; i++) ok = await ctx.tween(300, (t) => (ft[i].style.opacity = t)); });
+      },
+    },
+    {
+      at: 33, title: "数据增强和小积木 MLP", kicker: "第 33–36 格 · 预处理层",
+      html: `<p>ViT 很“吃数据”，所以作者把数据增强直接做成网络的前几层：</p><ul class="tight"><li><code>Normalization</code>：先用训练集算出均值和方差（<code>adapt(x_train)</code>），把像素标准化；</li><li><code>RandomFlip("horizontal")</code>：随机左右翻转；</li><li><code>RandomRotation(0.02)</code>：随机转一点点（约 ±7°）；</li><li><code>RandomZoom(0.2)</code>：随机放大缩小 20% 以内。</li></ul><p>第 36 格的 <code>mlp</code> 是一块小积木：若干层全连接 + GELU 激活 + Dropout，Transformer 每一层里和分类头都会用到它。</p>`,
+      cells: [34, 36], highlight: ["RandomFlip(\"horizontal\")", "RandomRotation(factor=0.02)", "adapt(x_train)"],
+      draw(svg, ctx) {
+        const S = 48, base = concrete(41, S, true, { width: 1.5, contrast: 0.55 }).img;
+        draw(svg, base, S, 30, 70, 160);
+        K.svg(svg, "text", { x: 110, y: 256, "text-anchor": "middle", "font-size": 12 }, "原图");
+        const g = K.svg(svg, "g");
+        const img = draw(g, base, S, 0, 0, 160);
+        const lab = K.svg(svg, "text", { x: 520, y: 256, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "");
+        const clip = K.svg(svg, "rect", { x: 440, y: 70, width: 160, height: 160, fill: "none", stroke: "var(--line)" });
+        const ops = [["左右翻转", (t) => `translate(${440 + 160 * t},70) scale(${1 - 2 * t},1)`], ["旋转 ≈7°", (t) => `translate(440,70) rotate(${7 * t} 80 80)`], ["放大 20%", (t) => `translate(440,70) scale(${1 + 0.2 * t}) translate(${-13 * t},${-13 * t})`], ["缩小 20%", (t) => `translate(440,70) scale(${1 - 0.2 * t}) translate(${20 * t},${20 * t})`]];
+        K.arrow(svg, 210, 150, 420, 150);
+        K.svg(svg, "text", { x: 315, y: 140, "text-anchor": "middle", "font-size": 12, class: "muted" }, "每次训练随机变一下");
+        (async () => {
+          for (let round = 0; round < 2; round++) for (const [n, f] of ops) {
+            lab.textContent = n;
+            if (!(await ctx.tween(700, (t) => g.setAttribute("transform", f(t))))) return;
+            if (!(await ctx.wait(350))) return;
+            g.setAttribute("transform", f(0));
+          }
+        })();
+      },
+    },
+    {
+      at: 37, title: "把图切成小块", kicker: "第 37–39 格 · Patches 层",
+      html: `<p><code>Patches</code> 层用 <code>tf.image.extract_patches</code> 按 20×20、步长 20 不重叠地切块，再把每块拉平成 1200 个数。一张图就变成了 <b>144 × 1200</b> 的表格：144 行，每行是一块。</p><p>第 39 格随机挑一张训练图，打印出图片大小、块大小、块数、每块元素数，并把 144 块按 12×12 排开显示。动画演示的就是切块再排成一串的过程。</p>`,
+      cells: [38, 39], highlight: ["tf.image.extract_patches", "tf.reshape(patches, [batch_size, -1, patch_dims])"],
+      draw(svg, ctx) {
+        const S = 36, im = concrete(51, S, true, { width: 1.3, contrast: 0.55 }).img, P = 6, n = S / P;
+        const tiles = [];
+        for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+          const sub = new Float32Array(P * P);
+          for (let y = 0; y < P; y++) for (let x = 0; x < P; x++) sub[y * P + x] = im[(i * P + y) * S + j * P + x];
+          tiles.push({ e: draw(svg, sub, P, 30 + j * 34, 40 + i * 34, 32), i, j });
+        }
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 12, class: "muted" }, "一张图（示意 6×6 = 36 块，作者是 12×12 = 144 块）");
+        const lab = K.svg(svg, "text", { x: 260, y: 320, "font-size": 13 }, "");
+        ctx.wait(800).then((ok) => ok && ctx.tween(2200, (t) => tiles.forEach((o, k) => {
+          const tt = K.clamp(t * 1.5 - k * 0.012, 0, 1);
+          const tx = 260 + (k % 12) * 36, ty = 60 + Math.floor(k / 12) * 80;
+          K.set(o.e, { x: K.lerp(30 + o.j * 34, tx, tt), y: K.lerp(40 + o.i * 34, ty, tt) });
+          lab.textContent = "排成一串“图块词”：每块拉平成 1 行数字";
+        })));
+      },
+    },
+    {
+      at: 40, title: "图块编码 + 位置编码", kicker: "第 40–41 格 · PatchEncoder",
+      html: `<p>每块 1200 个数先经过一个全连接层（<code>Dense(64)</code>），压成 64 维向量。</p><p>问题是：切成一串以后，模型不知道哪块原来在左上角、哪块在右下角。所以 <code>PatchEncoder</code> 再给每个位置（0 到 143）学一个 64 维的<b>位置编码</b>，直接<b>加</b>到图块向量上。这样同样的纹理出现在不同位置，向量也会略有不同。</p>`,
+      cells: [41], highlight: ["self.projection(patch) + self.position_embedding(positions)"],
+      draw(svg, ctx) {
+        const rows = 6, r = K.rng(9);
+        K.svg(svg, "text", { x: 90, y: 28, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "图块（1200 个数）");
+        K.svg(svg, "text", { x: 330, y: 28, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "压成 64 维");
+        K.svg(svg, "text", { x: 500, y: 28, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "+ 位置编码");
+        K.svg(svg, "text", { x: 640, y: 28, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "= 输入");
+        const vec = (x, y, seed, c) => { const rr = K.rng(seed), g = K.svg(svg, "g"); for (let k = 0; k < 12; k++) K.svg(g, "rect", { x: x + k * 9, y, width: 8, height: 26, fill: c, opacity: 0.25 + rr() * 0.75 }); return g; };
+        for (let i = 0; i < rows; i++) {
+          const y = 46 + i * 44;
+          const S = 12, sub = concrete(60 + i, S, i === 2 || i === 3, { width: 1.2, contrast: 0.6 }).img;
+          draw(svg, sub, S, 66, y - 4, 34);
+          K.svg(svg, "text", { x: 30, y: y + 18, "font-size": 11, class: "muted" }, "#" + i);
+          const a = vec(276, y, 70 + i, "var(--c1)"), b = vec(446, y, 90 + i, "var(--c4)"), c = vec(586, y, 110 + i, "var(--c3)");
+          [a, b, c].forEach((g, k) => { g.style.opacity = 0; ctx.wait(400 + k * 700 + i * 80).then((ok) => ok && (g.style.opacity = 1)); });
+          K.arrow(svg, 112, y + 13, 270, y + 13);
+          K.svg(svg, "text", { x: 425, y: y + 18, "font-size": 15 }, "+");
+        }
+        K.svg(svg, "text", { x: 30, y: 320, "font-size": 12, class: "muted" }, "位置编码让模型知道“这块原来在第几行第几列”（颜色深浅为示意）");
+      },
+    },
+    {
+      at: 42, title: "Transformer 编码器：每一块都在“看”别的块", kicker: "第 42–44 格 · 自注意力 × 8 层",
+      html: `<p>每一层 Transformer 做四件事：层归一化 → <b>多头自注意力</b> → 残差相加 → 层归一化 → MLP → 残差相加。重复 8 层。</p><p><b>自注意力</b>：每一块都给其他 143 块打分，“谁和我有关”，再按分数把别的块的信息加权汇总到自己身上。比如一条裂缝穿过好几块，这几块会互相给高分，彼此“串起来”。</p><p>和论文不同，作者没有加一个专门的 [CLS] 分类标记，而是把最后一层 144 块的输出全部摊平后接分类头。第 43 格作者也提醒：ViT 参数多，小数据上容易过拟合。</p>`,
+      cells: [44], highlight: ["layers.MultiHeadAttention(", "layers.Add()([attention_output, encoded_patches])", "layers.Flatten()(representation)"],
+      draw(svg, ctx) {
+        const S = 48, c = concrete(71, S, true, { width: 1.6, contrast: 0.6 }), im = c.img, n = 6, P = S / n;
+        draw(svg, im, S, 30, 40, 240);
+        for (let k = 1; k < n; k++) { K.svg(svg, "line", { x1: 30 + k * 40, y1: 40, x2: 30 + k * 40, y2: 280, stroke: "var(--panel)", "stroke-width": 2 }); K.svg(svg, "line", { x1: 30, y1: 40 + k * 40, x2: 270, y2: 40 + k * 40, stroke: "var(--panel)", "stroke-width": 2 }); }
+        const dark = []; for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) { let s = 0; for (let y = 0; y < P; y++) for (let x = 0; x < P; x++) s += im[(i * P + y) * S + j * P + x]; dark.push(-s / (P * P)); }
+        const q = dark.indexOf(Math.max(...dark));
+        const sc = dark.map((d) => Math.exp((d - Math.max(...dark)) * 30)), tot = sc.reduce((a, b) => a + b, 0);
+        const qi = Math.floor(q / n), qj = q % n;
+        K.svg(svg, "rect", { x: 30 + qj * 40, y: 40 + qi * 40, width: 40, height: 40, fill: "none", stroke: "var(--warn)", "stroke-width": 3 });
+        const ls = sc.map((s, k) => K.svg(svg, "line", { x1: 50 + qj * 40, y1: 60 + qi * 40, x2: 50 + qj * 40, y2: 60 + qi * 40, stroke: "var(--warn)", "stroke-width": 1 + 5 * s / Math.max(...sc), opacity: 0.25 + 0.75 * s / Math.max(...sc) }));
+        const layers = ["LayerNorm", "多头自注意力", "+ 残差", "LayerNorm", "MLP", "+ 残差"];
+        layers.forEach((l, i) => K.node(svg, 330 + (i % 3) * 125, 60 + Math.floor(i / 3) * 80, 112, 46, l, { fs: 12, fill: i === 1 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 1 ? "var(--accent)" : "var(--line)" }));
+        K.svg(svg, "text", { x: 330, y: 240, "font-size": 14, "font-weight": 700 }, "× 8 层");
+        K.svg(svg, "text", { x: 330, y: 270, "font-size": 12, class: "muted" }, "黄框 = 一块裂缝；线越粗 = 注意力越大（示意）");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1600, (t) => ls.forEach((l, k) => { const i = Math.floor(k / n), j = k % n; l.setAttribute("x2", K.lerp(50 + qj * 40, 50 + j * 40, t)); l.setAttribute("y2", K.lerp(60 + qi * 40, 60 + i * 40, t)); })));
+      },
+    },
+    {
+      at: 45, title: "训练 ViT：AdamW，实际只跑 10 轮", kicker: "第 45–47 格 · 训练",
+      html: `<p><code>run_experiment</code> 用 <b>AdamW</b> 优化器（Adam 加上“权重衰减”，让参数别长得太大），损失是带 logits 的稀疏交叉熵。每轮结束按 <code>val_accuracy</code> 保存最好的权重，训练完再加载它去评估。</p><ul class="tight"><li><code>model.fit(..., epochs=10)</code>：前面设的 <code>num_epochs = 100</code> 没有被用上；</li><li><code>validation_data=(x_test, y_test)</code> + 按它挑最好的权重：等于用测试集选模型，测试分数偏乐观；</li><li>两分类问题还算了“前 5 名准确率”，这个数恒为 100%，没有意义。</li></ul><p>第 47 格作者说明：论文里的好成绩来自在 JFT-300M 大数据上预训练；不预训练的话，可以多训练几轮、加层数、改块大小，实际应用更推荐微调预训练好的 ViT。</p>`,
+      cells: [45, 47], highlight: ["tfa.optimizers.AdamW(", "epochs=10", "SparseTopKCategoricalAccuracy(5", "save_best_only=True"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 360, h: 220 }, [1, 10], [0.4, 1], { xlabel: "训练轮次", ylabel: "准确率", xticks: 9, yfmt: (v) => Math.round(v * 100) + "%" });
+        const r = K.rng(7), va = [];
+        for (let e = 1; e <= 10; e++) va.push(0.6 + 0.3 * (1 - Math.exp(-e / 3)) + (r() - 0.5) * 0.08);
+        const dots = va.map((v, i) => K.svg(svg, "circle", { cx: ax.sx(i + 1), cy: ax.sy(v), r: 0, fill: "var(--c3)" }));
+        K.svg(svg, "text", { x: 70, y: 22, "font-size": 11, class: "muted" }, "“验证”准确率（其实是测试集，示意）");
+        const best = va.indexOf(Math.max(...va));
+        const ring = K.svg(svg, "circle", { cx: ax.sx(best + 1), cy: ax.sy(va[best]), r: 0, fill: "none", stroke: "var(--bad)", "stroke-width": 2.5 });
+        const t1 = K.svg(svg, "text", { x: 450, y: 70, "font-size": 13, fill: "var(--bad)" }, "");
+        const t2 = K.svg(svg, "text", { x: 450, y: 94, "font-size": 13, fill: "var(--bad)" }, "");
+        K.svg(svg, "text", { x: 450, y: 150, "font-size": 13 }, "top-5 准确率（只有 2 类）");
+        const t3 = K.svg(svg, "text", { x: 450, y: 180, "font-size": 24, "font-weight": 700, fill: "var(--warn)" }, "");
+        K.svg(svg, "text", { x: 450, y: 204, "font-size": 12, class: "muted" }, "前 5 名里总包含正确答案 → 恒为 100%");
+        ctx.tween(1500, (t) => dots.forEach((d, i) => d.setAttribute("r", K.clamp(t * 10 - i, 0, 1) * 5)))
+          .then((ok) => ok && ctx.tween(600, (t) => ring.setAttribute("r", 12 * t)))
+          .then((ok) => { if (!ok) return; t1.textContent = "按测试集挑“最好的一轮”"; t2.textContent = "→ 再用同一个测试集打分"; t3.textContent = "100%"; });
+      },
+    },
+    {
+      at: 48, title: "评估 ViT：混淆矩阵画成了 CNN 的", kicker: "第 48–51 格 · 评估",
+      html: `<p>第 49 格画 ViT 的学习曲线（标题还写着 “Optimizer : Adam”，实际是 AdamW）。第 50 格用 <code>argmax</code> 把 ViT 输出的两个分数变成预测类别，存进 <code>vit_y_pred</code>。</p><p class="callout warn">但第 51 格画混淆矩阵时用的是 <code>confusion_matrix(y_test, y_pred)</code>，<code>y_pred</code> 是前面 <b>CNN</b> 的预测。所以这张“ViT 混淆矩阵”其实和第 30 格 CNN 的那张一模一样。正确写法是 <code>confusion_matrix(y_test, vit_y_pred)</code>。</p><p>这类“变量名差一个前缀”的错误程序不会报错，最容易混进结论里。</p>`,
+      cells: [50, 51], highlight: ["vit_y_pred = [np.argmax(probas) for probas in vit_predictions]", "cnf_matrix = confusion_matrix(y_test, y_pred)"],
+      draw(svg, ctx) {
+        K.node(svg, 30, 50, 170, 56, "CNN 的预测\ny_pred", { fs: 13, fill: "color-mix(in srgb, var(--c1) 15%, var(--panel))", stroke: "var(--c1)" });
+        K.node(svg, 30, 200, 170, 56, "ViT 的预测\nvit_y_pred", { fs: 13, fill: "color-mix(in srgb, var(--c3) 15%, var(--panel))", stroke: "var(--c3)" });
+        K.node(svg, 470, 125, 210, 70, "第 51 格\n“ViT 混淆矩阵”", { fs: 13, bold: true });
+        const wrong = K.svg(svg, "path", { d: "M200,78 C330,78 360,150 470,155", fill: "none", stroke: "var(--bad)", "stroke-width": 3 });
+        const right = K.svg(svg, "path", { d: "M200,228 C330,228 360,170 470,165", fill: "none", stroke: "var(--good)", "stroke-width": 3, "stroke-dasharray": "6 4" });
+        const L1 = wrong.getTotalLength ? wrong.getTotalLength() : 300, L2 = right.getTotalLength ? right.getTotalLength() : 300;
+        wrong.style.strokeDasharray = L1; wrong.style.strokeDashoffset = L1; right.style.opacity = 0;
+        const t1 = K.svg(svg, "text", { x: 260, y: 66, "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "");
+        const t2 = K.svg(svg, "text", { x: 260, y: 262, "font-size": 13, fill: "var(--good)", "font-weight": 700 }, "");
+        ctx.tween(1200, (t) => (wrong.style.strokeDashoffset = L1 * (1 - t))).then((ok) => { if (!ok) return; t1.textContent = "实际用了这个 ✗"; return ctx.wait(700); })
+          .then((ok) => { if (!ok) return; right.style.opacity = 1; t2.textContent = "应该用这个 ✓"; });
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：卷积核找裂缝 ---------- */
+  const SA = 40;
+  function score(img, kern) { const f = relu(conv(img, SA, kern)), p = pool(f, SA, 2), p2 = pool(p.a, p.S, 2); const arr = Array.from(p2.a).sort((a, b) => b - a); return { f, p2, s: (arr[0] + arr[1] + arr[2]) / 3 }; }
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "k", label: "卷积核", value: "dark", options: [["dark", "找暗线（中间暗、四周亮）"], ["sobelx", "竖直边缘（Sobel x）"], ["sobely", "水平边缘（Sobel y）"], ["blur", "模糊（不找任何东西）"]] },
+      { id: "width", label: "裂缝宽度（像素）", min: 0.6, max: 3, step: 0.1, value: 1.2, fmt: (v) => v.toFixed(1) },
+      { id: "rough", label: "混凝土表面粗糙度（斑点、污渍）", min: 0.04, max: 0.3, step: 0.01, value: 0.12, fmt: (v) => v.toFixed(2) },
+      { id: "thr", label: "判为“有裂缝”的分数门槛", min: 0, max: 1, step: 0.01, value: 0.62, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "浏览器里现场生成 60 张有裂缝、60 张没裂缝的 40×40 示意图，每张都做“卷积 → ReLU → 2×2 池化两次”，取最强的 3 个响应的平均当“裂缝分数”，再和门槛比较。真实 CNN 的卷积核是训练学出来的，这里是手工挑的。",
+    render(svg, v) {
+      const kern = KERNELS[v.k], sc = [];
+      for (let i = 0; i < 120; i++) { const crack = i < 60, c = concrete(2000 + i, SA, crack, { width: v.width, contrast: 0.45, rough: v.rough }); sc.push({ crack, s: score(c.img, kern).s }); }
+      const mx = Math.max(...sc.map((d) => d.s)) || 1; sc.forEach((d) => (d.s /= mx));
+      const ex1 = concrete(2000, SA, true, { width: v.width, rough: v.rough }).img, ex0 = concrete(2060, SA, false, { width: v.width, rough: v.rough }).img;
+      const r1 = score(ex1, kern), r0 = score(ex0, kern);
+      [[ex1, r1, "有裂缝"], [ex0, r0, "没裂缝"]].forEach(([im, rr, n], k) => {
+        const y = 10 + k * 112;
+        draw(svg, im, SA, 10, y, 96); draw(svg, rr.f, SA, 116, y, 96, { norm: true, heat: true }); draw(svg, rr.p2.a, rr.p2.S, 222, y, 96, { norm: true, heat: true });
+        K.svg(svg, "text", { x: 58, y: y + 108, "text-anchor": "middle", "font-size": 10, class: "muted" }, n);
+      });
+      K.svg(svg, "text", { x: 164, y: 238, "text-anchor": "middle", "font-size": 10, class: "muted" }, "卷积 + ReLU");
+      K.svg(svg, "text", { x: 270, y: 238, "text-anchor": "middle", "font-size": 10, class: "muted" }, "池化两次后");
+      const ax = K.axes(svg, { x: 360, y: 20, w: 260, h: 200 }, [0, 1], [0, 1], { yticks: 0, xlabel: "裂缝分数" });
+      const bins = 20, h1 = new Array(bins).fill(0), h0 = new Array(bins).fill(0);
+      sc.forEach((d) => { const b = Math.min(bins - 1, Math.floor(d.s * bins)); (d.crack ? h1 : h0)[b]++; });
+      const hm = Math.max(...h1, ...h0, 1);
+      for (let b = 0; b < bins; b++) {
+        K.svg(svg, "rect", { x: ax.sx(b / bins), y: ax.sy(h0[b] / hm), width: 260 / bins - 1, height: ax.sy(0) - ax.sy(h0[b] / hm), fill: "var(--ink-3)", opacity: 0.6 });
+        K.svg(svg, "rect", { x: ax.sx(b / bins), y: ax.sy(h1[b] / hm), width: 260 / bins - 1, height: ax.sy(0) - ax.sy(h1[b] / hm), fill: "var(--c6)", opacity: 0.55 });
+      }
+      K.svg(svg, "line", { x1: ax.sx(v.thr), x2: ax.sx(v.thr), y1: 20, y2: 220, stroke: "var(--ink)", "stroke-dasharray": "5 3", "stroke-width": 2 });
+      K.svg(svg, "text", { x: 360, y: 270, "font-size": 11, fill: "var(--c6)" }, "■ 有裂缝的 60 张"); K.svg(svg, "text", { x: 480, y: 270, "font-size": 11, class: "muted" }, "■ 没裂缝的 60 张");
+      let TP = 0, FP = 0, FN = 0, TN = 0;
+      sc.forEach((d) => { const p = d.s >= v.thr; if (p && d.crack) TP++; else if (p) FP++; else if (d.crack) FN++; else TN++; });
+      const acc = (TP + TN) / 120;
+      return { readout: [
+        { k: "准确率", v: (acc * 100).toFixed(0) + "%", color: acc > 0.85 ? "var(--good)" : acc > 0.65 ? "var(--warn)" : "var(--bad)" },
+        { k: "漏检（有裂缝判成没有）", v: String(FN), color: FN > 6 ? "var(--bad)" : "var(--ink)" },
+        { k: "误报（没裂缝判成有）", v: String(FP), color: FP > 6 ? "var(--bad)" : "var(--ink)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：切块与注意力 ---------- */
+  const SB = 60, imgB = concrete(3001, SB, true, { width: 1.6, contrast: 0.55 });
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "ps", label: "图块边长（示意图 60×60；作者 240 的图用 20）", value: "10", options: [["5", "5 像素 → 12×12 = 144 块（同作者的块数）"], ["10", "10 像素 → 6×6 = 36 块"], ["15", "15 像素 → 4×4 = 16 块"], ["20", "20 像素 → 3×3 = 9 块"]] },
+      { id: "q", label: "选一块当“提问者”（编号）", min: 0, max: 143, step: 1, value: 0 },
+      { id: "temp", label: "注意力的集中程度（softmax 温度的倒数）", min: 1, max: 40, step: 1, value: 12 },
+    ],
+    note: "每块用 3 个手工特征（平均亮度、最暗处、暗像素比例）当作它的“向量”，提问块与每一块比相似度（这里用负的距离平方代替真实 ViT 里 query 与 key 的点积），再做 softmax，得到注意力分布。真实 ViT 的向量是 64 维、由网络学出来的，这里只演示“按相似度分配注意力”的计算过程。",
+    render(svg, v) {
+      const P = +v.ps, n = SB / P, N = n * n, q = Math.min(v.q, N - 1);
+      const feats = [];
+      for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+        let s = 0, mn = 1, dk = 0;
+        for (let y = 0; y < P; y++) for (let x = 0; x < P; x++) { const a = imgB.img[(i * P + y) * SB + j * P + x]; s += a; mn = Math.min(mn, a); if (a < 0.4) dk++; }
+        feats.push([1 - s / (P * P), 1 - mn, (dk / (P * P)) * 4]);
+      }
+      const fq = feats[q], logits = feats.map((f) => -((f[0] - fq[0]) ** 2 + (f[1] - fq[1]) ** 2 + (f[2] - fq[2]) ** 2) * v.temp * 4);
+      const m = Math.max(...logits), ex = logits.map((l) => Math.exp(l - m)), tot = ex.reduce((a, b) => a + b, 0), att = ex.map((e) => e / tot);
+      const W = 280;
+      draw(svg, imgB.img, SB, 10, 10, W);
+      const cs = W / n;
+      for (let k = 1; k < n; k++) { K.svg(svg, "line", { x1: 10 + k * cs, y1: 10, x2: 10 + k * cs, y2: 10 + W, stroke: "var(--panel)", "stroke-width": 1 }); K.svg(svg, "line", { x1: 10, y1: 10 + k * cs, x2: 10 + W, y2: 10 + k * cs, stroke: "var(--panel)", "stroke-width": 1 }); }
+      K.svg(svg, "rect", { x: 10 + (q % n) * cs, y: 10 + Math.floor(q / n) * cs, width: cs, height: cs, fill: "none", stroke: "var(--warn)", "stroke-width": 3 });
+      const am = Math.max(...att);
+      att.forEach((a, k) => K.svg(svg, "rect", { x: 330 + (k % n) * cs, y: 10 + Math.floor(k / n) * cs, width: cs - 1, height: cs - 1, fill: "var(--warn)", opacity: 0.05 + 0.95 * (a / am) }));
+      K.svg(svg, "rect", { x: 330 + (q % n) * cs, y: 10 + Math.floor(q / n) * cs, width: cs, height: cs, fill: "none", stroke: "var(--ink)", "stroke-width": 2 });
+      K.svg(svg, "text", { x: 150, y: 310, "text-anchor": "middle", "font-size": 12 }, "原图 + 切块（黄框 = 提问块）");
+      K.svg(svg, "text", { x: 470, y: 310, "text-anchor": "middle", "font-size": 12 }, "提问块分给每一块的注意力");
+      const top = att.map((a, k) => [a, k]).sort((a, b) => b[0] - a[0]).slice(0, 3);
+      return { readout: [
+        { k: "块数", v: `${n}×${n} = ${N}` },
+        { k: "每块元素数", v: `${P}×${P}×3 = ${P * P * 3}` },
+        { k: "注意力表大小", v: `${N}×${N} = ${N * N}` },
+        { k: "最受关注的 3 块", v: top.map((t) => `#${t[1]}`).join(" ") },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

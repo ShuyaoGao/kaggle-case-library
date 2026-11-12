@@ -1,0 +1,527 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SDN 里的 DDoS 检测</title>
+<meta name="description" content="Kaggle 案例拆解：用软件定义网络（SDN）交换机的流表统计识别 DDoS 流量，五种经典分类器在特征选择前后的对比。">
+<link rel="stylesheet" href="../assets/case.css">
+<style>#data table.res td:last-child{white-space:nowrap}</style>
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格数据 · 二分类 · 网络安全</div>
+  <h1>SDN 交换机里的 DDoS 检测：从流表统计认出洪水流量</h1>
+  <p class="en">DDoS Attack Detection Classification</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">独热编码</span><span class="tag method">标准化</span><span class="tag method">逻辑回归</span>
+    <span class="tag method">SVM（四种核）</span><span class="tag method">KNN + 网格搜索</span><span class="tag method">决策树 + 网格搜索</span>
+    <span class="tag method">随机森林</span><span class="tag method">按论文结果做特征选择</span><span class="tag method">相关性去冗余</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Aiken Kazin</b></span>
+    <span>Kaggle 点赞 <b>329</b>（2026-11 抓取）</span>
+    <span>数据集 <b>aikenkazin/ddos-sdn-dataset</b></span>
+    <span><a href="https://www.kaggle.com/code/aikenkazin/ddos-attack-detection-classification" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">SDN 交换机上的流表统计</div><p>软件定义网络（SDN）里，交换机会给每条“流”（同一对地址之间的一串数据包）记账：发了多少包、多少字节、持续多久、速率多少。每一行就是这样一条记账记录。<span data-cell="13">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这条流是良性（0）还是恶意（1）</div><p>作者在第 6 格注明：label 0 = 良性，1 = 恶意。恶意流量就是 DDoS 洪水攻击产生的流。<span data-cell="6">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">五个经典分类器，比两轮</div><p>先用全部数值列 + 协议独热编码训练逻辑回归、SVM、决策树、随机森林、KNN；再按一篇论文的特征排名挑列、去掉高度相关的重复列，重训一遍。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">作者：五个模型“都表现很好”</div><p>作者在第 26 格代码末尾的注释里写道：决策树、SVM、逻辑回归、KNN、随机森林都 “works well”。具体准确率只在运行输出里。<span data-cell="26">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>DDoS SDN dataset</b>（作者本人上传到 Kaggle）。下面的规模数字来自作者在第 18 格代码里手写的标注，列名来自 notebook 里实际用到的列；列的含义按列名和 SDN 流表的常识推断，以数据集说明为准。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">三种协议的请求数之和</div><div class="v">104,345</div></div>
+        <div class="stat-tile"><div class="k">其中恶意</div><div class="v" style="color:var(--c6)">40,784</div></div>
+        <div class="stat-tile"><div class="k">恶意占比（约）</div><div class="v" style="color:var(--c6)">39%</div></div>
+        <div class="stat-tile"><div class="k">标签</div><div class="v">0 / 1</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">第 18 格里，作者把三种协议的总请求数（41321、33588、29436）和其中的恶意请求数（9419、17499、13866）直接写进了画图代码 <span data-cell="18">出处</span>，上面的总数和占比是把它们相加得到的。这份数据不像信用卡欺诈那样极度不平衡。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么（notebook 里用到的列）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>白话含义</th><th>类型</th></tr>
+        <tr><td><code>dt</code></td><td>记录时间</td><td>数值</td></tr>
+        <tr><td><code>switch</code></td><td>是哪台交换机记的账</td><td>编号</td></tr>
+        <tr><td><code>src</code> / <code>dst</code></td><td>源 IP / 目的 IP</td><td>文本</td></tr>
+        <tr><td><code>pktcount</code> / <code>bytecount</code></td><td>这条流累计的包数 / 字节数</td><td>数值</td></tr>
+        <tr><td><code>dur</code> / <code>tot_dur</code></td><td>这条流持续了多久（两种计法）</td><td>数值</td></tr>
+        <tr><td><code>flows</code></td><td>交换机上同时存在的流数量</td><td>数值</td></tr>
+        <tr><td><code>pktperflow</code> / <code>byteperflow</code> / <code>pktrate</code></td><td>一段统计间隔内的包数、字节数、包速率</td><td>数值</td></tr>
+        <tr><td><code>Protocol</code></td><td>协议（三种）</td><td>类别</td></tr>
+        <tr><td><code>tx_bytes</code>、<code>tx_kbps</code>、<code>rx_kbps</code>、<code>tot_kbps</code></td><td>端口发送 / 接收的字节数与速率</td><td>数值</td></tr>
+        <tr><td><code>label</code></td><td><b>要预测的答案</b>：0 = 良性，1 = 恶意</td><td>类别</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="37">
+    <h3>动手试试 A · KNN 该看几个邻居？ <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="51">
+    <h3>动手试试 B · 删掉哪些列，模型还认得出洪水？ <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>决策树、SVM、逻辑回归、KNN、随机森林五个模型都 “works well”</td><td><span data-cell="26">第 26 格</span></td></tr>
+        <tr><td>特征选择沿用 MDPI《Electronics》2021 年一篇论文的排名，给出 14 个特征的权重（最高 src 17.87，最低 dur、tot_dur 各 1.11）</td><td><span data-cell="44">第 44 格</span></td></tr>
+        <tr><td>dur 与 tot_dur、pktperflow 与 pktrate 是重复或高度相关的特征</td><td><span data-cell="51">第 51 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">原 notebook 的准确率、分类报告都在运行输出里，Kaggle 下载的源码不带输出，作者的文字和注释里也没写具体数值，所以这里不列分数。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li>第 9 格饼图的标签写反了：sizes 第一项是 label 0（良性）的数量，却标成了 “Maliciuous”。<span data-cell="9">第 9 格</span></li>
+        <li>所有 <code>classification_report(预测, 真实)</code> 的参数顺序反了，sklearn 要求“真实在前”，这样打印出的精确率和召回率会互换。<span data-cell="26">第 26 格</span></li>
+        <li>第 51 格注释说 pktperflow 和 pktrate 高度相关，应该二选一，代码却把两列都删了。<span data-cell="51">第 51 格</span></li>
+        <li>标准化在切分训练 / 测试之前对全部数据拟合，测试集的信息轻微泄漏进了训练。<span data-cell="26">第 26 格</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>SDN 控制器每隔几秒从交换机拉一次流表统计，模型给每条流打“恶意”标记，控制器就能下发规则限速或丢弃这条流。</li>
+        <li><b>同类问题：</b>数据中心流量清洗、物联网网关异常流量识别、校园网带宽滥用检测。</li>
+        <li><b>可迁移的套路：</b>先看标签和每个类别的来源 → 去掉 IP、时间这类“身份证号”列，免得模型死记 → 用领域论文或相关性做特征选择 → 对比选择前后的效果和耗时。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>缺失值：直接丢掉含空值的行 <span data-cell="29">第 29 格</span></li>
+        <li>编码与缩放：<code>pd.get_dummies</code> 独热编码 <span data-cell="31">第 31 格</span>，<code>StandardScaler</code> <span data-cell="26">第 26 格</span></li>
+        <li>模型：逻辑回归（试 5 种求解器）、SVM（试 4 种核）、KNN（K=1–11 + 网格搜索）、决策树（网格搜索深度和叶子数）、随机森林（500 棵树） <span data-cell="26">第 26 格</span></li>
+        <li>特征选择：论文排名 <span data-cell="44">第 44 格</span> + 相关性热力图去冗余 <span data-cell="49">第 49 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者在建模前删掉了源 IP、目的 IP 和时间。如果保留它们，准确率可能更高，为什么这反而是坏事？</li>
+      <li>论文排名里 src 的权重最高（17.87），作者却没有用它。你同意吗？换一个网络环境，攻击者的 IP 还会是同一批吗？</li>
+      <li>第 51 格两列高度相关的特征被一起删掉了。动手试试 B 里，“只删一列”和“两列都删”的结果有什么不同？</li>
+      <li>如果 classification_report 的参数顺序反了，你会怎么从打印出来的表格里发现不对劲？</li>
+      <li>DDoS 检测要在几秒内反应。五个模型里，哪个最适合部署在 SDN 控制器上实时判断？除了准确率还要比什么？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Aiken Kazin，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：aikenkazin/ddos-sdn-dataset。
+</footer>
+</main>
+
+<script src="nb/ddos-sdn-classifiers.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const FAST = location.hash === "#fast";
+
+  /* 模拟一条流的特征：良性流速率低、包少；DDoS 流速率高、包多但每个包小 */
+  function makeFlows(seed, n, overlap) {
+    const r = K.rng(seed), X = [], y = [];
+    for (let i = 0; i < n; i++) {
+      const c = r() < 0.4 ? 1 : 0;
+      const sp = 0.6 + overlap * 1.2;
+      const a = c ? 1.3 + K.randn(r) * sp * 0.6 : -0.6 + K.randn(r) * sp * 0.7;
+      const b = c ? -0.8 + K.randn(r) * sp * 0.6 : 0.5 + K.randn(r) * sp * 0.7;
+      X.push([a, b]); y.push(c);
+    }
+    return { X, y };
+  }
+
+  const steps = [
+    {
+      title: "一行 = 交换机记下的一条流", kicker: "第 3–10 格 · 认识数据",
+      html: `<p>SDN（软件定义网络）把“怎么转发”的大脑集中到一个控制器上，交换机只负责照规则转发，并给每条<b>流</b>记账：同一对地址之间的数据包算一条流。</p><p>作者先看前几行、形状、类型，再数标签：第 6 格注释写明 0 是良性、1 是恶意。动画里控制器每隔一段时间向交换机要一次“账本”，每次拿到的就是一批这样的记录。</p>`,
+      cells: [3, 6, 7], highlight: ["label"],
+      notes: { 9: "注意：sizes 的第一项是 label 0（良性）的数量，却配了标签 “Maliciuous”，饼图上的两个标签贴反了。" },
+      draw(svg, ctx) {
+        const ctrl = K.node(svg, 270, 16, 180, 50, "SDN 控制器", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const sws = [0, 1, 2].map((i) => K.node(svg, 60 + i * 230, 120, 140, 44, "交换机 s" + (i + 1)));
+        [0, 1, 2].forEach((i) => K.arrow(svg, 130 + i * 230, 120, 360, 68, { dash: "4 3" }));
+        const hdr = ["switch", "src→dst", "pktcount", "pktrate", "Protocol", "label"];
+        hdr.forEach((h, j) => K.svg(svg, "text", { x: 40 + j * 110, y: 200, "font-size": 12, "font-weight": 700, "font-family": "var(--mono)" }, h));
+        const r = K.rng(4), rows = [];
+        for (let k = 0; k < 5; k++) {
+          const bad = r() < 0.45;
+          const vals = ["s" + (1 + Math.floor(r() * 3)), "h" + (1 + Math.floor(r() * 9)) + "→h" + (1 + Math.floor(r() * 9)), bad ? String(40000 + Math.floor(r() * 90000)) : String(200 + Math.floor(r() * 3000)), bad ? String(300 + Math.floor(r() * 600)) : String(1 + Math.floor(r() * 40)), ["UDP", "TCP", "ICMP"][Math.floor(r() * 3)], bad ? "1" : "0"];
+          const g = K.svg(svg, "g");
+          vals.forEach((v, j) => K.svg(g, "text", { x: 40 + j * 110, y: 226 + k * 22, "font-size": 12, "font-family": "var(--mono)", fill: j === 5 ? (bad ? "var(--c6)" : "var(--c3)") : "var(--ink)" }, v));
+          g.style.opacity = 0; rows.push(g);
+        }
+        K.svg(svg, "text", { x: 40, y: 336, "font-size": 11, class: "muted" }, "示意数据：数字是编的，只为说明一行记录的样子");
+        (async () => { for (const g of rows) { if (!(await ctx.tween(FAST ? 1 : 380, (t) => (g.style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      title: "缺失值与列的类型", kicker: "第 11–14 格 · 数据检查",
+      html: `<p>作者画出每列的空值数量，再把列分成<b>数值列</b>和<b>文本列</b>。文本列只有源 IP、目的 IP 和协议，它们后面要么被删掉，要么做独热编码。</p><p>有空值的行在建模前会被 <code>dropna()</code> 整行丢掉（第 29 格）。</p>`,
+      cells: [11, 13], highlight: ["select_dtypes"],
+      draw(svg, ctx) {
+        const cols = ["dt", "switch", "src", "dst", "pktcount", "bytecount", "dur", "flows", "pktrate", "Protocol", "tx_kbps", "rx_kbps", "label"];
+        const isObj = (c) => c === "src" || c === "dst" || c === "Protocol";
+        const els = cols.map((c, i) => {
+          const g = K.node(svg, 20 + (i % 7) * 98, 40 + Math.floor(i / 7) * 60, 90, 40, c, { fs: 12 });
+          return { g, c, i };
+        });
+        K.svg(svg, "text", { x: 30, y: 200, "font-size": 13, "font-weight": 700, fill: "var(--c1)" }, "数值列 → 直接进模型");
+        K.svg(svg, "text", { x: 460, y: 200, "font-size": 13, "font-weight": 700, fill: "var(--c2)" }, "文本列 → 删掉或编码");
+        ctx.wait(FAST ? 1 : 600).then((ok) => ok && ctx.tween(FAST ? 1 : 1400, (t) => {
+          let a = 0, b = 0;
+          els.forEach((e) => {
+            const obj = isObj(e.c);
+            const tx = obj ? 460 + (b++) * 0 : 30 + (a % 5) * 82, ty = obj ? 214 + (b - 1) * 40 : 214 + Math.floor(a++ / 5) * 40;
+            const x0 = 20 + (e.i % 7) * 98, y0 = 40 + Math.floor(e.i / 7) * 60;
+            e.g.setAttribute("transform", `translate(${(tx - x0) * t},${(ty - y0) * t})`);
+            const rc = e.g.querySelector("rect");
+            rc.style.stroke = obj ? "var(--c2)" : "var(--c1)";
+          });
+        }));
+      },
+    },
+    {
+      at: 15, title: "谁在发请求：按源 IP 数一数", kicker: "第 15–17 格 · 探索",
+      html: `<p>作者统计每个源 IP 发出的请求数，再单独统计恶意请求，最后把两张条形图叠在一起：绿色是全部，蓝色是其中恶意的部分。</p><p>这样一眼能看出哪些主机在“发洪水”（动画里的数字是示意）。不过真实网络中攻击者会换 IP，所以后面建模时作者没有把 IP 当特征。</p>`,
+      cells: [17], highlight: ["data.label == 1"],
+      draw(svg, ctx) {
+        const r = K.rng(8), hosts = [];
+        for (let i = 0; i < 8; i++) { const all = 30 + r() * 70; hosts.push({ n: "10.0.0." + (i + 1), all, bad: i % 3 === 0 ? all * (0.6 + r() * 0.3) : all * r() * 0.1 }); }
+        const ax = K.axes(svg, { x: 110, y: 20, w: 560, h: 280 }, [0, 110], [0, 8], { yticks: 0, xlabel: "请求数（示意）" });
+        const bars = hosts.map((h, i) => {
+          const y = 26 + i * 34;
+          K.svg(svg, "text", { x: 104, y: y + 17, "text-anchor": "end", "font-size": 12, "font-family": "var(--mono)" }, h.n);
+          const a = K.svg(svg, "rect", { x: ax.sx(0), y, width: 0, height: 24, fill: "var(--c3)", opacity: 0.6 });
+          const b = K.svg(svg, "rect", { x: ax.sx(0), y: y + 4, width: 0, height: 16, fill: "var(--c1)" });
+          return { a, b, h };
+        });
+        ctx.tween(FAST ? 1 : 900, (t) => bars.forEach((d) => d.a.setAttribute("width", (ax.sx(d.h.all) - ax.sx(0)) * t)))
+          .then((ok) => ok && ctx.tween(FAST ? 1 : 900, (t) => bars.forEach((d) => d.b.setAttribute("width", (ax.sx(d.h.bad) - ax.sx(0)) * t))));
+        K.svg(svg, "text", { x: 520, y: 330, "font-size": 12, fill: "var(--c3)" }, "■ 全部");
+        K.svg(svg, "text", { x: 580, y: 330, "font-size": 12, fill: "var(--c1)" }, "■ 其中恶意");
+      },
+    },
+    {
+      title: "按协议看：哪种协议里恶意最多", kicker: "第 18 格 · 探索",
+      html: `<p>同样的叠加条形图，这次按协议分组。作者把数字直接写进了代码：三种协议的总请求数分别是 41321、33588、29436，其中恶意的分别是 9419、17499、13866。<span data-cell="18">出处</span></p><p>按这些数字算，第二种协议里恶意占了一半以上，第一种只占两成多。协议本身就带有一点信息，所以后面会把 Protocol 做成独热编码保留下来。代码里没写明三根柱子各是哪种协议，动画里只标“协议 1/2/3”。</p>`,
+      cells: [18], highlight: ["41321", "33588", "29436"],
+      draw(svg, ctx) {
+        const D = [[41321, 9419], [33588, 17499], [29436, 13866]];
+        const ax = K.axes(svg, { x: 70, y: 20, w: 420, h: 270 }, [0, 3], [0, 45000], { xticks: 0, yticks: 3, yfmt: (v) => Math.round(v / 1000) + "k" });
+        const els = D.map((d, i) => {
+          const x = ax.sx(i + 0.2), w = ax.sx(0.6) - ax.sx(0);
+          const a = K.svg(svg, "rect", { x, y: ax.sy(0), width: w, height: 0, fill: "var(--c2)", opacity: 0.55 });
+          const b = K.svg(svg, "rect", { x, y: ax.sy(0), width: w, height: 0, fill: "var(--c1)" });
+          K.svg(svg, "text", { x: x + w / 2, y: 312, "text-anchor": "middle", "font-size": 12 }, "协议 " + (i + 1));
+          const p = K.svg(svg, "text", { x: x + w / 2, y: ax.sy(d[0]) - 6, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, "");
+          return { a, b, d, p };
+        });
+        ctx.tween(FAST ? 1 : 1000, (t) => els.forEach((e) => { const h = ax.sy(0) - ax.sy(e.d[0] * t); e.a.setAttribute("y", ax.sy(0) - h); e.a.setAttribute("height", h); }))
+          .then((ok) => ok && ctx.tween(FAST ? 1 : 1000, (t) => els.forEach((e) => { const h = ax.sy(0) - ax.sy(e.d[1] * t); e.b.setAttribute("y", ax.sy(0) - h); e.b.setAttribute("height", h); e.p.textContent = "恶意 " + Math.round((e.d[1] / e.d[0]) * 100 * t) + "%"; })));
+        K.svg(svg, "text", { x: 520, y: 60, "font-size": 13, fill: "var(--c2)" }, "■ 全部请求");
+        K.svg(svg, "text", { x: 520, y: 84, "font-size": 13, fill: "var(--c1)" }, "■ 其中恶意");
+        K.svg(svg, "text", { x: 520, y: 130, "font-size": 12, class: "muted" }, "数字来自第 18 格");
+        K.svg(svg, "text", { x: 520, y: 148, "font-size": 12, class: "muted" }, "作者手写的标注");
+      },
+    },
+    {
+      at: 19, title: "数值特征长什么样", kicker: "第 19–24 格 · 分布",
+      html: `<p>作者画了持续时间、发送字节数、发送速率、交换机编号的直方图，最后单独画了恶意流量来自哪些交换机。</p><p>这类网络统计量通常是<b>长尾</b>的：大多数流很小，少数流巨大。洪水流量往往包很多、速率很高，正好落在长尾那一端。</p>`,
+      cells: [21, 24], highlight: ["tx_bytes", "label"],
+      draw(svg, ctx) {
+        const r = K.rng(12), ben = [], bad = [];
+        for (let i = 0; i < 400; i++) ben.push(Math.exp(K.randn(r) * 0.8 + 1));
+        for (let i = 0; i < 250; i++) bad.push(Math.exp(K.randn(r) * 0.4 + 2.6));
+        const bins = 24, mx = 40, hb = new Array(bins).fill(0), hm = new Array(bins).fill(0);
+        ben.forEach((v) => hb[Math.min(bins - 1, Math.floor((v / mx) * bins))]++);
+        bad.forEach((v) => hm[Math.min(bins - 1, Math.floor((v / mx) * bins))]++);
+        const ax = K.axes(svg, { x: 50, y: 20, w: 620, h: 270 }, [0, mx], [0, 170], { yticks: 0, xlabel: "发送速率（示意单位）" });
+        const bw = ax.sx(mx / bins) - ax.sx(0);
+        const A = hb.map((c, i) => K.svg(svg, "rect", { x: ax.sx((i * mx) / bins), y: ax.sy(0), width: bw - 1, height: 0, fill: "var(--c3)", opacity: 0.7 }));
+        const B = hm.map((c, i) => K.svg(svg, "rect", { x: ax.sx((i * mx) / bins), y: ax.sy(0), width: bw - 1, height: 0, fill: "var(--c6)", opacity: 0.6 }));
+        K.svg(svg, "text", { x: 440, y: 40, "font-size": 13, fill: "var(--c3)" }, "■ 良性流：小而多");
+        K.svg(svg, "text", { x: 440, y: 62, "font-size": 13, fill: "var(--c6)" }, "■ 恶意流：集中在高速率一端");
+        ctx.tween(FAST ? 1 : 1000, (t) => A.forEach((e, i) => { const h = (ax.sy(0) - ax.sy(hb[i])) * t; e.setAttribute("y", ax.sy(0) - h); e.setAttribute("height", h); }))
+          .then((ok) => ok && ctx.tween(FAST ? 1 : 1000, (t) => B.forEach((e, i) => { const h = (ax.sy(0) - ax.sy(hm[i])) * t; e.setAttribute("y", ax.sy(0) - h); e.setAttribute("height", h); })));
+      },
+    },
+    {
+      at: 25, title: "一个类装下五种分类器", kicker: "第 25–26 格 · 建模工具箱",
+      html: `<p>作者写了一个 <code>Model</code> 类：构造时先用 <code>StandardScaler</code> 把所有列标准化，再按 7:3 切出训练集和测试集。类里五个方法各训练一种模型，并且<b>每种都试多组设置</b>：</p><ul class="tight"><li>逻辑回归：试 5 种求解器，挑准确率最高的</li><li>SVM：试 linear / poly / rbf / sigmoid 四种核</li><li>KNN：K 从 1 到 11 画曲线，再网格搜索 K、权重、距离</li><li>决策树：网格搜索深度 2–10、叶子数 2–11</li><li>随机森林：500 棵树</li></ul><p>注意两个小问题：标准化是在切分之前对全部数据做的；<code>classification_report</code> 的参数顺序写反了。</p>`,
+      cells: [26], highlight: ["StandardScaler", "classification_report(predicted_lr, self.y_test)", "solvers", "kernels"],
+      draw(svg, ctx) {
+        K.node(svg, 20, 140, 120, 60, "特征表 X\n标签 y", { bold: true });
+        K.node(svg, 170, 140, 110, 60, "标准化\n7:3 切分", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        K.arrow(svg, 140, 170, 168, 170);
+        const M = [["逻辑回归", "5 种求解器"], ["SVM", "4 种核"], ["KNN", "K=1…11 + 网格"], ["决策树", "深度×叶子 网格"], ["随机森林", "500 棵树"]];
+        const g = M.map((m, i) => {
+          const y = 14 + i * 64;
+          const a = K.arrow(svg, 280, 170, 338, y + 26);
+          const n = K.node(svg, 340, y, 130, 52, m[0], { bold: true });
+          const tries = [];
+          for (let k = 0; k < 5; k++) tries.push(K.svg(svg, "circle", { cx: 495 + k * 22, cy: y + 26, r: 7, fill: "var(--panel-2)", stroke: "var(--ink-3)" }));
+          K.svg(svg, "text", { x: 610, y: y + 30, "font-size": 11, class: "muted" }, m[1]);
+          a.style.opacity = n.style.opacity = 0;
+          return { a, n, tries };
+        });
+        (async () => {
+          for (const d of g) {
+            if (!(await ctx.tween(FAST ? 1 : 300, (t) => (d.a.style.opacity = d.n.style.opacity = t)))) return;
+            const best = Math.floor(Math.random() * 5);
+            for (let k = 0; k < 5; k++) { if (!(await ctx.tween(FAST ? 1 : 90, (t) => (d.tries[k].style.fill = `color-mix(in srgb, var(--c1) ${Math.round(t * 40)}%, var(--panel-2))`)))) return; }
+            d.tries[best].style.fill = "var(--good)";
+          }
+        })();
+      },
+    },
+    {
+      at: 27, title: "第一轮：不挑特征，全部用上", kicker: "第 27–37 格 · 无特征选择",
+      html: `<p>第一轮的预处理很简单：丢掉含空值的行；删掉 <code>dt</code>（时间）、<code>src</code>、<code>dst</code>（IP）和标签；剩下的列里只有 <code>Protocol</code> 是文字，用 <code>pd.get_dummies</code> 拆成三列 0/1（<b>独热编码</b>）。然后把五种模型挨个跑一遍。</p><p>删 IP 和时间是对的：它们像“身份证号”，模型会记住“某台主机就是坏人”，换个网络就失灵。</p>`,
+      cells: [30, 31, 33], highlight: ["'dt','src','dst','label'", "get_dummies"],
+      notes: { 37: "KNN 这一格会先画 K=1 到 11 的准确率曲线，再网格搜索。下面的实验 A 在模拟数据上重现这条曲线。" },
+      draw(svg, ctx) {
+        const cols = ["dt", "switch", "src", "dst", "pktcount", "pktrate", "…", "Protocol", "label"];
+        const drop = new Set(["dt", "src", "dst", "label"]);
+        const cells = cols.map((c, i) => ({ c, g: K.node(svg, 20 + i * 76, 40, 70, 40, c, { fs: 12 }) }));
+        const x0 = 20 + 7 * 76;
+        const oh = ["UDP", "TCP", "ICMP"].map((p, j) => { const g = K.node(svg, x0 - 40 + j * 64, 170, 60, 40, "P_" + p, { fs: 11, fill: "color-mix(in srgb, var(--c2) 15%, var(--panel))", stroke: "var(--c2)" }); g.style.opacity = 0; return g; });
+        const vals = [[1, 0, 0], [0, 0, 1], [0, 1, 0]];
+        const vt = [];
+        vals.forEach((row, k) => row.forEach((v, j) => { const t = K.svg(svg, "text", { x: x0 - 10 + j * 64, y: 236 + k * 20, "text-anchor": "middle", "font-size": 12, "font-family": "var(--mono)" }, v); t.style.opacity = 0; vt.push(t); }));
+        const lab = K.svg(svg, "text", { x: 20, y: 120, "font-size": 13, fill: "var(--bad)" }, "");
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 12, class: "muted" }, "协议名称只是示意；独热编码 = 一个类别变成几列 0/1 开关");
+        ctx.wait(FAST ? 1 : 500)
+          .then((ok) => { if (ok) lab.textContent = "✗ 删掉：时间、源 IP、目的 IP（以及答案 label）"; return ok && ctx.tween(FAST ? 1 : 900, (t) => cells.forEach((d) => { if (drop.has(d.c)) { d.g.style.opacity = 1 - 0.85 * t; } })); })
+          .then((ok) => ok && ctx.tween(FAST ? 1 : 900, (t) => { oh.forEach((g) => (g.style.opacity = t)); vt.forEach((v) => (v.style.opacity = t)); }));
+      },
+    },
+    {
+      at: 38, title: "第二轮：借用论文的特征排名", kicker: "第 38–45 格 · 特征选择",
+      html: `<p>第二轮作者没有自己算特征重要性，而是引用了一篇 MDPI 期刊论文的结果（第 43 格给出链接），把论文里 14 个特征的权重抄进代码。</p><p>动画里的条形长度就是第 44 格里写的权重。src、dst、dt 排名靠前，但作者在下一格把它们删掉了。</p>`,
+      cells: [44], highlight: ["important_features", "weights"],
+      draw(svg, ctx) {
+        const F = [["src", 17.87], ["pktcount", 15.16], ["dst", 13.64], ["byteperflow", 12.97], ["pktperflow", 11.35], ["pktrate", 11.35], ["tot_kbps", 9.68], ["rx_kbps", 9.66], ["flows", 8.95], ["bytecount", 4.92], ["dt", 2.33], ["Protocol", 1.31], ["dur", 1.11], ["tot_dur", 1.11]];
+        const drop = new Set(["src", "dst", "dt"]);
+        const bars = F.map((f, i) => {
+          const y = 12 + i * 22.5;
+          K.svg(svg, "text", { x: 118, y: y + 14, "text-anchor": "end", "font-size": 12, "font-family": "var(--mono)" }, f[0]);
+          const b = K.svg(svg, "rect", { x: 124, y, width: 0, height: 17, rx: 3, fill: drop.has(f[0]) ? "var(--ink-3)" : "var(--c1)" });
+          const t = K.svg(svg, "text", { x: 128, y: y + 13, "font-size": 11, class: "muted" }, "");
+          return { b, t, f };
+        });
+        const note = K.svg(svg, "text", { x: 470, y: 60, "font-size": 13, fill: "var(--ink-3)" }, "");
+        ctx.tween(FAST ? 1 : 1400, (t) => bars.forEach((d) => { const w = d.f[1] * 18 * t; d.b.setAttribute("width", w); d.t.setAttribute("x", 128 + w); d.t.textContent = (d.f[1] * t).toFixed(2); }))
+          .then((ok) => { if (ok) note.textContent = "灰色：src、dst、dt 下一格会被删掉"; });
+      },
+    },
+    {
+      at: 46, title: "去掉“说同一件事”的列", kicker: "第 46–53 格 · 相关性去冗余",
+      html: `<p>剩下的列画相关系数热力图（取绝对值）。两列相关性接近 1，就像同一个信息说了两遍，留一列就够了。</p><p>第 51 格的注释点名了两对：<code>dur</code> 与 <code>tot_dur</code>、<code>pktperflow</code> 与 <code>pktrate</code>。但代码删掉的是 dur、pktrate、pktperflow 三列：第二对<b>两列都删了</b>，和注释说的“二选一”对不上。删完再画一次热力图确认。</p>`,
+      cells: [49, 51], highlight: ["X.drop(['dur', \"pktrate\", \"pktperflow\"], axis=1)", "abs(X.corr())"],
+      draw(svg, ctx) {
+        const L = ["pktcount", "byteperflow", "pktperflow", "pktrate", "tot_kbps", "rx_kbps", "flows", "bytecount", "dur", "tot_dur"];
+        const n = L.length, r = K.rng(31), M = [];
+        for (let i = 0; i < n; i++) { M.push([]); for (let j = 0; j < n; j++) M[i].push(i === j ? 1 : 0); }
+        const set = (a, b, v) => { M[a][b] = M[b][a] = v; };
+        for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) set(i, j, 0.05 + r() * 0.45);
+        set(2, 3, 0.99); set(8, 9, 1.0); set(1, 2, 0.6); set(4, 5, 0.75);
+        const s = 26, ox = 130, oy = 20, rects = [];
+        L.forEach((l, i) => { K.svg(svg, "text", { x: ox - 6, y: oy + i * s + 17, "text-anchor": "end", "font-size": 11, "font-family": "var(--mono)" }, l); });
+        for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) rects.push({ i, j, e: K.svg(svg, "rect", { x: ox + j * s, y: oy + i * s, width: s - 2, height: s - 2, fill: K.heat(M[i][j]) }) });
+        K.svg(svg, "text", { x: 420, y: 40, "font-size": 13, "font-weight": 700 }, "颜色越深 = 两列越像（示意数值）");
+        const t1 = K.svg(svg, "text", { x: 420, y: 80, "font-size": 13, fill: "var(--warn)" }, "");
+        const t2 = K.svg(svg, "text", { x: 420, y: 104, "font-size": 13, fill: "var(--bad)" }, "");
+        const t3 = K.svg(svg, "text", { x: 420, y: 150, "font-size": 12, class: "muted" }, "");
+        const rings = [[2, 3], [8, 9]].map(([a, b]) => K.svg(svg, "rect", { x: ox + b * s - 2, y: oy + a * s - 2, width: s + 2, height: s + 2, fill: "none", stroke: "var(--warn)", "stroke-width": 0 }));
+        ctx.wait(FAST ? 1 : 700)
+          .then((ok) => { if (!ok) return false; rings.forEach((x) => K.set(x, { "stroke-width": 3 })); t1.textContent = "高度相关：pktperflow~pktrate、dur~tot_dur"; return ctx.wait(FAST ? 1 : 1200); })
+          .then((ok) => { if (!ok) return false; t2.textContent = "代码删掉：dur、pktrate、pktperflow"; t3.textContent = "第二对两列都删了，比注释说的多删一列"; const del = new Set([2, 3, 8]); return ctx.tween(FAST ? 1 : 900, (t) => rects.forEach((d) => { if (del.has(d.i) || del.has(d.j)) d.e.style.opacity = 1 - 0.85 * t; })); });
+      },
+    },
+    {
+      at: 54, title: "用更少的列再比一次", kicker: "第 54–59 格 · 特征选择后重训",
+      html: `<p>特征从十几列减到 8 列左右（加上协议的独热列），作者用同一个 <code>Model</code> 类把逻辑回归、SVM、随机森林、决策树再跑一遍（这一轮没有跑 KNN）。</p><p>特征选择的好处：训练更快、模型更简单、更不容易被无关的列带偏。代价是可能丢掉一点有用信息。两轮各自的准确率在作者的运行输出里，源码里看不到，所以这里不比较具体数字。</p>`,
+      cells: [55, 56], highlight: ["Model(X)"],
+      draw(svg, ctx) {
+        const before = ["switch", "pktcount", "bytecount", "dur", "tot_dur", "flows", "pktperflow", "byteperflow", "pktrate", "tx_bytes", "rx_bytes", "tx_kbps", "rx_kbps", "tot_kbps", "Protocol×3"];
+        const keep = new Set(["pktcount", "byteperflow", "tot_kbps", "rx_kbps", "flows", "bytecount", "tot_dur", "Protocol×3"]);
+        K.svg(svg, "text", { x: 20, y: 26, "font-size": 13, "font-weight": 700 }, "第一轮：用上所有数值列（示意，列名为 notebook 中出现过的）");
+        K.svg(svg, "text", { x: 20, y: 196, "font-size": 13, "font-weight": 700, fill: "var(--c1)" }, "第二轮：论文排名 + 去冗余之后");
+        const els = before.map((c, i) => ({ c, g: K.node(svg, 20 + (i % 8) * 86, 40 + Math.floor(i / 8) * 50, 80, 38, c, { fs: 11 }) }));
+        ctx.wait(FAST ? 1 : 600).then((ok) => ok && ctx.tween(FAST ? 1 : 1400, (t) => {
+          let k = 0;
+          els.forEach((d, i) => {
+            const x0 = 20 + (i % 8) * 86, y0 = 40 + Math.floor(i / 8) * 50;
+            if (keep.has(d.c)) { const tx = 20 + k * 86, ty = 214; k++; d.g.setAttribute("transform", `translate(${(tx - x0) * t},${(ty - y0) * t})`); d.g.querySelector("rect").style.stroke = "var(--c1)"; }
+            else d.g.style.opacity = 1 - 0.8 * t;
+          });
+        }));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：KNN 的 K ---------- */
+  function knnPredict(X, y, p, k) {
+    const d = X.map((q, i) => [(q[0] - p[0]) ** 2 + (q[1] - p[1]) ** 2, y[i]]).sort((a, b) => a[0] - b[0]);
+    let s = 0; for (let i = 0; i < k; i++) s += d[i][1];
+    return s * 2 > k ? 1 : s * 2 < k ? 0 : d[0][1];
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "k", label: "邻居个数 K", min: 1, max: 11, step: 1, value: 5 },
+      { id: "ov", label: "良性与恶意的重叠程度", min: 0, max: 1, step: 0.05, value: 0.4, fmt: (v) => (v < 0.3 ? "低" : v < 0.7 ? "中" : "高") + " " + v.toFixed(2) },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "两个特征都是标准化后的模拟流量（横轴像“包速率”，纵轴像“平均包大小”）。训练 240 条、测试 240 条，K 从 1 到 11 全部现场算一遍，画出和作者第 26 格同样的“K–准确率”曲线。",
+    render(svg, v) {
+      const seed = 7 + v.seed * 13;
+      const tr = makeFlows(seed, 240, v.ov), te = makeFlows(seed + 500, 240, v.ov);
+      const acc = [];
+      for (let k = 1; k <= 11; k++) { let ok = 0; te.X.forEach((p, i) => { if (knnPredict(tr.X, tr.y, p, k) === te.y[i]) ok++; }); acc.push(ok / te.X.length); }
+      // 左：决策区域
+      const ax = K.axes(svg, { x: 30, y: 14, w: 300, h: 300 }, [-3.5, 4], [-3.5, 3.5], { xticks: 0, yticks: 0 });
+      const st = 0.3;
+      for (let gx = -3.5; gx < 4; gx += st) for (let gy = -3.5; gy < 3.5; gy += st) {
+        const c = knnPredict(tr.X, tr.y, [gx + st / 2, gy + st / 2], v.k);
+        K.svg(svg, "rect", { x: ax.sx(gx), y: ax.sy(gy + st), width: ax.sx(gx + st) - ax.sx(gx) + 0.5, height: ax.sy(gy) - ax.sy(gy + st) + 0.5, fill: c ? "var(--c6)" : "var(--c3)", "fill-opacity": 0.13 });
+      }
+      tr.X.forEach((p, i) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 3, fill: tr.y[i] ? "var(--c6)" : "var(--c3)", opacity: 0.8 }));
+      K.svg(svg, "text", { x: 30, y: 336, "font-size": 12, class: "muted" }, "绿=良性 红=恶意（训练点），底色=K 近邻的判决区域");
+      // 右：K-准确率曲线
+      const lo = Math.min(...acc) - 0.03, hi = Math.min(1, Math.max(...acc) + 0.02);
+      const bx = K.axes(svg, { x: 390, y: 20, w: 230, h: 270 }, [1, 11], [lo, hi], { xticks: 5, yticks: 4, xlabel: "K", yfmt: (x) => (x * 100).toFixed(0) + "%" });
+      let d = "";
+      acc.forEach((a, i) => (d += (i ? "L" : "M") + bx.sx(i + 1) + "," + bx.sy(a)));
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+      acc.forEach((a, i) => K.svg(svg, "circle", { cx: bx.sx(i + 1), cy: bx.sy(a), r: i + 1 === v.k ? 6 : 3, fill: i + 1 === v.k ? "var(--accent)" : "var(--c1)" }));
+      const best = acc.indexOf(Math.max(...acc)) + 1;
+      return { readout: [
+        { k: "当前 K 的测试准确率", v: (acc[v.k - 1] * 100).toFixed(1) + "%" },
+        { k: "这次抽样最好的 K", v: String(best) },
+        { k: "K=1 的准确率", v: (acc[0] * 100).toFixed(1) + "%", color: "var(--ink-3)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：特征选择 ---------- */
+  // 模拟 8 列流表特征：pktcount、pktrate 有区分度；pktperflow ≈ pktrate；tot_dur ≈ dur；switch、flows 是噪声
+  const FEAT = ["pktcount", "pktrate", "pktperflow", "bytecount", "dur", "tot_dur", "switch", "flows"];
+  function makeTable(seed, n) {
+    const r = K.rng(seed), X = [], y = [];
+    for (let i = 0; i < n; i++) {
+      const c = r() < 0.4 ? 1 : 0;
+      const pc = (c ? 1.1 : -0.4) + K.randn(r) * 0.9;
+      const pr = (c ? 1.0 : -0.5) + K.randn(r) * 0.9;
+      const ppf = pr + K.randn(r) * 0.12;
+      const bc = (c ? 0.4 : -0.1) + K.randn(r) * 1.0;
+      const du = (c ? -0.3 : 0.1) + K.randn(r) * 1.0;
+      const td = du + K.randn(r) * 0.05;
+      X.push([pc, pr, ppf, bc, du, td, K.randn(r), K.randn(r)]); y.push(c);
+    }
+    return { X, y };
+  }
+  function trainLR(X, y, epochs) {
+    const d = X[0].length; let w = new Array(d).fill(0), b = 0; const lr = 0.3;
+    for (let e = 0; e < epochs; e++) {
+      const g = new Array(d).fill(0); let gb = 0;
+      for (let i = 0; i < X.length; i++) { let z = b; for (let j = 0; j < d; j++) z += w[j] * X[i][j]; const p = K.sigmoid(z) - y[i]; for (let j = 0; j < d; j++) g[j] += p * X[i][j]; gb += p; }
+      for (let j = 0; j < d; j++) w[j] -= (lr * g[j]) / X.length; b -= (lr * gb) / X.length;
+    }
+    return { w, b };
+  }
+  function corr(a, b) { const n = a.length; let ma = 0, mb = 0; for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; } ma /= n; mb /= n; let s = 0, sa = 0, sb = 0; for (let i = 0; i < n; i++) { s += (a[i] - ma) * (b[i] - mb); sa += (a[i] - ma) ** 2; sb += (b[i] - mb) ** 2; } return s / Math.sqrt(sa * sb); }
+  const PRESETS = {
+    all: [0, 1, 2, 3, 4, 5, 6, 7],
+    author: [0, 3, 5, 7],
+    one: [0, 1, 3, 5, 7],
+    best2: [0, 1],
+    noise: [4, 5, 6, 7],
+  };
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "set", label: "保留哪些列", value: "all", options: [["all", "全部 8 列（第一轮的做法）"], ["author", "像第 51 格：dur、pktrate、pktperflow 都删"], ["one", "高相关的两对各留一列"], ["best2", "只留 pktcount + pktrate"], ["noise", "只留没区分度的列"]] },
+      { id: "n", label: "训练样本数", min: 40, max: 600, step: 20, value: 200 },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "模拟的 8 列里：pktcount、pktrate 最能区分洪水；pktperflow 几乎是 pktrate 的复制，tot_dur 几乎是 dur 的复制；switch、flows 是纯噪声。浏览器里现场训练逻辑回归（300 轮梯度下降），在 2000 条模拟测试流上算准确率。左边是所选列的相关系数热力图。",
+    render(svg, v) {
+      const seed = 50 + v.seed * 11, sel = PRESETS[v.set];
+      const tr = makeTable(seed, v.n), te = makeTable(seed + 777, 2000);
+      const pick = (X) => X.map((row) => sel.map((j) => row[j]));
+      const m = trainLR(pick(tr.X), tr.y, 300);
+      let ok = 0; const Xt = pick(te.X);
+      Xt.forEach((row, i) => { let z = m.b; row.forEach((x, j) => (z += m.w[j] * x)); if ((z > 0 ? 1 : 0) === te.y[i]) ok++; });
+      // 热力图
+      const cols = sel.map((j) => tr.X.map((r) => r[j]));
+      const s = Math.min(34, 260 / sel.length), ox = 110, oy = 20;
+      let maxOff = 0;
+      sel.forEach((j, a) => {
+        K.svg(svg, "text", { x: ox - 6, y: oy + a * s + s / 2 + 4, "text-anchor": "end", "font-size": 11, "font-family": "var(--mono)" }, FEAT[j]);
+        sel.forEach((k, b) => {
+          const c = Math.abs(corr(cols[a], cols[b]));
+          if (a !== b) maxOff = Math.max(maxOff, c);
+          K.svg(svg, "rect", { x: ox + b * s, y: oy + a * s, width: s - 2, height: s - 2, fill: K.heat(c) });
+          if (s >= 28) K.svg(svg, "text", { x: ox + b * s + s / 2 - 1, y: oy + a * s + s / 2 + 4, "text-anchor": "middle", "font-size": 10, fill: c > 0.6 ? "var(--panel)" : "var(--ink)" }, c.toFixed(1));
+        });
+      });
+      // 权重条
+      K.svg(svg, "text", { x: 420, y: 30, "font-size": 13, "font-weight": 700 }, "逻辑回归学到的权重");
+      const mw = Math.max(...m.w.map(Math.abs), 0.01);
+      sel.forEach((j, a) => {
+        const y = 44 + a * 30, w = (Math.abs(m.w[a]) / mw) * 120;
+        K.svg(svg, "text", { x: 500, y: y + 15, "text-anchor": "end", "font-size": 11, "font-family": "var(--mono)" }, FEAT[j]);
+        K.svg(svg, "rect", { x: 506, y, width: w, height: 20, rx: 3, fill: m.w[a] >= 0 ? "var(--c6)" : "var(--c1)" });
+      });
+      K.svg(svg, "text", { x: 420, y: 340, "font-size": 11, class: "muted" }, "红=越大越像洪水，蓝=越小越像洪水");
+      return { readout: [
+        { k: "测试准确率", v: ((ok / Xt.length) * 100).toFixed(1) + "%", color: ok / Xt.length > 0.8 ? "var(--good)" : "var(--bad)" },
+        { k: "用了几列", v: String(sel.length) },
+        { k: "列之间最高相关", v: maxOff.toFixed(2), color: maxOff > 0.9 ? "var(--warn)" : "var(--ink)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>扩散模型画头像</title>
+<meta name="description" content="Kaggle 案例拆解：机器学习课程作业 HW6 的扩散模型（DDPM）。先一步步往头像里加噪声，再训练 U-Net 猜出噪声，从纯噪声一步步“擦”出新头像。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">图像 · 扩散模型 · 课程作业</div>
+  <h1>从一团雪花点里“擦”出头像：扩散模型 DDPM</h1>
+  <p class="en">HW6 Diffusion Model</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">去噪扩散概率模型 DDPM</span><span class="tag method">线性噪声表</span><span class="tag method">U-Net</span>
+    <span class="tag method">正弦时间编码</span><span class="tag method">预测噪声 + MSE</span><span class="tag method">EMA 滑动平均</span><span class="tag method">PyTorch</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>b07202024</b></span>
+    <span>Kaggle 点赞 <b>1,428</b>（2026-11 抓取）</span>
+    <span>数据集 <b>b07202024/diffusion</b>（faces 文件夹）</span>
+    <span><a href="https://www.kaggle.com/code/b07202024/hw6-diffusion-model" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">一个文件夹的头像 jpg</div><p>机器学习课程第 6 次作业（路径里写着 ML 2023 Spring）用的 <code>faces</code> 图片，统一缩到 64×64。<span data-cell="17">出处</span> <span data-cell="19">出处</span></p></div>
+    <div class="card panel"><h3>要做什么</h3><div class="big">生成 1000 张新头像</div><p>训练一个扩散模型，最后让它从纯噪声里画出 1000 张图，打包提交作业。<span data-cell="15">出处</span> <span data-cell="20">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">加噪 100 步，学会一步步去噪</div><p>前向：往图里逐步加高斯噪声；反向：训练一个 U-Net 猜“这张图里混进了什么噪声”，再从纯噪声出发一步步减掉。代码改编自 lucidrains 的开源实现。<span data-cell="0">出处</span> <span data-cell="13">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">完整跑通“训练 → 采样 → 提交”</div><p>这份 notebook 没有写评分或结论；生成的图和训练损失都在运行输出里，源码不带。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据是作者上传的 Kaggle 数据集 <b>b07202024/diffusion</b>，代码读取其中 <code>faces/faces</code> 文件夹下所有 <code>.jpg</code> <span data-cell="17">第 17 格</span>。notebook 没有写图片数量和来源说明，这里不写具体数字。据该课程作业的题目，这些是<b>动漫人物头像</b>（课程说明，不是 notebook 原文）。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">关键设置（来自作者代码）</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">图片尺寸</div><div class="v">64×64×3</div></div>
+        <div class="stat-tile"><div class="k">加噪步数 T</div><div class="v" style="color:var(--c6)">100</div></div>
+        <div class="stat-tile"><div class="k">训练步数</div><div class="v">10,000</div></div>
+        <div class="stat-tile"><div class="k">要生成</div><div class="v" style="color:var(--c1)">1,000 张</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">尺寸、步数见 <span data-cell="17">第 17 格</span>；生成数量是 <code>inference(num=1000)</code> 的默认值 <span data-cell="15">第 15 格</span>。原论文用 T = 1000，这里只用 100 步，速度快 10 倍。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">训练时一条“样本”长什么样</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>部分</th><th>含义</th></tr>
+        <tr><td>x₀</td><td>一张真头像，像素先缩到 0–1，再自动换成 −1 到 1</td></tr>
+        <tr><td>t</td><td>随机抽的一个时刻（0–99），表示“加了多少噪声”</td></tr>
+        <tr><td>ε</td><td>随机生成的高斯噪声，和图同样大小</td></tr>
+        <tr><td>x_t</td><td>按公式把 x₀ 和 ε 混在一起的“脏图”</td></tr>
+        <tr><td><b>要预测的答案</b></td><td><b>ε：U-Net 看着 x_t 和 t，猜出混进去的噪声</b></td></tr>
+      </table></div>
+      <p class="note">这个“答案”是训练时自己造出来的，不需要任何人工标注 <span data-cell="13">第 13 格</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="5">
+    <h3>动手试试 A · 往头像里加噪声：噪声表与 ᾱ_t <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="13">
+    <h3>动手试试 B · 在浏览器里训练一个二维点云扩散模型 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">从 notebook 能确认的内容</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>代码来源：lucidrains 的 denoising-diffusion-pytorch，参考 Ho 等 2020、Dhariwal &amp; Nichol 2021</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>三步结构：前向（噪声表）→ 反向（U-Net）→ 扩散过程（训练与采样）</td><td><span data-cell="4">第 4 格</span> <span data-cell="8">第 8 格</span> <span data-cell="11">第 11 格</span></td></tr>
+        <tr><td>设置：T = 100、线性噪声表、64×64、batch 16、学习率 1e-3、训练 1 万步</td><td><span data-cell="17">第 17 格</span></td></tr>
+        <tr><td>推理：载入第 55 个存档 <code>model-55.pt</code>，生成 1000 张图，打包成 tgz 提交</td><td><span data-cell="19">第 19 格</span> <span data-cell="20">第 20 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">作者没有写任何文字结论或分数，生成图和损失在运行输出里，Kaggle 下载的源码不带输出，这里不列数字，也不展示“作者的结果图”。</p>
+      <p class="callout">读代码发现的问题：<br>① 训练只设了 1 万步、每 1000 步存一次，最多存到 <code>model-10.pt</code>；推理却载入 <code>model-55.pt</code>，而且路径是 Colab 的 Google Drive（<code>/content/drive/…</code>）<span data-cell="19">第 19 格</span>。说明真正用来生成的模型是在别处训练了约 5.5 万步的，在 Kaggle 上直接运行这一格会找不到文件。<br>② 两处作业模板里的 <code>TODO</code>（数据增强、画出采样过程）都没有完成 <span data-cell="7">第 7 格</span> <span data-cell="13">第 13 格</span>。<br>③ <code>loss_weight = snr / snr</code> 恒等于 1：原库里“截断信噪比加权”被删掉后留下的空壳 <span data-cell="13">第 13 格</span>。<br>④ <code>inception_block_idx</code> 参数传了但没有用到 <span data-cell="15">第 15 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>生成新图片；今天的 Stable Diffusion、各种 AI 绘画工具都基于扩散模型，只是加上了“文字条件”，并在压缩后的潜空间里扩散。</li>
+        <li><b>同类问题：</b>图像修复（只对缺的部分去噪）、超分辨率、语音和音乐生成、分子结构生成、视频生成。</li>
+        <li><b>可迁移的套路：</b>定义一个“逐步加噪”的前向过程 → 用 U-Net 学预测噪声（简单的 MSE）→ 从纯噪声出发反复去噪 → 用 EMA 权重采样。</li>
+        <li><b>和 GAN 比：</b>训练更稳定（只是回归噪声，没有两个网络对抗），但生成要跑很多步，更慢。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>噪声表：线性 β，随 T 缩放 <span data-cell="5">第 5 格</span></li>
+        <li>数据：Resize 64、ToTensor，读文件夹全部 jpg <span data-cell="7">第 7 格</span></li>
+        <li>网络：U-Net（ResNet 块 + 线性注意力 + 中间全注意力 + 跳连）+ 正弦时间编码 <span data-cell="10">第 10 格</span></li>
+        <li>扩散：<code>q_sample</code> 一步加噪、预测噪声的 MSE、<code>p_sample_loop</code> 逐步采样 <span data-cell="13">第 13 格</span></li>
+        <li>训练：Adam、梯度裁剪 1.0、EMA 0.995、每 1000 步采样存档 <span data-cell="15">第 15 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>为什么让网络去猜“混进去的噪声”，而不是直接猜“干净的图”？两者在数学上可以互相换算，训练起来有什么不同？</li>
+      <li>T 从 1000 改成 100，生成快了 10 倍。代价是什么？（实验 A 里比较两种 T 下 ᾱ_t 曲线的形状）</li>
+      <li>采样时每一步还要再加一点随机噪声（t > 0 时）。如果去掉这一步，每次生成的结果会怎样？</li>
+      <li>推理载入的是 <code>model-55.pt</code>，而这份 notebook 只训练到第 10 个存档。作为作业的检查者，你会怎么看待这种情况？</li>
+      <li>扩散模型能画出以假乱真的头像。用 AI 生成的头像做社交账号，会带来哪些问题？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 b07202024，代码改编自 Phil Wang（lucidrains）的开源项目 denoising-diffusion-pytorch，方法来自 Ho 等人 2020 年的 DDPM 论文。版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的头像和点云都是程序生成的示意数据，不是作者的数据和结果。数据集：b07202024/diffusion。
+</footer>
+</main>
+
+<script src="nb/ddpm-anime-faces-hw6.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* 程序画的 16×16 卡通头像（值域 −1..1） */
+  const S = 16;
+  const FACE = (() => {
+    const a = new Float64Array(S * S);
+    for (let i = 0; i < S; i++) for (let j = 0; j < S; j++) {
+      const x = (j + 0.5) / S - 0.5, y = (i + 0.5) / S - 0.5;
+      let v = -0.9;
+      if (y < -0.05 && Math.abs(x) < 0.45 && y > -0.48) v = 0.2;                         // 头发
+      if (Math.hypot(x / 0.34, (y - 0.08) / 0.36) < 1) v = 0.85;                          // 脸
+      if (Math.hypot((x + 0.14) / 0.08, (y + 0.02) / 0.11) < 1 || Math.hypot((x - 0.14) / 0.08, (y + 0.02) / 0.11) < 1) v = -0.6; // 大眼睛
+      if (Math.abs(y - 0.24) < 0.025 && Math.abs(x) < 0.07) v = -0.2;                     // 嘴
+      if (y < -0.12 && y > -0.3 && Math.abs(x) < 0.3 && Math.sin(x * 40) > 0.3) v = 0.2;  // 刘海
+      a[i * S + j] = v;
+    }
+    return a;
+  })();
+  function pix(svg, x, y, size, arr) {
+    const n = Math.round(Math.sqrt(arr.length)), s = size / n, g = K.svg(svg, "g");
+    K.svg(g, "rect", { x, y, width: size, height: size, fill: "var(--panel-2)", stroke: "var(--line)" });
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) K.svg(g, "rect", { x: x + j * s, y: y + i * s, width: s + 0.3, height: s + 0.3, fill: "var(--c2)", "fill-opacity": K.clamp((arr[i * n + j] + 1) / 2, 0, 1) });
+    return g;
+  }
+  function schedule(T, kind) {
+    const betas = [];
+    if (kind === "cosine") {
+      const f = (t) => Math.cos(((t / T + 0.008) / 1.008) * Math.PI / 2) ** 2;
+      for (let t = 0; t < T; t++) betas.push(Math.min(0.999, 1 - f(t + 1) / f(t)));
+    } else {
+      const sc = 1000 / T, b0 = sc * 0.0001, b1 = sc * 0.02;
+      for (let t = 0; t < T; t++) betas.push(b0 + ((b1 - b0) * t) / (T - 1));
+    }
+    const ab = []; let p = 1; betas.forEach((b) => { p *= 1 - b; ab.push(p); });
+    return { betas, ab };
+  }
+  const noisy = (x0, ab, seed) => { const r = K.rng(seed); const sa = Math.sqrt(ab), sb = Math.sqrt(1 - ab); return x0.map((v) => sa * v + sb * K.randn(r)); };
+  const SCH = schedule(100, "linear");
+
+  const steps = [
+    {
+      at: 0, title: "扩散模型：先弄脏，再学会擦干净", kicker: "第 0–4 格 · 来源与导入",
+      html: `<p>这是一门机器学习课的第 6 次作业：用扩散模型生成头像。代码改编自 GitHub 上 lucidrains 的 <i>denoising-diffusion-pytorch</i>，方法来自 Ho 等人 2020 年提出的 <b>DDPM</b>（去噪扩散概率模型）<span data-cell="0">第 0 格</span>。先安装 einops、ema_pytorch、accelerate 等工具 <span data-cell="2">第 2 格</span>。</p><p>扩散模型分两个方向：</p><ul class="tight"><li><b>前向</b>：往一张真图里一点点加噪声，加 100 步后变成纯雪花点（不用学，公式直接算）；</li><li><b>反向</b>：训练一个网络，学会从“有点脏”的图里猜出噪声并减掉。学会以后，从纯雪花点出发反复去噪，就得到一张全新的图。</li></ul>`,
+      cells: [0, 2, 3],
+      draw(svg, ctx) {
+        const ts = [0, 10, 25, 45, 70, 99], xs = ts.map((_, i) => 20 + i * 117);
+        const imgs = ts.map((t, i) => { const g = K.svg(svg, "g"); pix(g, xs[i], 70, 100, t === 0 ? FACE : noisy(FACE, SCH.ab[t], 3 + i)); K.svg(g, "text", { x: xs[i] + 50, y: 192, "text-anchor": "middle", "font-size": 12 }, "t = " + t); return g; });
+        const fw = K.svg(svg, "text", { x: 360, y: 40, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--c6)" }, "前向：加噪声 →");
+        const bw = K.svg(svg, "text", { x: 360, y: 240, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--c3)" }, "← 反向：网络一步步去噪（要学的部分）");
+        bw.style.opacity = 0;
+        K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 12, class: "muted" }, "头像是程序画的示意图；噪声按作者的线性噪声表（T = 100）真实计算");
+        imgs.forEach((g) => (g.style.opacity = 0));
+        (async () => {
+          for (const g of imgs) if (!(await ctx.tween(300, (t) => (g.style.opacity = t)))) return;
+          await ctx.tween(600, (t) => (bw.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "噪声表：每一步加多少噪声", kicker: "第 5–6 格 · 前向过程",
+      html: `<p><code>linear_beta_schedule</code> 给出每一步的噪声强度 β<sub>t</sub>：从小到大线性增长 <span data-cell="5">第 5 格</span>。原论文 T = 1000 时 β 从 0.0001 到 0.02；这里乘了 <code>scale = 1000 / T</code>，T = 100 时就是从 0.001 到 0.2，保证 100 步也能把图完全变成噪声。</p><p>累乘 α<sub>t</sub> = 1 − β<sub>t</sub> 得到 <b>ᾱ<sub>t</sub></b>：表示到第 t 步时，原图还剩多少“信号”。有了它，任何一步的脏图都能<b>一步算出来</b>，不用真的一步步加：</p><p style="text-align:center">x<sub>t</sub> = √ᾱ<sub>t</sub> · x₀ + √(1 − ᾱ<sub>t</sub>) · ε</p><p><code>extract</code> 是个小工具：按每张图的 t 从表里取出对应的数。</p>`,
+      cells: [5], highlight: ["scale = 1000 / timesteps", "torch.linspace(beta_start, beta_end"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [0, 100], [0, 1], { xticks: 5, yticks: 4, xlabel: "时刻 t", ylabel: "数值" });
+        const pb = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        const pa = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 470, y: 60, "font-size": 13, fill: "var(--c1)" }, "ᾱ_t：原图还剩多少");
+        K.svg(svg, "text", { x: 470, y: 84, "font-size": 13, fill: "var(--c6)" }, "β_t：这一步加多少（0.001→0.2）");
+        ctx.tween(2000, (t) => {
+          let a = "", b = "";
+          for (let k = 0; k <= 99 * t; k++) { a += (a ? "L" : "M") + ax.sx(k) + "," + ax.sy(SCH.ab[k]); b += (b ? "L" : "M") + ax.sx(k) + "," + ax.sy(SCH.betas[k]); }
+          pa.setAttribute("d", a); pb.setAttribute("d", b);
+        });
+      },
+    },
+    {
+      title: "数据集：读入文件夹里的头像", kicker: "第 7–9 格 · Dataset",
+      html: `<p><code>Dataset</code> 类找出文件夹（含子文件夹）里所有 <code>.jpg</code>，每张图缩放到 64 并转成 0–1 的张量 <span data-cell="7">第 7 格</span>。后面 <code>GaussianDiffusion</code> 会自动把它换成 −1 到 1。</p><p>作业模板在这里留了一个 <code>TODO: Data Augmentation</code>（数据增强），作者没有做。对生成任务来说，左右翻转是最常见也最安全的增强：头像左右翻过来仍然是合理的头像。</p>`,
+      cells: [7], highlight: ["glob(f'**/*.jpg')", "TODO: Data Augmentation"],
+      draw(svg, ctx) {
+        const gs = [];
+        for (let k = 0; k < 8; k++) {
+          const r = K.rng(20 + k), f = FACE.map((v) => K.clamp(v + (r() - 0.5) * 0.3 + (k % 3 - 1) * 0.15, -1, 1));
+          const g = K.svg(svg, "g"); pix(g, 30 + (k % 4) * 120, 30 + Math.floor(k / 4) * 130, 100, f); g.style.opacity = 0; gs.push(g);
+        }
+        K.svg(svg, "text", { x: 520, y: 100, "font-size": 13 }, "faces/**/*.jpg");
+        K.svg(svg, "text", { x: 520, y: 124, "font-size": 13 }, "→ Resize(64)");
+        K.svg(svg, "text", { x: 520, y: 148, "font-size": 13 }, "→ ToTensor（0–1）");
+        K.svg(svg, "text", { x: 520, y: 190, "font-size": 12, fill: "var(--warn)" }, "TODO：数据增强（未完成）");
+        K.svg(svg, "text", { x: 30, y: 320, "font-size": 11, class: "muted" }, "示意头像（程序生成，非作业数据）");
+        (async () => { for (const g of gs) if (!(await ctx.tween(200, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "U-Net：看着脏图和时刻，猜出噪声", kicker: "第 10 格 · 反向过程的网络",
+      html: `<p>负责去噪的网络是 <b>U-Net</b> <span data-cell="10">第 10 格</span>（这一格还有一堆小工具函数）：</p><ul class="tight"><li><b>下采样路径</b>：每层两个 ResNet 块 + 线性注意力，再缩小一半；</li><li><b>中间</b>：ResNet 块 + 完整注意力 + ResNet 块；</li><li><b>上采样路径</b>：把下采样时存下的特征<b>拼回来</b>（跳连），再放大；</li><li><b>时间编码</b>：把时刻 t 用正弦、余弦函数变成一串数（<code>SinusoidalPosEmb</code>），送进每个 ResNet 块。网络因此知道“现在是第几步、噪声有多大”。</li></ul><p>输入是一张脏图，输出是同样大小的“噪声图”。</p>`,
+      cells: [10], highlight: ["class SinusoidalPosEmb", "class ResnetBlock", "self.mid_attn", "torch.cat((x, h.pop()), dim = 1)"],
+      draw(svg, ctx) {
+        const lv = [[40, 64, 120], [150, 32, 90], [250, 16, 60]];
+        const down = lv.map((l, i) => K.node(svg, l[0], 40 + i * 70, 80, l[2] * 0.6, `${l[1]}×${l[1]}`, { fill: "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: "var(--c1)" }));
+        const mid = K.node(svg, 320, 250, 80, 50, "中间\n注意力", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const up = lv.slice().reverse().map((l, i) => K.node(svg, 720 - l[0] - 80 - 20, 180 - i * 70, 80, l[2] * 0.6, `${l[1]}×${l[1]}`, { fill: "color-mix(in srgb, var(--c3) 18%, var(--panel))", stroke: "var(--c3)" }));
+        const skips = lv.map((l, i) => { const y = 40 + i * 70 + l[2] * 0.3; const s = K.svg(svg, "line", { x1: l[0] + 80, y1: y, x2: 720 - l[0] - 100, y2: y, stroke: "var(--warn)", "stroke-dasharray": "5 4", "stroke-width": 1.5 }); s.style.opacity = 0; return s; });
+        K.svg(svg, "text", { x: 360, y: 30, "text-anchor": "middle", "font-size": 12, fill: "var(--warn)" }, "黄色虚线：跳连（把细节直接送到对面）");
+        const tEmb = K.node(svg, 560, 260, 140, 50, "t → sin / cos\n时间编码", { fill: "var(--panel-2)", stroke: "var(--ink-3)" });
+        K.svg(svg, "text", { x: 60, y: 320, "font-size": 12, class: "muted" }, "左：下采样（看全局）  右：上采样（还原细节）  输出：预测的噪声 ε");
+        ctx.tween(1500, (t) => skips.forEach((s, i) => (s.style.opacity = K.clamp(t * 3 - i, 0, 1))));
+      },
+    },
+    {
+      title: "预先算好一整张“系数表”", kicker: "第 11–12 格 · 扩散过程的准备",
+      html: `<p>第三步是把前向、反向串起来的 <code>GaussianDiffusion</code> 类 <span data-cell="11">第 11 格</span>。它在初始化时，把后面要反复用到的系数全部预先算好、存成表：√ᾱ<sub>t</sub>、√(1−ᾱ<sub>t</sub>)、1/√ᾱ<sub>t</sub>……还有“已知 x<sub>t</sub> 和 x₀ 时，x<sub>t−1</sub> 的均值和方差”所需的系数（后验分布）。</p><p>动画画出了其中两条最重要的：√ᾱ<sub>t</sub>（原图的权重）一路下降，√(1−ᾱ<sub>t</sub>)（噪声的权重）一路上升。两者平方和恒为 1，所以图的“总能量”大致不变，只是信号被噪声一点点替换掉。</p>`,
+      cells: [11, 12],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [0, 100], [0, 1], { xticks: 5, yticks: 4, xlabel: "时刻 t" });
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 90, y: 60, "font-size": 13, fill: "var(--c1)" }, "√ᾱ_t：原图的权重");
+        K.svg(svg, "text", { x: 440, y: 60, "font-size": 13, fill: "var(--c6)" }, "√(1−ᾱ_t)：噪声的权重");
+        ctx.tween(2000, (t) => { let a = "", b = ""; for (let k = 0; k <= 99 * t; k++) { a += (a ? "L" : "M") + ax.sx(k) + "," + ax.sy(Math.sqrt(SCH.ab[k])); b += (b ? "L" : "M") + ax.sx(k) + "," + ax.sy(Math.sqrt(1 - SCH.ab[k])); } p1.setAttribute("d", a); p2.setAttribute("d", b); });
+      },
+    },
+    {
+      title: "训练：随机挑一步，让网络猜噪声", kicker: "第 13 格 · q_sample 与 p_losses",
+      html: `<p>训练的一步只有四句话 <span data-cell="13">第 13 格</span>（<code>forward</code> → <code>p_losses</code>）：</p><ol class="tight"><li>每张图随机抽一个时刻 t（0–99）；</li><li>随机生成噪声 ε，用 <code>q_sample</code> 一步算出脏图 x<sub>t</sub>；</li><li>U-Net 看着 x<sub>t</sub> 和 t，输出它猜的噪声；</li><li>损失 = 猜的噪声和真噪声的<b>均方误差</b>。</li></ol><p>就这么简单：没有判别器、没有对抗，只是一个“猜噪声”的回归题。题目和答案都是自己造的，要多少有多少。</p>`,
+      cells: [13], highlight: ["def q_sample", "loss = self.loss_fn(model_out, noise, reduction = 'none')", "t = torch.randint(0, self.num_timesteps"],
+      draw(svg, ctx) {
+        const r = K.rng(7), t = 40;
+        pix(svg, 30, 80, 110, FACE); K.svg(svg, "text", { x: 85, y: 210, "text-anchor": "middle", "font-size": 12 }, "x₀ 真图");
+        const eps = FACE.map(() => K.randn(r)); const epsV = eps.map((v) => K.clamp(v / 2, -1, 1));
+        pix(svg, 170, 80, 110, epsV); K.svg(svg, "text", { x: 225, y: 210, "text-anchor": "middle", "font-size": 12 }, "ε 随机噪声");
+        const xt = FACE.map((v, i) => Math.sqrt(SCH.ab[t]) * v + Math.sqrt(1 - SCH.ab[t]) * eps[i]);
+        pix(svg, 320, 80, 110, xt); K.svg(svg, "text", { x: 375, y: 210, "text-anchor": "middle", "font-size": 12 }, `x_t（t = ${t}）`);
+        const un = K.node(svg, 455, 105, 90, 60, "U-Net", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const g = K.svg(svg, "g");
+        K.svg(svg, "text", { x: 625, y: 210, "text-anchor": "middle", "font-size": 12 }, "猜的噪声");
+        const loss = K.svg(svg, "text", { x: 360, y: 280, "text-anchor": "middle", "font-size": 15, "font-weight": 700 }, "");
+        ctx.tween(2400, (u) => {
+          while (g.firstChild) g.firstChild.remove();
+          const q = u, guess = epsV.map((v, i) => K.clamp(q * v + (1 - q) * (K.rng(i + 1)() - 0.5), -1, 1));
+          pix(g, 570, 80, 110, guess);
+          let m = 0; guess.forEach((v, i) => (m += (v - epsV[i]) ** 2)); loss.textContent = `MSE(猜的, 真的) = ${(m / guess.length).toFixed(3)}  （示意：训练中越来越小）`;
+        });
+      },
+    },
+    {
+      title: "采样：从纯噪声一步步去噪", kicker: "第 13–14 格 · p_sample_loop",
+      html: `<p>训练好以后怎么画新图？同一格里的 <code>p_sample_loop</code> <span data-cell="13">第 13 格</span>：</p><ol class="tight"><li>从一张<b>纯高斯噪声</b>开始；</li><li>从 t = 99 倒数到 0，每一步：U-Net 猜出噪声 → 推出“干净图”的估计 x̂₀（截到 −1~1）→ 用后验公式算出 x<sub>t−1</sub> 的均值 → 再加一点点新的随机噪声（最后一步不加）；</li><li>最后把 −1~1 换回 0–1。</li></ol><p>作业模板这里也留了 <code>TODO: plot the sampling process</code>（画出采样过程），没有完成。下面的实验 B 在浏览器里把这个过程完整跑一遍：二维点云版本。</p>`,
+      cells: [13], highlight: ["def p_sample_loop", "for t in tqdm(reversed(range(0, self.num_timesteps))", "noise = torch.randn_like(x) if t > 0 else 0."],
+      draw(svg, ctx) {
+        const r = K.rng(11), noise = FACE.map(() => K.randn(r)), g = K.svg(svg, "g");
+        const lab = K.svg(svg, "text", { x: 420, y: 120, "font-size": 18, "font-family": "var(--mono)", "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 420, y: 160, "font-size": 12, class: "muted" }, "示意：按 ᾱ_t 把噪声和一张目标头像混合，");
+        K.svg(svg, "text", { x: 420, y: 180, "font-size": 12, class: "muted" }, "模拟“越往后越清楚”的去噪过程");
+        ctx.tween(3200, (u) => {
+          const t = Math.round(99 * (1 - u));
+          while (g.firstChild) g.firstChild.remove();
+          pix(g, 60, 40, 260, FACE.map((v, i) => Math.sqrt(SCH.ab[t]) * v + Math.sqrt(1 - SCH.ab[t]) * noise[i]));
+          lab.textContent = `t = ${t}`;
+        });
+      },
+    },
+    {
+      title: "Trainer：Adam、梯度裁剪与 EMA", kicker: "第 15–16 格 · 训练器",
+      html: `<p><code>Trainer</code> 负责训练细节 <span data-cell="15">第 15 格</span>：</p><ul class="tight"><li>数据无限循环地取（<code>cycle</code>），Adam 优化器；</li><li>每步把梯度长度裁到不超过 1.0，防止偶尔一步走太远；</li><li><b>EMA（指数滑动平均）</b>：另外维护一份“平均权重”，每 10 步更新一次，衰减 0.995。采样时用这份平均权重，生成的图通常更稳定；</li><li>每 1000 步用 EMA 模型采样 25 张存图、存一次档；</li><li><code>inference</code>：分 5 批共生成 1000 张，逐张存成 jpg。</li></ul>`,
+      cells: [15], highlight: ["EMA(diffusion_model", "clip_grad_norm_(self.model.parameters(), 1.0)", "def inference"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [0, 100], [-1.5, 1.5], { xticks: 5, yticks: 0, xlabel: "训练步数（示意）", ylabel: "某个权重的值" });
+        const r = K.rng(5), raw = []; let w = 1.2, e = 1.2;
+        for (let k = 0; k <= 100; k++) { w = w * 0.96 + K.randn(r) * 0.18; raw.push(w); }
+        const ema = []; raw.forEach((v) => { e = 0.9 * e + 0.1 * v; ema.push(e); });
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--ink-3)", "stroke-width": 1.5 });
+        const p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c3)", "stroke-width": 3 });
+        K.svg(svg, "text", { x: 440, y: 60, "font-size": 12, class: "muted" }, "— 每一步的权重（抖动）");
+        K.svg(svg, "text", { x: 440, y: 82, "font-size": 12, fill: "var(--c3)" }, "— EMA 平均权重（平滑）");
+        ctx.tween(2200, (t) => { let a = "", b = ""; for (let k = 0; k <= 100 * t; k++) { a += (a ? "L" : "M") + ax.sx(k) + "," + ax.sy(raw[k]); b += (b ? "L" : "M") + ax.sx(k) + "," + ax.sy(ema[k]); } p1.setAttribute("d", a); p2.setAttribute("d", b); });
+      },
+    },
+    {
+      title: "超参数：100 步、16 通道、训练 1 万步", kicker: "第 17–18 格 · 开始训练",
+      html: `<p>作者的设置 <span data-cell="17">第 17 格</span>：</p><ul class="tight"><li>图片 64×64，batch 16，学习率 1e-3（比库的默认 1e-4 大 10 倍），训练 10,000 步；</li><li>U-Net 第一层 16 个通道，<code>dim_mults = (1, 2, 4)</code>：三层分辨率，通道 16 → 32 → 64；</li><li><b>T = 100</b> 步加噪，线性噪声表；</li><li>每 1000 步采样、存档一次。</li></ul><p>相比原论文（T = 1000、更大的网络），这是为了让作业在免费 GPU 上跑得动的“轻量版”。</p>`,
+      cells: [17], highlight: ["timesteps = 100", "lr = 1e-3", "channels = 16", "train_num_steps = 10000"],
+      draw(svg, ctx) {
+        const rows = [["T（加噪步数）", 100, 1000], ["第一层通道", 16, 128], ["分辨率层数", 3, 4]];
+        K.svg(svg, "text", { x: 260, y: 36, "font-size": 13, fill: "var(--c1)", "font-weight": 700 }, "本作业");
+        K.svg(svg, "text", { x: 470, y: 36, "font-size": 13, fill: "var(--ink-3)", "font-weight": 700 }, "常见的“标准版”（参考）");
+        const bars = rows.map((r, i) => {
+          K.svg(svg, "text", { x: 40, y: 85 + i * 80, "font-size": 13 }, r[0]);
+          const mx = r[2];
+          const a = K.svg(svg, "rect", { x: 260, y: 65 + i * 80, width: 0, height: 26, fill: "var(--c1)" });
+          const b = K.svg(svg, "rect", { x: 470, y: 65 + i * 80, width: 0, height: 26, fill: "var(--ink-3)", opacity: 0.5 });
+          K.svg(svg, "text", { x: 260, y: 108 + i * 80, "font-size": 11 }, String(r[1]));
+          K.svg(svg, "text", { x: 470, y: 108 + i * 80, "font-size": 11, class: "muted" }, String(r[2]));
+          return [a, b, (180 * r[1]) / mx, 180];
+        });
+        K.svg(svg, "text", { x: 40, y: 320, "font-size": 11, class: "muted" }, "参考：DDPM 论文 T = 1000、CIFAR-10 模型第一层 128 通道；分辨率层数取 lucidrains 库默认 dim_mults (1,2,4,8)");
+        ctx.tween(1200, (t) => bars.forEach((b) => { K.set(b[0], { width: b[2] * t }); K.set(b[1], { width: b[3] * t }); }));
+      },
+    },
+    {
+      title: "推理：载入存档，生成 1000 张交作业", kicker: "第 19–20 格 · 生成与打包",
+      html: `<p>最后载入存档 <code>model-55.pt</code>，调用 <code>inference()</code> 生成 1000 张头像存到 <code>submission</code> 文件夹 <span data-cell="19">第 19 格</span>，再打包成 <code>submission.tgz</code> <span data-cell="20">第 20 格</span>。</p><p>存档编号 55 表示训练了 55 × 1000 = 5.5 万步，而这份 notebook 只设了 1 万步；路径 <code>/content/drive/…</code> 也是 Colab 上的 Google Drive。可见交作业用的模型是在别处训练得更久的。</p>`,
+      cells: [19, 20], highlight: ["model-55.pt", "tar -zcf"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 60, w: 600, h: 80 }, [0, 60], [0, 1], { xticks: 6, yticks: 0, xlabel: "存档编号（× 1000 步）" });
+        const tr = K.svg(svg, "rect", { x: ax.sx(0), y: 80, width: 0, height: 30, fill: "var(--c1)" });
+        K.svg(svg, "text", { x: ax.sx(5), y: 74, "text-anchor": "middle", "font-size": 12, fill: "var(--c1)" }, "本 notebook：1 万步（存档 1–10）");
+        const m55 = K.svg(svg, "circle", { cx: ax.sx(55), cy: 95, r: 0, fill: "var(--c6)" });
+        K.svg(svg, "text", { x: ax.sx(55), y: 74, "text-anchor": "middle", "font-size": 12, fill: "var(--c6)" }, "载入 model-55");
+        const cnt = K.svg(svg, "text", { x: 360, y: 250, "text-anchor": "middle", "font-size": 22, "font-weight": 700 }, "");
+        ctx.tween(1000, (t) => K.set(tr, { width: (ax.sx(10) - ax.sx(0)) * t })).then((ok) => ok && ctx.tween(500, (t) => K.set(m55, { r: 9 * t }))).then((ok) => ok && ctx.tween(1500, (t) => (cnt.textContent = `已生成 ${Math.round(1000 * t)} / 1000 张 → submission.tgz`)));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：前向加噪 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 660, height: 330,
+    controls: [
+      { id: "T", label: "总步数 T", value: "100", options: [["100", "100（作者用的，β 放大 10 倍）"], ["1000", "1000（原论文）"]] },
+      { id: "kind", label: "噪声表", value: "linear", options: [["linear", "线性（作者用的）"], ["cosine", "余弦（后来的改进版）"]] },
+      { id: "frac", label: "走到第几步（占总步数的比例）", min: 0, max: 1, step: 0.01, value: 0.3, fmt: (v) => Math.round(v * 100) + "%" },
+      { id: "seed", label: "换一组随机噪声", button: true },
+    ],
+    note: "按 x_t = √ᾱ_t·x₀ + √(1−ᾱ_t)·ε 在浏览器里真实计算（16×16 示意头像）。右图是 ᾱ_t 曲线，竖线是当前时刻。比较：同样走到 30%，线性表和余弦表剩下的信号差多少？线性表在后半段几乎全是噪声，很多步都“浪费”了。",
+    render(svg, v) {
+      const T = +v.T, sc = schedule(T, v.kind), t = Math.min(T - 1, Math.round(v.frac * (T - 1)));
+      const img = noisy(FACE, sc.ab[t], 30 + v.seed);
+      pix(svg, 20, 20, 120, FACE); K.svg(svg, "text", { x: 80, y: 160, "text-anchor": "middle", "font-size": 12 }, "x₀");
+      pix(svg, 160, 20, 120, img); K.svg(svg, "text", { x: 220, y: 160, "text-anchor": "middle", "font-size": 12 }, `x_t（t = ${t}）`);
+      // 几个代表性时刻
+      [0.1, 0.25, 0.5, 0.75, 1].forEach((f, k) => { const tt = Math.min(T - 1, Math.round(f * (T - 1))); pix(svg, 20 + k * 56, 190, 50, noisy(FACE, sc.ab[tt], 30 + v.seed)); K.svg(svg, "text", { x: 45 + k * 56, y: 255, "text-anchor": "middle", "font-size": 10, class: "muted" }, Math.round(f * 100) + "%"); });
+      K.svg(svg, "text", { x: 20, y: 280, "font-size": 11, class: "muted" }, "同一噪声表下 10%、25%、50%、75%、100% 处的样子");
+      const ax = K.axes(svg, { x: 360, y: 20, w: 280, h: 220 }, [0, T], [0, 1], { xticks: 4, yticks: 4, xlabel: "t" });
+      let d = ""; sc.ab.forEach((a, k) => (d += (d ? "L" : "M") + ax.sx(k) + "," + ax.sy(a)));
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+      K.svg(svg, "line", { x1: ax.sx(t), x2: ax.sx(t), y1: 20, y2: 240, stroke: "var(--warn)", "stroke-width": 2 });
+      K.svg(svg, "text", { x: 370, y: 290, "font-size": 12, fill: "var(--c1)" }, "ᾱ_t：原图信号还剩多少");
+      return { readout: [
+        { k: "β_t（这一步加的噪声）", v: sc.betas[t].toFixed(4) },
+        { k: "√ᾱ_t（原图权重）", v: Math.sqrt(sc.ab[t]).toFixed(3), color: "var(--c1)" },
+        { k: "√(1−ᾱ_t)（噪声权重）", v: Math.sqrt(1 - sc.ab[t]).toFixed(3), color: "var(--c6)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：二维点云 DDPM ---------- */
+  function ddpm(cfg) {
+    const T = 50, r = K.rng(cfg.seed), H = 32, NF = 8, IN = 2 + NF;
+    const sc = schedule(T, "linear"), betas = sc.betas, ab = sc.ab;
+    const sample = () => {
+      if (cfg.shape === "ring") { const a = r() * 2 * Math.PI, rr = 1 + K.randn(r) * 0.06; return [rr * Math.cos(a), rr * Math.sin(a)]; }
+      if (cfg.shape === "moons") { const a = r() * Math.PI; return r() < 0.5 ? [Math.cos(a) - 0.5, Math.sin(a) - 0.25 + K.randn(r) * 0.05] : [0.5 - Math.cos(a), 0.25 - Math.sin(a) + K.randn(r) * 0.05]; }
+      const k = Math.floor(r() * 4); return [[-0.8, -0.8], [0.8, 0.8], [-0.8, 0.8], [0.8, -0.8]][k].map((v) => v + K.randn(r) * 0.1);
+    };
+    const tf = (t) => { const f = [], x = t / T; for (let k = 0; k < NF / 2; k++) { f.push(Math.sin(x * Math.PI * Math.pow(2, k))); f.push(Math.cos(x * Math.PI * Math.pow(2, k))); } return f; };
+    const init = (a, b, s) => { const w = new Float64Array(a * b); for (let i = 0; i < w.length; i++) w[i] = K.randn(r) * Math.sqrt(2 / b) * s; return w; };
+    const P = { W1: init(H, IN, 1), b1: new Float64Array(H), W2: init(H, H, 1), b2: new Float64Array(H), W3: init(2, H, 0.5), b3: new Float64Array(2) };
+    const M = {}, V = {}; for (const k in P) { M[k] = new Float64Array(P[k].length); V[k] = new Float64Array(P[k].length); }
+    const act = (a) => (a > 0 ? a : 0.01 * a), dact = (a) => (a > 0 ? 1 : 0.01);
+    function fwd(x) {
+      const a1 = new Float64Array(H), h1 = new Float64Array(H), a2 = new Float64Array(H), h2 = new Float64Array(H), o = [0, 0];
+      for (let i = 0; i < H; i++) { let s = P.b1[i]; for (let j = 0; j < IN; j++) s += P.W1[i * IN + j] * x[j]; a1[i] = s; h1[i] = act(s); }
+      for (let i = 0; i < H; i++) { let s = P.b2[i]; for (let j = 0; j < H; j++) s += P.W2[i * H + j] * h1[j]; a2[i] = s; h2[i] = act(s); }
+      for (let i = 0; i < 2; i++) { let s = P.b3[i]; for (let j = 0; j < H; j++) s += P.W3[i * H + j] * h2[j]; o[i] = s; }
+      return { a1, h1, a2, h2, o };
+    }
+    const B = 64, losses = []; let step = 0;
+    for (let it = 0; it < cfg.iters; it++) {
+      const G = {}; for (const k in P) G[k] = new Float64Array(P[k].length); let L = 0;
+      for (let b = 0; b < B; b++) {
+        const x0 = sample(), t = Math.floor(r() * T), e = [K.randn(r), K.randn(r)], sa = Math.sqrt(ab[t]), sb = Math.sqrt(1 - ab[t]);
+        const xin = [sa * x0[0] + sb * e[0], sa * x0[1] + sb * e[1]].concat(tf(t));
+        const f = fwd(xin), d = [(f.o[0] - e[0]) / B, (f.o[1] - e[1]) / B];
+        L += ((f.o[0] - e[0]) ** 2 + (f.o[1] - e[1]) ** 2) / 2;
+        const dh2 = new Float64Array(H);
+        for (let i = 0; i < 2; i++) { G.b3[i] += d[i]; for (let j = 0; j < H; j++) { G.W3[i * H + j] += d[i] * f.h2[j]; dh2[j] += d[i] * P.W3[i * H + j]; } }
+        const dh1 = new Float64Array(H);
+        for (let i = 0; i < H; i++) { const g = dh2[i] * dact(f.a2[i]); G.b2[i] += g; for (let j = 0; j < H; j++) { G.W2[i * H + j] += g * f.h1[j]; dh1[j] += g * P.W2[i * H + j]; } }
+        for (let i = 0; i < H; i++) { const g = dh1[i] * dact(f.a1[i]); G.b1[i] += g; for (let j = 0; j < IN; j++) G.W1[i * IN + j] += g * xin[j]; }
+      }
+      step++; const lr = 0.01 * (it < cfg.iters * 0.7 ? 1 : 0.3);
+      for (const k in P) { const p = P[k], g = G[k], m = M[k], v = V[k]; for (let i = 0; i < p.length; i++) { m[i] = 0.9 * m[i] + 0.1 * g[i]; v[i] = 0.999 * v[i] + 0.001 * g[i] * g[i]; p[i] -= (lr * (m[i] / (1 - Math.pow(0.9, step)))) / (Math.sqrt(v[i] / (1 - Math.pow(0.999, step))) + 1e-8); } }
+      if (it % 50 === 0) losses.push(L / B);
+    }
+    let xs = []; for (let i = 0; i < 400; i++) xs.push([K.randn(r), K.randn(r)]);
+    const traj = [xs];
+    for (let t = T - 1; t >= 0; t--) {
+      const a = 1 - betas[t];
+      xs = xs.map((p) => { const e = fwd(p.concat(tf(t))).o; const m = [(p[0] - (betas[t] / Math.sqrt(1 - ab[t])) * e[0]) / Math.sqrt(a), (p[1] - (betas[t] / Math.sqrt(1 - ab[t])) * e[1]) / Math.sqrt(a)]; if (t > 0) { const s = Math.sqrt((betas[t] * (1 - ab[t - 1])) / (1 - ab[t])); m[0] += s * K.randn(r); m[1] += s * K.randn(r); } return m; });
+      traj.push(xs);
+    }
+    const data = []; for (let i = 0; i < 400; i++) data.push(sample());
+    return { traj, losses, data, T };
+  }
+  const cache = {};
+  K.lab(document.getElementById("lab2"), {
+    width: 660, height: 360,
+    controls: [
+      { id: "shape", label: "真实数据的形状", value: "ring", options: [["ring", "圆环"], ["moons", "两个月牙（最难）"], ["four", "四个点团"]] },
+      { id: "iters", label: "训练步数（每步 64 个样本）", value: "1500", options: [["0", "0（没训练）"], ["300", "300"], ["1500", "1500"], ["3000", "3000（约 1 秒）"]] },
+      { id: "view", label: "看采样到第几步（50 = 纯噪声，0 = 完成）", min: 0, max: 50, step: 1, value: 0 },
+      { id: "seed", label: "换一组随机初始化", button: true },
+    ],
+    note: "和作者的 DDPM 完全同一套公式，只是把 64×64 的图换成二维平面上的点，把 U-Net 换成一个小全连接网络（输入：点的坐标 + 时刻的正弦/余弦编码；输出：猜的噪声）。线性噪声表，T = 50。训练完后从 400 个纯高斯噪声点出发，按 p_sample 公式一步步去噪。拖动“看第几步”观察点云怎样从一团雾慢慢聚成目标形状。",
+    render(svg, v) {
+      const key = v.shape + "|" + v.iters + "|" + v.seed;
+      let ms = 0;
+      if (!cache[key]) { const t0 = performance.now(); cache[key] = ddpm({ shape: v.shape, iters: +v.iters, seed: 3 + v.seed * 11 }); ms = performance.now() - t0; }
+      const m = cache[key], idx = m.T - v.view, pts = m.traj[idx];
+      const ax = K.axes(svg, { x: 40, y: 20, w: 300, h: 300 }, [-2.5, 2.5], [-2.5, 2.5], { xticks: 0, yticks: 0 });
+      m.data.forEach((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 2, fill: "var(--ink-3)", opacity: 0.25 }));
+      pts.forEach((p) => { if (Math.abs(p[0]) < 2.5 && Math.abs(p[1]) < 2.5) K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 2.6, fill: "var(--c2)", opacity: 0.8 }); });
+      K.svg(svg, "text", { x: 40, y: 346, "font-size": 12 }, `t = ${v.view}　灰 = 真实数据，橙 = 生成的点`);
+      // 损失曲线
+      const bx = K.axes(svg, { x: 400, y: 20, w: 240, h: 130 }, [0, Math.max(1, m.losses.length)], [0, 1.2], { xticks: 0, yticks: 3 });
+      let d = ""; m.losses.forEach((l, i) => (d += (d ? "L" : "M") + bx.sx(i) + "," + bx.sy(Math.min(1.2, l))));
+      if (d) K.svg(svg, "path", { d, fill: "none", stroke: "var(--c1)", "stroke-width": 1.5 });
+      K.svg(svg, "text", { x: 400, y: 172, "font-size": 11, class: "muted" }, "训练损失：猜噪声的均方误差");
+      // 几个时刻的小图
+      [50, 25, 10, 0].forEach((tt, k) => {
+        const q = m.traj[m.T - tt], x0 = 400 + k * 62, sx = (x) => x0 + 28 + x * 11, sy = (y) => 230 - y * 11;
+        K.svg(svg, "rect", { x: x0, y: 200, width: 56, height: 60, fill: "var(--panel-2)", stroke: tt === v.view ? "var(--warn)" : "var(--line)" });
+        q.slice(0, 200).forEach((p) => { if (Math.abs(p[0]) < 2.5 && Math.abs(p[1]) < 2.6) K.svg(svg, "circle", { cx: sx(p[0]), cy: sy(p[1]), r: 1, fill: "var(--c2)" }); });
+        K.svg(svg, "text", { x: x0 + 28, y: 276, "text-anchor": "middle", "font-size": 10 }, "t=" + tt);
+      });
+      let err = 0; pts.forEach((p) => { let b = 9; m.data.forEach((q) => (b = Math.min(b, Math.hypot(p[0] - q[0], p[1] - q[1])))); err += b; });
+      return { readout: [
+        { k: "生成点到真实数据的平均距离", v: (err / pts.length).toFixed(3), color: err / pts.length < 0.12 ? "var(--good)" : "var(--warn)" },
+        { k: "最后的训练损失", v: m.losses.length ? m.losses[m.losses.length - 1].toFixed(3) : "—" },
+        { k: "本次计算用时", v: ms ? Math.round(ms) + " ms" : "（已缓存）", color: "var(--ink-3)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

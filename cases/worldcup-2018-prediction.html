@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>预测世界杯冠军</title>
+<meta name="description" content="Kaggle 案例拆解：用 FIFA 排名和一百多年的国际比赛结果训练逻辑回归，模拟 2018 年世界杯小组赛和淘汰赛；讨论体育预测里的随机性、主场偏差和“只模拟一次”的问题。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格数据 · 二分类 + 赛事模拟 · 体育数据分析</div>
+  <h1>预测 2018 世界杯冠军：用排名差猜胜负，再把整届比赛“演”一遍</h1>
+  <p class="en">Predicting the winner of the 2018 FIFA World Cup</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">多表合并</span><span class="tag method">按日期补齐排名</span><span class="tag method">差值特征</span>
+    <span class="tag method">多项式特征</span><span class="tag method">逻辑回归</span><span class="tag method">ROC / AUC</span>
+    <span class="tag method">误差分析</span><span class="tag method">赛事模拟</span><span class="tag method">公平赔率</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Agoston Torok</b></span>
+    <span>Kaggle 点赞 <b>884</b>（2026-11 抓取）</span>
+    <span>数据集 <b>FIFA 排名 1993–2018、国际足球比赛 1872–2018、2018 世界杯赛程</b></span>
+    <span><a href="https://www.kaggle.com/code/agostontorok/soccer-world-cup-2018-winner" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">一百多年的国家队比赛 + 每月的 FIFA 排名</div><p>把每场比赛和两队当天的排名、积分对上号，再加上 2018 世界杯的分组赛程。<span data-cell="1">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">主队会不会赢（平局算没赢）</div><p>模型输出“主队获胜的概率”，再用它把小组赛、16 强到决赛一场场推演下去。<span data-cell="5">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">四个特征 + 带二次项的逻辑回归</div><p>平均排名、排名差、积分差、是否正式比赛；用 ROC/AUC 和混淆矩阵评估；用 0.05 的边界判平局。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">模型预测：德国夺冠</div><p>作者写“德国会夺冠”，并预测巴西过不了比利时、C 罗和梅西会在 1/4 决赛相遇。<span data-cell="0">出处</span> 真实的 2018 世界杯冠军是法国，德国小组赛就出局了。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">作者用了三份 Kaggle 上的公开数据（第 1 格）。行数在运行输出里，源码不带输出，这里只写作者文字里写明的范围。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">三份数据</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>数据</th><th>范围</th><th>用来做什么</th></tr>
+        <tr><td>FIFA 男足国家队排名（Tadhg Fitzgerald 整理）</td><td>1993–2018，每月更新</td><td>查每支球队在某天的排名和积分</td></tr>
+        <tr><td>国际足球比赛结果（Mart Jürisoo 整理）</td><td>1872–2018</td><td>训练数据：每场的主客队、比分、赛事类型</td></tr>
+        <tr><td>2018 世界杯数据（Nuggs 整理）</td><td>2018 届</td><td>参赛队、分组、小组赛对手</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">FIFA 排名只从 1993 年开始，所以和排名合并后，1993 年以前的比赛自然被丢掉了（第 4 格的 merge 是内连接）。<span data-cell="4">出处</span></p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">合并后，模型用到的列</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>白话含义</th><th>类型</th></tr>
+        <tr><td><code>average_rank</code></td><td>两队排名的平均：数字小 = 两支都是强队</td><td>数值</td></tr>
+        <tr><td><code>rank_difference</code></td><td>主队排名 − 客队排名：负数说明主队排得更靠前</td><td>数值</td></tr>
+        <tr><td><code>point_difference</code></td><td>两队近三年加权积分之差</td><td>数值</td></tr>
+        <tr><td><code>is_stake</code></td><td>是不是正式比赛（不是友谊赛）</td><td>是 / 否</td></tr>
+        <tr><td><code>is_won</code></td><td><b>要预测的答案</b>：主队是否获胜（平局算没赢）</td><td>是 / 否</td></tr>
+      </table></div>
+      <p style="font-size:14px">作者还试过“休息天数”和“参赛国独热编码”，觉得作用不大，最后没用（第 3 格）。<span data-cell="3">出处</span></p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="7">
+    <h3>动手试试 A · 排名差 → 获胜概率：现场训练一个逻辑回归 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="16">
+    <h3>动手试试 B · 只演一次 vs 演一万次：冠军概率有多大 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>预测冠军是德国（作者称其为博彩公司眼中的“冷门”）</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>埃及能进 16 强，和葡萄牙的比赛是这一轮“最稳的赌注”；巴西过不了比利时；C 罗和梅西 1/4 决赛相遇</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>简单的逻辑回归“表现已经相当好”</td><td><span data-cell="6">第 6 格</span> <span data-cell="8">第 8 格</span></td></tr>
+        <tr><td>排名接近、整体排名靠后、友谊赛的比赛更容易猜错</td><td><span data-cell="10">第 10 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">AUC 分数是画在图标题里的运行结果，源码不带输出，这里不列。2018 年世界杯的真实结果（法国夺冠，德国小组未出线）是公开事实，与模型预测相差很大。这不一定说明模型“错了”：足球进球少、偶然性大，再好的模型也只能给概率。问题在于作者只按“概率大的一方赢”推演了<b>一次</b>，把概率当成了确定结果。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>两队相遇时谁的胜算更大；把单场概率串起来，估计整届赛事每队夺冠的概率。</li>
+        <li><b>同类问题：</b>篮球、网球、电竞对局预测，选举中各候选人胜选概率，体育博彩的赔率定价。</li>
+        <li><b>可迁移的套路：</b>“差值特征”（强弱之差）→ 逻辑回归给出单场概率 → 蒙特卡洛模拟（随机地演很多遍）得到整体分布。</li>
+        <li><b>提醒：</b>训练数据里的“主队”有真实主场优势，而世界杯在中立场地（东道主除外），作者却直接把赛程表里排在前面的队当作“主队”，可能给它们多加了胜率。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>按天前向填充排名，再和比赛按日期合并 <span data-cell="4">第 4 格</span></li>
+        <li>差值特征、平局算输的标签 <span data-cell="5">第 5 格</span></li>
+        <li>PolynomialFeatures(2) + LogisticRegression(C=1e-5) <span data-cell="7">第 7 格</span></li>
+        <li>错误样本的分布分析 <span data-cell="9">第 9 格</span></li>
+        <li>小组赛积分模拟、淘汰赛推演、公平赔率 1/p <span data-cell="14">第 14 格</span> <span data-cell="16">第 16 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>模型说德国夺冠，结果德国小组就出局了。能不能据此说“模型没用”？怎样评价一个给出概率的预测是好是坏？</li>
+      <li>作者把平局算作“主队没赢”。在小组赛里平局很常见，这个简化会带来什么问题？作者用 0.05 的 margin 补救，合理吗？</li>
+      <li>训练数据里主队通常真的在自己家踢球，而世界杯模拟中“主队”只是赛程表里先写的那支。把两队对调，预测会变吗？</li>
+      <li>作者用随机方式切分训练集和测试集，测试集里有很多比训练数据更早的比赛。预测“未来比赛”时，这样评估合适吗？</li>
+      <li>如果要把模型用在体育博彩上，你觉得会有什么风险？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Agoston Torok，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Tadhg Fitzgerald（FIFA 排名）、Mart Jürisoo（国际足球比赛结果）、Nuggs（2018 世界杯数据集）。
+</footer>
+</main>
+
+<script src="nb/worldcup-2018-prediction.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const T = (svg, x, y, s, o) => K.svg(svg, "text", Object.assign({ x, y, "font-size": 13 }, o || {}), s);
+  const fade = (els, ctx, ms) => { els.forEach((e) => (e.style.opacity = 0)); return ctx.tween(ms || 500, (t) => els.forEach((e) => (e.style.opacity = t))); };
+
+  const steps = [
+    {
+      title: "先看目标和作者的结论", kicker: "第 0 格 · 开场",
+      html: `<p>作者开门见山：用排名、积分和积分差来预测两队交手的结果，再用这个模型推演小组赛和淘汰赛（第 0 格）。</p><p>他的结论写在最前面：<b>德国会夺冠</b>，巴西过不了比利时，C 罗和梅西会在 1/4 决赛相遇。为了让球迷看得懂，他还把概率换算成了“公平赔率”。</p>`,
+      cells: [0], highlight: ["Germany"],
+      draw(svg, ctx) {
+        const rounds = [8, 4, 2, 1], els = [];
+        rounds.forEach((n, ri) => { for (let i = 0; i < n; i++) { const y = 20 + (300 / n) * (i + 0.5); const g = K.node(svg, 40 + ri * 170, y - 15, 130, 30, ri === 3 ? "德国？" : "", { fill: ri === 3 ? "color-mix(in srgb, var(--warn) 25%, var(--panel))" : "var(--panel-2)", stroke: ri === 3 ? "var(--warn)" : "var(--line)", bold: true }); g.style.opacity = 0; els.push({ g, ri }); } });
+        T(svg, 40, 336, "16 强 → 8 强 → 4 强 → 决赛（示意）", { "font-size": 12, class: "muted" });
+        (async () => { for (let r = 0; r < 4; r++) { if (!(await ctx.tween(350, (t) => els.filter((e) => e.ri === r).forEach((e) => (e.g.style.opacity = t))))) return; } })();
+      },
+    },
+    {
+      title: "三份数据，名字要先对齐", kicker: "第 1–2 格 · 读数据",
+      html: `<p>三份数据来自不同的人，国家名写法不一样：“IR Iran”和“Iran”、“Costarica”和“Costa Rica”、拼错的“Porugal”……作者在读入时就统一替换（第 2 格），否则后面合并时这些队会“对不上号”而丢失。</p><p>他还把排名表里“当年、两年前、三年前”的加权积分加起来，得到 <code>weighted_points</code>。另外把“民主德国”并入“德国”、“China”改成“China PR”。</p>`,
+      cells: [1, 2], highlight: ["\"Porugal\": \"Portugal\"", "weighted_points"],
+      draw(svg, ctx) {
+        const pairs = [["IR Iran", "Iran"], ["Costarica", "Costa Rica"], ["Porugal", "Portugal"], ["Columbia", "Colombia"], ["Korea", "Korea Republic"], ["Germany DR", "Germany"]];
+        const rows = pairs.map((p, i) => {
+          const a = K.node(svg, 60, 20 + i * 50, 200, 38, p[0], { fill: "color-mix(in srgb, var(--bad) 14%, var(--panel))", stroke: "var(--bad)" });
+          const ar = K.arrow(svg, 270, 39 + i * 50, 380, 39 + i * 50);
+          const b = K.node(svg, 390, 20 + i * 50, 220, 38, p[1], { fill: "color-mix(in srgb, var(--good) 14%, var(--panel))", stroke: "var(--good)" });
+          ar.style.opacity = b.style.opacity = 0; return [ar, b];
+        });
+        (async () => { for (const r of rows) { if (!(await ctx.tween(250, (t) => r.forEach((e) => (e.style.opacity = t))))) return; } })();
+      },
+    },
+    {
+      title: "按日期把排名接到每场比赛上", kicker: "第 3–4 格 · 数据合并",
+      html: `<p>排名每月才发布一次，比赛却每天都有。作者先把每支球队的排名<b>按天展开</b>，没发布排名的日子沿用上一次的排名（前向填充 <code>ffill</code>），再按“日期 + 主队”“日期 + 客队”两次合并到比赛表上（第 4 格）。</p><p>这样每场比赛都知道“开赛那天两队各排第几”。用的是比赛当天之前已经公布的排名，没有偷看未来，这是对的。</p>`,
+      cells: [3, 4], highlight: ["resample('D').first()", "fillna(method='ffill')", "merge"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 40, w: 620, h: 120 }, [0, 90], [0, 1], { xticks: 3, yticks: 0, xlabel: "日期（天，示意）", xfmt: (v) => `${v}` });
+        const pubs = [[0, 12], [30, 9], [60, 11], [90, 8]];
+        pubs.forEach((p) => { K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: 100, r: 7, fill: "var(--c1)" }); T(svg, ax.sx(p[0]), 84, `第 ${p[1]}`, { "text-anchor": "middle", "font-size": 12, "font-weight": 700 }); });
+        const fill = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 3, opacity: 0.4 });
+        const games = [12, 41, 47, 75];
+        const gEls = games.map((d) => { const g = K.svg(svg, "g"); K.svg(g, "line", { x1: ax.sx(d), x2: ax.sx(d), y1: 100, y2: 230, stroke: "var(--c2)", "stroke-dasharray": "3 3" }); K.svg(g, "circle", { cx: ax.sx(d), cy: 240, r: 9, fill: "var(--c2)" }); const r = pubs.filter((p) => p[0] <= d).pop()[1]; K.svg(g, "text", { x: ax.sx(d), y: 270, "text-anchor": "middle", "font-size": 12 }, `比赛 → 排名第 ${r}`); g.style.opacity = 0; return g; });
+        T(svg, 50, 320, "蓝点 = 排名发布日；横线 = 沿用上次排名；橙点 = 比赛日，取当天有效的排名", { "font-size": 12, class: "muted" });
+        ctx.tween(1200, (t) => { let d = ""; pubs.forEach((p, i) => { if (i < 3) { const x0 = ax.sx(p[0]), x1 = ax.sx(K.lerp(p[0], pubs[i + 1][0], K.clamp(t * 3 - i, 0, 1))); d += `M${x0},100L${x1},100`; } }); fill.setAttribute("d", d); })
+          .then(async (ok) => { if (!ok) return; for (const g of gEls) { if (!(await ctx.tween(250, (t) => (g.style.opacity = t)))) return; } });
+      },
+    },
+    {
+      title: "造特征：排名差、积分差、是否正式比赛", kicker: "第 5 格 · 特征工程",
+      html: `<p>作者为每场比赛算了几个数（第 5 格）：</p><ul class="tight"><li><b>排名差</b> = 主队排名 − 客队排名（负数代表主队更强）</li><li><b>平均排名</b>：两支都是强队，还是两支都是弱队</li><li><b>积分差</b>：近三年加权积分之差</li><li><b>是否正式比赛</b>：作者的直觉是友谊赛更难猜（大家不拼命）</li></ul><p>“差”比“各自是多少”更有用：比赛结果取决于两队<b>相对</b>的强弱。</p>`,
+      cells: [5], highlight: ["rank_difference", "point_difference", "is_stake"],
+      draw(svg, ctx) {
+        K.node(svg, 30, 60, 150, 70, "主队\n排名 5 · 积分 1500", { fs: 12, bold: true, fill: "color-mix(in srgb, var(--c1) 14%, var(--panel))", stroke: "var(--c1)" });
+        K.node(svg, 30, 180, 150, 70, "客队\n排名 25 · 积分 1100", { fs: 12, bold: true, fill: "color-mix(in srgb, var(--c2) 14%, var(--panel))", stroke: "var(--c2)" });
+        const feats = [["排名差", "5 − 25 = −20"], ["平均排名", "(5 + 25) / 2 = 15"], ["积分差", "1500 − 1100 = 400"], ["正式比赛？", "是"]];
+        const els = feats.map((f, i) => { const g = K.node(svg, 300, 30 + i * 70, 340, 52, `${f[0]}：${f[1]}`, { fs: 14, fill: "var(--accent-soft)", stroke: "var(--accent)" }); g.style.opacity = 0; return g; });
+        const a1 = K.arrow(svg, 180, 95, 295, 150), a2 = K.arrow(svg, 180, 215, 295, 160);
+        a1.style.opacity = a2.style.opacity = 0;
+        T(svg, 300, 330, "数值为示意", { "font-size": 11, class: "muted" });
+        (async () => { if (!(await ctx.tween(300, (t) => { a1.style.opacity = a2.style.opacity = t; }))) return; for (const e of els) { if (!(await ctx.tween(300, (t) => (e.style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      title: "标签怎么定：平局算“没赢”", kicker: "第 5–6 格 · 关键简化",
+      html: `<p>同一格里，作者定义答案 <code>is_won = 主队进球 &gt; 客队进球</code>，注释写着“平局算输”。于是原本的三种结果（主胜、平、客胜）变成了两种（主胜、没赢）。</p><p>好处是可以直接用二分类模型。代价是：模型说“主队获胜概率 0.4”时，剩下 0.6 里混着平局和客胜，分不清。后面小组赛模拟时作者只好用一个 0.05 的“边界”来人为判平局（第 9 章）。</p><p>另一个隐患：训练数据里的“主队”多半真在自己家比赛，有主场优势。</p>`,
+      cells: [5], highlight: ["matches['is_won'] = matches['score_difference'] > 0 # take draw as lost"],
+      draw(svg, ctx) {
+        const res = [["主胜", "var(--good)"], ["平局", "var(--warn)"], ["客胜", "var(--bad)"]];
+        const top = res.map((r, i) => K.node(svg, 60 + i * 210, 50, 180, 60, r[0], { bold: true, fill: `color-mix(in srgb, ${r[1]} 18%, var(--panel))`, stroke: r[1] }));
+        const win = K.node(svg, 60, 220, 180, 60, "is_won = 1", { bold: true, fill: "color-mix(in srgb, var(--good) 18%, var(--panel))", stroke: "var(--good)" });
+        const lose = K.node(svg, 330, 220, 390, 60, "is_won = 0（平局 + 客胜混在一起）", { bold: true, fill: "color-mix(in srgb, var(--bad) 14%, var(--panel))", stroke: "var(--bad)" });
+        const arr = [K.arrow(svg, 150, 112, 150, 215), K.arrow(svg, 360, 112, 470, 215), K.arrow(svg, 570, 112, 560, 215)];
+        [win, lose, ...arr].forEach((e) => (e.style.opacity = 0));
+        (async () => { if (!(await ctx.tween(500, (t) => arr.forEach((a) => (a.style.opacity = t))))) return; await ctx.tween(500, (t) => { win.style.opacity = lose.style.opacity = t; }); })();
+      },
+    },
+    {
+      title: "逻辑回归 + 二次多项式特征", kicker: "第 7 格 · 建模",
+      html: `<p>模型很简单（第 7 格）：先用 <code>PolynomialFeatures(degree=2)</code> 把 4 个特征扩展成它们的平方和两两乘积（比如“排名差 × 是否正式比赛”），再交给<b>逻辑回归</b>。逻辑回归给每个特征一个权重，加总后用 S 形曲线换算成 0–1 之间的获胜概率。</p><p>数据随机切成 80% 训练、20% 测试。注意 <code>C=1e-5</code>：C 越小，正则化越强，权重被压得越小，模型越“保守”。而特征没有做标准化，积分差的平方可能是几十万量级，这会让不同特征被压缩的程度很不一样。</p>`,
+      cells: [7], highlight: ["PolynomialFeatures(degree=2)", "LogisticRegression(C=1e-5)"],
+      draw(svg, ctx) {
+        const base = ["平均排名", "排名差", "积分差", "正式比赛"];
+        base.forEach((b, i) => K.node(svg, 20, 30 + i * 70, 120, 46, b, { fs: 12 }));
+        const poly = ["1", "a", "b", "c", "d", "a²", "ab", "ac", "ad", "b²", "bc", "bd", "c²", "cd", "d²"];
+        const pe = poly.map((p, i) => { const g = K.node(svg, 200 + (i % 5) * 62, 40 + Math.floor(i / 5) * 70, 54, 44, p, { fs: 13, fill: "color-mix(in srgb, var(--c1) 12%, var(--panel))", stroke: "var(--c1)" }); g.style.opacity = 0; return g; });
+        const lr = K.node(svg, 540, 110, 160, 80, "逻辑回归\n→ 获胜概率", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        lr.style.opacity = 0;
+        T(svg, 200, 300, "4 个特征 → 15 个（含常数项、平方、两两相乘）", { "font-size": 12, class: "muted" });
+        (async () => { for (const e of pe) { if (!(await ctx.tween(90, (t) => (e.style.opacity = t)))) return; } await ctx.tween(400, (t) => (lr.style.opacity = t)); })();
+      },
+    },
+    {
+      title: "ROC 曲线、AUC 与混淆矩阵", kicker: "第 7 格 · 评估",
+      html: `<p>同一格的后半部分画了三张图：</p><ul class="tight"><li><b>ROC 曲线</b>：把“判为赢”的门槛从高往低移，看抓到的真赢比例（纵轴）和误判比例（横轴）怎么一起变化。曲线越往左上角拱越好</li><li><b>AUC</b>：ROC 曲线下的面积，0.5 等于抛硬币，1 是完美。作者把 AUC 写在图标题里，源码不带输出，这里不列</li><li>测试集和训练集的<b>混淆矩阵</b>：两张图差不多，说明没有明显过拟合</li></ul><p>作者评价“已经相当好”，并提醒足球进球少，结果本来就难预测（第 8 格）。</p>`,
+      cells: [7], highlight: ["roc_curve", "roc_auc_score", "confusion_matrix"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 20, w: 280, h: 280 }, [0, 1], [0, 1], { xlabel: "误判比例", ylabel: "抓到的真赢比例" });
+        K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0), x2: ax.sx(1), y2: ax.sy(1), stroke: "var(--ink-3)", "stroke-dasharray": "4 4" });
+        T(svg, ax.sx(0.55), ax.sy(0.45), "抛硬币", { "font-size": 11, class: "muted" });
+        const p = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 3 });
+        const dot = K.svg(svg, "circle", { cx: ax.sx(1), cy: ax.sy(1), r: 6, fill: "var(--accent)" });
+        const lab = T(svg, 400, 60, "", { "font-weight": 700 });
+        T(svg, 400, 100, "门槛从高往低移：", { "font-size": 13 });
+        T(svg, 400, 124, "· 判为赢的比赛越来越多", { "font-size": 13 });
+        T(svg, 400, 148, "· 抓到的真赢、误判都变多", { "font-size": 13 });
+        T(svg, 400, 300, "曲线形状为示意", { "font-size": 11, class: "muted" });
+        const roc = (x) => 1 - Math.pow(1 - x, 2.6);
+        ctx.tween(1800, (t) => {
+          let d = ""; for (let x = 0; x <= t; x += 0.01) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(roc(x)); p.setAttribute("d", d);
+          dot.setAttribute("cx", ax.sx(t)); dot.setAttribute("cy", ax.sy(roc(t))); lab.textContent = `门槛 ≈ ${(1 - t).toFixed(2)}`;
+        });
+      },
+    },
+    {
+      title: "错在哪：势均力敌的比赛最难猜", kicker: "第 8–10 格 · 误差分析",
+      html: `<p>作者把测试集里猜错的比赛单独拿出来，和全部比赛比较三个特征的分布（第 9 格）。结论（第 10 格）：</p><ul class="tight"><li><b>排名接近</b>的比赛更容易猜错</li><li>整体<b>排名靠后</b>（两支弱队）的比赛更容易猜错</li><li><b>友谊赛</b>稍微更容易猜错</li></ul><p>作者由此推断：世界杯都是正式比赛，所以预测“可能会更好”。这种“看错在哪里”的<b>误差分析</b>是很好的习惯。</p>`,
+      cells: [8, 9, 10], highlight: ["wrongs = y_test != model.predict(X_test)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [-80, 80], [0, 1], { yticks: 0, xlabel: "排名差（示意）" });
+        const g = (m, s) => (x) => Math.exp(-((x - m) ** 2) / (2 * s * s));
+        const all = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 3 });
+        const wr = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 3 });
+        T(svg, 480, 50, "— 全部比赛", { fill: "var(--c1)", "font-weight": 700 });
+        T(svg, 480, 74, "— 猜错的比赛", { fill: "var(--c6)", "font-weight": 700 });
+        const note = T(svg, 360, 300, "猜错的比赛挤在“排名差 ≈ 0”附近：实力接近，最难猜", { "text-anchor": "middle", "font-weight": 700 });
+        note.style.opacity = 0;
+        const fa = g(0, 35), fw = g(0, 14);
+        ctx.tween(1500, (t) => {
+          let d1 = "", d2 = ""; for (let x = -80; x <= -80 + 160 * t; x += 1) { d1 += (d1 ? "L" : "M") + ax.sx(x) + "," + ax.sy(fa(x) * 0.6); d2 += (d2 ? "L" : "M") + ax.sx(x) + "," + ax.sy(fw(x) * 0.95); }
+          all.setAttribute("d", d1); wr.setAttribute("d", d2);
+        }).then((ok) => ok && fade([note], ctx, 500));
+      },
+    },
+    {
+      title: "小组赛模拟：用 0.05 的边界判平局", kicker: "第 11–14 格 · 赛事模拟",
+      html: `<p>作者取排名表里<b>最新一期</b>的排名（第 13 格），对每个小组的 6 场比赛逐一算“前一队获胜概率” p（第 14 格）：</p><ul class="tight"><li>p ≥ 0.55：前一队赢，得 3 分</li><li>p ≤ 0.45：后一队赢，得 3 分</li><li>两者之间：判平局，各得 1 分</li></ul><p>同时累加每队的获胜概率 <code>total_prob</code>，积分相同时用它排序。这是一种“确定性”模拟：每场都按概率大的一方算结果，只演一次。</p>`,
+      cells: [11, 13, 14], highlight: ["margin = 0.05", "points += 3", "Draw"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 60, w: 600, h: 60 }, [0, 1], [0, 1], { xticks: 10, yticks: 0, xlabel: "前一队获胜概率 p" });
+        K.svg(svg, "rect", { x: ax.sx(0), y: 60, width: ax.sx(0.45) - ax.sx(0), height: 60, fill: "var(--c2)", opacity: 0.25 });
+        K.svg(svg, "rect", { x: ax.sx(0.45), y: 60, width: ax.sx(0.55) - ax.sx(0.45), height: 60, fill: "var(--warn)", opacity: 0.35 });
+        K.svg(svg, "rect", { x: ax.sx(0.55), y: 60, width: ax.sx(1) - ax.sx(0.55), height: 60, fill: "var(--c1)", opacity: 0.25 });
+        T(svg, ax.sx(0.22), 50, "后一队赢 +3", { "text-anchor": "middle", "font-weight": 700, fill: "var(--c2)" });
+        T(svg, ax.sx(0.5), 50, "平 +1/+1", { "text-anchor": "middle", "font-weight": 700, fill: "var(--warn)" });
+        T(svg, ax.sx(0.78), 50, "前一队赢 +3", { "text-anchor": "middle", "font-weight": 700, fill: "var(--c1)" });
+        const teams = ["甲", "乙", "丙", "丁"], pts = [0, 0, 0, 0];
+        const games = [[0, 1, 0.62], [0, 2, 0.71], [0, 3, 0.52], [1, 2, 0.48], [1, 3, 0.57], [2, 3, 0.4]];
+        const tb = teams.map((t, i) => T(svg, 120 + i * 140, 250, `${t}队：0 分`, { "font-size": 15, "font-weight": 700 }));
+        const marker = K.svg(svg, "circle", { cx: ax.sx(0.5), cy: 90, r: 9, fill: "var(--ink)" });
+        const cur = T(svg, 360, 200, "", { "text-anchor": "middle" });
+        T(svg, 360, 300, "一个四队小组的 6 场比赛（概率为示意）", { "text-anchor": "middle", "font-size": 12, class: "muted" });
+        (async () => {
+          for (const [a, b, p] of games) {
+            cur.textContent = `${teams[a]}队 vs ${teams[b]}队：p = ${p.toFixed(2)}`;
+            if (!(await ctx.tween(400, (t) => marker.setAttribute("cx", ax.sx(K.lerp(0.5, p, t)))))) return;
+            if (p >= 0.55) pts[a] += 3; else if (p <= 0.45) pts[b] += 3; else { pts[a]++; pts[b]++; }
+            tb.forEach((e, i) => (e.textContent = `${teams[i]}队：${pts[i]} 分`));
+            if (!(await ctx.wait(350))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "淘汰赛推演与“公平赔率”", kicker: "第 15–16 格 · 单场淘汰",
+      html: `<p>每组前两名进入 16 强，按 <code>pairing</code> 的顺序配对（A1 对 B2 之类，第 16 格）。淘汰赛没有平局：p ≤ 0.5 就判后一队晋级，否则前一队晋级，一轮一轮推到决赛。</p><p>作者还给出了<b>公平赔率</b> = 1 / 概率。比如胜率 0.25 对应赔率 4.0：押 1 元赢了拿回 4 元。“公平”指没扣博彩公司的抽成。</p><p>关键问题：每场都让概率大的一方晋级，等于假设“热门永远赢”。一支每场都有 60% 胜率的球队，连赢 4 场的概率只有 0.6⁴ ≈ 13%。下面的实验 B 把整个淘汰赛随机演很多遍，看看每队真正的夺冠概率。</p>`,
+      cells: [15, 16], highlight: ["pairing", "1/home_win_prob", "<= 0.5"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [1, 4], [0, 1], { xticks: 3, xlabel: "连续要赢的场数（16 强 → 冠军共 4 场）", ylabel: "全部赢下的概率", xfmt: (v) => String(Math.round(v)) });
+        const ps = [0.75, 0.6];
+        const cols = ["var(--c1)", "var(--c6)"];
+        ps.forEach((p, k) => T(svg, 470, 60 + k * 22, `— 每场胜率 ${p}`, { fill: cols[k], "font-weight": 700, "font-size": 12 }));
+        const paths = ps.map((p, k) => K.svg(svg, "path", { d: "", fill: "none", stroke: cols[k], "stroke-width": 3 }));
+        const lab = T(svg, 360, 310, "", { "text-anchor": "middle", "font-weight": 700 });
+        ctx.tween(1600, (t) => {
+          paths.forEach((pa, k) => { let d = ""; for (let n = 1; n <= 1 + 3 * t + 1e-9; n += 0.05) d += (d ? "L" : "M") + ax.sx(n) + "," + ax.sy(Math.pow(ps[k], n)); pa.setAttribute("d", d); });
+          if (t > 0.99) lab.textContent = `0.6 的 4 次方 = ${Math.pow(0.6, 4).toFixed(2)}：“热门”夺冠其实并不稳`;
+        });
+      },
+    },
+    {
+      title: "画出对阵树，再对照真实结果", kicker: "第 17–19 格 · 可视化与回看",
+      html: `<p>作者用 networkx 把淘汰赛画成一棵放射状的对阵树，每个节点标着两队的公平赔率，颜色越深表示两队胜率差距越大（第 18 格）。</p><p>回看历史：2018 年世界杯的冠军是法国，德国在小组赛就被淘汰了。作者预测的“德国夺冠”没有发生。</p><p>这正好说明体育预测的本质：模型给的是<b>概率</b>，不是剧本。评价一个概率模型，要看它在大量比赛上的概率是否靠谱（比如说 70% 的事情是不是大约 70% 发生了），而不是只看一届的冠军猜没猜中。</p>`,
+      cells: [17, 18], highlight: ["balanced_tree", "graphviz_layout"],
+      draw(svg, ctx) {
+        const cx = 360, cy = 170, els = [];
+        const levels = [16, 8, 4, 2];
+        levels.forEach((n, li) => { const R = 150 - li * 42; for (let i = 0; i < n; i++) { const a = (i / n) * Math.PI * 2; const c = K.svg(svg, "circle", { cx: cx + R * Math.cos(a), cy: cy + R * Math.sin(a), r: 0, fill: K.heat(0.3 + 0.15 * li) }); els.push({ c, li }); } });
+        const center = K.svg(svg, "circle", { cx, cy, r: 0, fill: "var(--warn)" });
+        const t1 = T(svg, 560, 60, "模型预测：德国", { "font-weight": 700, fill: "var(--warn)" });
+        const t2 = T(svg, 560, 90, "真实冠军：法国", { "font-weight": 700, fill: "var(--good)" });
+        const t3 = T(svg, 560, 120, "德国：小组未出线", { "font-size": 12 });
+        [t1, t2, t3].forEach((e) => (e.style.opacity = 0));
+        (async () => {
+          for (let li = 0; li < 4; li++) { if (!(await ctx.tween(300, (t) => els.filter((e) => e.li === li).forEach((e) => e.c.setAttribute("r", 9 * t))))) return; }
+          if (!(await ctx.tween(300, (t) => center.setAttribute("r", 16 * t)))) return;
+          if (!(await fade([t1], ctx, 400))) return;
+          await fade([t2, t3], ctx, 500);
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：排名差 → 获胜概率 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "home", label: "主场优势（模拟设定，单位：相当于多少个排名位次）", min: 0, max: 30, step: 1, value: 12 },
+      { id: "noise", label: "比赛的偶然性（越大越难预测）", min: 5, max: 60, step: 1, value: 25 },
+      { id: "rd", label: "要预测的对阵：前一队排名 − 后一队排名", min: -60, max: 60, step: 1, value: -10 },
+    ],
+    note: "现场生成 1500 场模拟比赛：主队获胜概率取决于“排名差 − 主场优势”加上偶然性。浏览器里用梯度下降训练逻辑回归（只用排名差一个特征），画出拟合的 S 形曲线。读数里把同一对阵两种顺序各算一次：中立场地上，两队获胜概率之和应小于 100%（还有平局）。主场优势调大后，这个和会超过 100%，说明把赛程表里先写的队当“主队”会多算胜率。",
+    render(svg, v) {
+      const r = K.rng(21), X = [], Y = [];
+      for (let i = 0; i < 1500; i++) {
+        const rd = (r() - 0.5) * 140;
+        const perf = -(rd - v.home) + K.randn(r) * v.noise;  // 排名差越负（主队排名靠前）越好
+        X.push(rd); Y.push(perf > 8 ? 1 : 0);  // 平局算没赢：需要明显优势才算赢
+      }
+      let w = 0, b = 0;
+      for (let e = 0; e < 400; e++) { let gw = 0, gb = 0; for (let i = 0; i < X.length; i++) { const p = K.sigmoid(w * X[i] / 50 + b); gw += (p - Y[i]) * X[i] / 50; gb += p - Y[i]; } w -= (1.5 * gw) / X.length; b -= (1.5 * gb) / X.length; }
+      const P = (rd) => K.sigmoid((w * rd) / 50 + b);
+      const ax = K.axes(svg, { x: 60, y: 20, w: 560, h: 240 }, [-70, 70], [0, 1], { xlabel: "排名差（主队 − 客队；负数 = 主队排名更靠前）", ylabel: "主队获胜" });
+      const bins = {};
+      X.forEach((x, i) => { const k = Math.round(x / 10) * 10; (bins[k] = bins[k] || [0, 0]); bins[k][0] += Y[i]; bins[k][1]++; });
+      Object.keys(bins).forEach((k) => K.svg(svg, "circle", { cx: ax.sx(+k), cy: ax.sy(bins[k][0] / bins[k][1]), r: 4 + Math.sqrt(bins[k][1]) / 3, fill: "var(--c1)", opacity: 0.45 }));
+      let d = ""; for (let x = -70; x <= 70; x += 1) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(P(x)); K.svg(svg, "path", { d, fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+      K.svg(svg, "line", { x1: ax.sx(v.rd), x2: ax.sx(v.rd), y1: ax.sy(0), y2: ax.sy(1), stroke: "var(--accent)", "stroke-dasharray": "4 3" });
+      K.svg(svg, "circle", { cx: ax.sx(v.rd), cy: ax.sy(P(v.rd)), r: 6, fill: "var(--accent)" });
+      T(svg, 60, 318, "蓝圈 = 每个排名差区间里主队实际获胜的比例（圈越大场次越多）；红线 = 逻辑回归拟合", { "font-size": 11, class: "muted" });
+      return { readout: [
+        { k: "前一队当“主队”的获胜概率", v: (P(v.rd) * 100).toFixed(0) + "%" },
+        { k: "交换顺序：后一队当“主队”的获胜概率", v: (P(-v.rd) * 100).toFixed(0) + "%" },
+        { k: "两者之和（中立场地应小于 100%）", v: ((P(v.rd) + P(-v.rd)) * 100).toFixed(0) + "%", color: P(v.rd) + P(-v.rd) > 1 ? "var(--bad)" : "var(--ink)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：蒙特卡洛模拟淘汰赛 ---------- */
+  const NAMES = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"];
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "spread", label: "16 支球队的实力差距（越大强队越强）", min: 0.2, max: 3, step: 0.1, value: 1.2, fmt: (v) => v.toFixed(1) },
+      { id: "n", label: "随机模拟多少届", min: 1, max: 10000, step: 1, value: 2000 },
+      { id: "seed", label: "重新抽一遍", button: true },
+    ],
+    note: "16 支模拟球队（A 最强，P 最弱），淘汰赛对阵固定。每场按实力算出胜率，再像掷骰子一样随机决定谁晋级，整届演 N 遍，统计每队夺冠的比例。黄色柱子和箭头标出的是“每场都让热门赢”只演一次的冠军，即作者的做法。把届数调成 1 再多点几次“重新抽”，看看冠军会换成谁。",
+    render(svg, v) {
+      const r = K.rng(500 + v.seed * 37);
+      const str = NAMES.map((_, i) => v.spread * (1 - i / 7.5));
+      const order = [0, 15, 7, 8, 3, 12, 4, 11, 1, 14, 6, 9, 2, 13, 5, 10];
+      const win = (a, b) => K.sigmoid(str[a] - str[b]);
+      const cnt = new Array(16).fill(0);
+      for (let s = 0; s < v.n; s++) {
+        let cur = order.slice();
+        while (cur.length > 1) { const nx = []; for (let i = 0; i < cur.length; i += 2) nx.push(r() < win(cur[i], cur[i + 1]) ? cur[i] : cur[i + 1]); cur = nx; }
+        cnt[cur[0]]++;
+      }
+      let det = order.slice(); while (det.length > 1) { const nx = []; for (let i = 0; i < det.length; i += 2) nx.push(win(det[i], det[i + 1]) >= 0.5 ? det[i] : det[i + 1]); det = nx; }
+      const mx = Math.max(...cnt) / v.n;
+      const bw = 560 / 16;
+      cnt.forEach((c, i) => {
+        const p = c / v.n, h = (p / Math.max(mx, 0.05)) * 230;
+        K.svg(svg, "rect", { x: 60 + i * bw + 3, y: 270 - h, width: bw - 6, height: h, rx: 3, fill: i === det[0] ? "var(--warn)" : "var(--c1)" });
+        T(svg, 60 + i * bw + bw / 2, 288, NAMES[i], { "text-anchor": "middle", "font-size": 12 });
+        if (p > 0.005) T(svg, 60 + i * bw + bw / 2, 264 - h, (p * 100).toFixed(0) + "%", { "text-anchor": "middle", "font-size": 10 });
+      });
+      T(svg, 60 + det[0] * bw + bw / 2, 310, "↑ 只演一次、热门全赢的冠军", { "text-anchor": "start", "font-size": 12, fill: "var(--warn)" });
+      T(svg, 60, 334, "横轴：球队（A 最强 → P 最弱）；柱高：模拟中夺冠的比例", { "font-size": 11, class: "muted" });
+      return { readout: [
+        { k: "最强队 A 的夺冠概率", v: ((cnt[0] / v.n) * 100).toFixed(1) + "%", color: "var(--warn)" },
+        { k: "A 之外的球队夺冠概率合计", v: ((1 - cnt[0] / v.n) * 100).toFixed(1) + "%" },
+        { k: "A 第一场的胜率", v: (win(0, 15) * 100).toFixed(0) + "%" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

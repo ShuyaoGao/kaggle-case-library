@@ -1,0 +1,654 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Whisper 长音频转写</title>
+<meta name="description" content="Kaggle 案例拆解：用 Whisper JAX 在 TPU 上把 30 分钟英文录音转成文字——Whisper 编码器-解码器、30 秒切块、批处理并行、JIT 编译缓存、时间戳与翻译。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">音频 · 语音转文字 · 大模型推理加速</div>
+  <h1>30 分钟录音，35 秒转成文字：Whisper 怎么做到的</h1>
+  <p class="en">Whisper JAX TPU</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">Whisper large-v2</span><span class="tag method">编码器-解码器 Transformer</span><span class="tag method">对数梅尔频谱</span>
+    <span class="tag method">30 秒切块</span><span class="tag method">批处理并行 pmap</span><span class="tag method">JIT 编译缓存</span><span class="tag method">bfloat16 半精度</span><span class="tag method">时间戳</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Sanchit Gandhi</b></span>
+    <span>Kaggle 点赞 <b>2,149</b>（2026-11 抓取）</span>
+    <span>数据 <b>sanchit-gandhi/whisper-jax-test-files（由 LibriSpeech 拼接）</b></span>
+    <span><a href="https://www.kaggle.com/code/sgandhi99/whisper-jax-tpu" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">5 分钟和 30 分钟的英文朗读录音</div><p>由 LibriSpeech 有声书语料里连续的片段拼接而成，用来测试长音频转写。<span data-cell="9">出处</span></p></div>
+    <div class="card panel"><h3>要做什么</h3><div class="big">把整段录音转成文字（可带时间戳）</div><p>这是<b>推理</b>演示：直接用 OpenAI 训练好的 Whisper large-v2，不做训练。<span data-cell="6">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">切块 + 批处理 + 8 核并行 + 编译缓存</div><p>长音频先切成 30 秒一块，16 块一批分给 TPU 的 8 个核心同时算；用 JAX 的 JIT 编译和半精度提速。<span data-cell="5">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">30 分钟录音约 35 秒转完</div><p>作者原话：“只用 35 秒就转写了 30 分钟音频”，并称比 OpenAI 的 PyTorch 代码快 70 倍以上。<span data-cell="21">出处</span> <span data-cell="0">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">测试音频是作者上传到 Hugging Face 的 <b>whisper-jax-test-files</b>，由 LibriSpeech（志愿者朗读的英文有声书）连续片段拼接而成。下面的数字来自 notebook 文字。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">测试音频</div><div class="v">2 段</div></div>
+        <div class="stat-tile"><div class="k">时长</div><div class="v">5 分钟 / 30 分钟</div></div>
+        <div class="stat-tile"><div class="k">切块长度</div><div class="v">30 秒</div></div>
+        <div class="stat-tile"><div class="k">每批块数</div><div class="v">16</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">时长见第 9、11 格 <span data-cell="9">出处</span> <span data-cell="11">出处</span>；30 秒切块见第 5 格 <span data-cell="5">出处</span>；<code>batch_size=16</code> 见第 6 格 <span data-cell="6">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">输入和输出</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>字段</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>audio["array"]</code></td><td>录音的采样值，一长串数字</td><td>数值数组</td></tr>
+        <tr><td><code>audio["sampling_rate"]</code></td><td>每秒多少个采样点，用来算时长</td><td>整数</td></tr>
+        <tr><td><code>outputs["text"]</code></td><td><b>输出</b>：整段转写文字</td><td>文本</td></tr>
+        <tr><td><code>outputs["chunks"]</code></td><td><b>输出</b>：分句文字 + 起止时间戳</td><td>列表</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">字段名见第 10、19、23 格 <span data-cell="10">出处</span> <span data-cell="19">出处</span> <span data-cell="23">出处</span>。转写出来的文字在运行输出里，源码不带，这里不摘录。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="6">
+    <h3>动手试试 A · 切块、批处理、多核：长录音要算几轮 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="16">
+    <h3>动手试试 B · Whisper 的“耳朵”：30 秒对数梅尔频谱 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="23">
+    <h3>动手试试 C · 切块会切断单词吗：重叠与拼接 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论（作者原文里的数字）</th><th>出处</th></tr>
+        <tr><td>Whisper JAX 比 OpenAI 的 PyTorch 实现快 70 倍以上</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>Kaggle 每月免费提供 20 小时 TPU v3-8；一个加速器里有 8 个 TPU 核心</td><td><span data-cell="1">第 1 格</span> <span data-cell="3">第 3 格</span></td></tr>
+        <tr><td>把一段长音频切块后批量并行转写，比逐块顺序转写快约 10 倍</td><td><span data-cell="5">第 5 格</span></td></tr>
+        <tr><td>第一次调用要 JIT 编译，batch 16 在 TPU v3-8 上约 2 分钟；之后用缓存，非常快</td><td><span data-cell="13">第 13 格</span></td></tr>
+        <tr><td>30 分钟音频只用 35 秒；2 小时电影不到 2.5 分钟</td><td><span data-cell="21">第 21 格</span></td></tr>
+        <tr><td>批大小翻倍，转写时间大约减半（前提是总批量小于音频总时长）；TPU v4 比 v3 再快约 2 倍</td><td><span data-cell="21">第 21 格</span></td></tr>
+        <tr><td>带时间戳要重新编译一次，比不带时间戳的编译更久</td><td><span data-cell="22">第 22 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">这是推理速度演示，没有在测试集上算词错误率（WER），所以没有准确率数字。作者说转写结果“看起来完全正确”，具体文字和计时在运行输出里，源码不带。<span data-cell="16">第 16 格</span></p>
+      <h3>读的时候要注意</h3>
+      <ul class="tight">
+        <li>类名写作 <code>FlaxWhisperPipline</code>（少一个 e），这是 whisper-jax 库本身的拼写，不是笔误，照抄才能导入。<span data-cell="6">第 6 格</span></li>
+        <li>“快 70 倍”是作者对整个实现的说法，本 notebook 里只测了 Whisper JAX 自己，没有跑 PyTorch 版做对比。<span data-cell="0">第 0 格</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>会议、课堂、采访、播客的自动字幕和文字稿；带时间戳就能点文字跳到对应位置。</li>
+        <li><b>同类问题：</b>视频字幕生成、客服电话质检、医生口述病历、把外语讲座直接翻成英文（<code>task="translate"</code>）。</li>
+        <li><b>可迁移的套路：</b>大模型推理提速三板斧：<b>半精度</b>（数字少存几位）→ <b>批处理 + 多设备并行</b>（一次喂很多块）→ <b>编译一次、缓存复用</b>。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>查看 TPU 设备 <code>jax.devices()</code> <span data-cell="2">第 2 格</span></li>
+        <li><code>FlaxWhisperPipline("openai/whisper-large-v2", dtype=jnp.bfloat16, batch_size=16)</code> <span data-cell="6">第 6 格</span></li>
+        <li>编译缓存 <code>cc.initialize_cache</code> <span data-cell="8">第 8 格</span></li>
+        <li>读数据 <code>load_dataset</code> <span data-cell="10">第 10 格</span></li>
+        <li>转写、计时 <code>%time pipeline(audio)</code> <span data-cell="14">第 14 格</span></li>
+        <li>时间戳 <code>return_timestamps=True</code> <span data-cell="23">第 23 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>Whisper 用编码器-解码器一个词一个词地“写”出文字，而不是像 CTC 那样每帧输出一个字母。你觉得哪种更容易出现“编出录音里没说的话”？为什么？</li>
+      <li>作者说批大小翻倍、时间减半，但“总批量要小于音频总时长”。为什么 30 分钟的录音，把批大小从 64 加到 128 不会再变快？</li>
+      <li>第一次运行要编译 2 分钟，之后几十秒就转完。什么场景下这种“先慢后快”划算，什么场景不划算？</li>
+      <li>半精度把每个数字存得更“粗”，为什么转写结果几乎不受影响？</li>
+      <li>一个能 35 秒转写 30 分钟录音的工具，可能被拿去做哪些侵犯隐私的事？录音转写前应该征得谁的同意？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Sanchit Gandhi，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。Whisper 模型由 OpenAI 发布，Whisper JAX 基于 Hugging Face Transformers 实现。本页为教学解读，动画与实验中的声音、文字和计时都是浏览器内的合成示意或按作者原文数字推算，不是作者的运行结果。
+</footer>
+</main>
+
+<script src="nb/whisper-jax-long-audio.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* ===== 本页专用：浏览器内的小型音频工具（合成示意声音、FFT、频谱图、梅尔滤波、MFCC） ===== */
+  const AK = {};
+  AK.SR = 16000;
+  // 原地基 2 FFT
+  AK.fft = function (re, im) {
+    const n = re.length;
+    for (let i = 1, j = 0; i < n; i++) {
+      let bit = n >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
+    }
+    for (let len = 2; len <= n; len <<= 1) {
+      const ang = (-2 * Math.PI) / len, wr = Math.cos(ang), wi = Math.sin(ang);
+      for (let i = 0; i < n; i += len) {
+        let cr = 1, ci = 0;
+        for (let k = 0; k < len / 2; k++) {
+          const a = i + k, b = a + len / 2;
+          const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
+          re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+          const nr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = nr;
+        }
+      }
+    }
+  };
+  AK.pow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
+  // 短时傅里叶变换：返回 [帧][频点] 的功率谱
+  AK.stft = function (x, win, hop, nfft) {
+    nfft = nfft || AK.pow2(win);
+    const frames = [], w = new Float32Array(win);
+    for (let i = 0; i < win; i++) w[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (win - 1));
+    for (let s = 0; s + win <= x.length; s += hop) {
+      const re = new Float32Array(nfft), im = new Float32Array(nfft);
+      for (let i = 0; i < win; i++) re[i] = x[s + i] * w[i];
+      AK.fft(re, im);
+      const p = new Float32Array(nfft / 2 + 1);
+      for (let k = 0; k <= nfft / 2; k++) p[k] = (re[k] * re[k] + im[k] * im[k]) / win;
+      frames.push(p);
+    }
+    return frames;
+  };
+  AK.spectrum = function (x) { // 整段 FFT 幅度（取前一半）
+    const n = AK.pow2(x.length), re = new Float32Array(n), im = new Float32Array(n);
+    re.set(x);
+    AK.fft(re, im);
+    const out = new Float32Array(n / 2);
+    for (let k = 0; k < n / 2; k++) out[k] = (2 / x.length) * Math.hypot(re[k], im[k]);
+    return out;
+  };
+  AK.hz2mel = (f) => 2595 * Math.log10(1 + f / 700);
+  AK.mel2hz = (m) => 700 * (Math.pow(10, m / 2595) - 1);
+  // 三角形梅尔滤波器组：返回 nMels 个 {lo, c, hi, w: Float32Array(nBins)}
+  AK.melFB = function (nMels, nfft, sr, fmin, fmax) {
+    fmin = fmin || 0; fmax = fmax || sr / 2;
+    const nb = nfft / 2 + 1, m0 = AK.hz2mel(fmin), m1 = AK.hz2mel(fmax), pts = [];
+    for (let i = 0; i < nMels + 2; i++) pts.push(AK.mel2hz(m0 + ((m1 - m0) * i) / (nMels + 1)));
+    const fb = [];
+    for (let m = 0; m < nMels; m++) {
+      const lo = pts[m], c = pts[m + 1], hi = pts[m + 2], w = new Float32Array(nb);
+      for (let k = 0; k < nb; k++) {
+        const f = (k * sr) / nfft;
+        w[k] = f < lo || f > hi ? 0 : f <= c ? (f - lo) / (c - lo) : (hi - f) / (hi - c);
+      }
+      fb.push({ lo, c, hi, w });
+    }
+    return fb;
+  };
+  AK.applyFB = function (frames, fb) {
+    return frames.map((p) => Float32Array.from(fb, (f) => { let s = 0; for (let k = 0; k < p.length; k++) s += p[k] * f.w[k]; return s; }));
+  };
+  AK.log = (frames, eps) => frames.map((p) => Float32Array.from(p, (v) => Math.log(v + (eps || 1e-10))));
+  AK.db = (frames) => { let mx = 1e-12; frames.forEach((p) => p.forEach((v) => (mx = Math.max(mx, v)))); return frames.map((p) => Float32Array.from(p, (v) => Math.max(-80, 10 * Math.log10((v + 1e-12) / mx)))); };
+  AK.dct = function (v, n) { // DCT-II，取前 n 个系数
+    const N = v.length, out = new Float32Array(n);
+    for (let k = 0; k < n; k++) { let s = 0; for (let i = 0; i < N; i++) s += v[i] * Math.cos((Math.PI * k * (2 * i + 1)) / (2 * N)); out[k] = s * Math.sqrt((k ? 2 : 1) / N); }
+    return out;
+  };
+  // ---- 合成示意声音 ----
+  const VOW = { a: [730, 1090, 2440], e: [530, 1840, 2480], i: [270, 2290, 3010], o: [570, 840, 2410], u: [300, 870, 2240], n: [250, 1700, 2600], l: [360, 1300, 2700], r: [420, 1300, 1600], w: [300, 700, 2200] };
+  function voiced(out, s0, n, f0, F, amp, sr, f0end) {
+    const nh = Math.floor(3800 / f0);
+    const amps = [];
+    for (let k = 1; k <= nh; k++) { let a = 0; F.forEach((f, j) => (a += Math.exp(-Math.pow((k * f0 - f) / (90 + 40 * j), 2)) / (1 + j * 0.6))); amps.push((a + 0.02) / Math.sqrt(k)); }
+    let ph = 0;
+    for (let i = 0; i < n; i++) {
+      const t = i / n, env = Math.min(1, t * 12, (1 - t) * 10), f = f0 + ((f0end || f0) - f0) * t;
+      ph += (2 * Math.PI * f) / sr;
+      let v = 0;
+      for (let k = 1; k <= amps.length; k++) if (k * f < sr / 2) v += amps[k - 1] * Math.sin(k * ph);
+      out[s0 + i] += amp * env * v * 0.35;
+    }
+  }
+  function noiseBand(out, s0, n, lo, hi, amp, r, sr) {
+    const comps = [];
+    for (let j = 0; j < 70; j++) comps.push([lo + r() * (hi - lo), r() * 6.283]);
+    for (let i = 0; i < n; i++) {
+      const t = i / n, env = Math.min(1, t * 6, (1 - t) * 6);
+      let v = 0;
+      for (const c of comps) v += Math.sin((2 * Math.PI * c[0] * i) / sr + c[1]);
+      out[s0 + i] += (amp * env * v) / 9;
+    }
+  }
+  // 一个音段：[类型, 时长秒, 参数]；类型：v 元音/浊音（参数=VOW 键）, f 擦音（[lo,hi]）, b 爆破（[lo,hi]）, s 静音
+  AK.WORDS = {
+    yes: [["v", 0.07, "i"], ["v", 0.2, "e"], ["f", 0.22, [4200, 7600]]],
+    no: [["v", 0.09, "n"], ["v", 0.32, "o"], ["v", 0.08, "u"]],
+    up: [["v", 0.24, "a"], ["s", 0.06], ["b", 0.03, [600, 3000]]],
+    down: [["b", 0.025, [2500, 5000]], ["v", 0.18, "a"], ["v", 0.12, "u"], ["v", 0.09, "n"]],
+    left: [["v", 0.07, "l"], ["v", 0.17, "e"], ["f", 0.11, [1500, 6500]], ["b", 0.03, [3500, 7000]]],
+    right: [["v", 0.07, "r"], ["v", 0.16, "a"], ["v", 0.1, "i"], ["s", 0.04], ["b", 0.03, [3500, 7000]]],
+    on: [["v", 0.28, "o"], ["v", 0.12, "n"]],
+    off: [["v", 0.26, "o"], ["f", 0.17, [1200, 6500]]],
+    stop: [["f", 0.16, [4200, 7600]], ["b", 0.02, [3500, 7000]], ["v", 0.2, "o"], ["s", 0.05], ["b", 0.03, [600, 3000]]],
+    go: [["b", 0.02, [1200, 3000]], ["v", 0.32, "o"], ["v", 0.08, "u"]],
+  };
+  // 合成一个词：opt {sr, dur, f0, start, noise, seed}；返回 {x, segs:[{name,t0,t1}]}
+  AK.word = function (name, opt) {
+    opt = Object.assign({ sr: AK.SR, dur: 1, f0: 130, start: 0.22, noise: 0.004, seed: 1 }, opt || {});
+    const sr = opt.sr, N = Math.round(sr * opt.dur), x = new Float32Array(N), r = K.rng(opt.seed);
+    let t = opt.start;
+    const segs = [];
+    (AK.WORDS[name] || AK.WORDS.yes).forEach((sg, j) => {
+      const n = Math.round(sg[1] * sr), s0 = Math.round(t * sr);
+      if (s0 + n < N) {
+        if (sg[0] === "v") voiced(x, s0, n, opt.f0 * (1 + 0.04 * Math.sin(j)), VOW[sg[2]], sg[2] === "n" ? 0.5 : 1, sr, opt.f0 * (j % 2 ? 0.93 : 1.02));
+        else if (sg[0] === "f") noiseBand(x, s0, n, sg[2][0], Math.min(sg[2][1], sr / 2 - 100), 0.16, r, sr);
+        else if (sg[0] === "b") noiseBand(x, s0, n, sg[2][0], Math.min(sg[2][1], sr / 2 - 100), 0.35, r, sr);
+      }
+      segs.push({ name: sg[0] === "v" ? sg[2] : sg[0] === "f" ? "擦音" : sg[0] === "b" ? "爆破" : "停顿", t0: t, t1: t + sg[1] });
+      t += sg[1];
+    });
+    for (let i = 0; i < N; i++) x[i] += opt.noise * K.randn(r);
+    return { x, segs, sr };
+  };
+  // 环境声 / 其他示意声音
+  AK.sound = function (kind, opt) {
+    opt = Object.assign({ sr: AK.SR, dur: 1, seed: 1 }, opt || {});
+    const sr = opt.sr, N = Math.round(sr * opt.dur), x = new Float32Array(N), r = K.rng(opt.seed);
+    const add = (f, a, s0, n, decay) => { for (let i = 0; i < n && s0 + i < N; i++) x[s0 + i] += a * Math.sin((2 * Math.PI * f * i) / sr) * (decay ? Math.exp(-i / (decay * sr)) : 1); };
+    if (kind === "siren") { let ph = 0; for (let i = 0; i < N; i++) { const f = 900 + 400 * Math.sin((2 * Math.PI * 1.5 * i) / sr); ph += (2 * Math.PI * f) / sr; x[i] = 0.4 * Math.sin(ph) + 0.15 * Math.sin(2 * ph); } }
+    else if (kind === "dog") { [0.1, 0.45].forEach((t0) => { const s0 = Math.round(t0 * sr), n = Math.round(0.18 * sr); voiced(x, s0, n, 420, [800, 1500, 2600], 1.4, sr, 330); noiseBand(x, s0, Math.round(0.05 * sr), 500, 4000, 0.6, r, sr); }); }
+    else if (kind === "rain") { for (let i = 0; i < N; i++) x[i] = 0.12 * K.randn(r); for (let k = 0; k < 40; k++) { const s0 = Math.floor(r() * N); for (let i = 0; i < 120 && s0 + i < N; i++) x[s0 + i] += 0.5 * K.randn(r) * Math.exp(-i / 25); } }
+    else if (kind === "clock") { for (let t0 = 0.05; t0 < opt.dur; t0 += 0.25) { const s0 = Math.round(t0 * sr); add(3000, 0.6, s0, 400, 0.004); add(5200, 0.4, s0, 300, 0.003); } }
+    else if (kind === "engine") { let ph = 0; for (let i = 0; i < N; i++) { ph += (2 * Math.PI * 55) / sr; let v = 0; for (let k = 1; k < 12; k++) v += Math.sin(k * ph + k) / k; x[i] = 0.25 * v * (1 + 0.3 * Math.sin((2 * Math.PI * 8 * i) / sr)) + 0.03 * K.randn(r); } }
+    else if (kind === "bird") { for (let t0 = 0.08; t0 < opt.dur - 0.15; t0 += 0.3) { const s0 = Math.round(t0 * sr), n = Math.round(0.12 * sr); let ph = 0; for (let i = 0; i < n && s0 + i < N; i++) { const f = 3200 + 1600 * (i / n) + 300 * Math.sin(i / 40); ph += (2 * Math.PI * f) / sr; x[s0 + i] += 0.45 * Math.sin(ph) * Math.sin((Math.PI * i) / n); } } }
+    else if (kind === "crying") { [0, 0.5].forEach((t0) => voiced(x, Math.round((t0 + 0.05) * sr), Math.round(0.4 * sr), 450, [1000, 2500, 3500], 1.2, sr, 380)); }
+    else if (kind === "glass") { const s0 = Math.round(0.2 * sr); noiseBand(x, s0, Math.round(0.04 * sr), 2000, 7500, 1.2, r, sr); [2800, 4100, 5600, 6900].forEach((f, j) => add(f, 0.3, s0, Math.round(0.6 * sr), 0.15 + j * 0.03)); }
+    else if (kind === "noise") { for (let i = 0; i < N; i++) x[i] = 0.2 * K.randn(r); }
+    for (let i = 0; i < N; i++) x[i] += 0.003 * K.randn(r);
+    return { x, sr };
+  };
+  // ---- 画图 ----
+  AK.drawWave = function (svg, box, x, opt) {
+    opt = opt || {};
+    K.svg(svg, "rect", { x: box.x, y: box.y, width: box.w, height: box.h, fill: "var(--panel-2)", rx: 4 });
+    let mx = 1e-9; for (let i = 0; i < x.length; i++) mx = Math.max(mx, Math.abs(x[i]));
+    const cols = Math.min(box.w, 600), step = x.length / cols, mid = box.y + box.h / 2, sc = (box.h / 2 - 3) / (opt.max || mx);
+    let d = "";
+    for (let c = 0; c < cols; c++) {
+      let lo = 0, hi = 0;
+      for (let i = Math.floor(c * step); i < Math.floor((c + 1) * step); i++) { lo = Math.min(lo, x[i]); hi = Math.max(hi, x[i]); }
+      const px = box.x + (c / cols) * box.w;
+      d += `M${px.toFixed(1)},${(mid - hi * sc).toFixed(1)}V${(mid - lo * sc + 0.5).toFixed(1)}`;
+    }
+    return K.svg(svg, "path", { d, stroke: opt.color || "var(--c1)", "stroke-width": Math.max(1, box.w / cols) * 0.9, fill: "none" });
+  };
+  AK.color = function (t) { // 频谱图色带：底色 → 蓝 → 橙
+    t = K.clamp(t, 0, 1);
+    return t < 0.55 ? `color-mix(in srgb, var(--c1) ${Math.round((t / 0.55) * 100)}%, var(--panel-2))` : `color-mix(in srgb, var(--warn) ${Math.round(((t - 0.55) / 0.45) * 100)}%, var(--c1))`;
+  };
+  // frames: [时间][频率]，画成热力图；opt {lo, hi, maxT, maxF, fmax(频点上限)}
+  AK.drawSpec = function (svg, box, frames, opt) {
+    opt = opt || {};
+    const g = K.svg(svg, "g");
+    const T = frames.length, Fall = frames[0].length, F = opt.fmax ? Math.min(Fall, opt.fmax) : Fall;
+    let lo = opt.lo, hi = opt.hi;
+    if (lo == null || hi == null) { const v = []; frames.forEach((p) => { for (let k = 0; k < F; k++) v.push(p[k]); }); v.sort((a, b) => a - b); if (lo == null) lo = v[Math.floor(v.length * 0.05)]; if (hi == null) hi = v[Math.floor(v.length * 0.995)]; }
+    const nt = Math.min(T, opt.maxT || 90), nf = Math.min(F, opt.maxF || 64);
+    const cw = box.w / nt, ch = box.h / nf;
+    for (let a = 0; a < nt; a++) for (let b = 0; b < nf; b++) {
+      const t0 = Math.floor((a * T) / nt), t1 = Math.max(t0 + 1, Math.floor(((a + 1) * T) / nt)), f0 = Math.floor((b * F) / nf), f1 = Math.max(f0 + 1, Math.floor(((b + 1) * F) / nf));
+      let s = -Infinity;
+      for (let t = t0; t < t1; t++) for (let f = f0; f < f1; f++) s = Math.max(s, frames[t][f]);
+      K.svg(g, "rect", { x: (box.x + a * cw).toFixed(1), y: (box.y + box.h - (b + 1) * ch).toFixed(1), width: (cw + 0.6).toFixed(1), height: (ch + 0.6).toFixed(1), fill: AK.color((s - lo) / (hi - lo || 1)) });
+    }
+    return g;
+  };
+  // 用 WebAudio 播放（课堂上可以真的听到合成声音）
+  AK.play = function (x, sr) {
+    try {
+      const C = window.AudioContext || window.webkitAudioContext; if (!C) return;
+      const ac = AK._ac || (AK._ac = new C());
+      let mx = 1e-9; for (let i = 0; i < x.length; i++) mx = Math.max(mx, Math.abs(x[i]));
+      const buf = ac.createBuffer(1, x.length, sr), ch = buf.getChannelData(0);
+      for (let i = 0; i < x.length; i++) ch[i] = (0.8 * x[i]) / mx;
+      const src = ac.createBufferSource(); src.buffer = buf; src.connect(ac.destination); src.start();
+    } catch (e) { /* 没有声卡也不影响页面 */ }
+  };
+  // 在实验面板外加一个“播放”按钮
+  AK.playBtn = function (labEl, label, getter) {
+    const b = K.el("button", { class: "btn ghost", style: "margin-top:8px" }, label || "▶ 播放合成声音");
+    b.onclick = () => { const s = getter(); if (s) AK.play(s.x, s.sr); };
+    const ctrl = labEl.querySelector(".ctrl"); (ctrl || labEl).appendChild(b);
+    return b;
+  };
+  /* ===== 音频工具结束 ===== */
+
+
+  const SR = 16000;
+  // 合成一句“话”：若干个词，词间有短停顿
+  function phrase(words, seed, gap) {
+    const parts = [];
+    let t = 0.15;
+    words.forEach((w, i) => { const d = (AK.WORDS[w] || AK.WORDS.yes).reduce((s, g) => s + g[1], 0) + 0.04; parts.push([w, t, d]); t += d + (gap || 0.12); });
+    const x = new Float32Array(Math.round((t + 0.2) * SR));
+    parts.forEach(([w, t0, d], i) => { const y = AK.word(w, { seed: seed + i, start: 0, dur: d, f0: 120 + 15 * Math.sin(i), sr: SR }).x; x.set(y.subarray(0, Math.min(y.length, x.length - Math.round(t0 * SR))), Math.round(t0 * SR)); });
+    return { x, parts };
+  }
+  const logmel80 = (x) => AK.log(AK.applyFB(AK.stft(x, 400, 160, 512), AK.melFB(80, 512, SR, 0, 8000)));
+
+  const steps = [
+    {
+      at: 0, title: "开场：Whisper 与 Whisper JAX", kicker: "第 0 格 · 介绍",
+      html: `<p><b>Whisper</b> 是 OpenAI 发布的语音识别模型：输入一段声音，输出文字。它是一个<b>编码器-解码器 Transformer</b>：编码器“听”30 秒的对数梅尔频谱，解码器像写作文一样<b>一个词一个词</b>地写出文字，每写一个词都回头“注意”声音里相关的位置。按 Whisper 论文的介绍，它用了约 68 万小时从网上收集的带字幕音频训练。</p><p>本 notebook 的主角 <b>Whisper JAX</b> 是同一个模型用 JAX 框架重写的版本，作者说它比 OpenAI 原版 PyTorch 代码快 70 倍以上。所以这份 notebook 讲的不是“怎么训练”，而是<b>怎么把一个现成的大模型跑得飞快</b>。</p>`,
+      draw(svg, ctx) {
+        const ph = phrase(["yes", "go", "stop"], 3), sp = logmel80(ph.x);
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 12, class: "muted" }, "对数梅尔频谱（合成示意）");
+        AK.drawSpec(svg, { x: 20, y: 34, w: 180, h: 120 }, sp, { maxT: 60, maxF: 40 });
+        const enc = K.node(svg, 240, 40, 160, 110, "编码器\nTransformer\n“听”整段声音", { fill: "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: "var(--c1)", bold: true });
+        const dec = K.node(svg, 450, 40, 160, 110, "解码器\nTransformer\n一个词一个词写", { fill: "color-mix(in srgb, var(--c4) 18%, var(--panel))", stroke: "var(--c4)", bold: true });
+        K.arrow(svg, 200, 95, 238, 95); K.arrow(svg, 400, 95, 448, 95);
+        const toks = ["<|en|>", "<|transcribe|>", "yes", "go", "stop", "<|end|>"];
+        const tk = toks.map((t, i) => { const g = K.node(svg, 20 + i * 115, 230, 108, 40, t, { fill: i < 2 || i === 5 ? "var(--panel-2)" : "var(--accent-soft)", stroke: i < 2 || i === 5 ? "var(--line)" : "var(--accent)", fs: 12 }); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 20, y: 218, "font-size": 12 }, "解码器的输出：先写语言、任务等特殊标记，再写文字，直到写出结束标记");
+        const att = []; for (let i = 0; i < 6; i++) att.push(K.svg(svg, "line", { x1: 530, y1: 150, x2: 260 + i * 25, y2: 150, stroke: "var(--warn)", "stroke-width": 1.5, opacity: 0 }));
+        (async () => {
+          for (let i = 0; i < toks.length; i++) {
+            if (!(await ctx.tween(380, (t) => { tk[i].style.opacity = t; att.forEach((l, j) => (l.style.opacity = j === i ? t * 0.9 : 0.1)); }))) return;
+          }
+          att.forEach((l) => (l.style.opacity = 0));
+        })();
+        K.svg(svg, "text", { x: 20, y: 310, "font-size": 12, class: "muted" }, "橙线示意：每写一个词，解码器都“注意”编码器输出里的相关位置（交叉注意力）");
+      },
+    },
+    {
+      at: 1, title: "连上 TPU：一个加速器里 8 个核心", kicker: "第 1–4 格 · 硬件与安装",
+      html: `<p>作者用的是 Kaggle 免费提供的 <b>TPU v3-8</b>（每月 20 小时）。TPU 是谷歌专门为神经网络设计的芯片，擅长大批量的矩阵乘法。<code>jax.devices()</code> 列出来有 <b>8 个 TPU 核心</b>，它们可以同时干活。</p><p>Kaggle 的 TPU 预装了 JAX，作者只需再装 whisper-jax、datasets（读数据集）、soundfile 和 librosa（读音频）。</p>`,
+      cells: [2, 4], highlight: ["jax.devices()", "whisper-jax"],
+      draw(svg, ctx) {
+        const cores = [];
+        for (let i = 0; i < 8; i++) cores.push(K.node(svg, 60 + (i % 4) * 150, 70 + Math.floor(i / 4) * 110, 120, 80, `TPU 核心 ${i}`, { fill: "var(--panel-2)" }));
+        K.svg(svg, "text", { x: 60, y: 50, "font-size": 13, "font-weight": 700 }, "TPU v3-8：一个加速器 = 8 个核心");
+        K.svg(svg, "text", { x: 60, y: 320, "font-size": 12, class: "muted" }, "动画：每个核心同时处理不同的 30 秒音频块");
+        (async () => {
+          for (let round = 0; round < 3; round++) {
+            if (!(await ctx.tween(700, (t) => cores.forEach((c, i) => { const r = c.querySelector("rect"); r.style.fill = `color-mix(in srgb, var(--c3) ${Math.round(Math.sin(Math.PI * K.clamp(t * 1.3 - i * 0.04, 0, 1)) * 60)}%, var(--panel-2))`; })))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 5, title: "加载流水线：大模型、半精度、批处理", kicker: "第 5–6 格 · FlaxWhisperPipline",
+      html: `<p><code>FlaxWhisperPipline</code> 把前处理（读音频、算频谱、切块）、模型、后处理（把数字变回文字）打包好，还用 JAX 的 <b>pmap</b> 把数据分给所有核心并行计算。</p><p>三个提速设置：</p><ul class="tight"><li><b>large-v2</b>：Whisper 最大的一档模型，准但慢，所以才需要加速；</li><li><b>bfloat16 半精度</b>：中间结果少存几位小数，计算快很多，模型权重本身的精度不变；</li><li><b>batch_size=16</b>：长音频先切成 <b>30 秒</b>一块，16 块一起送进模型。作者说这比一块一块顺序转写快约 10 倍。</li></ul>`,
+      cells: [6], highlight: ["openai/whisper-large-v2", "dtype=jnp.bfloat16", "batch_size=16"],
+      draw(svg, ctx) {
+        const N = 20, bw = 640 / N;
+        K.svg(svg, "text", { x: 40, y: 26, "font-size": 12 }, "10 分钟录音 → 切成 20 块 × 30 秒");
+        const blocks = [];
+        for (let i = 0; i < N; i++) blocks.push(K.svg(svg, "rect", { x: 40 + i * bw, y: 36, width: bw - 3, height: 36, rx: 3, fill: "var(--c1)", opacity: 0.25 }));
+        K.svg(svg, "text", { x: 40, y: 120, "font-size": 13, "font-weight": 700 }, "逐块顺序：20 轮");
+        K.svg(svg, "text", { x: 40, y: 220, "font-size": 13, "font-weight": 700 }, "batch 16：2 轮（16 + 4）");
+        const seqBar = K.svg(svg, "rect", { x: 40, y: 130, width: 0, height: 26, fill: "var(--c6)", opacity: 0.7 });
+        const batBar = K.svg(svg, "rect", { x: 40, y: 230, width: 0, height: 26, fill: "var(--c3)", opacity: 0.8 });
+        const t1 = K.svg(svg, "text", { x: 40, y: 290, "font-size": 12, class: "muted" }, "条的长度示意计算轮数，不是作者测出的时间");
+        (async () => {
+          if (!(await ctx.tween(1600, (t) => { const k = Math.floor(t * N); blocks.forEach((b, i) => (b.style.opacity = i <= k ? 0.85 : 0.25)); seqBar.setAttribute("width", 640 * t); }))) return;
+          await ctx.tween(500, (t) => batBar.setAttribute("width", 64 * t));
+        })();
+      },
+    },
+    {
+      at: 7, title: "编译缓存：JIT 只编一次", kicker: "第 7–8 格 · 编译缓存",
+      html: `<p>JAX 的 <b>JIT（即时编译）</b>会在第一次调用时，把整个计算过程“翻译”成针对 TPU 优化好的机器指令，这一步很慢；翻译好以后存起来，下次直接用。</p><p><code>cc.initialize_cache("./jax_cache")</code> 把编译结果存到硬盘：就算关掉 notebook 再打开，也不用从头编译。</p>`,
+      cells: [8], highlight: ["cc.initialize_cache"],
+      draw(svg, ctx) {
+        K.node(svg, 40, 60, 160, 70, "Python 代码\n（每次解释执行）", { fill: "var(--panel-2)" });
+        const comp = K.node(svg, 270, 60, 170, 70, "JIT 编译\n第一次：慢", { fill: "color-mix(in srgb, var(--warn) 20%, var(--panel))", stroke: "var(--warn)", bold: true });
+        const cache = K.node(svg, 510, 60, 170, 70, "./jax_cache\n编译结果存硬盘", { fill: "color-mix(in srgb, var(--c3) 18%, var(--panel))", stroke: "var(--c3)" });
+        K.arrow(svg, 200, 95, 268, 95); K.arrow(svg, 440, 95, 508, 95);
+        K.svg(svg, "text", { x: 40, y: 190, "font-size": 12 }, "调用次数");
+        const bars = [];
+        const H = [130, 10, 10, 10, 10];
+        for (let i = 0; i < 5; i++) { bars.push(K.svg(svg, "rect", { x: 120 + i * 100, y: 320, width: 60, height: 0, fill: i ? "var(--c3)" : "var(--warn)" })); K.svg(svg, "text", { x: 150 + i * 100, y: 336, "text-anchor": "middle", "font-size": 11 }, `第 ${i + 1} 次`); }
+        K.svg(svg, "text", { x: 400, y: 190, "font-size": 12, class: "muted" }, "柱高示意耗时：第一次包含编译");
+        (async () => { for (let i = 0; i < 5; i++) if (!(await ctx.tween(400, (t) => { bars[i].setAttribute("height", H[i] * t); bars[i].setAttribute("y", 320 - H[i] * t); }))) return; })();
+      },
+    },
+    {
+      at: 9, title: "读入 5 分钟的长录音", kicker: "第 9–12 格 · 数据",
+      html: `<p>测试音频是作者准备的两段长录音：<b>5 分钟</b>和 <b>30 分钟</b>，都是把 LibriSpeech（志愿者朗读英文有声书的语料库）里连续的片段首尾拼起来得到的。<code>load_dataset</code> 一行就能下载，<code>test_dataset[0]</code> 是 5 分钟那段。</p><p>作者也提醒：管线可以直接接收任意 .mp3、.wav、.flac 文件，会自己负责读取和重采样。</p>`,
+      cells: [10, 12], highlight: ["whisper-jax-test-files", "test_dataset[0]"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 28, "font-size": 12 }, "很多段短朗读 → 首尾相接 → 一段 5 分钟的长录音（示意）");
+        const segs = [], r = K.rng(4);
+        let x = 30;
+        while (x < 680) { const w = 30 + r() * 50; segs.push([x, Math.min(w, 690 - x)]); x += w; }
+        const els = segs.map((s, i) => { const g = K.svg(svg, "rect", { x: s[0], y: 60 + (i % 3) * 50, width: s[1] - 3, height: 36, rx: 4, fill: K.colors[i % 6], opacity: 0.75 }); return g; });
+        ctx.wait(500).then((ok) => ok && ctx.tween(1400, (t) => els.forEach((e, i) => e.setAttribute("y", K.lerp(60 + (i % 3) * 50, 240, t)))));
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12, class: "muted" }, "每个色块代表 LibriSpeech 里的一小段朗读");
+      },
+    },
+    {
+      at: 13, title: "第一次慢，第二次飞快", kicker: "第 13–16 格 · 转写 5 分钟录音",
+      html: `<p>第一次调用 <code>pipeline(audio)</code> 会触发 pmap 的 JIT 编译，作者说在 TPU v3-8、batch 16 下大约要 <b>2 分钟</b>，“够你去倒杯咖啡”。第二次调用同样的音频，直接用编译好的函数，速度飞快。</p><p>Whisper 内部做的事：把每个 30 秒块变成 <b>80 个梅尔带、每 10 毫秒一帧</b>的对数梅尔频谱（不足 30 秒补零），编码器把它变成一串“声音向量”，解码器从特殊标记开始，每一步预测下一个词，直到写出结束标记。作者看了打印出来的文字，评价是“看起来完全正确”。</p>`,
+      cells: [14, 15, 16], highlight: ["%time text = pipeline(audio)"],
+      draw(svg, ctx) {
+        const ph = phrase(["go", "left", "stop", "no"], 7);
+        const x = new Float32Array(30 * SR); x.set(ph.x);
+        const sp = logmel80(x);
+        K.svg(svg, "text", { x: 30, y: 22, "font-size": 12, class: "muted" }, "一个 30 秒块的对数梅尔频谱：80 个梅尔带 × 3000 帧（合成示意，后面补零）");
+        let mx = -1e9; sp.forEach((p) => p.forEach((q) => (mx = Math.max(mx, q))));
+        AK.drawSpec(svg, { x: 30, y: 30, w: 660, h: 110 }, sp, { maxT: 150, maxF: 40, lo: mx - 14, hi: mx });
+        const pad = K.svg(svg, "rect", { x: 30 + (ph.x.length / x.length) * 660, y: 30, width: 660 * (1 - ph.x.length / x.length), height: 110, fill: "none", stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+        K.svg(svg, "text", { x: 60 + (ph.x.length / x.length) * 660, y: 90, "font-size": 12, class: "muted" }, "补零（静音）到满 30 秒");
+        const words = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "Go", "left", ",", "stop", ",", "no", "."];
+        let out = "";
+        const tx = K.svg(svg, "text", { x: 30, y: 200, "font-size": 15, "font-family": "var(--mono)" }, "");
+        const pr = K.svg(svg, "text", { x: 30, y: 240, "font-size": 12, class: "muted" }, "");
+        (async () => {
+          for (let i = 0; i < words.length; i++) {
+            pr.textContent = `第 ${i + 1} 步：根据声音 + 已经写出的内容，预测下一个记号`;
+            out += (i ? " " : "") + words[i];
+            tx.textContent = out.length > 70 ? "…" + out.slice(-70) : out;
+            if (!(await ctx.wait(380))) return;
+          }
+          pr.textContent = "写出结束标记后停止。文字为示意，不是作者的转写结果";
+        })();
+      },
+    },
+    {
+      at: 17, title: "30 分钟录音只要 35 秒", kicker: "第 17–21 格 · 转写 30 分钟录音",
+      html: `<p>接着作者加大难度：<code>test_dataset[1]</code> 是 30 分钟的录音，先用“采样点数 ÷ 采样率 ÷ 60”算出时长，再用已经编译好的函数转写。</p><p>结果：<b>35 秒</b>转写完 30 分钟音频。作者推算：一部 2 小时的电影不到 2.5 分钟就能转完。他还说批大小翻倍，时间大约减半，但前提是总批量小于音频总时长；换成 TPU v4 还能再快约 2 倍。</p>`,
+      cells: [19, 20], highlight: ["audio_length_in_mins", "%time text = pipeline(audio)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 40, w: 600, h: 200 }, [0, 30], [0, 1], { yticks: 0, xlabel: "分钟" });
+        K.svg(svg, "text", { x: 70, y: 30, "font-size": 12 }, "录音时长 vs 转写耗时（作者第 21 格给出的数字）");
+        const a = K.svg(svg, "rect", { x: ax.sx(0), y: 80, width: 0, height: 40, fill: "var(--c1)", opacity: 0.8 });
+        const b = K.svg(svg, "rect", { x: ax.sx(0), y: 170, width: 0, height: 40, fill: "var(--c3)" });
+        K.svg(svg, "text", { x: 70, y: 74, "font-size": 12 }, "录音：30 分钟");
+        K.svg(svg, "text", { x: 70, y: 164, "font-size": 12 }, "转写：约 35 秒");
+        const big = K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 22, "font-weight": 700, fill: "var(--good)" }, "");
+        ctx.tween(1500, (t) => a.setAttribute("width", (ax.sx(30) - ax.sx(0)) * t))
+          .then((ok) => ok && ctx.tween(600, (t) => b.setAttribute("width", (ax.sx(35 / 60) - ax.sx(0)) * t)))
+          .then((ok) => { if (ok) big.textContent = "约快 50 倍于实时（30 × 60 ÷ 35）"; });
+      },
+    },
+    {
+      at: 22, title: "时间戳：哪句话在第几秒", kicker: "第 22–24 格 · return_timestamps",
+      html: `<p>加上 <code>return_timestamps=True</code>，输出里除了整段文字 <code>text</code>，还有 <code>chunks</code>：每一小句话和它的起止时间。因为前向计算的“签名”变了，需要重新编译一次，而且比不带时间戳的编译更久；好在前面开了编译缓存，不用从零开始。</p><p>Whisper 的时间戳也是解码器“写”出来的：它的词表里有一批特殊的时间标记（如 <code>&lt;|0.00|&gt;</code>、<code>&lt;|2.40|&gt;</code>），模型在句子前后写上这些标记，就得到了起止时间。长音频切块后，每块的时间还要加上这一块在整段里的起点。</p>`,
+      cells: [23, 24], highlight: ["return_timestamps=True", "outputs[\"chunks\"]"],
+      draw(svg, ctx) {
+        const ph = phrase(["yes", "go", "down", "stop", "on", "left"], 11, 0.35);
+        AK.drawWave(svg, { x: 30, y: 40, w: 660, h: 80 }, ph.x);
+        const dur = ph.x.length / SR;
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 12, class: "muted" }, "合成录音（示意）");
+        const groups = [[0, 2], [2, 4], [4, 6]];
+        const seq = [];
+        groups.forEach((g, k) => { const t0 = ph.parts[g[0]][1], t1 = ph.parts[g[1] - 1][1] + ph.parts[g[1] - 1][2]; seq.push({ t0, t1, txt: ph.parts.slice(g[0], g[1]).map((p) => p[0]).join(" ") }); });
+        const items = seq.map((s, k) => {
+          const g = K.svg(svg, "g");
+          K.svg(g, "rect", { x: 30 + (s.t0 / dur) * 660, y: 130, width: ((s.t1 - s.t0) / dur) * 660, height: 10, fill: K.colors[k + 2], opacity: 0.8 });
+          K.svg(g, "text", { x: 30, y: 190 + k * 34, "font-size": 14, "font-family": "var(--mono)" }, `<|${s.t0.toFixed(2)}|> ${s.txt} <|${s.t1.toFixed(2)}|>`);
+          g.style.opacity = 0; return g;
+        });
+        K.svg(svg, "text", { x: 30, y: 320, "font-size": 12, class: "muted" }, "解码器在每句话前后写出时间标记 → chunks 里的 timestamp");
+        (async () => { for (const g of items) if (!(await ctx.tween(500, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      at: 25, title: "转写还是翻译：task 与 language", kicker: "第 25 格 · 生成参数",
+      html: `<p>最后作者介绍两个可选参数：</p><ul class="tight"><li><code>task</code>：<code>"transcribe"</code>（照原语言写下来，默认）或 <code>"translate"</code>（翻译成英文写下来）；</li><li><code>language</code>：如 <code>"en"</code>；默认不填，模型会先自己判断录音是哪种语言。</li></ul><p>这两个参数其实就是解码器开头那几个<b>特殊标记</b>：同一个模型，开头写 <code>&lt;|zh|&gt;&lt;|transcribe|&gt;</code> 就输出中文，写 <code>&lt;|zh|&gt;&lt;|translate|&gt;</code> 就输出英文译文。一个模型多种用途，靠的是训练数据里混了多种语言、多种任务。</p>`,
+      draw(svg, ctx) {
+        const enc = K.node(svg, 40, 120, 150, 80, "中文录音\n→ 编码器", { fill: "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: "var(--c1)" });
+        const a = K.node(svg, 300, 50, 200, 50, "<|zh|><|transcribe|>", { fill: "var(--panel-2)", fs: 12 });
+        const b = K.node(svg, 300, 220, 200, 50, "<|zh|><|translate|>", { fill: "var(--panel-2)", fs: 12 });
+        K.arrow(svg, 190, 150, 298, 80); K.arrow(svg, 190, 170, 298, 245);
+        const o1 = K.node(svg, 540, 50, 160, 50, "输出：中文文字", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const o2 = K.node(svg, 540, 220, 160, 50, "输出：英文译文", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        K.arrow(svg, 500, 75, 538, 75); K.arrow(svg, 500, 245, 538, 245);
+        [a, b, o1, o2].forEach((g) => (g.style.opacity = 0));
+        K.svg(svg, "text", { x: 40, y: 320, "font-size": 12, class: "muted" }, "同一个模型，换开头的特殊标记就换任务（示意，不填 language 时由模型自动识别）");
+        (async () => { for (const g of [a, o1, b, o2]) if (!(await ctx.tween(400, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：切块与批处理 ---------- */
+  // 校准：作者第 21 格——30 分钟音频（60 块）batch 16 在 v3-8 上约 35 秒 → 每轮约 35/4 秒；
+  // 第 5 格——批处理比逐块顺序快约 10 倍。
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "min", label: "录音时长（分钟）", min: 1, max: 120, step: 1, value: 30 },
+      { id: "bs", label: "批大小 batch_size（作者 16）", value: "16", options: [["1", "1（逐块顺序）"], ["8", "8"], ["16", "16（作者）"], ["32", "32"], ["64", "64"], ["128", "128"]] },
+      { id: "chunk", label: "每块长度（秒，Whisper 固定 30）", min: 10, max: 30, step: 5, value: 30 },
+    ],
+    note: "按作者给出的两个数字推算：30 分钟、batch 16 约 35 秒（第 21 格），批处理比逐块顺序快约 10 倍（第 5 格）。假设每一轮耗时不随批大小变化（作者说的“批大小翻倍时间减半”），这是粗略模型，不是实测。",
+    render(svg, v) {
+      const bs = +v.bs, chunks = Math.ceil((v.min * 60) / v.chunk), rounds = Math.ceil(chunks / bs);
+      const perRound = 35 / 4 * (v.chunk / 30);
+      const seqPerChunk = (35 * 10) / 60 * (v.chunk / 30);
+      const est = bs === 1 ? chunks * seqPerChunk : rounds * perRound;
+      const show = Math.min(chunks, 240), cols = 30, cw = 580 / cols, ch = Math.min(18, 200 / Math.ceil(show / cols));
+      for (let i = 0; i < show; i++) {
+        const rd = Math.floor(i / bs);
+        K.svg(svg, "rect", { x: 40 + (i % cols) * cw, y: 20 + Math.floor(i / cols) * (ch + 2), width: cw - 2, height: ch, rx: 2, fill: K.colors[rd % 6], opacity: 0.8 });
+      }
+      K.svg(svg, "text", { x: 40, y: 250, "font-size": 12, class: "muted" }, `每个小方块 = 一个 ${v.chunk} 秒的块；同一颜色 = 同一轮一起计算${chunks > show ? "（只画前 240 块）" : ""}`);
+      K.svg(svg, "text", { x: 40, y: 275, "font-size": 12, class: "muted" }, bs > chunks ? "批大小比总块数还大：多出来的位置空着，再加批大小也不会更快" : "");
+      return { readout: [
+        { k: "总块数", v: String(chunks) },
+        { k: "计算轮数", v: String(bs === 1 ? chunks : rounds) },
+        { k: "推算耗时", v: est < 120 ? est.toFixed(0) + " 秒" : (est / 60).toFixed(1) + " 分钟" },
+        { k: "相当于实时的", v: ((v.min * 60) / est).toFixed(0) + " 倍速", color: "var(--good)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：30 秒对数梅尔 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "n", label: "录音里说几个词", min: 1, max: 30, step: 1, value: 6 },
+      { id: "gap", label: "词与词之间停顿（秒）", min: 0.05, max: 1.2, step: 0.05, value: 0.3, fmt: (x) => x.toFixed(2) },
+      { id: "nm", label: "梅尔带数（Whisper large-v2 用 80）", value: "80", options: [["40", "40"], ["80", "80（large-v2）"], ["128", "128"]] },
+    ],
+    note: "照 Whisper 的做法现场计算：25 毫秒窗、10 毫秒帧移，不足 30 秒的补零，超过 30 秒的部分要放到下一块。读数告诉你这一块里有多少是真声音、多少是补的零。",
+    render(svg, v) {
+      const ws = "yes no up down left right on off stop go".split(" "), list = [];
+      for (let i = 0; i < v.n; i++) list.push(ws[(i * 7) % 10]);
+      const ph = phrase(list, 5, v.gap), real = ph.x.length / SR;
+      const x = new Float32Array(30 * SR); x.set(ph.x.subarray(0, Math.min(ph.x.length, x.length)));
+      const sp = AK.log(AK.applyFB(AK.stft(x, 400, 160, 512), AK.melFB(+v.nm, 512, SR, 0, 8000)));
+      let mx = -1e9; sp.forEach((p) => p.forEach((q) => (mx = Math.max(mx, q))));
+      AK.drawSpec(svg, { x: 40, y: 20, w: 580, h: 230 }, sp, { maxT: 150, maxF: Math.min(64, +v.nm), lo: mx - 14, hi: mx });
+      const cut = Math.min(1, real / 30);
+      K.svg(svg, "line", { x1: 40 + cut * 580, x2: 40 + cut * 580, y1: 20, y2: 250, stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+      K.svg(svg, "text", { x: 40, y: 275, "font-size": 12, class: "muted" }, real <= 30 ? "橙线右边是补的零（静音）" : "录音超过 30 秒：橙线在最右，超出的部分进入下一块");
+      K.svg(svg, "text", { x: 40, y: 300, "font-size": 12, class: "muted" }, "横轴：0–30 秒　纵轴：梅尔带（低频在下）");
+      return { readout: [
+        { k: "真实声音", v: real.toFixed(1) + " 秒", color: real > 30 ? "var(--bad)" : "var(--ink)" },
+        { k: "补零比例", v: (Math.max(0, 1 - real / 30) * 100).toFixed(0) + "%" },
+        { k: "输入形状", v: `${v.nm} × ${sp.length}` },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：切块重叠与拼接 ---------- */
+  const SENT = "the quick brown fox jumps over the lazy dog while the old man reads a long book about stars and rivers near the quiet town where children play every sunny afternoon until the bells ring".split(" ");
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 230,
+    controls: [
+      { id: "L", label: "每块长度（秒）", min: 4, max: 30, step: 1, value: 8 },
+      { id: "s", label: "相邻块重叠（秒，0 = 不重叠）", min: 0, max: 4, step: 0.5, value: 0, fmt: (x) => x.toFixed(1) },
+      { id: "seed", label: "换一种语速", button: true },
+    ],
+    note: "一段约 40 秒的示意朗读（句子是我们编的英文，不是数据集内容）。假设：一个词如果被块的边界切断，这一块就认不出它；有重叠时，两块各认出一部分，按时间把重叠区里的词去重后拼起来。",
+    render(svg, v) {
+      const r = K.rng(9 + v.seed * 5), W = [];
+      let t = 0.3;
+      SENT.forEach((w) => { const d = 0.25 + 0.06 * w.length + r() * 0.2; W.push({ w, t0: t, t1: t + d }); t += d + 0.08 + r() * 0.25; });
+      const total = Math.max(40, Math.ceil(t + 0.5)), sc = 580 / total;
+      const step = v.L - v.s, blocks = [];
+      for (let a = 0; a < total; a += step) { blocks.push([a, Math.min(total, a + v.L)]); if (a + v.L >= total) break; }
+      blocks.forEach((b, i) => K.svg(svg, "rect", { x: 40 + b[0] * sc, y: 20 + (i % 2) * 22, width: (b[1] - b[0]) * sc - 1, height: 18, rx: 3, fill: K.colors[i % 6], opacity: 0.55 }));
+      K.svg(svg, "text", { x: 40, y: 80, "font-size": 12, class: "muted" }, `切成 ${blocks.length} 块（上两行交替画，方便看重叠）`);
+      const got = new Set();
+      blocks.forEach((b) => W.forEach((w, i) => { if (w.t0 >= b[0] && w.t1 <= b[1]) got.add(i); }));
+      W.forEach((w, i) => { const ok = got.has(i), x = 40 + w.t0 * sc; K.svg(svg, "rect", { x, y: 92, width: Math.max(1, (w.t1 - w.t0) * sc), height: 14, fill: ok ? "var(--c3)" : "var(--c6)" }); });
+      K.svg(svg, "text", { x: 40, y: 124, "font-size": 12, class: "muted" }, "每个词在时间轴上的位置：绿色 = 被某一块完整认出，红色 = 每一块里都被切断");
+      // 拼出文字
+      let line = "", y = 150, out = [];
+      W.forEach((w, i) => out.push(got.has(i) ? w.w : "▢"));
+      const txt = out.join(" ");
+      for (let k = 0; k < txt.length; k += 78) { K.svg(svg, "text", { x: 40, y, "font-size": 13, "font-family": "var(--mono)" }, txt.slice(k, k + 78)); y += 20; }
+      const lost = W.length - got.size;
+      return { readout: [
+        { k: "块数", v: String(blocks.length) },
+        { k: "多算的音频", v: ((blocks.reduce((s, b) => s + b[1] - b[0], 0) / total - 1) * 100).toFixed(0) + "%" },
+        { k: "丢失的词", v: `${lost} / ${W.length}`, color: lost ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

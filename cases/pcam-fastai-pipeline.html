@@ -1,0 +1,649 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>病理切片找癌转移</title>
+<meta name="description" content="Kaggle 案例拆解：在 96×96 的淋巴结病理小图里判断有没有乳腺癌转移，一条从理解问题、清洗数据、DenseNet 迁移学习、1cycle 训练、Grad-CAM 解释到部署的完整流水线。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">病理切片小图 · 二分类 · 完整机器学习流水线</div>
+  <h1>病理切片找癌转移：22 万张小图里，中间那一小块有没有癌细胞？</h1>
+  <p class="en">A complete ML pipeline (Fast.ai)</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">中心裁剪 + 数据增强</span><span class="tag method">通道均值 / 标准差</span><span class="tag method">异常图片检查</span>
+    <span class="tag method">分层切分</span><span class="tag method">DenseNet169 迁移学习</span><span class="tag method">学习率查找器</span>
+    <span class="tag method">1cycle 策略</span><span class="tag method">冻结 / 解冻微调</span><span class="tag method">Grad-CAM</span><span class="tag method">ROC / AUC</span><span class="tag method">TTA</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Joni Juvonen</b></span>
+    <span>Kaggle 点赞 <b>1,418</b>（2026-11 抓取）</span>
+    <span>比赛 <b>histopathologic-cancer-detection</b></span>
+    <span><a href="https://www.kaggle.com/code/qitvision/a-complete-ml-pipeline-fast-ai" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">淋巴结切片在显微镜下的小方块图</div><p>96×96 像素的彩色小图，用 H&amp;E 染色：细胞核染成蓝紫色，其余部分染成粉红色。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">图片正中 32×32 的区域里有没有肿瘤组织</div><p>淋巴结是乳腺癌最先扩散到的地方。只要中间区域有一个像素是肿瘤，就算阳性；边缘有肿瘤不影响标签。<span data-cell="1">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">DenseNet169 迁移学习 + 1cycle 训练</div><p>先清洗、裁剪、增强；用学习率查找器挑学习率和权重衰减；冻结主干训练 8 轮，再解冻精调 12 轮；最后用 Grad-CAM 看模型在看哪里。<span data-cell="23">出处</span> <span data-cell="35">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">文字里没写分数</div><p>作者只说第一阶段后“模型已经表现不错”，精调末尾开始过拟合，在这里停下正合适。<span data-cell="42">出处</span> <span data-cell="48">出处</span> 准确率和 AUC 在运行输出里，这里不列。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据是 PCam（PatchCamelyon）去掉重复图片后的版本。PCam 来自 Camelyon16 挑战赛：荷兰两家医学中心扫描的 400 张淋巴结切片全片图像，再切成一个个小方块。以下信息来自作者第 1 格的数据说明。<span data-cell="1">出处</span></p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">训练图片</div><div class="v">约 22 万</div></div>
+        <div class="stat-tile"><div class="k">测试图片</div><div class="v">约 5.7 万</div></div>
+        <div class="stat-tile"><div class="k">图片尺寸</div><div class="v">96×96×3</div></div>
+        <div class="stat-tile"><div class="k">负 : 正</div><div class="v">约 60 : 40</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">训练集具体是 220,025 张（第 14 格进度条的文字 <span data-cell="14">出处</span>）。作者数出约 13 万张阴性、9 万张阳性，所以比例约 60/40，而不是说明里写的 50/50 <span data-cell="4">出处</span>。每个像素在显微镜下约 2.43 微米 <span data-cell="1">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列 / 每个文件是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>名字</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>train/&lt;id&gt;.tif</code></td><td>一张 96×96 的彩色小图，文件名就是 id</td><td>图片（TIF，JPEG 压缩）</td></tr>
+        <tr><td><code>train_labels.csv · id</code></td><td>图片编号，对应上面的文件名</td><td>文字</td></tr>
+        <tr><td><code>train_labels.csv · label</code></td><td><b>要预测的答案</b>：1 = 中间 32×32 区域有肿瘤组织，0 = 没有</td><td>0 / 1</td></tr>
+        <tr><td><code>test/&lt;id&gt;.tif</code></td><td>没有答案的测试图片，要提交“是肿瘤的概率”</td><td>图片</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">文件结构见第 3 格、第 70 格 <span data-cell="3">出处</span> <span data-cell="70">出处</span>。图片格式见第 1 格 <span data-cell="1">出处</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="9">
+    <h3>动手试试 A · 作者的裁剪与增强，在一张示意切片上现场做 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labA"></div>
+  </div>
+  <div data-at="33">
+    <h3>动手试试 B · 学习率查找器：边加大学习率边看损失 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labB"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>标签只由中心 32×32 决定，裁到中心更合理；但他试过 32×32 比 48×48 差，最终用 90×90</td><td><span data-cell="7">第 7 格</span></td></tr>
+        <tr><td>通道均值 [0.702, 0.546, 0.696]，标准差 [0.239, 0.282, 0.216]；有 1 张极暗、6 张极亮的图，全是阴性</td><td><span data-cell="13">第 13 格</span> <span data-cell="18">第 18 格</span></td></tr>
+        <tr><td>三种权重衰减里 1e-4 最合适，学习率选 2e-2 左右</td><td><span data-cell="34">第 34 格</span></td></tr>
+        <tr><td>只训练头部 8 轮后，混淆矩阵显示模型已经能区分肿瘤和正常组织</td><td><span data-cell="42">第 42 格</span></td></tr>
+        <tr><td>解冻精调末尾，验证表现开始和训练分开，出现过拟合迹象，适合停在这里</td><td><span data-cell="48">第 48 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">准确率、AUC 都打印在运行输出里（第 53、64 格），Kaggle 下载的源码不带输出，作者的文字里也没写具体数值，所以这里不列分数。</p>
+      <h3>读代码时发现的小问题</h3>
+      <ul class="tight">
+        <li>第 4 格的文字写成“13 万个阴性和 9 万个<b>阴性</b>”，后一个应为阳性。<span data-cell="4">出处</span></li>
+        <li>第 64 格把 <code>get_preds</code> 的结果再取 <code>np.exp</code> 当概率。fastai v1 的 <code>get_preds</code> 默认已经输出 softmax 概率，再取指数就多余了；不过指数函数不改变排序，所以算出的 AUC 不受影响。<span data-cell="64">出处</span></li>
+        <li>第 76 格的部署示例裁成 68×68、除以 256、也没做标准化，而训练时是 90×90、除以 255 再按通道均值标准差归一化。前后处理不一致，预测会不可靠。作者自己说这段没测试过。<span data-cell="72">出处</span></li>
+        <li>增强写在读图函数里，验证集读图时也会被随机增强，所以验证分数本身带有随机性。<span data-cell="8">出处</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一张淋巴结切片的小方块，输出“有转移”的概率；把一整张切片切成成千上万块逐块打分，就能画出可疑区域地图，提醒病理医生重点看哪里。</li>
+        <li><b>同类问题：</b>其他癌症的病理切片、宫颈细胞涂片、血涂片、皮肤镜、工业显微镜检测。</li>
+        <li><b>可迁移的套路：</b>先问清“标签到底怎么定义的” → 按定义裁剪 → 找坏数据 → 用训练集算归一化参数 → 先做简单基线 → 查学习率 → 冻结后解冻 → 看最错的样本 → 用 Grad-CAM 检查模型有没有学歪。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>裁剪与增强：OpenCV 旋转、平移、翻转、亮度、对比度 <span data-cell="9">第 9 格</span></li>
+        <li>数据检查：通道统计、极暗 / 极亮图片 <span data-cell="14">第 14 格</span></li>
+        <li>切分：分层抽 10% 做验证 <span data-cell="21">第 21 格</span></li>
+        <li>模型：fastai v1 + 预训练 DenseNet169，dropout 0.5 <span data-cell="23">第 23 格</span> <span data-cell="30">第 30 格</span></li>
+        <li>训练：lr_find、1cycle 8 轮，解冻后分层学习率 12 轮 <span data-cell="35">第 35 格</span> <span data-cell="46">第 46 格</span></li>
+        <li>分析：最错 / 最对样本、Grad-CAM、ROC <span data-cell="55">第 55 格</span> <span data-cell="59">第 59 格</span> <span data-cell="64">第 64 格</span></li>
+        <li>提交：12 次 TTA 平均 <span data-cell="67">第 67 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>标签只看中间 32×32，作者却保留了 90×90。为什么“多看一点周围”反而更好？会不会让模型把边缘的肿瘤当成证据？</li>
+      <li>病理图片转 90 度、上下翻转都可以，为什么旋转只允许 ±3 度这么小（再加上 90 度整转）？大角度旋转会带来什么麻烦？</li>
+      <li>全白、全黑的图片都是阴性。如果不删掉它们，对模型有好处还是坏处？</li>
+      <li>为什么先冻结主干只训练头部，再解冻全部？如果一开始就全部用大学习率训练会怎样？</li>
+      <li>Grad-CAM 发现模型看的是切片边上的笔迹或者染色深浅，而不是细胞核，你会怎么办？</li>
+      <li>部署代码裁剪尺寸和训练时不一致。你能想到生活中“训练时一个样，用的时候另一个样”导致出错的例子吗？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Joni Juvonen，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意，图中的“切片”是用代码画的示意图，不是真实病理图像。数据：Kaggle Histopathologic Cancer Detection（PCam 去重版）。
+</footer>
+</main>
+
+<script src="nb/pcam-fastai-pipeline.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  if (/[?&]fast/.test(location.search)) { K.tween = (ms, fn, ctx) => { if (ctx && !ctx.alive()) return Promise.resolve(false); fn(1, 1); return Promise.resolve(true); }; K.wait = (ms, ctx) => Promise.resolve(!ctx || ctx.alive()); }
+  if (/[?&]fold/.test(location.search)) document.head.appendChild(Object.assign(document.createElement("style"), { textContent: ".walk .ch-cells > .cell, .walk .cell-note { display: none !important; }" }));
+  /* ===== 页面专用：像素图工具（用代码生成小图，在浏览器里真算卷积、模糊、池化、几何变换） ===== */
+  const PX = (function () {
+    function rgbOf(name, fb) {
+      let s = (K.css(name) || fb || "#888888").trim();
+      if (s[0] !== "#") return [128, 128, 128];
+      if (s.length === 4) s = "#" + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+      return [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
+    }
+    function grid(W, H, f) { const a = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) a[y * W + x] = f(x, y); return { W, H, a }; }
+    /* 彩色图：{W,H,rgb:[R,G,B]}，每个通道取值 0–1 */
+    function rgbGrid(W, H, f) { const R = new Float32Array(W * H), G = new Float32Array(W * H), B = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const c = f(x, y), i = y * W + x; R[i] = c[0]; G[i] = c[1]; B[i] = c[2]; } return { W, H, rgb: [R, G, B] }; }
+    const chan = (m, c) => ({ W: m.W, H: m.H, a: m.rgb[c] });
+    const fromChans = (ch) => ({ W: ch[0].W, H: ch[0].H, rgb: ch.map((c) => c.a) });
+    const gray = (m) => (m.rgb ? grid(m.W, m.H, (x, y) => { const i = y * m.W + x; return 0.299 * m.rgb[0][i] + 0.587 * m.rgb[1][i] + 0.114 * m.rgb[2][i]; }) : m);
+    function at(m, x, y) { return m.a[y * m.W + x]; }
+    function atClamp(m, x, y) { x = x < 0 ? 0 : x >= m.W ? m.W - 1 : x; y = y < 0 ? 0 : y >= m.H ? m.H - 1 : y; return m.a[y * m.W + x]; }
+    function atZero(m, x, y) { return x < 0 || y < 0 || x >= m.W || y >= m.H ? 0 : m.a[y * m.W + x]; }
+    /* padding='same'：边界外按 0 补 */
+    function conv(m, k) { const n = k.length, r = (n - 1) / 2; return grid(m.W, m.H, (x, y) => { let s = 0; for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) s += k[j][i] * atZero(m, x + i - r, y + j - r); return s; }); }
+    function map(m, f) { if (m.rgb) return { W: m.W, H: m.H, rgb: m.rgb.map((a) => { const o = new Float32Array(a.length); for (let i = 0; i < a.length; i++) o[i] = f(a[i], i); return o; }) }; const o = { W: m.W, H: m.H, a: new Float32Array(m.a.length) }; for (let i = 0; i < m.a.length; i++) o.a[i] = f(m.a[i], i); return o; }
+    const relu = (m) => map(m, (v) => (v > 0 ? v : 0));
+    function pool(m, s) { s = s || 2; const W = Math.ceil(m.W / s), H = Math.ceil(m.H / s); return grid(W, H, (x, y) => { let b = -Infinity; for (let j = 0; j < s; j++) for (let i = 0; i < s; i++) { const xx = x * s + i, yy = y * s + j; if (xx < m.W && yy < m.H) b = Math.max(b, at(m, xx, yy)); } return b; }); }
+    function range(m) { let lo = Infinity, hi = -Infinity; for (const v of m.a) { if (v < lo) lo = v; if (v > hi) hi = v; } return [lo, hi]; }
+    /* 可分离高斯模糊（边界用最近像素），彩色图逐通道做 */
+    function blur(m, sigma) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => blur(chan(m, c), sigma)));
+      if (sigma <= 0.01) return m;
+      const r = Math.max(1, Math.ceil(sigma * 3)), w = [];
+      let s = 0;
+      for (let i = -r; i <= r; i++) { const v = Math.exp((-i * i) / (2 * sigma * sigma)); w.push(v); s += v; }
+      for (let i = 0; i < w.length; i++) w[i] /= s;
+      const t = grid(m.W, m.H, (x, y) => { let a = 0; for (let i = -r; i <= r; i++) a += w[i + r] * atClamp(m, x + i, y); return a; });
+      return grid(m.W, m.H, (x, y) => { let a = 0; for (let i = -r; i <= r; i++) a += w[i + r] * atClamp(t, x, y + i); return a; });
+    }
+    function bilinear(m, x, y) {
+      const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+      return (atClamp(m, x0, y0) * (1 - fx) + atClamp(m, x0 + 1, y0) * fx) * (1 - fy) + (atClamp(m, x0, y0 + 1) * (1 - fx) + atClamp(m, x0 + 1, y0 + 1) * fx) * fy;
+    }
+    /* 绕中心旋转/缩放/平移/翻转；fill：'nearest' 用最近像素，数字表示边界外填这个值 */
+    function affine(m, p) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => affine(chan(m, c), p)));
+      const th = ((p.rot || 0) * Math.PI) / 180, c = Math.cos(th), s = Math.sin(th), z = p.zoom || 1;
+      const cx = (m.W - 1) / 2, cy = (m.H - 1) / 2, tx = (p.tx || 0) * m.W, ty = (p.ty || 0) * m.H;
+      return grid(m.W, m.H, (x, y) => {
+        let u = x - cx - tx, v = y - cy - ty;
+        if (p.flip) u = -u;
+        if (p.vflip) v = -v;
+        const a = (c * u + s * v) / z + cx, b = (-s * u + c * v) / z + cy;
+        if (p.fill != null && p.fill !== "nearest" && (a < -0.5 || b < -0.5 || a > m.W - 0.5 || b > m.H - 0.5)) return p.fill;
+        return bilinear(m, a, b);
+      });
+    }
+    function resize(m, W, H) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => resize(chan(m, c), W, H)));
+      return grid(W, H, (x, y) => bilinear(m, ((x + 0.5) * m.W) / W - 0.5, ((y + 0.5) * m.H) / H - 0.5));
+    }
+    function toURL(m, mode, lo, hi) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      if (m.rgb) {
+        for (let i = 0; i < m.W * m.H; i++) { for (let c = 0; c < 3; c++) d[i * 4 + c] = Math.max(0, Math.min(1, m.rgb[c][i])) * 255; d[i * 4 + 3] = 255; }
+      } else {
+        const P = rgbOf("--panel", "#ffffff"), A = rgbOf("--c1"), B = rgbOf("--c6");
+        if (lo == null || hi == null) { const r = range(m); if (lo == null) lo = r[0]; if (hi == null) hi = r[1]; }
+        const span = hi - lo || 1, amax = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+        for (let i = 0; i < m.a.length; i++) {
+          const v = m.a[i]; let r, gg, b;
+          if (mode === "div") { const t = Math.max(-1, Math.min(1, v / amax)), C = t >= 0 ? B : A, k = Math.abs(t); r = P[0] + (C[0] - P[0]) * k; gg = P[1] + (C[1] - P[1]) * k; b = P[2] + (C[2] - P[2]) * k; }
+          else if (mode === "heat") { const k = Math.max(0, Math.min(1, (v - lo) / span)); r = P[0] + (B[0] - P[0]) * k; gg = P[1] + (B[1] - P[1]) * k; b = P[2] + (B[2] - P[2]) * k; }
+          else { const k = Math.max(0, Math.min(1, (v - lo) / span)) * 255; r = gg = b = k; }
+          d[i * 4] = r; d[i * 4 + 1] = gg; d[i * 4 + 2] = b; d[i * 4 + 3] = 255;
+        }
+      }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    function draw(svg, x, y, w, h, m, mode, lo, hi, smooth) {
+      const e = K.svg(svg, "image", { x, y, width: w, height: h, preserveAspectRatio: "none" });
+      if (!smooth) e.style.imageRendering = "pixelated";
+      e.setAttribute("href", toURL(m, mode, lo, hi));
+      K.svg(svg, "rect", { x, y, width: w, height: h, fill: "none", stroke: "var(--line)" });
+      return e;
+    }
+    function update(e, m, mode, lo, hi) { e.setAttribute("href", toURL(m, mode, lo, hi)); }
+    function lines(svg, x, y, w, h, W, H, op) {
+      const g = K.svg(svg, "g");
+      for (let i = 0; i <= W; i++) K.svg(g, "line", { x1: x + (w * i) / W, x2: x + (w * i) / W, y1: y, y2: y + h, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      for (let j = 0; j <= H; j++) K.svg(g, "line", { y1: y + (h * j) / H, y2: y + (h * j) / H, x1: x, x2: x + w, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      return g;
+    }
+    const smooth = (e0, e1, x) => { const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+    const blob = (x, y, cx, cy, sx, sy) => Math.exp(-(((x - cx) * (x - cx)) / (2 * sx * sx) + ((y - cy) * (y - cy)) / (2 * sy * sy)));
+    /* 平滑噪声：几层不同频率的随机网格插值叠加，用来做纹理 */
+    function noise(W, H, seed, cells) {
+      const r = K.rng(seed || 1), n = cells || 6, g0 = grid(n + 1, n + 1, () => r());
+      return grid(W, H, (x, y) => bilinear(g0, (x / W) * n, (y / H) * n));
+    }
+    return { grid, rgbGrid, chan, fromChans, gray, at, atClamp, conv, map, relu, pool, range, blur, bilinear, affine, resize, toURL, draw, update, lines, smooth, blob, noise, rgbOf };
+  })();
+
+  /* ===== 用代码画一张示意 H&E 切片（RGB 0–1）。tumor: "none" | "center" | "edge" ===== */
+  function tissue(N, tumor, seed) {
+    const r = K.rng(seed || 1), tex = PX.noise(N, N, (seed || 1) + 3, 8), nuc = [];
+    const inTumor = (x, y) => tumor === "center" ? Math.hypot(x - 0.5, y - 0.5) < 0.24 : tumor === "edge" ? x < 0.24 : false;
+    for (let i = 0; i < 260 && nuc.length < 70; i++) {
+      const x = r(), y = r(), t = inTumor(x, y);
+      if (!t && r() < 0.45) continue;
+      const rad = t ? 0.035 + r() * 0.03 : 0.018 + r() * 0.01;
+      if (nuc.some((n) => Math.hypot(n.x - x, n.y - y) < (n.rad + rad) * 0.9)) continue;
+      nuc.push({ x, y, rad, t, ex: t ? 0.7 + r() * 0.6 : 0.9 + r() * 0.2, ph: r() * 6.28, k: t ? 3 + Math.floor(r() * 3) : 2, amp: t ? 0.25 : 0.06, dark: t ? 0.8 + r() * 0.2 : 0.55 + r() * 0.15 });
+    }
+    return PX.rgbGrid(N, N, (px, py) => {
+      const x = px / N, y = py / N, t = tex.a[py * N + px];
+      let c = [0.93 - 0.06 * t, 0.68 - 0.1 * t, 0.82 - 0.06 * t];
+      for (const n of nuc) {
+        const dx = (x - n.x) / n.ex, dy = (y - n.y) * n.ex, d = Math.hypot(dx, dy);
+        if (d > n.rad * 1.4) continue;
+        const a = Math.atan2(dy, dx), rr = n.rad * (1 + n.amp * Math.sin(n.k * a + n.ph));
+        const e = PX.smooth(rr + 0.004, rr - 0.004, d) * n.dark;
+        const nc = [0.3, 0.2, 0.55];
+        c = c.map((v, i) => v * (1 - e) + nc[i] * e);
+      }
+      return c;
+    });
+  }
+  /* 作者第 9 格 readCroppedImage 的浏览器版：旋转（绕 48,48）→ 平移后中心裁剪 → 翻转 → 亮度 → 对比度 → 截断到 0–1 */
+  function readCropped(img, p) {
+    let m = PX.affine(img, { rot: -p.rot, fill: 0 });
+    const S = img.W, C = p.crop, s0 = Math.floor((S - C) / 2);
+    m = PX.fromChans([0, 1, 2].map((c) => PX.grid(C, C, (x, y) => {
+      let xx = x, yy = y;
+      if (p.fh) xx = C - 1 - xx;
+      if (p.fv) yy = C - 1 - yy;
+      const v = m.rgb[c][K.clamp(s0 + yy + p.sx, 0, S - 1) * S + K.clamp(s0 + xx + p.sy, 0, S - 1)];
+      return K.clamp((v + p.br) * p.cr, 0, 1);
+    })));
+    return m;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "问题：淋巴结里有没有癌细胞转移", kicker: "第 0–1 格 · 理解问题与数据",
+      html: `<p>作者先像写项目报告一样回答几个问题：问题是什么？答案长什么样？领域里已知什么？<span data-cell="0">出处</span></p><p>任务是<b>二分类</b>：一张 96×96 的病理小图，中心 32×32 区域里只要有一点肿瘤组织就算阳性。难点是转移灶可能小到只有几个细胞。比赛按 <b>AUC</b> 打分。</p><p>淋巴结是乳腺癌最先扩散到的地方，病理医生要在显微镜下翻看大片组织，很累，也容易漏掉小病灶。<span data-cell="1">出处</span></p>`,
+      cells: [0, 1],
+      draw(svg, ctx) {
+        const imgs = [["center", "中心有肿瘤 → 标签 1"], ["edge", "只有边缘有肿瘤 → 标签 0"], ["none", "没有肿瘤 → 标签 0"]];
+        imgs.forEach(([t, lab], i) => {
+          const x = 30 + i * 230;
+          PX.draw(svg, x, 50, 190, 190, tissue(96, t, 40 + i), null, null, null, true);
+          const box = K.svg(svg, "rect", { x: x + 190 / 3, y: 50 + 190 / 3, width: 190 / 3, height: 190 / 3, fill: "none", stroke: i === 0 ? "var(--c6)" : "var(--c1)", "stroke-width": 3, "stroke-dasharray": "6 4", opacity: 0 });
+          const tx = K.svg(svg, "text", { x: x + 95, y: 270, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: i === 0 ? "var(--c6)" : "var(--ink)" }, lab);
+          tx.style.opacity = 0;
+          ctx.wait(400 + i * 600).then((ok) => ok && ctx.tween(500, (k) => { box.style.opacity = k; tx.style.opacity = k; }));
+        });
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "虚线框 = 中心 32×32 区域，标签只看这里（示意切片，紫色是细胞核）");
+        K.svg(svg, "text", { x: 30, y: 310, "font-size": 12, class: "muted" }, "肿瘤细胞核：更大、形状不规则、颜色更深、挤在一起");
+      },
+    },
+    {
+      title: "数一数：阴性多，阳性少", kicker: "第 2–4 格 · 标签统计",
+      html: `<p>读入 <code>train_labels.csv</code>，<code>value_counts()</code> 数两类各有多少。作者发现约 13 万张阴性、9 万张阳性，比例接近 60/40，阴性是阳性的 1.5 倍。<span data-cell="4">出处</span></p><p>这个比例不算极端，不需要特别的重采样，但切分验证集时要保持这个比例（第 21 格）。顺便一提，作者原文把后一个也写成了“negatives”，是笔误。</p>`,
+      cells: [3], highlight: ["value_counts()"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 120, y: 40, w: 480, h: 240 }, [0, 1], [0, 140], { xticks: 0, yticks: 4, ylabel: "图片数（千张，约数）" });
+        const items = [["阴性 0", 130, "var(--c1)"], ["阳性 1", 90, "var(--c6)"]];
+        const bars = items.map(([n, v, c], i) => {
+          K.svg(svg, "text", { x: 230 + i * 220, y: 300, "text-anchor": "middle", "font-size": 13 }, n);
+          const t = K.svg(svg, "text", { x: 230 + i * 220, y: ax.sy(v) - 8, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "约 " + v + "k"); t.style.opacity = 0;
+          return [K.svg(svg, "rect", { x: 170 + i * 220, y: ax.sy(0), width: 120, height: 0, rx: 4, fill: c }), v, t];
+        });
+        ctx.tween(1200, (k) => bars.forEach(([r, v, t]) => { const h = (ax.sy(0) - ax.sy(v)) * k; r.setAttribute("y", ax.sy(0) - h); r.setAttribute("height", h); t.style.opacity = k; }));
+      },
+    },
+    {
+      title: "看图：可疑的细胞核长什么样", kicker: "第 5–7 格 · 可视化与领域知识",
+      html: `<p>作者随机画出 5 张阴性、5 张阳性，并用虚线框标出中心 32×32 区域。他承认：这对没受过训练的眼睛来说<b>极其困难</b>。<span data-cell="7">出处</span></p><p>他查了病理学资料：转移灶的特征是“外来的细胞群”，细胞核<b>变大、边界不规则、染色不均、核仁大</b>。结论一句话：<b>形状、大小、颜色不规则的细胞核可能意味着转移。</b></p><p>他还想到：既然标签只看中心，可以裁掉边缘；但裁得太紧会丢掉周围的信息。他试过 32×32 比 48×48 差。</p>`,
+      cells: [6], highlight: ["patches.Rectangle((32,32),32,32"],
+      draw(svg, ctx) {
+        const A = tissue(96, "none", 7), B = tissue(96, "center", 8);
+        PX.draw(svg, 40, 40, 230, 230, A, null, null, null, true);
+        PX.draw(svg, 420, 40, 230, 230, B, null, null, null, true);
+        K.svg(svg, "text", { x: 155, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "正常淋巴组织（示意）");
+        K.svg(svg, "text", { x: 535, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--c6)" }, "有转移（示意）");
+        const lens = K.svg(svg, "circle", { cx: 535, cy: 155, r: 0, fill: "none", stroke: "var(--warn)", "stroke-width": 3 });
+        const tips = ["核变大", "边界不规则", "颜色更深", "挤成一团"].map((t, i) => { const e = K.svg(svg, "text", { x: 300, y: 110 + i * 26, "font-size": 13, fill: "var(--warn)" }, "← " + t); e.style.opacity = 0; return e; });
+        ctx.wait(500).then((ok) => ok && ctx.tween(700, (k) => lens.setAttribute("r", 60 * k))).then(async (ok) => { if (!ok) return; for (const t of tips) if (!(await ctx.tween(260, (k) => (t.style.opacity = k)))) return; });
+      },
+    },
+    {
+      title: "裁到中心，再随机变一变", kicker: "第 8–12 格 · 预处理与数据增强",
+      html: `<p>作者把裁剪和增强都写进读图函数 <code>readCroppedImage</code>：<span data-cell="9">出处</span></p><ul class="tight"><li>随机旋转 ±3°，再随机整转 ±90°</li><li>中心裁到 90×90，裁剪框随机偏移 ±2 像素</li><li>随机水平、垂直翻转</li><li>亮度 ±7%、对比度 ±5%，最后截断到 0～1</li></ul><p>病理切片没有“上下左右”之分，所以翻转、整转都没问题。注意：因为增强写在读图函数里，<b>预测时也会被增强</b>，作者顺势把它当作测试时增强（TTA）用。<span data-cell="8">出处</span></p>`,
+      cells: [9, 12], highlight: ["CROP_SIZE = 90", "RANDOM_ROTATION = 3", "RANDOM_90_DEG_TURN = 1", "RANDOM_BRIGHTNESS", "RANDOM_CONTRAST"],
+      draw(svg, ctx) {
+        const base = tissue(96, "center", 12), r = K.rng(5), outs = [];
+        PX.draw(svg, 20, 70, 200, 200, base, null, null, null, true);
+        K.svg(svg, "rect", { x: 20 + 200 * 3 / 96, y: 70 + 200 * 3 / 96, width: 200 * 90 / 96, height: 200 * 90 / 96, fill: "none", stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+        K.svg(svg, "text", { x: 120, y: 58, "text-anchor": "middle", "font-size": 13 }, "原图 96×96，虚线 = 90×90 裁剪框");
+        K.svg(svg, "text", { x: 470, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "同一张图读 5 次，每次都不一样");
+        for (let i = 0; i < 5; i++) {
+          const p = { rot: Math.round((r() * 2 - 1) * 3) + Math.round(r() * 2 - 1) * 90, sx: Math.round((r() * 2 - 1) * 2), sy: Math.round((r() * 2 - 1) * 2), crop: 90, fh: r() < 0.5, fv: r() < 0.5, br: Math.round((r() * 2 - 1) * 7) / 100, cr: 1 + Math.round((r() * 2 - 1) * 5) / 100 };
+          const x = 260 + (i % 3) * 150, y = 45 + Math.floor(i / 3) * 145;
+          const e = PX.draw(svg, x, y, 125, 125, readCropped(base, p), null, null, null, true); e.style.opacity = 0;
+          const t = K.svg(svg, "text", { x: x + 62, y: y + 138, "text-anchor": "middle", "font-size": 11, class: "muted" }, `转${p.rot}° ${p.fh ? "左右翻 " : ""}${p.fv ? "上下翻" : ""}`); t.style.opacity = 0;
+          outs.push([e, t]);
+        }
+        (async () => { for (const [e, t] of outs) if (!(await ctx.tween(320, (k) => { e.style.opacity = k; t.style.opacity = k; }))) return; })();
+      },
+    },
+    {
+      title: "算通道统计，顺便揪出全黑全白的图", kicker: "第 13–18 格 · 数据质量检查",
+      html: `<p>神经网络喜欢输入“均值 0、标准差 1”的数据，所以要先算出训练集红、绿、蓝三个通道的平均值和标准差。这一步<b>不能加增强</b>，否则统计会被随机变化污染。<span data-cell="13">出处</span></p><p>边算边检查坏图：所有像素都低于 10/255 的算“太暗”，所有像素都高于 245/255 的算“太亮”。作者找到 1 张极暗、6 张极亮的图，标签全是阴性，多半是没染色的空白玻片。他认为这么少的异常值删不删影响不大。<span data-cell="18">出处</span></p><p>算出的结果写在文字里：均值 [0.702, 0.546, 0.696]，标准差 [0.239, 0.282, 0.216]。<span data-cell="13">出处</span></p>`,
+      cells: [14, 15, 17], highlight: ["dark_th = 10 / 255", "bright_th = 245 / 255", "channel_avr", "channel_std"],
+      draw(svg, ctx) {
+        const mean = [0.702447, 0.546243, 0.696453], std = [0.238893, 0.282094, 0.216251], names = ["红 R", "绿 G", "蓝 B"], col = ["var(--c6)", "var(--c3)", "var(--c1)"];
+        const ax = K.axes(svg, { x: 70, y: 30, w: 330, h: 240 }, [0, 3], [0, 1], { xticks: 0, yticks: 4 });
+        const bars = mean.map((m, i) => {
+          K.svg(svg, "text", { x: ax.sx(i + 0.5), y: 290, "text-anchor": "middle", "font-size": 13 }, names[i]);
+          const r = K.svg(svg, "rect", { x: ax.sx(i + 0.2), y: ax.sy(0), width: ax.sx(0.6) - ax.sx(0), height: 0, fill: col[i], opacity: 0.8 });
+          const e = K.svg(svg, "line", { x1: ax.sx(i + 0.5), x2: ax.sx(i + 0.5), y1: ax.sy(m), y2: ax.sy(m), stroke: "var(--ink)", "stroke-width": 2 });
+          return [r, e, m, std[i]];
+        });
+        K.svg(svg, "text", { x: 235, y: 22, "text-anchor": "middle", "font-size": 12, class: "muted" }, "柱 = 通道均值，黑线 = ±1 个标准差（作者算出的值）");
+        K.node(svg, 450, 40, 110, 110, "极暗\n1 张", { fill: "#111", color: "#eee" });
+        K.node(svg, 580, 40, 110, 110, "极亮\n6 张", { fill: "#fafafa", color: "#222" });
+        const t = K.svg(svg, "text", { x: 570, y: 190, "text-anchor": "middle", "font-size": 13, fill: "var(--c3)", "font-weight": 700 }, "标签全是 0（阴性）"); t.style.opacity = 0;
+        K.svg(svg, "text", { x: 570, y: 215, "text-anchor": "middle", "font-size": 12, class: "muted" }, "多半是没染色的空白玻片");
+        ctx.tween(1200, (k) => bars.forEach(([r, e, m, s]) => { const h = (ax.sy(0) - ax.sy(m)) * k; r.setAttribute("y", ax.sy(0) - h); r.setAttribute("height", h); e.setAttribute("y1", ax.sy(m + s * k)); e.setAttribute("y2", ax.sy(m - s * k)); })).then((ok) => ok && ctx.tween(400, (k) => (t.style.opacity = k)));
+      },
+    },
+    {
+      title: "先做一个简单基线，分层切出验证集", kicker: "第 19–21 格 · 切分",
+      html: `<p>作者的工程观念：先做一个“最小可用产品”（基线），尽快发现数据质量之类的意外问题，再决定值不值得继续投入调模型。<span data-cell="19">出处</span></p><p>用 <code>train_test_split(..., stratify=...)</code> 拿出 10% 做验证，并保持 60/40 的比例。作者解释：这里两类差不多，分层不算关键；但如果有罕见类别，随机切分可能让验证集里一个都没有。<span data-cell="20">出处</span></p><p>删除异常图片的代码写好了但被注释掉，最终没有删。</p>`,
+      cells: [21], highlight: ["stratify=train_labels", "test_size=0.1"],
+      draw(svg, ctx) {
+        const r = K.rng(3), dots = [];
+        for (let i = 0; i < 200; i++) { const pos = i % 5 < 2; dots.push({ pos, x: 40 + (i % 20) * 16, y: 60 + Math.floor(i / 20) * 22, e: null }); }
+        dots.forEach((d) => (d.e = K.svg(svg, "circle", { cx: d.x, cy: d.y, r: 5, fill: d.pos ? "var(--c6)" : "var(--c1)" })));
+        K.svg(svg, "text", { x: 40, y: 36, "font-size": 13 }, "全部训练图（示意：红 = 阳性 40%，蓝 = 阴性 60%）");
+        const vb = K.svg(svg, "rect", { x: 420, y: 60, width: 260, height: 80, rx: 8, fill: "color-mix(in srgb, var(--c2) 12%, var(--panel))", stroke: "var(--c2)" });
+        K.svg(svg, "text", { x: 550, y: 50, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "验证集 10%（比例不变）");
+        svg.insertBefore(vb, svg.firstChild);
+        const pick = []; let p = 0, n = 0;
+        dots.forEach((d, i) => { if (d.pos && p < 8 && r() < 0.15) { pick.push(d); p++; } else if (!d.pos && n < 12 && r() < 0.12) { pick.push(d); n++; } });
+        ctx.wait(500).then((ok) => ok && ctx.tween(1400, (k) => pick.forEach((d, j) => { d.e.setAttribute("cx", K.lerp(d.x, 440 + (j % 10) * 24, k)); d.e.setAttribute("cy", K.lerp(d.y, 85 + Math.floor(j / 10) * 30, k)); })));
+      },
+    },
+    {
+      title: "fastai 数据管道 + 预训练 DenseNet169", kicker: "第 22–30 格 · 搭模型",
+      html: `<p>作者用 fastai v1（建立在 PyTorch 上的高层库）。选的主干是在 ImageNet 上预训练好的 <b>DenseNet169</b>，他说这个结构在这份数据上表现不错；更深的模型会更快过拟合。<span data-cell="22">出处</span> <span data-cell="23">出处</span></p><p>DenseNet 的特点是“密集连接”：每一层都能直接拿到前面<b>所有层</b>的输出。动画里每个新块都向前面所有块连线。</p><p>数据方面：继承 fastai 的 <code>ImageList</code>，换成自己的读图函数；用第 13 格算出的通道均值和标准差做归一化；批量 128。<span data-cell="27">出处</span> 分类头加了 0.5 的 dropout（训练时随机关掉一半神经元，防止死记硬背）。<span data-cell="30">出处</span></p>`,
+      cells: [23, 26, 27, 30], highlight: ["densenet169", "normalize", "ps=0.5", "pretrained=True"],
+      draw(svg, ctx) {
+        const n = 6, xs = [], els = [];
+        for (let i = 0; i < n; i++) xs.push(70 + i * 105);
+        (async () => {
+          for (let i = 0; i < n; i++) {
+            const g = K.node(svg, xs[i] - 35, 210, 70, 50, i === 0 ? "输入" : "块 " + i, { fs: 12, fill: i === 0 ? "var(--panel-2)" : "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: "var(--c1)" });
+            g.style.opacity = 0; els.push(g);
+            const arcs = [];
+            for (let j = 0; j < i; j++) {
+              const mx = (xs[j] + xs[i]) / 2, h = 30 + (i - j) * 28;
+              arcs.push(K.svg(svg, "path", { d: `M${xs[j]},210 Q${mx},${210 - h * 2} ${xs[i]},210`, fill: "none", stroke: "var(--c" + (1 + (j % 5)) + ")", "stroke-width": 1.5, opacity: 0 }));
+            }
+            if (!(await ctx.tween(380, (k) => { g.style.opacity = k; arcs.forEach((a) => (a.style.opacity = 0.75 * k)); }))) return;
+          }
+        })();
+        K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 13 }, "密集连接：每一块都接收前面所有块的特征（示意，真实 DenseNet169 有上百层）");
+      },
+    },
+    {
+      title: "学习率查找器：挑步子大小和权重衰减", kicker: "第 31–34 格 · 调参",
+      html: `<p><b>学习率查找器</b>（lr_find）的做法：从很小的学习率开始，每训练一小批就把学习率调大一点，同时记录损失。损失先下降，到某个点后突然往上冲。作者说最好的学习率在“底部之前、损失还在下降”的地方。<span data-cell="31">出处</span></p><p>他对三个<b>权重衰减</b>（一种惩罚参数过大的正则化）1e-6、1e-4、1e-2 各跑 600 步，画在同一张图上比较，选出“还能用最大学习率训练的最大权重衰减”1e-4，学习率取 2e-2。<span data-cell="34">出处</span></p><p>下面的实验 B 在浏览器里真跑一次学习率查找。</p>`,
+      cells: [32, 33], highlight: ["lr_find", "iter_count = 600"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 600, h: 250 }, [-6, 0], [0.3, 1.2], { xticks: 6, xfmt: (v) => "1e" + v, xlabel: "学习率（对数刻度）", ylabel: "损失" });
+        const curves = [[0, "var(--c1)", "wd=1e-6"], [0.15, "var(--c2)", "wd=1e-4"], [0.5, "var(--c3)", "wd=1e-2"]];
+        const f = (x, s) => 0.95 - 0.5 / (1 + Math.exp(-(x + 3.3) * 2.2)) + Math.max(0, x + 1.4 - s) * Math.max(0, x + 1.4 - s) * 1.6 + s * 0.06;
+        const paths = curves.map(([s, c, n], i) => { K.svg(svg, "text", { x: 560, y: 60 + i * 20, "font-size": 12, fill: c }, "— " + n); return [K.svg(svg, "path", { d: "", fill: "none", stroke: c, "stroke-width": 2 }), s]; });
+        const mark = K.svg(svg, "line", { x1: ax.sx(Math.log10(0.02)), x2: ax.sx(Math.log10(0.02)), y1: 30, y2: 280, stroke: "var(--warn)", "stroke-dasharray": "5 3", opacity: 0 });
+        const mt = K.svg(svg, "text", { x: ax.sx(Math.log10(0.02)) - 6, y: 46, "text-anchor": "end", "font-size": 12, fill: "var(--warn)" }, "作者选 2e-2"); mt.style.opacity = 0;
+        K.svg(svg, "text", { x: 80, y: 296, "font-size": 11, class: "muted" }, "曲线形状为示意");
+        ctx.tween(2200, (k) => paths.forEach(([p, s]) => { let d = ""; for (let x = -6; x <= -6 + 6 * k + 1e-9; x += 0.05) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(Math.min(1.2, f(x, s))); p.setAttribute("d", d); })).then((ok) => ok && ctx.tween(400, (k) => { mark.style.opacity = k; mt.style.opacity = k; }));
+      },
+    },
+    {
+      title: "1cycle：冻结主干，只训练头部 8 轮", kicker: "第 35–43 格 · 第一阶段训练",
+      html: `<p>先<b>冻结</b>预训练主干，只训练新接上的分类头 8 轮。原因：新头的参数是随机的，如果一开始就让整个网络一起改，随机的梯度会破坏主干里已经学好的特征。<span data-cell="34">出处</span></p><p>训练用 <b>1cycle 策略</b>：学习率先从小升到最大值 2e-2，再降下来。作者解释，高学习率有正则化作用，不让模型掉进“又尖又窄”的坑，而是找到更宽、更稳的低谷；后半段降低学习率，在这个低谷里找最低点。<span data-cell="37">出处</span> 所以损失曲线中间会先小小地上升一下。<span data-cell="40">出处</span></p>`,
+      cells: [35, 36, 39, 41], highlight: ["fit_one_cycle(cyc_len=8, max_lr=max_lr, wd=wd)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 290, h: 230 }, [0, 8], [0, 0.022], { xticks: 4, yfmt: (v) => (v * 100).toFixed(1), xlabel: "轮次", ylabel: "学习率 ×10⁻²" });
+        const lr = (t) => (t < 0.3 ? 0.0008 + (0.02 - 0.0008) * (1 - Math.cos((Math.PI * t) / 0.3)) / 2 : 0.02 * (1 + Math.cos((Math.PI * (t - 0.3)) / 0.7)) / 2 + 1e-6);
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const bx = K.axes(svg, { x: 430, y: 30, w: 260, h: 230 }, [0, 8], [0, 0.7], { xticks: 4, xlabel: "轮次", ylabel: "损失（示意）" });
+        const loss = (t) => 0.2 + 0.45 * Math.exp(-t * 6) + 0.06 * Math.exp(-Math.pow((t - 0.35) / 0.1, 2));
+        const p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 70, y: 300, "font-size": 12, class: "muted" }, "左：1cycle 学习率先升后降　右：训练损失在学习率最高处会小小反弹一下");
+        ctx.tween(2400, (k) => { let a = "", b = ""; for (let t = 0; t <= k + 1e-9; t += 0.01) { a += (a ? "L" : "M") + ax.sx(t * 8) + "," + ax.sy(lr(t)); b += (b ? "L" : "M") + bx.sx(t * 8) + "," + bx.sy(loss(t)); } p1.setAttribute("d", a); p2.setAttribute("d", b); });
+      },
+    },
+    {
+      title: "解冻全部，用更小的学习率精调", kicker: "第 44–51 格 · 第二阶段训练",
+      html: `<p>头部已经能用了，现在<b>解冻</b>整个网络，再跑一次学习率查找，然后用小得多的学习率训练 12 轮：<code>max_lr=slice(4e-5, 4e-4)</code>，意思是靠近输入的底层用 4e-5，靠近输出的顶层用 4e-4。<span data-cell="46">出处</span></p><p>底层学到的是边缘、纹理这些通用特征，只需要轻轻调；顶层更贴近具体任务，可以多改一点。<span data-cell="44">出处</span></p><p>作者观察到末尾验证表现和训练表现开始分开：模型开始“只记训练集”，这是停下的好时机。<span data-cell="48">出处</span></p>`,
+      cells: [45, 46], highlight: ["learner.unfreeze()", "slice(4e-5,4e-4)"],
+      draw(svg, ctx) {
+        const n = 8, lrs = [];
+        for (let i = 0; i < n; i++) lrs.push(4e-5 * Math.pow(10, i / (n - 1)));
+        K.svg(svg, "text", { x: 360, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "分层学习率：越靠近输出，学习率越大");
+        const bars = lrs.map((v, i) => {
+          K.node(svg, 40 + i * 82, 230, 70, 44, i === 0 ? "底层" : i === n - 1 ? "顶层/头" : "第" + (i + 1) + "组", { fs: 11, fill: "color-mix(in srgb, var(--c1) " + (12 + i * 8) + "%, var(--panel))" });
+          return [K.svg(svg, "rect", { x: 52 + i * 82, y: 220, width: 46, height: 0, rx: 3, fill: "var(--c2)" }), (Math.log10(v) + 5) / 1.2];
+        });
+        const l1 = K.svg(svg, "text", { x: 75, y: 300, "text-anchor": "middle", "font-size": 12 }, "4e-5"), l2 = K.svg(svg, "text", { x: 649, y: 300, "text-anchor": "middle", "font-size": 12 }, "4e-4");
+        void l1; void l2;
+        ctx.tween(1400, (k) => bars.forEach(([r, h], i) => { const H = (40 + h * 120) * K.clamp(k * 1.5 - i * 0.07, 0, 1); r.setAttribute("y", 220 - H); r.setAttribute("height", H); }));
+      },
+    },
+    {
+      title: "看看模型最错、最对的是哪些图", kicker: "第 52–56 格 · 验证分析",
+      html: `<p>训练完先在验证集上算准确率。<span data-cell="53">出处</span> 但作者认为光看一个数字不够，要<b>看图</b>：随机样本、模型最有把握却答错的样本（损失最大）、最有把握且答对的样本。<span data-cell="54">出处</span></p><p>看错得最离谱的图，常常能发现数据本身的问题，比如标签错了、图片模糊。动画模拟这种排序：每张图按损失从大到小排开。</p>`,
+      cells: [53, 55], highlight: ["top_losses", "Most incorrect"],
+      draw(svg, ctx) {
+        const r = K.rng(21), items = [];
+        for (let i = 0; i < 24; i++) { const y = r() < 0.4 ? 1 : 0, p = y ? K.clamp(0.75 + K.randn(r) * 0.25, 0.01, 0.99) : K.clamp(0.25 + K.randn(r) * 0.25, 0.01, 0.99); items.push({ y, p, loss: -Math.log(y ? p : 1 - p) }); }
+        const sorted = items.slice().sort((a, b) => b.loss - a.loss);
+        const ax = K.axes(svg, { x: 70, y: 30, w: 600, h: 230 }, [0, 24], [0, Math.max(...items.map((d) => d.loss)) * 1.1], { xticks: 0, ylabel: "损失（越高越错，示意）" });
+        const bars = items.map((d, i) => K.svg(svg, "rect", { x: ax.sx(i) + 3, y: ax.sy(d.loss), width: 600 / 24 - 6, height: ax.sy(0) - ax.sy(d.loss), fill: d.y ? "var(--c6)" : "var(--c1)", opacity: 0.85 }));
+        K.svg(svg, "text", { x: 70, y: 290, "font-size": 12, fill: "var(--c6)" }, "■ 真实为肿瘤");
+        K.svg(svg, "text", { x: 190, y: 290, "font-size": 12, fill: "var(--c1)" }, "■ 真实为阴性");
+        const t1 = K.svg(svg, "text", { x: 90, y: 22, "font-size": 12, fill: "var(--bad)", "font-weight": 700 }, "← 最错的样本，最值得人工看"); t1.style.opacity = 0;
+        ctx.wait(500).then((ok) => ok && ctx.tween(1500, (k) => bars.forEach((b, i) => { const j = sorted.indexOf(items[i]); b.setAttribute("x", K.lerp(ax.sx(i), ax.sx(j), k) + 3); }))).then((ok) => ok && ctx.tween(300, (k) => (t1.style.opacity = k)));
+      },
+    },
+    {
+      title: "Grad-CAM：模型到底在看哪里", kicker: "第 57–62 格 · 可解释性",
+      html: `<p><b>Grad-CAM</b> 把模型最后一层卷积的特征图，按“这个通道对答案有多重要”（梯度的平均值）加权求和，得到一张粗糙的热力图，叠在原图上，就能看出模型是根据哪块区域做的判断。<span data-cell="59">出处</span></p><p>作者举了个例子：如果某个狗品种的照片都是在狗展上拍的，模型可能学会认“狗展背景”而不是认狗。热力图能揭穿这种“作弊”。<span data-cell="57">出处</span></p><p>动画：示意切片上，热力图集中在那团异常的细胞核上。</p>`,
+      cells: [58, 59, 61], highlight: ["hook_output", "grad_chan", "mult = (acts*grad_chan[...,None,None]).mean(0)"],
+      draw(svg, ctx) {
+        const base = tissue(96, "center", 33), g = PX.gray(base);
+        PX.draw(svg, 40, 50, 230, 230, base, null, null, null, true);
+        K.svg(svg, "text", { x: 155, y: 40, "text-anchor": "middle", "font-size": 13 }, "输入（示意）");
+        const cam = PX.grid(6, 6, (x, y) => Math.exp(-(Math.pow(x - 2.5, 2) + Math.pow(y - 2.5, 2)) / 2.2));
+        const big = PX.resize(cam, 96, 96);
+        K.svg(svg, "text", { x: 420, y: 40, "text-anchor": "middle", "font-size": 13 }, "6×6 粗热力图（示意）");
+        PX.draw(svg, 330, 70, 180, 180, cam, "heat", 0, 1, false);
+        PX.draw(svg, 560, 70, 130, 130, g, null, null, null, true);
+        const ov = PX.draw(svg, 560, 70, 130, 130, big, "heat", 0, 1, true);
+        ov.style.opacity = 0;
+        K.svg(svg, "text", { x: 625, y: 222, "text-anchor": "middle", "font-size": 12 }, "叠加在灰度图上");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1200, (k) => (ov.style.opacity = 0.6 * k)));
+      },
+    },
+    {
+      title: "ROC 曲线、TTA 平均，生成提交", kicker: "第 63–71 格 · 评估与提交",
+      html: `<p>比赛用 AUC 评分，所以作者在验证集上画 ROC 曲线、算曲线下面积。他提醒：验证集上的 AUC 和最终测试分数多半会有差别。<span data-cell="63">出处</span></p><p>提交时，因为读图函数自带随机增强，作者对测试集<b>预测 12 次取平均</b>，这就是测试时增强 TTA。然后取“肿瘤”这一列概率，按 <code>sample_submission.csv</code> 的顺序写出提交文件。<span data-cell="67">出处</span> <span data-cell="70">出处</span></p>`,
+      cells: [64, 67], highlight: ["roc_curve", "n_aug = 12"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 250, h: 250 }, [0, 1], [0, 1], { xticks: 2, yticks: 2, xlabel: "误报率", ylabel: "检出率" });
+        K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0), x2: ax.sx(1), y2: ax.sy(1), stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+        const roc = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 195, y: 22, "text-anchor": "middle", "font-size": 12, class: "muted" }, "ROC 曲线（示意）");
+        const preds = [];
+        for (let i = 0; i < 12; i++) preds.push(K.svg(svg, "rect", { x: 400 + (i % 6) * 48, y: 60 + Math.floor(i / 6) * 50, width: 40, height: 36, rx: 4, fill: "color-mix(in srgb, var(--c1) 30%, var(--panel))", stroke: "var(--c1)", opacity: 0 }));
+        K.svg(svg, "text", { x: 540, y: 40, "text-anchor": "middle", "font-size": 13 }, "同一张测试图，随机增强后预测 12 次");
+        const avg = K.node(svg, 470, 220, 140, 50, "取平均 → 提交", { fill: "var(--accent-soft)", stroke: "var(--accent)" }); avg.style.opacity = 0;
+        (async () => {
+          if (!(await ctx.tween(1200, (k) => { let d = ""; for (let x = 0; x <= k + 1e-9; x += 0.02) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(1 - Math.pow(1 - x, 6)); roc.setAttribute("d", d); }))) return;
+          for (const p of preds) if (!(await ctx.tween(90, (k) => (p.style.opacity = k)))) return;
+          await ctx.tween(400, (k) => (avg.style.opacity = k));
+        })();
+      },
+    },
+    {
+      title: "部署示例：训练时和使用时要一模一样", kicker: "第 72–76 格 · 部署",
+      html: `<p>最后作者演示怎样把模型搬到别的机器上：导出 <code>export.pkl</code>，在新机器上加载，再写一个读图函数做预测。他坦白说这段<b>没有实际测试过</b>。<span data-cell="72">出处</span></p><p>细看会发现一个问题：部署用的读图函数裁成 <b>68×68</b>、除以 <b>256</b>，也没有用训练集的均值和标准差做归一化；而训练时是 <b>90×90</b>、除以 <b>255</b> 再归一化。<span data-cell="76">出处</span> 输入的“样子”和训练时不一样，预测结果就不可靠。</p>`,
+      cells: [73, 76], highlight: ["sz = 68", "/ 256"],
+      draw(svg, ctx) {
+        const rows = [["裁剪尺寸", "90×90", "68×68"], ["像素缩放", "÷255", "÷256"], ["通道归一化", "用训练集均值/标准差", "没有"]];
+        K.svg(svg, "text", { x: 260, y: 40, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--c1)" }, "训练时（第 9、27 格）");
+        K.svg(svg, "text", { x: 540, y: 40, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--c6)" }, "部署示例（第 76 格）");
+        const els = rows.map(([k, a, b], i) => {
+          const y = 70 + i * 70;
+          K.svg(svg, "text", { x: 30, y: y + 30, "font-size": 13, "font-weight": 700 }, k);
+          const g1 = K.node(svg, 160, y, 200, 48, a, { fs: 13, stroke: "var(--c1)" }), g2 = K.node(svg, 440, y, 200, 48, b, { fs: 13, stroke: "var(--c6)" });
+          const x = K.svg(svg, "text", { x: 400, y: y + 32, "text-anchor": "middle", "font-size": 22, fill: "var(--bad)", "font-weight": 700 }, "≠");
+          [g1, g2, x].forEach((e) => (e.style.opacity = 0));
+          return [g1, g2, x];
+        });
+        (async () => { for (const r of els) if (!(await ctx.tween(450, (k) => r.forEach((e) => (e.style.opacity = k))))) return; })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：裁剪与增强 ---------- */
+  let lastRand = -1;
+  K.lab(document.getElementById("labA"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "tumor", label: "示意切片", value: "center", options: [["center", "中心有肿瘤（标签 1）"], ["edge", "只有边缘有肿瘤（标签 0）"], ["none", "没有肿瘤（标签 0）"]] },
+      { id: "crop", label: "裁剪尺寸 CROP_SIZE（作者用 90）", min: 32, max: 96, step: 2, value: 90 },
+      { id: "rot", label: "旋转角度", min: -180, max: 180, step: 1, value: 0, fmt: (v) => v + "°" },
+      { id: "br", label: "亮度变化（作者 ±7%）", min: -30, max: 30, step: 1, value: 0, fmt: (v) => v + "%" },
+      { id: "cr", label: "对比度变化（作者 ±5%）", min: -30, max: 30, step: 1, value: 0, fmt: (v) => v + "%" },
+      { id: "rand", label: "按作者的设置随机读一次", button: true },
+    ],
+    note: "每次拖动都在浏览器里重新算：先绕中心旋转，再裁剪，再翻转、调亮度和对比度，最后截断到 0–1，顺序和作者第 9 格一样。把裁剪拖到 32，就只剩下决定标签的中心区域；选“只有边缘有肿瘤”时，裁得越小，肿瘤越容易被完全裁掉。点随机按钮会按作者的范围抽：±3° 加随机 ±90°、偏移 ±2 像素、随机翻转、亮度 ±7%、对比度 ±5%。",
+    render(svg, v) {
+      const base = tissue(96, v.tumor, 12);
+      let p = { rot: v.rot, sx: 0, sy: 0, crop: v.crop, fh: false, fv: false, br: v.br / 100, cr: 1 + v.cr / 100 };
+      if (v.rand !== lastRand) {
+        lastRand = v.rand;
+        if (v.rand > 0) { const r = K.rng(500 + v.rand * 7); p = { rot: Math.round((r() * 2 - 1) * 3) + Math.round(r() * 2 - 1) * 90, sx: Math.round((r() * 2 - 1) * 2), sy: Math.round((r() * 2 - 1) * 2), crop: 90, fh: r() < 0.5, fv: r() < 0.5, br: Math.round((r() * 2 - 1) * 7) / 100, cr: 1 + Math.round((r() * 2 - 1) * 5) / 100 }; }
+      }
+      const out = readCropped(base, p);
+      PX.draw(svg, 20, 30, 240, 240, base, null, null, null, true);
+      const s = 240 / 96, o = Math.floor((96 - p.crop) / 2);
+      K.svg(svg, "rect", { x: 20 + (o + p.sy) * s, y: 30 + (o + p.sx) * s, width: p.crop * s, height: p.crop * s, fill: "none", stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+      K.svg(svg, "rect", { x: 20 + 32 * s, y: 30 + 32 * s, width: 32 * s, height: 32 * s, fill: "none", stroke: "var(--ink)", "stroke-width": 1.5 });
+      PX.draw(svg, 380, 30, 240, 240, out, null, null, null, true);
+      K.svg(svg, "text", { x: 140, y: 20, "text-anchor": "middle", "font-size": 12 }, "原图：黄虚线=裁剪框，黑框=决定标签的中心");
+      K.svg(svg, "text", { x: 500, y: 20, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, `模型看到的 ${p.crop}×${p.crop}`);
+      K.arrow(svg, 275, 150, 365, 150);
+      return { readout: [
+        { k: "旋转", v: p.rot + "°" },
+        { k: "翻转", v: (p.fh ? "左右 " : "") + (p.fv ? "上下" : "") || "无" },
+        { k: "亮度 / 对比度", v: (p.br >= 0 ? "+" : "") + Math.round(p.br * 100) + "% / ×" + p.cr.toFixed(2) },
+        { k: "保留面积", v: Math.round((p.crop * p.crop) / 96 / 96 * 100) + "%" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：学习率查找器（在小数据上真跑） ---------- */
+  K.lab(document.getElementById("labB"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "lo", label: "起始学习率 10^x", min: -6, max: -3, step: 0.5, value: -5, fmt: (v) => "1e" + v },
+      { id: "hi", label: "结束学习率 10^x", min: -1, max: 2, step: 0.5, value: 1.5, fmt: (v) => "1e" + v },
+      { id: "it", label: "步数（作者建议至少 300，他用了 600）", min: 50, max: 600, step: 50, value: 300 },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "浏览器里现场训练一个小型两层神经网络（2 维输入 → 16 个隐藏单元 → 1 个输出）去分两团模拟点。每一步取 32 个点做一次梯度下降，学习率按指数从起点涨到终点，三种权重衰减各跑一遍，画出平滑后的损失。虚线是程序找到的“损失下降最陡”的位置，这是一种常用的学习率建议。",
+    render(svg, v) {
+      const r0 = K.rng(9 + v.seed * 31), X = [], Y = [];
+      for (let i = 0; i < 600; i++) { const y = i % 2; X.push([K.randn(r0) + (y ? 1.2 : -1.2), K.randn(r0) * 1.2 + (y ? 0.6 : -0.6)]); Y.push(y); }
+      function run(wd) {
+        const r = K.rng(4 + v.seed), H = 16, W1 = [], b1 = new Array(H).fill(0), W2 = [];
+        for (let h = 0; h < H; h++) { W1.push([K.randn(r) * 0.7, K.randn(r) * 0.7]); W2.push(K.randn(r) * 0.3); }
+        let b2 = 0, avg = 0; const out = [];
+        for (let s = 0; s < v.it; s++) {
+          const lr = Math.pow(10, v.lo + ((v.hi - v.lo) * s) / (v.it - 1));
+          const gW1 = W1.map(() => [0, 0]), gb1 = new Array(H).fill(0), gW2 = new Array(H).fill(0); let gb2 = 0, L = 0;
+          for (let k = 0; k < 32; k++) {
+            const i = Math.floor(r() * X.length), x = X[i], hid = [];
+            let z = b2;
+            for (let h = 0; h < H; h++) { const a = Math.max(0, W1[h][0] * x[0] + W1[h][1] * x[1] + b1[h]); hid.push(a); z += W2[h] * a; }
+            const p = K.sigmoid(K.clamp(z, -30, 30)); L += -(Y[i] ? Math.log(p + 1e-9) : Math.log(1 - p + 1e-9));
+            const d = p - Y[i]; gb2 += d;
+            for (let h = 0; h < H; h++) { gW2[h] += d * hid[h]; if (hid[h] > 0) { const dh = d * W2[h]; gW1[h][0] += dh * x[0]; gW1[h][1] += dh * x[1]; gb1[h] += dh; } }
+          }
+          L /= 32;
+          for (let h = 0; h < H; h++) { W2[h] -= lr * (gW2[h] / 32 + wd * W2[h]); W1[h][0] -= lr * (gW1[h][0] / 32 + wd * W1[h][0]); W1[h][1] -= lr * (gW1[h][1] / 32 + wd * W1[h][1]); b1[h] -= lr * gb1[h] / 32; }
+          b2 -= lr * gb2 / 32;
+          avg = s ? 0.95 * avg + 0.05 * L : L;
+          const sm = avg / (1 - Math.pow(0.95, s + 1));
+          out.push([Math.log10(lr), isFinite(sm) ? sm : 99]);
+          if (!isFinite(sm) || sm > 4 * out[0][1] + 2) break;
+        }
+        return out;
+      }
+      const wds = [[1e-6, "var(--c1)", "wd=1e-6"], [1e-4, "var(--c2)", "wd=1e-4"], [1e-2, "var(--c3)", "wd=1e-2"]];
+      const res = wds.map(([w]) => run(w));
+      const ax = K.axes(svg, { x: 60, y: 20, w: 560, h: 250 }, [v.lo, v.hi], [0, 1.2], { xticks: Math.round(v.hi - v.lo), xfmt: (x) => "1e" + x.toFixed(0), xlabel: "学习率（对数刻度）", ylabel: "平滑后的损失" });
+      let best = null;
+      res.forEach((pts, j) => {
+        let d = ""; pts.forEach(([x, y]) => (d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(Math.min(1.2, y))));
+        K.svg(svg, "path", { d, fill: "none", stroke: wds[j][1], "stroke-width": 2 });
+        K.svg(svg, "text", { x: 470, y: 40 + j * 18, "font-size": 12, fill: wds[j][1] }, "— " + wds[j][2]);
+        if (j === 1) { let m = 0; for (let i = Math.max(5, Math.floor(pts.length * 0.15)); i < pts.length - 5; i++) { const g = (pts[i + 5][1] - pts[i - 5][1]) / (pts[i + 5][0] - pts[i - 5][0]); if (g < m) { m = g; best = pts[i][0]; } } }
+      });
+      if (best != null) { K.svg(svg, "line", { x1: ax.sx(best), x2: ax.sx(best), y1: 20, y2: 270, stroke: "var(--warn)", "stroke-dasharray": "5 3" }); }
+      const minOf = (pts) => pts.reduce((a, b) => (b[1] < a[1] ? b : a));
+      const m = minOf(res[1]);
+      return { readout: [
+        { k: "最陡处学习率（wd=1e-4）", v: best != null ? Math.pow(10, best).toExponential(1) : "—", color: "var(--warn)" },
+        { k: "损失最低处（wd=1e-4）", v: Math.pow(10, m[0]).toExponential(1) },
+        { k: "最低平滑损失", v: m[1].toFixed(3) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>顾客还会回来吗</title>
+<meta name="description" content="Kaggle 案例拆解：用巴西电商 Olist 的订单日志和 lifetimes 库的 MBG/NBD 概率模型，预测每位顾客未来 90 天还会买几次、是否已经“悄悄流失”。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">交易日志 · 客户终身价值 · 概率模型</div>
+  <h1>顾客还会回来吗：从购买记录推算“还活着”的概率</h1>
+  <p class="en">E-Commerce predicting customer lifetime value</p>
+  <div class="tags">
+    <span class="tag st">统计分析</span><span class="tag dm">数据挖掘</span>
+    <span class="tag method">客户终身价值 CLV</span><span class="tag method">RFM 汇总</span><span class="tag method">校准期 / 验证期</span>
+    <span class="tag method">MBG/NBD 模型</span><span class="tag method">泊松过程</span><span class="tag method">Gamma-Gamma（未启用）</span>
+    <span class="tag method">存活概率 P(alive)</span><span class="tag method">lifetimes 库</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Anubhav Dhiman</b></span>
+    <span>Kaggle 点赞 <b>496</b>（2026-11 抓取）</span>
+    <span>数据集 <b>olistbr/brazilian-ecommerce</b></span>
+    <span><a href="https://www.kaggle.com/code/dhimananubhav/e-commerce-predicting-customer-lifetime-value" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">巴西电商平台的订单记录</div><p>Olist 平台 2016–2018 年约 10 万笔订单。作者只用到“哪位顾客、哪天下了单”。<span data-cell="5">出处</span></p></div>
+    <div class="card panel"><h3>要做什么</h3><div class="big">预测每位顾客未来还会买几次</div><p>区分仍然活跃和已经流失的顾客，预测个人与全体的未来购买量。<span data-cell="0">出处</span> 这里是“非合约”场景：顾客走了不会通知你。</p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">MBG/NBD 概率模型</div><p>假设顾客“活着时”按泊松过程随机购买，每次购买后有一定概率永久离开；用 lifetimes 库拟合，预测未来 90 天的购买次数和存活概率。<span data-cell="12">出处</span> <span data-cell="20">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">只完成了“买几次”，没算出“值多少钱”</div><p>预测金额的 Gamma-Gamma 部分全被注释掉了，所以标题里的“终身价值”其实没有算出来。作者用几张对照图检验模型拟合。<span data-cell="17">出处</span> <span data-cell="24">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>Brazilian E-Commerce Public Dataset by Olist</b>：巴西最大的百货类平台 Olist 公开的真实（已匿名）订单数据。规模来自数据集说明页：<b>2016 到 2018 年约 10 万笔订单</b>，分成多张表。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者用到的三张表</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>表</th><th>取了哪些列</th><th>用途</th></tr>
+        <tr><td><code>olist_orders_dataset</code></td><td><code>customer_id</code>、<code>order_id</code>、<code>order_purchase_timestamp</code></td><td>每笔订单的下单时间</td></tr>
+        <tr><td><code>olist_customers_dataset</code></td><td><code>customer_id</code>、<code>customer_unique_id</code></td><td>把“每单一个的顾客号”换成真正的顾客</td></tr>
+        <tr><td><code>olist_order_payments_dataset</code></td><td><code>order_id</code>、<code>payment_value</code></td><td>付款金额（读进来了，但<b>后面没用上</b>）</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">见第 5 格 <span data-cell="5">出处</span>。最后的交易日志只有两列：<code>CUSTOMER_ID</code>、<code>ORDER_DATE</code>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">整理成每位顾客的四个数</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>字段</th><th>白话含义</th></tr>
+        <tr><td><code>frequency_cal</code></td><td>校准期内的<b>重复</b>购买次数（第一次不算）</td></tr>
+        <tr><td><code>recency_cal</code></td><td>第一次到最后一次购买隔了多少天</td></tr>
+        <tr><td><code>T_cal</code></td><td>第一次购买到校准期结束隔了多少天（顾客“年龄”）</td></tr>
+        <tr><td><code>frequency_holdout</code></td><td><b>用来检验的答案</b>：验证期内实际又买了几次</td></tr>
+      </table></div>
+      <p class="callout">校准期截至 <b>2018-06-30</b>，观察截至 <b>2018-09-28</b>，中间约 90 天当作“未来”来检验。<span data-cell="9">出处</span></p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead">这份 notebook 很短，但模型的思路很典型：不去预测“是/否”，而是给每位顾客的购买行为建一个概率故事。</p>
+  <div id="pipe"></div>
+  <div data-at="20">
+    <h3>实验 A · 一位顾客“还活着”的概率怎么变 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labAlive"></div>
+  </div>
+  <div data-at="24">
+    <h3>实验 B · 按模型的假设模拟 3000 位顾客 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labSim"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者做到了什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>按 2018-06-30 切出校准期、到 2018-09-28 为验证期，做成每位顾客的 RFM 汇总</td><td><span data-cell="9">第 9 格</span></td></tr>
+        <tr><td>拟合 MBG/NBD 模型（penalizer_coef = 0.01）</td><td><span data-cell="13">第 13 格</span></td></tr>
+        <tr><td>为每位顾客预测未来 90 天的购买次数和存活概率</td><td><span data-cell="20">第 20 格</span></td></tr>
+        <tr><td>用三类图检验：重复购买次数分布、校准期 vs 验证期购买、累计 / 每日交易的预测与实际</td><td><span data-cell="23">第 23 格</span> <span data-cell="24">第 24 格</span> <span data-cell="31">第 31 格</span></td></tr>
+        <tr><td>“如果用全部数据而不是样本训练，模型会更好”</td><td><span data-cell="35">第 35 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">作者没有在文字里写任何拟合参数或误差数字，所有结果都在运行输出的图里，源码不带输出，这里不列数字。</p>
+      <p class="callout warn"><b>原文的问题：</b>①标题和目标说要算“客户终身价值”，但 Gamma-Gamma 金额模型（第 16–18、34 格）全部被注释掉，付款金额读进来也没并入日志，最终只预测了购买次数；②第 12 格说流失概率 p 的差异服从 Gamma 分布，按 MBG/NBD 的定义应是 <b>Beta</b> 分布（p 在 0 到 1 之间）；③第 20 格把 P(alive) 除以全体最大值，结果不再是概率；④第 26 格用 <code>date.today()</code> 算“今天还活着的概率”，而数据停在 2018 年，换个日子运行结果就变；⑤第 31 格注释写校准期到 2017-09-30，代码用的是 2018-06-30；⑥第 35 格说训练用的是“样本”，代码里其实没有抽样。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>找出“很久没来、多半已流失”的顾客，决定要不要发挽回券；预测下季度全体顾客大约下多少单，用来备货。<span data-cell="0">出处</span></li>
+        <li><b>同类问题：</b>电商复购、外卖、咖啡店会员、游戏玩家回流、捐款人再次捐款，凡是“顾客走了不会说再见”的非合约场景。</li>
+        <li><b>可迁移的套路：</b>交易日志 → 每人的 frequency / recency / T → 按时间切校准期和验证期 → 拟合 BG/NBD 类模型 → 用验证期的真实购买检验 → 再加 Gamma-Gamma 估金额，相乘得到 CLV。</li>
+        <li><b>注意：</b>Olist 的顾客绝大多数只买过一次，重复购买数据很少，这类模型会很依赖“只买一次的人”的假设。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>三表合并成交易日志 <span data-cell="5">第 5 格</span></li>
+        <li><code>calibration_and_holdout_data</code> <span data-cell="9">第 9 格</span></li>
+        <li><code>ModifiedBetaGeoFitter</code> <span data-cell="13">第 13 格</span></li>
+        <li>条件期望购买次数、条件存活概率 <span data-cell="20">第 20 格</span></li>
+        <li>拟合检验图 <span data-cell="23">第 23 格</span> <span data-cell="24">第 24 格</span>，个人存活历史 <span data-cell="26">第 26 格</span>，累计交易 <span data-cell="31">第 31 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>手机套餐的用户要退订会打电话，网店的顾客“走了”却不会通知你。为什么后者更难判断？模型是怎么绕开这个难题的？</li>
+      <li>一位顾客一年里买了 5 次，但最近 6 个月没来；另一位只买过 1 次，就在上周。你觉得谁更可能还会回来？</li>
+      <li>标题说“客户终身价值”，实际只算了购买次数。要真正算出“值多少钱”，还缺哪一步？</li>
+      <li>用 <code>date.today()</code> 算“今天的存活概率”，2018 年和 2026 年运行会有什么不同？你会怎么改？</li>
+      <li>Olist 的大多数顾客只买过一次。这样的数据适合用“复购模型”吗？可能会出什么问题？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Anubhav Dhiman，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：Olist, Brazilian E-Commerce Public Dataset。
+</footer>
+</main>
+
+<script src="nb/olist-customer-lifetime-value.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const tint = (c, p) => `color-mix(in srgb, ${c} ${p}%, var(--panel))`;
+  const fadeIn = (ctx, els, ms) => ctx.tween(ms || 500, (t) => els.forEach((e) => (e.style.opacity = t)));
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+
+  /* 示意参数（不是作者拟合出的值）：MBG/NBD 的 r, alpha, a, b */
+  const PAR = { r: 0.6, alpha: 60, a: 0.9, b: 2.5 };
+  const pAlive = (x, tx, T, p) => 1 / (1 + (p.a / (p.b + x)) * Math.pow((p.alpha + T) / (p.alpha + tx), p.r + x));
+  function gammaSample(r, k) { // Marsaglia–Tsang，形状 k，尺度 1
+    if (k < 1) return gammaSample(r, k + 1) * Math.pow(r(), 1 / k);
+    const d = k - 1 / 3, c = 1 / Math.sqrt(9 * d);
+    for (;;) { let x, v; do { x = K.randn(r); v = 1 + c * x; } while (v <= 0); v = v * v * v; const u = r(); if (u < 1 - 0.0331 * x ** 4 || Math.log(u) < 0.5 * x * x + d * (1 - v + Math.log(v))) return d * v; }
+  }
+  /* MBG/NBD 生成过程：t=0 首次购买；0 时刻和每次购买后以概率 p 永久离开；活着时购买间隔 ~ 指数(λ) */
+  function simCustomer(r, lam, p, Tend) {
+    const buys = [0]; let t = 0;
+    if (r() < p) return { buys, alive: false };
+    for (;;) { t += -Math.log(1 - r()) / lam; if (t > Tend) return { buys, alive: true }; buys.push(t); if (r() < p) return { buys, alive: false }; }
+  }
+
+  const steps = [
+    {
+      at: 0, title: "客户终身价值：一位顾客将来还值多少", kicker: "第 0–3 格 · 问题与目标",
+      html: `<p>作者先讲概念：<b>客户终身价值（CLV）</b>是一位顾客未来能带来的净现金流折算到今天的值，是“向前看”的，不是历史利润。作者引用研究说，留存率提高 5% 能让利润提高 25% 到 95%。<span data-cell="0">出处</span></p><p>目标是在<b>非合约</b>场景下（顾客走了不会通知）建一个概率模型，做到三件事：分清活跃和不活跃的顾客、预测每个人的未来交易、预测全体顾客的总购买量。</p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        K.svg(svg, "line", { x1: 40, y1: 200, x2: 690, y2: 200, stroke: "var(--ink-3)", "stroke-width": 2 });
+        const now = 380;
+        K.svg(svg, "line", { x1: now, y1: 60, x2: now, y2: 260, stroke: "var(--accent)", "stroke-width": 2, "stroke-dasharray": "5 4" });
+        K.svg(svg, "text", { x: now, y: 50, "text-anchor": "middle", "font-size": 13, fill: "var(--accent)", "font-weight": 700 }, "今天");
+        K.svg(svg, "text", { x: 200, y: 290, "text-anchor": "middle", "font-size": 13, class: "muted" }, "过去：看得见的购买");
+        K.svg(svg, "text", { x: 540, y: 290, "text-anchor": "middle", "font-size": 13, class: "muted" }, "未来：要预测的购买（CLV）");
+        const past = [70, 150, 230, 330], fut = [450, 560, 650];
+        const ps = past.map((x) => K.svg(svg, "circle", { cx: x, cy: 200, r: 0, fill: "var(--c1)" }));
+        const fs = fut.map((x) => K.svg(svg, "circle", { cx: x, cy: 200, r: 10, fill: "none", stroke: "var(--c2)", "stroke-width": 2, "stroke-dasharray": "3 3" }));
+        const q = fut.map((x) => K.svg(svg, "text", { x, y: 175, "text-anchor": "middle", "font-size": 16, fill: "var(--c2)" }, "?"));
+        hide([...fs, ...q]);
+        (async () => {
+          for (const p of ps) if (!(await ctx.tween(250, (t) => p.setAttribute("r", 9 * t)))) return;
+          await fadeIn(ctx, [...fs, ...q], 700);
+        })();
+      },
+    },
+    {
+      title: "把三张表拼成一份交易日志", kicker: "第 4–7 格 · 读数据",
+      html: `<p>Olist 每笔订单都会生成一个新的 <code>customer_id</code>，同一个人要用 <code>customer_unique_id</code> 才能认出来。作者把订单表和顾客表按 <code>customer_id</code> 拼起来，再把下单时间截成日期。<span data-cell="5">出处</span></p><p>最后只剩两列：<b>谁</b>（CUSTOMER_ID）和<b>哪天</b>（ORDER_DATE）。付款表也读进来了，代码注释写着“too few”，之后没有并进日志。</p>`,
+      cells: [5, 7], highlight: ["customer_unique_id", "elog.columns = ['CUSTOMER_ID', 'ORDER_DATE']"],
+      draw(svg, ctx) {
+        const A = K.node(svg, 20, 30, 200, 70, "订单表\ncustomer_id · order_id · 时间", { fs: 12 });
+        const B = K.node(svg, 20, 130, 200, 70, "顾客表\ncustomer_id · unique_id", { fs: 12 });
+        const C = K.node(svg, 20, 230, 200, 70, "付款表\norder_id · payment_value", { fs: 12, stroke: "var(--ink-3)" });
+        const a1 = K.arrow(svg, 220, 65, 330, 140), a2 = K.arrow(svg, 220, 165, 330, 150);
+        const x = K.svg(svg, "text", { x: 240, y: 275, "font-size": 13, fill: "var(--bad)" }, "✗ 读了但没用上");
+        const D = K.node(svg, 340, 100, 170, 90, "交易日志 elog\nCUSTOMER_ID\nORDER_DATE", { bold: true, stroke: "var(--accent)" });
+        const rows = []; const r = K.rng(3);
+        for (let i = 0; i < 6; i++) { const t = K.svg(svg, "text", { x: 540, y: 60 + i * 34, "font-size": 12, "font-family": "var(--mono)" }, `顾客${String.fromCharCode(65 + Math.floor(r() * 4))}  2018-0${1 + Math.floor(r() * 8)}-1${Math.floor(r() * 9)}`); rows.push(t); }
+        hide([a1, a2, D, x, ...rows]);
+        (async () => {
+          if (!(await fadeIn(ctx, [a1, a2], 500))) return;
+          if (!(await fadeIn(ctx, [D], 500))) return;
+          if (!(await fadeIn(ctx, [x], 400))) return;
+          for (const t of rows) if (!(await fadeIn(ctx, [t], 200))) return;
+        })();
+      },
+    },
+    {
+      title: "切成校准期和验证期，算出每人的 RFM", kicker: "第 8–11 格 · 特征",
+      html: `<p>用 lifetimes 的 <code>calibration_and_holdout_data</code>：<b>2018-06-30 之前</b>是校准期，拿来训练；<b>2018-07-01 到 2018-09-28</b> 是验证期，当作“未来”来检验。<span data-cell="9">出处</span></p><p>对每位顾客算出三个数：<b>frequency</b>（重复购买几次）、<b>recency</b>（首次到最后一次购买隔多久）、<b>T</b>（首次购买到校准期结束隔多久）。再记下验证期里实际买了几次。<span data-cell="11">出处</span></p>`,
+      cells: [9, 11], highlight: ["calibration_period_ends = '2018-06-30'", "observation_period_end='2018-09-28'"],
+      draw(svg, ctx) {
+        const x0 = 60, x1 = 520, x2 = 680;
+        K.svg(svg, "rect", { x: x0, y: 40, width: x1 - x0, height: 230, fill: tint("var(--c1)", 8) });
+        K.svg(svg, "rect", { x: x1, y: 40, width: x2 - x1, height: 230, fill: tint("var(--c2)", 12) });
+        K.svg(svg, "text", { x: (x0 + x1) / 2, y: 30, "text-anchor": "middle", "font-size": 13, fill: "var(--c1)" }, "校准期（训练）… 2018-06-30");
+        K.svg(svg, "text", { x: (x1 + x2) / 2, y: 30, "text-anchor": "middle", "font-size": 13, fill: "var(--c2)" }, "验证期 → 09-28");
+        const cust = [[[120, 260, 400], [560]], [[300], []], [[200, 230], [600, 650]], [[450, 500], []]];
+        const sw = [];
+        cust.forEach(([cal, hold], i) => {
+          const y = 80 + i * 52;
+          K.svg(svg, "line", { x1: x0, y1: y, x2: x2, y2: y, stroke: "var(--line)" });
+          K.svg(svg, "text", { x: x0 - 8, y: y + 4, "text-anchor": "end", "font-size": 12 }, "顾客" + (i + 1));
+          cal.forEach((x, k) => sw.push(K.svg(svg, "circle", { cx: x, cy: y, r: 7, fill: k === 0 ? "var(--ink-3)" : "var(--c1)" })));
+          hold.forEach((x) => sw.push(K.svg(svg, "circle", { cx: x, cy: y, r: 7, fill: "var(--c2)" })));
+          if (i === 0) {
+            const b1 = K.svg(svg, "line", { x1: cal[0], y1: y + 16, x2: cal[cal.length - 1], y2: y + 16, stroke: "var(--warn)", "stroke-width": 2 });
+            const b2 = K.svg(svg, "line", { x1: cal[0], y1: y + 26, x2: x1, y2: y + 26, stroke: "var(--accent)", "stroke-width": 2 });
+            const t1 = K.svg(svg, "text", { x: cal[cal.length - 1] + 6, y: y + 20, "font-size": 11, fill: "var(--warn)" }, "recency");
+            const t2 = K.svg(svg, "text", { x: x1 - 6, y: y + 38, "text-anchor": "end", "font-size": 11, fill: "var(--accent)" }, "T");
+            sw.push(b1, b2, t1, t2);
+          }
+        });
+        K.svg(svg, "text", { x: 60, y: 300, "font-size": 12, class: "muted" }, "灰点 = 首次购买（不计入 frequency）；顾客 1：frequency = 2，验证期买了 1 次（示意）");
+        hide(sw);
+        (async () => { for (const s of sw) if (!(await fadeIn(ctx, [s], 120))) return; })();
+      },
+    },
+    {
+      title: "MBG/NBD：活着时随机买，买完可能悄悄走", kicker: "第 12–14 格 · 模型假设与拟合",
+      html: `<p>作者列出模型假设：<span data-cell="12">出处</span></p><ul class="tight"><li>顾客“活着”时，购买次数服从<b>泊松过程</b>（随机地、平均每段时间买 λ 次）</li><li>不同顾客的 λ 不同，服从 Gamma 分布（参数 r、α）</li><li>在第 0 天和每次购买后，顾客以概率 p 永久“沉睡”</li><li>不同顾客的 p 不同（参数 a、b）</li><li>λ 和 p 互相独立</li></ul><p>然后用 <code>ModifiedBetaGeoFitter(penalizer_coef=0.01)</code> 拟合这四个参数。<span data-cell="13">出处</span></p><p class="callout warn">原文写 p 的差异“服从 Gamma 分布”，按模型定义应是 Beta 分布（p 是 0 到 1 之间的概率），名字里的 “Beta-Geometric” 就来自这里。</p>`,
+      cells: [13, 14], highlight: ["ModifiedBetaGeoFitter(penalizer_coef=0.01)"],
+      draw(svg, ctx) {
+        const r = K.rng(17), rows = 4;
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 13, class: "muted" }, "每行一位模拟顾客：● 购买，每次购买后掷一次“走不走”的骰子，✕ = 从此不再来");
+        const lines = [];
+        for (let i = 0; i < rows; i++) {
+          const y = 70 + i * 66, lam = [0.012, 0.02, 0.008, 0.03][i], p = [0.3, 0.15, 0.5, 0.25][i];
+          K.svg(svg, "line", { x1: 40, y1: y, x2: 690, y2: y, stroke: "var(--line)" });
+          const ev = [{ x: 40, t: "buy" }]; let x = 40, dead = false;
+          if (r() < p) { ev.push({ x: 40 + 14, t: "die" }); dead = true; }
+          while (!dead) { x += (-Math.log(1 - r()) / lam) * 0.9; if (x > 690) break; ev.push({ x, t: "buy" }); if (r() < p) { ev.push({ x: x + 14, t: "die" }); dead = true; } }
+          lines.push(ev);
+          K.svg(svg, "text", { x: 690, y: y - 10, "text-anchor": "end", "font-size": 11, class: "muted" }, `λ≈${lam}/天，p=${p}`);
+        }
+        const els = [];
+        lines.forEach((ev, i) => ev.forEach((e) => {
+          const y = 70 + i * 66;
+          const el = e.t === "buy" ? K.svg(svg, "circle", { cx: e.x, cy: y, r: 7, fill: "var(--c1)" }) : K.svg(svg, "text", { x: e.x, y: y + 6, "font-size": 18, fill: "var(--bad)", "font-weight": 700 }, "✕");
+          el.style.opacity = 0; els.push([el, e.x]);
+        }));
+        const cur = K.svg(svg, "line", { x1: 40, y1: 40, x2: 40, y2: 300, stroke: "var(--accent)", "stroke-dasharray": "4 3" });
+        ctx.tween(3500, (t) => { const X = 40 + t * 650; cur.setAttribute("x1", X); cur.setAttribute("x2", X); els.forEach(([el, x]) => { if (x <= X) el.style.opacity = 1; }); });
+      },
+    },
+    {
+      title: "Gamma-Gamma：本该估“每单花多少”，却被注释掉了", kicker: "第 15–18 格 · 金额模型",
+      html: `<p>算终身价值还需要知道顾客<b>每次花多少钱</b>。作者介绍了 <b>Gamma-Gamma 模型</b>：假设平均客单价和购买频率无关，所以用前要先检查两者的皮尔逊相关是否接近 0。<span data-cell="15">出处</span></p><p>但接下来的三格代码<b>全部被注释掉了</b>，而且前面整理日志时根本没有并入金额，所以这一步实际上没有运行。<span data-cell="16">出处</span> <span data-cell="17">出处</span></p>`,
+      cells: [16, 17, 18],
+      draw(svg, ctx) {
+        K.node(svg, 40, 120, 170, 80, "MBG/NBD\n预计买几次", { bold: true, stroke: "var(--c1)" });
+        K.svg(svg, "text", { x: 238, y: 168, "font-size": 26 }, "×");
+        const gg = K.node(svg, 270, 120, 170, 80, "Gamma-Gamma\n预计每次花多少", { bold: true, stroke: "var(--c2)" });
+        K.svg(svg, "text", { x: 468, y: 168, "font-size": 26 }, "=");
+        const clv = K.node(svg, 500, 120, 180, 80, "客户终身价值\nCLV", { bold: true, stroke: "var(--accent)" });
+        const cross = K.svg(svg, "path", { d: "M270,120 L440,200 M440,120 L270,200", stroke: "var(--bad)", "stroke-width": 4 });
+        const note = K.svg(svg, "text", { x: 270, y: 240, "font-size": 13, fill: "var(--bad)" }, "代码全部以 # 注释掉，没有运行");
+        const q = K.svg(svg, "text", { x: 590, y: 240, "text-anchor": "middle", "font-size": 13, fill: "var(--warn)" }, "→ 没算出来");
+        hide([cross, note, q]);
+        ctx.wait(900).then((ok) => ok && fadeIn(ctx, [cross, note], 500)).then((ok) => { if (ok) { K.set(gg.querySelector("rect"), { opacity: 0.4 }); K.set(clv.querySelector("rect"), { "stroke-dasharray": "5 4" }); return fadeIn(ctx, [q], 400); } });
+      },
+    },
+    {
+      title: "给每位顾客打两个分：未来 90 天买几次、还活着的概率", kicker: "第 19–21 格 · 预测",
+      html: `<p>用拟合好的模型给每位顾客算：</p><ul class="tight"><li><code>predicted_purchases</code>：未来 90 天预计购买次数 <span data-cell="20">出处</span></li><li><code>p_alive</code>：根据他的 frequency、recency、T，他此刻“还活着”的概率</li></ul><p>直觉：<b>买得越频繁、而最近又很久没来</b>的人，越可能已经走了；只买过一次的人，反而“沉默”一阵也不奇怪。</p><p class="callout warn">作者把 p_alive 除以全体最大值再取两位小数，这样处理后它就不再是概率了，只是相对排名。</p>`,
+      cells: [20], highlight: ["t = 90", "conditional_probability_alive", "summary_cal_holdout['p_alive'].max()"],
+      draw(svg, ctx) {
+        const T = 300;
+        const cases = [["顾客甲：买 1 次，就在最近", 0, 0, 20], ["顾客乙：买了 6 次，最后一次在 150 天前", 6, 150, 300], ["顾客丙：买了 6 次，最后一次就在上周", 6, 293, 300], ["顾客丁：只买过 1 次，在 300 天前", 0, 0, 300]];
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 12, class: "muted" }, "按 MBG/NBD 公式现算（参数为示意值，不是作者拟合结果）");
+        const bars = cases.map(([n, x, tx, TT], i) => {
+          const y = 50 + i * 68, pa = pAlive(x, tx, TT, PAR);
+          K.svg(svg, "text", { x: 30, y: y + 14, "font-size": 13 }, n);
+          K.svg(svg, "rect", { x: 30, y: y + 24, width: 500, height: 20, rx: 3, fill: "var(--panel-2)" });
+          const b = K.svg(svg, "rect", { x: 30, y: y + 24, width: 0, height: 20, rx: 3, fill: pa > 0.5 ? "var(--good)" : "var(--bad)" });
+          const t = K.svg(svg, "text", { x: 545, y: y + 40, "font-size": 14, "font-family": "var(--mono)" }, "");
+          return { b, t, pa };
+        });
+        ctx.tween(1400, (tt) => bars.forEach((o) => { o.b.setAttribute("width", 500 * o.pa * tt); o.t.textContent = "P(alive)=" + (o.pa * tt).toFixed(2); }));
+      },
+    },
+    {
+      title: "检验一：重复购买次数的分布对得上吗", kicker: "第 22–24 格 · 拟合检验",
+      html: `<p>第一张图：校准期里买了 0、1、2……次的顾客各有多少，真实数据和模型模拟的放在一起比，纵轴取对数（因为只买一次的人太多）。<span data-cell="23">出处</span></p><p>第二张图：按校准期买了几次分组，比较每组在验证期里<b>实际</b>平均买了几次和模型<b>预测</b>的几次。两条线越贴近，模型越可信。<span data-cell="24">出处</span></p>`,
+      cells: [23, 24], highlight: ["plot_period_transactions", "plot_calibration_purchases_vs_holdout_purchases"],
+      draw(svg, ctx) {
+        const act = [1000, 140, 30, 9, 3, 1.2, 0.5], mod = [980, 155, 34, 8, 2.4, 0.8, 0.3];
+        const ax = K.axes(svg, { x: 70, y: 24, w: 560, h: 250 }, [0, 7], [-1, 3], { xticks: 0, yticks: 4, ylabel: "人数（对数刻度，示意）", yfmt: (v) => (v < 0 ? "0.1" : Math.round(Math.pow(10, v)).toString()) });
+        const bw = 30, els = [];
+        act.forEach((v, i) => {
+          const x = ax.sx(i) + 10;
+          const a = K.svg(svg, "rect", { x, y: ax.sy(-1), width: bw, height: 0, fill: "var(--c1)" });
+          const m = K.svg(svg, "rect", { x: x + bw + 2, y: ax.sy(-1), width: bw, height: 0, fill: "var(--c2)" });
+          K.svg(svg, "text", { x: x + bw, y: 296, "text-anchor": "middle", "font-size": 12 }, i === 6 ? "6+" : String(i));
+          els.push([a, Math.log10(v)], [m, Math.log10(mod[i])]);
+        });
+        K.svg(svg, "text", { x: 360, y: 322, "text-anchor": "middle", "font-size": 12 }, "校准期内重复购买次数");
+        K.svg(svg, "text", { x: 500, y: 50, "font-size": 12, fill: "var(--c1)" }, "■ 实际");
+        K.svg(svg, "text", { x: 560, y: 50, "font-size": 12, fill: "var(--c2)" }, "■ 模型");
+        ctx.tween(1300, (t) => els.forEach(([r, v]) => { const h = (ax.sy(-1) - ax.sy(v)) * t; r.setAttribute("y", ax.sy(-1) - h); r.setAttribute("height", h); }));
+      },
+    },
+    {
+      title: "检验二：一位顾客的“存活概率”历史", kicker: "第 25–26 格 · 个人轨迹",
+      html: `<p>作者挑了第 4942 位顾客，画出他的 P(alive) 随时间的变化：每次购买后概率跳回高位，然后随着沉默时间变长慢慢往下掉。<span data-cell="26">出处</span></p><p class="callout warn">这一格用 <code>date.today()</code> 作为“今天”，往前取两年、往后取一年。数据只到 2018 年，今天运行时“今天还活着的概率”是在外推好几年之后的结果，而且每天运行都不一样。</p>`,
+      cells: [26], highlight: ["summary_cal_holdout.iloc[4942]", "date.today()"],
+      draw(svg, ctx) {
+        const buys = [0, 40, 75, 160], Tend = 400;
+        const ax = K.axes(svg, { x: 60, y: 24, w: 600, h: 250 }, [0, Tend], [0, 1.05], { xticks: 8, yticks: 4, xlabel: "首次购买后的天数（示意参数）", ylabel: "P(alive)" });
+        let d = ""; const pts = [];
+        for (let T = 0; T <= Tend; T += 2) { const done = buys.filter((b) => b <= T); const x = done.length - 1, tx = done[done.length - 1]; pts.push([T, pAlive(x, tx, T, PAR)]); }
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        buys.forEach((b) => K.svg(svg, "line", { x1: ax.sx(b), x2: ax.sx(b), y1: ax.sy(0), y2: ax.sy(1.05), stroke: "var(--c1)", "stroke-dasharray": "3 4" }));
+        K.svg(svg, "text", { x: ax.sx(buys[1]) + 4, y: 40, "font-size": 11, fill: "var(--c1)" }, "虚线 = 购买");
+        ctx.tween(2500, (t) => { const n = Math.max(1, Math.floor(pts.length * t)); d = ""; for (let i = 0; i < n; i++) d += (i ? "L" : "M") + ax.sx(pts[i][0]) + "," + ax.sy(pts[i][1]); path.setAttribute("d", d); });
+      },
+    },
+    {
+      title: "检验三：累计交易数，预测线和实际线", kicker: "第 27–32 格 · 全体层面",
+      html: `<p>最后看全体：把所有顾客的重复购买按天累加，画出<b>实际</b>的累计曲线和<b>模型预期</b>的累计曲线，竖线标出校准期结束的位置。竖线右边的贴合程度最能说明模型对“未来”预测得准不准。<span data-cell="29">出处</span> <span data-cell="31">出处</span></p><p>再画每天新增交易数的对比。<span data-cell="32">出处</span></p><p class="callout warn">第 31 格的注释写“校准期 2016-09-04 到 2017-09-30”，代码里用的却是 2018-06-30，注释没跟着改。</p>`,
+      cells: [29, 31, 32], highlight: ["expected_cumulative_transactions", "cal = datetime.strptime('2018-06-30', '%Y-%m-%d')"],
+      draw(svg, ctx) {
+        const N = 100, cal = 75, r = K.rng(6);
+        const ax = K.axes(svg, { x: 60, y: 24, w: 600, h: 250 }, [0, N], [0, 1], { xticks: 0, yticks: 0, xlabel: "时间 →（示意）", ylabel: "累计重复购买" });
+        const act = [], exp = []; let a = 0, e = 0;
+        for (let i = 0; i <= N; i++) { const g = Math.pow(i / N, 1.6); e = g; a = K.clamp(g + (i > cal ? -0.02 * ((i - cal) / 25) : 0) + K.randn(r) * 0.006, 0, 1); act.push(a); exp.push(e); }
+        const pa = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const pe = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c2)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        K.svg(svg, "line", { x1: ax.sx(cal), x2: ax.sx(cal), y1: 24, y2: 274, stroke: "var(--ink-3)", "stroke-dasharray": "3 3" });
+        K.svg(svg, "text", { x: ax.sx(cal) + 4, y: 40, "font-size": 12, class: "muted" }, "校准期结束");
+        K.svg(svg, "text", { x: 80, y: 50, "font-size": 12, fill: "var(--c1)" }, "— 实际");
+        K.svg(svg, "text", { x: 80, y: 70, "font-size": 12, fill: "var(--c2)" }, "- - 模型预期");
+        ctx.tween(2200, (t) => { const n = Math.floor(N * t); let d1 = "", d2 = ""; for (let i = 0; i <= n; i++) { d1 += (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(act[i]); d2 += (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(exp[i]); } pa.setAttribute("d", d1); pe.setAttribute("d", d2); });
+      },
+    },
+    {
+      title: "收尾：平均客单价同样没算，结论一句话", kicker: "第 33–35 格 · 结尾",
+      html: `<p>“预测顾客的条件期望平均价值”这一格同样全是注释，没有运行。<span data-cell="34">出处</span></p><p>作者最后一句是“如果用全部数据而不是样本训练，模型会更好”，但代码里并没有抽样，用的就是全部数据。<span data-cell="35">出处</span></p><p>总结：这份 notebook 完整演示了“交易日志 → RFM → MBG/NBD → 检验”的流程，但离真正的“客户终身价值”还差金额这一半。</p>`,
+      cells: [34],
+      draw(svg, ctx) {
+        const steps = [["交易日志", true], ["RFM 汇总", true], ["MBG/NBD 买几次", true], ["拟合检验", true], ["Gamma-Gamma 花多少", false], ["CLV = 次数 × 金额", false]];
+        const els = steps.map(([n, ok], i) => {
+          const x = 20 + (i % 3) * 235, y = 60 + Math.floor(i / 3) * 130;
+          const g = K.svg(svg, "g");
+          K.node(g, x, y, 200, 70, n, { bold: true, stroke: ok ? "var(--good)" : "var(--bad)", fill: ok ? tint("var(--good)", 12) : "var(--panel-2)" });
+          K.svg(g, "text", { x: x + 100, y: y + 95, "text-anchor": "middle", "font-size": 13, fill: ok ? "var(--good)" : "var(--bad)" }, ok ? "✓ 完成" : "✗ 注释掉 / 没做");
+          g.style.opacity = 0; return g;
+        });
+        (async () => { for (const e of els) if (!(await fadeIn(ctx, [e], 350))) return; })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：P(alive) ---------- */
+  K.lab(document.getElementById("labAlive"), {
+    width: 660, height: 345,
+    controls: [
+      { id: "x", label: "校准期内重复购买次数 frequency", min: 0, max: 10, step: 1, value: 3 },
+      { id: "tx", label: "最后一次购买在首次购买后第几天 recency", min: 0, max: 600, step: 5, value: 120 },
+      { id: "T", label: "首次购买到现在多少天 T", min: 0, max: 600, step: 5, value: 365 },
+      { id: "q", label: "平均每次购买后流失的概率（改 a、b）", min: 0.05, max: 0.6, step: 0.01, value: 0.26, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "用 MBG/NBD 的条件存活概率公式现算：P(alive) = 1 / (1 + a/(b+x) · ((α+T)/(α+t_x))^(r+x))。r、α、a、b 是示意值（作者拟合出的参数在运行输出里，这里没有）。曲线画的是：假设今后不再购买，P(alive) 随时间往后怎么掉。",
+    render(svg, v) {
+      const tx = Math.min(v.tx, v.T), x = v.x === 0 ? 0 : v.x;
+      const txx = x === 0 ? 0 : tx;
+      const b = 2.5, a = (v.q * b) / (1 - v.q), P = { r: PAR.r, alpha: PAR.alpha, a, b };
+      const ax = K.axes(svg, { x: 60, y: 20, w: 560, h: 250 }, [0, 600], [0, 1.05], { xticks: 6, yticks: 4, xlabel: "首次购买后的天数", ylabel: "P(alive)" });
+      let d = "";
+      for (let T = txx; T <= 600; T += 4) d += (d ? "L" : "M") + ax.sx(T) + "," + ax.sy(pAlive(x, txx, T, P));
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+      K.svg(svg, "line", { x1: ax.sx(v.T), x2: ax.sx(v.T), y1: 20, y2: 270, stroke: "var(--ink)", "stroke-dasharray": "5 3" });
+      K.svg(svg, "text", { x: ax.sx(v.T) + 4, y: 34, "font-size": 12 }, "现在 T");
+      K.svg(svg, "circle", { cx: ax.sx(0), cy: ax.sy(0.02), r: 6, fill: "var(--ink-3)" });
+      if (x > 0) K.svg(svg, "circle", { cx: ax.sx(txx), cy: ax.sy(0.02), r: 6, fill: "var(--c1)" });
+      K.svg(svg, "text", { x: 60, y: 338, "font-size": 12, class: "muted" }, "灰点 = 首次购买；蓝点 = 最后一次购买；拖动“现在 T”看沉默越久概率越低");
+      const pa = pAlive(x, txx, v.T, P);
+      return { readout: [
+        { k: "此刻 P(alive)", v: pa.toFixed(3), color: pa > 0.5 ? "var(--good)" : "var(--bad)" },
+        { k: "已经沉默了", v: Math.max(0, v.T - txx) + " 天" },
+        { k: "示意参数 r / α / a / b", v: `${P.r} / ${P.alpha} / ${a.toFixed(2)} / ${b}` },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：生成 3000 位顾客 ---------- */
+  K.lab(document.getElementById("labSim"), {
+    width: 660, height: 320,
+    controls: [
+      { id: "rate", label: "平均每 100 天买几次（活着时）", min: 0.2, max: 5, step: 0.1, value: 1, fmt: (v) => v.toFixed(1) },
+      { id: "p", label: "平均每次购买后流失的概率", min: 0.05, max: 0.9, step: 0.01, value: 0.5, fmt: (v) => v.toFixed(2) },
+      { id: "T", label: "观察天数", min: 60, max: 720, step: 30, value: 360 },
+      { id: "seed", label: "重新模拟", button: true },
+    ],
+    note: "按 MBG/NBD 的生成方式现场模拟：每人的 λ 从 Gamma 分布抽、流失概率 p 从 Beta 分布抽（形状参数各取 1 左右，均值由滑块控制），再按“买—掷骰子—等待—再买”的过程生成购买记录。左图是重复购买次数分布（对数纵轴），和第 23 格那张图同一类。",
+    render(svg, v) {
+      const r = K.rng(321 + v.seed * 17), N = 3000, hist = new Array(8).fill(0);
+      let alive = 0, tot = 0;
+      const shape = 0.8, bb = 1.5, aa = (v.p * bb) / (1 - v.p);
+      for (let i = 0; i < N; i++) {
+        const lam = (gammaSample(r, shape) / shape) * (v.rate / 100);
+        const g1 = gammaSample(r, aa), g2 = gammaSample(r, bb), p = g1 / (g1 + g2);
+        const c = simCustomer(r, Math.max(lam, 1e-6), p, v.T);
+        const x = c.buys.length - 1; hist[Math.min(x, 7)]++; tot += x; if (c.alive) alive++;
+      }
+      const ax = K.axes(svg, { x: 60, y: 20, w: 360, h: 250 }, [0, 8], [-0.3, Math.log10(N) + 0.1], { xticks: 0, yticks: 0, ylabel: "人数（对数）" });
+      hist.forEach((h, i) => {
+        const y = h > 0 ? ax.sy(Math.log10(h)) : ax.sy(-0.3);
+        K.svg(svg, "rect", { x: ax.sx(i) + 5, y, width: 34, height: ax.sy(-0.3) - y, fill: i === 0 ? "var(--c2)" : "var(--c1)", rx: 2 });
+        K.svg(svg, "text", { x: ax.sx(i) + 22, y: y - 4, "text-anchor": "middle", "font-size": 11 }, String(h));
+        K.svg(svg, "text", { x: ax.sx(i) + 22, y: 290, "text-anchor": "middle", "font-size": 12 }, i === 7 ? "7+" : String(i));
+      });
+      K.svg(svg, "text", { x: 240, y: 312, "text-anchor": "middle", "font-size": 12 }, "观察期内重复购买次数");
+      K.svg(svg, "text", { x: 450, y: 60, "font-size": 13, "font-weight": 700 }, "3000 位模拟顾客");
+      K.svg(svg, "text", { x: 450, y: 90, "font-size": 12 }, `只买过一次（0 次重复）：${(hist[0] / N * 100).toFixed(0)}%`);
+      K.svg(svg, "text", { x: 450, y: 114, "font-size": 12 }, `观察结束时仍“活着”：${(alive / N * 100).toFixed(0)}%`);
+      K.svg(svg, "text", { x: 450, y: 160, "font-size": 12, class: "muted" }, "注意：模拟里我们知道谁活着，");
+      K.svg(svg, "text", { x: 450, y: 180, "font-size": 12, class: "muted" }, "真实数据里看不到，");
+      K.svg(svg, "text", { x: 450, y: 200, "font-size": 12, class: "muted" }, "只能靠 P(alive) 去猜。");
+      return { readout: [
+        { k: "只买一次的比例", v: (hist[0] / N * 100).toFixed(1) + "%" },
+        { k: "仍活跃的比例", v: (alive / N * 100).toFixed(1) + "%", color: "var(--good)" },
+        { k: "人均重复购买", v: (tot / N).toFixed(2) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,606 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>转账网络反洗钱</title>
+<meta name="description" content="Kaggle 案例拆解：把 IBM 模拟银行转账数据变成“账户为点、转账为边”的图，用 PyG 的 GAT 图注意力网络做账户级节点分类，并逐条检查特征对齐、评估方式等问题。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格 → 图 · 节点分类 · 反洗钱</div>
+  <h1>谁在帮人洗钱？把银行账户连成网来找</h1>
+  <p class="en">Anti Money Laundering Detection with GNN node classification</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">账户为点、转账为边</span><span class="tag method">节点特征聚合</span><span class="tag method">边特征</span>
+    <span class="tag method">GAT 图注意力</span><span class="tag method">PyG InMemoryDataset</span><span class="tag method">NeighborLoader 邻居采样</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Issac Chan</b></span>
+    <span>Kaggle 点赞 <b>227</b>（2026-11 抓取）</span>
+    <span>数据集 <b>IBM Transactions for Anti Money Laundering</b>（HI-Small_Trans.csv，模拟数据）</span>
+    <span><a href="https://www.kaggle.com/code/issacchanjj/anti-money-laundering-detection-with-gnn" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">一份模拟的银行转账流水</div><p>每行一笔转账：时间、从哪个银行哪个账户、转到哪个银行哪个账户、金额和币种、支付方式、是否洗钱。<span data-cell="2">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">哪些<b>账户</b>可疑</div><p>作者把“预测每笔转账”改成“预测每个账户”：只要参与过一笔洗钱转账（付款方或收款方），账户就标为可疑。<span data-cell="26">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">两层 GAT 图注意力网络</div><p>账户是节点，转账是边；节点特征是各币种的平均收付金额，边上带时间、金额、币种、方式。<span data-cell="43">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">没有给出可信的分数</div><p>训练时打印损失和“准确率”，但准确率的算法有误（见第 9 章），作者文字里也没写结果。这里不列分数。<span data-cell="48">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">IBM 公开的<b>模拟</b>反洗钱数据集（Kaggle 上由 ealtman2019 发布）。作者用的是其中的 <code>HI-Small_Trans.csv</code>（第 0 格、第 2 格）。notebook 文字里没有给出行数和洗钱比例，这里不写具体数字；作者自己的说明里提到这是不平衡的问题（第 5、26 格的思路）。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">一笔转账的样子</h3>
+      <p style="font-size:14px">每行是“某银行的某账户 → 另一家银行的某账户”的一笔转账。付款金额和收款金额、付款币种和收款币种<b>可能不同</b>（有手续费或跨币种），作者在第 11–14 格专门检查过，所以两组列都保留。</p>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">节点</div><div class="v" style="font-size:20px">账户</div></div>
+        <div class="stat-tile"><div class="k">边</div><div class="v" style="font-size:20px">转账</div></div>
+        <div class="stat-tile"><div class="k">节点标签</div><div class="v" style="font-size:20px">是否可疑</div></div>
+        <div class="stat-tile"><div class="k">边属性</div><div class="v" style="font-size:20px">6 个</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">边属性见 <span data-cell="36">第 36 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么（从作者代码用到的列整理）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th></tr>
+        <tr><td><code>Timestamp</code></td><td>转账时间</td></tr>
+        <tr><td><code>From Bank</code>、<code>Account</code></td><td>付款银行代码、付款账户</td></tr>
+        <tr><td><code>To Bank</code>、<code>Account.1</code></td><td>收款银行代码、收款账户</td></tr>
+        <tr><td><code>Amount Paid</code>、<code>Payment Currency</code></td><td>付出的金额和币种</td></tr>
+        <tr><td><code>Amount Received</code>、<code>Receiving Currency</code></td><td>收到的金额和币种</td></tr>
+        <tr><td><code>Payment Format</code></td><td>支付方式（如转账、支票、现金等）</td></tr>
+        <tr><td><code>Is Laundering</code></td><td><b>答案</b>：这笔转账是否属于洗钱（1 / 0）</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">列名见 <span data-cell="19">第 19 格</span>、<span data-cell="27">第 27 格</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="35">
+    <h3>动手试试 A · 从转账汇总到账户：对齐方式差一点，特征全错 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="44">
+    <h3>动手试试 B · 从一个已知账户出发：可疑性沿资金流扩散 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="48">
+    <h3>动手试试 C · “概率 == 标签”能算准确率吗 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者做了什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>把转账表转成节点分类问题：账户为节点、转账为边</td><td><span data-cell="5">第 5 格</span></td></tr>
+        <tr><td>付款与收款的金额、币种都不完全相等，存在手续费和跨币种转账，所以两组列都保留</td><td><span data-cell="14">第 14 格</span></td></tr>
+        <tr><td>参与洗钱转账的付款方和收款方都标为可疑账户</td><td><span data-cell="26">第 26 格</span></td></tr>
+        <tr><td>模型：两层 GATConv（8 头）+ 线性层 + Sigmoid</td><td><span data-cell="43">第 43–44 格</span></td></tr>
+        <tr><td>训练：BCELoss、SGD 学习率 0.0001、100 轮；10% 节点做验证；NeighborLoader 每层采 30 个邻居</td><td><span data-cell="48">第 48 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">作者没有在文字里写出任何分数；代码打印的“准确率”算法有误（见下）。完整训练要按作者 GitHub 仓库的说明在本地运行（第 47 格）。这里不列分数。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li><b>节点特征没对齐</b>（第 31 格）：<code>groupby(...).transform('mean')</code> 返回的结果按<b>转账的行号</b>排列，直接赋值给账户表时 pandas 会按行号对齐，于是第 i 个账户拿到的是“第 i 笔转账的付款账户”的平均金额，而不是它自己的（实验 A）。</li>
+        <li><b>准确率永远接近 0</b>（第 48 格）：<code>pred == ground_truth</code> 拿 Sigmoid 输出的小数和 0/1 标签比“是否完全相等”，几乎不可能相等。应该先用 0.5 之类的阈值把概率变成 0/1（实验 C）。</li>
+        <li><b>每 10 轮打印一次没有生效</b>：条件写成 <code>if epoch%10 == 0</code>，<code>epoch</code> 是常数 100，应为循环变量 <code>i</code>。</li>
+        <li><b>损失算在了整个采样子图上</b>：NeighborLoader 返回的小图里除了这批要训练的节点，还有被采样进来的邻居（可能是验证节点），代码对所有节点都算损失和准确率；通常只取前 <code>batch_size</code> 个种子节点。</li>
+        <li><b>边特征可能没被用上</b>：<code>GATConv</code> 没有设置 <code>edge_dim</code>，按 PyG 的设计此时传入的 <code>edge_attr</code> 不参与注意力计算。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给出每个账户的可疑程度，供银行合规部门排序复核；新转账进来时更新。</li>
+        <li><b>同类问题：</b>比特币交易反洗钱、电信诈骗“跑分”账户、电商刷单资金回流、保险团伙骗保。</li>
+        <li><b>可迁移的套路：</b>把“哪笔交易可疑”变成“哪个账户可疑” → 用账户的收付统计做节点特征、交易明细做边特征 → GNN 让可疑性沿资金流扩散。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>预处理：时间 min-max 归一化、银行代码 + 账号拼成唯一账户 <span data-cell="19">第 19 格</span></li>
+        <li>账户标签：参与洗钱的两端都标 1 <span data-cell="27">第 27 格</span></li>
+        <li>节点特征：各币种平均付款 / 收款金额 + 银行编码 <span data-cell="31">第 31 格</span> <span data-cell="33">第 33 格</span></li>
+        <li>边：[2, 转账数] 的 edge_index + 6 个边属性 <span data-cell="37">第 37 格</span></li>
+        <li>GAT：GATConv(8 头, 16) → GATConv(1 头, 4) → Linear → Sigmoid <span data-cell="44">第 44 格</span></li>
+        <li>PyG <code>InMemoryDataset</code> 封装、<code>RandomNodeSplit</code>、<code>NeighborLoader</code> <span data-cell="46">第 46 格</span> <span data-cell="48">第 48 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者把“参与过一笔洗钱转账”的收款方也标成可疑。如果一个普通商户收到了一笔洗钱的钱，它算不算“坏人”？这样标会带来什么问题？</li>
+      <li>为什么“把交易分类”改成“把账户分类”后，图神经网络就派上了用场？</li>
+      <li>洗钱常见的形状有“一个账户分散转给很多账户”“很多账户汇到一个账户”“绕一圈回到自己”。只看单个账户的金额，能发现这些形状吗？</li>
+      <li>训练损失在下降，但准确率一直接近 0。如果你是作者，第一反应应该是“模型没学好”还是“评估代码写错了”？怎么快速判断？</li>
+      <li>反洗钱模型误报一个正常账户，会给这个人带来什么麻烦？银行应该怎么设计复核流程？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Issac Chan，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：IBM Transactions for Anti Money Laundering（AML）。
+</footer>
+</main>
+
+<script src="nb/aml-transactions-gat.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* ===== 本页图神经网络小工具（页面专用，不改共用文件） ===== */
+  const G = {};
+  /* 自查开关：网址带 ?fast 时用定时器代替 requestAnimationFrame（无界面截图时动画也能播完），并折叠代码 */
+  G.fast = /[?&]fast/.test(location.search);
+  if (G.fast) window.requestAnimationFrame = (cb) => setTimeout(() => cb(performance.now()), 8);
+  G.selfcheck = function () {
+    if (!G.fast) return;
+    setTimeout(() => {
+      if (/[?&]labs/.test(location.search)) {
+        const box = document.createElement("div"); const m = document.querySelector("main"); m.insertBefore(box, m.firstChild);
+        document.querySelectorAll(".inline-lab").forEach((x) => box.appendChild(x));
+        return;
+      }
+      if (/[?&]nofold/.test(location.search)) return;
+      const b = document.querySelector('[data-a="fold"]'); if (b) b.click();
+    }, 50);
+  };
+  /* 随机“社团图”：n 个点、k 类；同类连边概率 pIn，异类 pOut */
+  G.make = function (seed, n, k, pIn, pOut) {
+    const r = K.rng(seed), cls = [], edges = [], adj = Array.from({ length: n }, () => []);
+    for (let i = 0; i < n; i++) cls.push(i % k);
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+      if (r() < (cls[i] === cls[j] ? pIn : pOut)) { edges.push([i, j]); adj[i].push(j); adj[j].push(i); }
+    }
+    // 保证没有孤立点：孤立点随机连一个同类点
+    for (let i = 0; i < n; i++) if (!adj[i].length) {
+      let j = i; while (j === i || cls[j] !== cls[i]) j = Math.floor(r() * n);
+      edges.push([i, j]); adj[i].push(j); adj[j].push(i);
+    }
+    return { n, k, cls, edges, adj };
+  };
+  G.grav = 1;
+  /* 简单力导向布局（确定性），返回 [[x,y]...] 落在 box 里 */
+  G.layout = function (g, box, seed, iters) {
+    const r = K.rng(seed || 1), n = g.n, P = [];
+    for (let i = 0; i < n; i++) {
+      const a = (2 * Math.PI * g.cls[i]) / Math.max(1, g.k) + r() * 1.2, d = 0.25 + r() * 0.2;
+      P.push([0.5 + Math.cos(a) * d, 0.5 + Math.sin(a) * d]);
+    }
+    const it = iters || 160, kk = 0.6 / Math.sqrt(n);
+    for (let t = 0; t < it; t++) {
+      const D = P.map(() => [0, 0]), temp = 0.05 * (1 - t / it) + 0.002;
+      for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+        let dx = P[i][0] - P[j][0], dy = P[i][1] - P[j][1], d2 = dx * dx + dy * dy + 1e-6, f = (kk * kk) / d2;
+        D[i][0] += dx * f; D[i][1] += dy * f; D[j][0] -= dx * f; D[j][1] -= dy * f;
+      }
+      g.edges.forEach(([a, b]) => {
+        const dx = P[a][0] - P[b][0], dy = P[a][1] - P[b][1], d = Math.sqrt(dx * dx + dy * dy) + 1e-6, f = d / kk;
+        D[a][0] -= (dx / d) * f * d; D[a][1] -= (dy / d) * f * d; D[b][0] += (dx / d) * f * d; D[b][1] += (dy / d) * f * d;
+      });
+      for (let i = 0; i < n; i++) {
+        D[i][0] += (0.5 - P[i][0]) * G.grav; D[i][1] += (0.5 - P[i][1]) * G.grav;
+        const L = Math.sqrt(D[i][0] ** 2 + D[i][1] ** 2) + 1e-9, s = Math.min(L, temp);
+        P[i][0] = K.clamp(P[i][0] + (D[i][0] / L) * s + 0, -2, 3);
+        P[i][1] = K.clamp(P[i][1] + (D[i][1] / L) * s + 0, -2, 3);
+      }
+    }
+    const xs = P.map((p) => p[0]), ys = P.map((p) => p[1]);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys), m = 10;
+    return P.map(([x, y]) => [box.x + m + ((x - x0) / (x1 - x0 || 1)) * (box.w - 2 * m), box.y + m + ((y - y0) / (y1 - y0 || 1)) * (box.h - 2 * m)]);
+  };
+  /* 画图：返回 {nodes, lines} */
+  G.draw = function (svg, g, pos, opt) {
+    opt = opt || {};
+    const lines = g.edges.map(([a, b]) => K.svg(svg, "line", { x1: pos[a][0], y1: pos[a][1], x2: pos[b][0], y2: pos[b][1], stroke: "var(--line)", "stroke-width": opt.ew || 1.2 }));
+    const nodes = pos.map((p, i) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: opt.r || 6, fill: opt.fill ? opt.fill(i) : K.colors[g.cls[i] % 6], stroke: "var(--panel)", "stroke-width": 1.5 }));
+    return { nodes, lines };
+  };
+  /* 一个“消息”小圆点沿边从 a 飞到 b */
+  G.fly = function (svg, ctx, pa, pb, color, ms) {
+    const d = K.svg(svg, "circle", { cx: pa[0], cy: pa[1], r: 4, fill: color || "var(--accent)" });
+    return ctx.tween(ms || 600, (t) => { d.setAttribute("cx", K.lerp(pa[0], pb[0], t)); d.setAttribute("cy", K.lerp(pa[1], pb[1], t)); }).then((ok) => { d.remove(); return ok; });
+  };
+  /* 一轮消息传递：H 是每个点的向量；mode = mean / sum / max；self 是否带上自己 */
+  G.prop = function (H, adj, mode, self) {
+    return H.map((h, i) => {
+      const nb = self ? adj[i].concat([i]) : adj[i];
+      if (!nb.length) return h.slice();
+      const out = h.map(() => (mode === "max" ? -Infinity : 0));
+      nb.forEach((j) => H[j].forEach((v, d) => { if (mode === "max") out[d] = Math.max(out[d], v); else out[d] += v; }));
+      if (mode === "mean") return out.map((v) => v / nb.length);
+      return out;
+    });
+  };
+  /* GCN 式对称归一化传播：D^-1/2 (A+I) D^-1/2 H */
+  G.gcn = function (H, adj) {
+    const deg = adj.map((a) => a.length + 1);
+    return H.map((h, i) => {
+      const out = h.map((v) => v / deg[i]);
+      adj[i].forEach((j) => { const w = 1 / Math.sqrt(deg[i] * deg[j]); H[j].forEach((v, d) => (out[d] += w * v)); });
+      return out;
+    });
+  };
+  /* 多分类逻辑回归（softmax），全批量梯度下降 */
+  G.softmaxFit = function (X, y, K_, epochs, lr, l2) {
+    const D = X[0].length, W = Array.from({ length: K_ }, () => new Array(D + 1).fill(0));
+    for (let e = 0; e < epochs; e++) {
+      const Gr = W.map((w) => w.map(() => 0));
+      for (let i = 0; i < X.length; i++) {
+        const p = G.softmaxP(W, X[i]);
+        for (let c = 0; c < K_; c++) { const g = p[c] - (y[i] === c ? 1 : 0); for (let d = 0; d < D; d++) Gr[c][d] += g * X[i][d]; Gr[c][D] += g; }
+      }
+      for (let c = 0; c < K_; c++) for (let d = 0; d <= D; d++) W[c][d] -= lr * (Gr[c][d] / X.length + (d < D ? (l2 || 0) * W[c][d] : 0));
+    }
+    return W;
+  };
+  G.softmaxP = function (W, x) {
+    const z = W.map((w) => { let s = w[w.length - 1]; for (let d = 0; d < x.length; d++) s += w[d] * x[d]; return s; });
+    const m = Math.max(...z), ex = z.map((v) => Math.exp(v - m)), S = ex.reduce((a, b) => a + b, 0);
+    return ex.map((v) => v / S);
+  };
+  G.argmax = (a) => a.reduce((bi, v, i) => (v > a[bi] ? i : bi), 0);
+  /* 一圈圈扩散的“跳数”环 */
+  G.ring = function (svg, p, r, color) { return K.svg(svg, "circle", { cx: p[0], cy: p[1], r, fill: "none", stroke: color || "var(--accent)", "stroke-width": 2, "stroke-dasharray": "5 4" }); };
+  /* 小工具：节点向量 → 颜色（取最大类的颜色，透明度=置信度） */
+  G.paint = function (el, vec) {
+    const s = vec.reduce((a, b) => a + Math.max(0, b), 0) || 1, c = G.argmax(vec), conf = Math.max(0, vec[c]) / s;
+    K.set(el, { fill: K.colors[c % 6], "fill-opacity": 0.25 + 0.75 * conf });
+  };
+
+
+  const ACC = "var(--c1)", SUS = "var(--c6)";
+  const steps = [
+    {
+      at: 0, title: "开场：账户是点，转账是边", kicker: "第 0–2 格 · 安装与读数据",
+      html: `<p>作者安装 PyTorch Geometric（PyG），读入 IBM 模拟转账数据 <code>HI-Small_Trans.csv</code>。完整的工程代码在作者的 GitHub 仓库里，这个 notebook 展示数据处理和模型的关键部分。</p><p>整个案例的核心思路就一句话：<b>把每个银行账户当成一个点，每笔转账当成一条从付款账户指向收款账户的箭头</b>。</p>`,
+      cells: [2], highlight: ["HI-Small_Trans.csv"],
+      draw(svg, ctx) {
+        const P = [[90, 90], [90, 250], [280, 170], [470, 80], [470, 260], [640, 170]];
+        const E = [[0, 2], [1, 2], [2, 3], [2, 4], [3, 5], [4, 5]];
+        P.forEach((p, i) => { K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 18, fill: ACC }); K.svg(svg, "text", { x: p[0], y: p[1] + 5, "text-anchor": "middle", "font-size": 11, fill: "var(--panel)" }, "账户"); });
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13 }, "点 = 银行账户，箭头 = 一笔转账（示意）");
+        (async () => {
+          for (const [a, b] of E) {
+            const ang = Math.atan2(P[b][1] - P[a][1], P[b][0] - P[a][0]);
+            K.arrow(svg, P[a][0] + 20 * Math.cos(ang), P[a][1] + 20 * Math.sin(ang), P[b][0] - 22 * Math.cos(ang), P[b][1] - 22 * Math.sin(ang), { color: "var(--ink-3)" });
+            if (!(await G.fly(svg, ctx, P[a], P[b], "var(--warn)", 380))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "看一眼转账表", kicker: "第 3–9 格 · 数据概览",
+      html: `<p>作者先打印前几行、看每列的数据类型、检查空值（第 4–9 格）。文字类型的列（币种、支付方式）之后要编码成数字（第 6 格）。</p><p>作者在第 5 格提出了全文的建模思路：从付款方和收款方里提取出所有账户，把整份数据变成<b>节点分类</b>问题：账户是节点，转账是边。</p>`,
+      cells: [4, 7, 9], highlight: ["isnull"],
+      draw(svg, ctx) {
+        const head = ["时间", "付款行", "付款账户", "收款行", "收款账户", "金额", "是否洗钱"];
+        head.forEach((h, i) => K.svg(svg, "text", { x: 30 + i * 96, y: 40, "font-size": 12, "font-weight": 700 }, h));
+        const r = K.rng(5), rows = [];
+        for (let k = 0; k < 6; k++) {
+          const y = 70 + k * 36, lau = k === 3;
+          const cells = ["09:" + (10 + k * 7), "B" + (1 + Math.floor(r() * 9)), "A" + Math.floor(r() * 90), "B" + (1 + Math.floor(r() * 9)), "A" + Math.floor(r() * 90), (100 + Math.floor(r() * 9000)).toString(), lau ? "1" : "0"];
+          const g = K.svg(svg, "g", {});
+          cells.forEach((c, i) => K.svg(g, "text", { x: 30 + i * 96, y, "font-size": 12, "font-family": "var(--mono)", fill: lau ? SUS : "var(--ink)" }, c));
+          g.style.opacity = 0; rows.push(g);
+        }
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 11, class: "muted" }, "示意数据，不是真实行");
+        (async () => { for (const g of rows) if (!(await ctx.tween(250, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "付款金额 ≠ 收款金额：两组列都要留", kicker: "第 10–16 格 · 检查",
+      html: `<p>表里有“付款金额 / 付款币种”和“收款金额 / 收款币种”两组列。作者怀疑它们是重复的，就检查了一下：<b>不完全相等</b>（第 11–13 格）。原因是有手续费，还有跨币种转账（比如付美元、收欧元）。所以两组列都保留（第 14 格）。</p><p>作者还确认了付款币种和收款币种的取值范围相同（第 16 格），这样两列可以用同一套编号编码。</p>`,
+      cells: [11, 13, 16], highlight: [".equals("],
+      draw(svg, ctx) {
+        K.node(svg, 40, 120, 160, 80, "付款账户\n付出 100 美元", {});
+        K.node(svg, 520, 120, 160, 80, "收款账户\n收到 ?", {});
+        const ar = K.arrow(svg, 200, 160, 518, 160, { color: "var(--accent)" });
+        const fee = K.svg(svg, "text", { x: 360, y: 140, "text-anchor": "middle", "font-size": 13 }, "");
+        const out = K.svg(svg, "text", { x: 600, y: 230, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--accent)" }, "");
+        const cases = [["同币种，无手续费", "100 美元"], ["扣了手续费", "98.5 美元"], ["跨币种", "92 欧元"]];
+        (async () => {
+          for (const [a, b] of cases) {
+            fee.textContent = a; out.textContent = "";
+            if (!(await G.fly(svg, ctx, [200, 160], [518, 160], "var(--warn)", 700))) return;
+            out.textContent = "收到 " + b;
+            if (!(await ctx.wait(700))) return;
+          }
+        })();
+        K.svg(svg, "text", { x: 40, y: 300, "font-size": 11, class: "muted" }, "金额和汇率为示意");
+      },
+    },
+    {
+      title: "预处理：时间缩放、账户编号、拆收付表", kicker: "第 17–25 格 · 预处理",
+      html: `<p><code>preprocess</code> 做了五件事（第 18–19 格）：</p><ol class="tight"><li>币种、支付方式用 LabelEncoder 编成数字；</li><li>时间转成数字后做 <b>min-max 归一化</b>，最早的为 0、最晚的为 1；</li><li>账户 = 银行代码 + “_” + 账号。不同银行可能有相同的账号，拼上银行代码才唯一；</li><li>拆出“收款表”和“付款表”，方便之后按账户统计；</li><li>列出所有出现过的币种。</li></ol>`,
+      cells: [19, 21, 23, 25], highlight: ["min()", "astype(str) + '_'", "receiving_df", "paying_df"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 40, y: 50, w: 300, h: 40 }, [0, 1], [0, 1], { yticks: 0, xticks: 2 });
+        K.svg(svg, "text", { x: 40, y: 34, "font-size": 12, "font-weight": 700 }, "时间 → 0 到 1");
+        const ts = [0.05, 0.2, 0.33, 0.6, 0.81, 0.97], dots = ts.map((t) => K.svg(svg, "circle", { cx: ax.sx(t), cy: 70, r: 0, fill: "var(--c4)" }));
+        ctx.tween(800, (u) => dots.forEach((d) => d.setAttribute("r", 6 * u)));
+        K.svg(svg, "text", { x: 40, y: 150, "font-size": 12, "font-weight": 700 }, "账户唯一编号");
+        const a = K.node(svg, 40, 165, 120, 36, "银行 12", {}), b = K.node(svg, 40, 210, 120, 36, "账号 8000ABC", {});
+        const c = K.node(svg, 220, 186, 140, 40, "12_8000ABC", { bold: true, stroke: "var(--accent)" });
+        c.style.opacity = 0;
+        ctx.wait(600).then((ok) => ok && ctx.tween(500, (u) => (c.style.opacity = u)));
+        K.svg(svg, "text", { x: 420, y: 34, "font-size": 12, "font-weight": 700 }, "拆成两张表");
+        K.node(svg, 420, 60, 260, 90, "付款表\n账户 · 付款金额 · 付款币种", { stroke: "var(--c2)" });
+        K.node(svg, 420, 180, 260, 90, "收款表\n账户 · 收款金额 · 收款币种", { stroke: "var(--c3)" });
+      },
+    },
+    {
+      title: "账户成为节点：参与洗钱的两端都标为可疑", kicker: "第 26–29 格 · 节点与标签",
+      html: `<p><code>get_all_account</code> 把付款账户和收款账户合在一起去重，得到所有节点（第 27 格）。</p><p>标签规则：只要某个账户<b>作为付款方或收款方</b>参与过一笔“是否洗钱 = 1”的转账，它就被标成 1（可疑），其余为 0（第 26 格）。这样原来的“转账级”标签变成了“账户级”标签。</p>`,
+      cells: [27, 29], highlight: ["suspicious = df[df['Is Laundering']==1]", "df.update"],
+      draw(svg, ctx) {
+        const P = [[80, 80], [80, 260], [300, 170], [520, 80], [520, 260], [660, 170]];
+        const E = [[0, 2, 0], [1, 2, 1], [2, 3, 0], [2, 4, 0], [4, 5, 1], [3, 5, 0]];
+        const nodes = P.map((p) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 18, fill: ACC }));
+        E.forEach(([a, b, l]) => { const ang = Math.atan2(P[b][1] - P[a][1], P[b][0] - P[a][0]); K.arrow(svg, P[a][0] + 20 * Math.cos(ang), P[a][1] + 20 * Math.sin(ang), P[b][0] - 22 * Math.cos(ang), P[b][1] - 22 * Math.sin(ang), { color: l ? SUS : "var(--ink-3)", sw: l ? 3 : 1.5 }); });
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13 }, "红色箭头 = 洗钱转账；它的两端账户都被标为可疑");
+        ctx.wait(700).then((ok) => ok && ctx.tween(700, (t) => [1, 2, 4, 5].forEach((i) => K.set(nodes[i], { fill: t > 0.5 ? SUS : ACC }))));
+      },
+    },
+    {
+      title: "节点特征：各币种的平均收付金额", kicker: "第 30–35 格 · 节点特征",
+      html: `<p>每个账户的特征 = 它在<b>每一种币种</b>上的平均付款金额 + 平均收款金额，再加上银行代码（编码成数字）。没有用过的币种填 0（第 30–33 格）。</p><p>想法是对的：把一个账户的所有转账“汇总”成一行描述。但第 31 格的写法有一个对齐问题：<code>transform('mean')</code> 的结果是按<b>转账行号</b>排列的，直接塞进账户表时会按行号对齐，账户拿到的不是自己的平均值。下面的实验 A 用一张小表演示。</p>`,
+      cells: [31, 33, 35], highlight: ["transform('mean')", "fillna(0)"],
+      notes: { 31: "transform 返回的 Series 索引是转账表的行号，赋值给账户表时按行号对齐，而不是按账户对齐" },
+      draw(svg, ctx) {
+        const tx = [["A", 100], ["A", 300], ["B", 50], ["C", 80], ["C", 120]];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 12, "font-weight": 700 }, "付款表（美元）");
+        tx.forEach(([a, v], i) => K.node(svg, 30, 44 + i * 40, 150, 32, `${a} 付 ${v}`, { fs: 12 }));
+        K.svg(svg, "text", { x: 450, y: 30, "font-size": 12, "font-weight": 700 }, "账户的“平均付款（美元）”");
+        const avg = { A: 200, B: 50, C: 100 };
+        ["A", "B", "C"].forEach((a, i) => {
+          const g = K.node(svg, 450, 64 + i * 70, 200, 44, `账户 ${a}：${avg[a]}`, { bold: true, stroke: "var(--accent)" });
+          g.style.opacity = 0;
+          const src = tx.map((t, k) => [t, k]).filter(([t]) => t[0] === a);
+          ctx.wait(400 + i * 700).then(async (ok) => {
+            if (!ok) return;
+            await Promise.all(src.map(([, k]) => G.fly(svg, ctx, [180, 60 + k * 40], [450, 86 + i * 70], "var(--accent)", 500)));
+            if (ctx.alive()) ctx.tween(300, (t) => (g.style.opacity = t));
+          });
+        });
+        K.svg(svg, "text", { x: 30, y: 320, "font-size": 11, class: "muted" }, "正确的汇总：按账户把它的转账求平均（示意）");
+      },
+    },
+    {
+      title: "边：每笔转账一条边，带 6 个属性", kicker: "第 36–41 格 · 边与边特征",
+      html: `<p><code>get_edge_df</code> 先给每个账户编号 0、1、2…，然后把每笔转账的付款账户、收款账户换成编号，叠成形状为 <b>[2, 转账数]</b> 的 <code>edge_index</code>（第 37 格）。</p><p>剩下的 6 列：时间、收款金额、收款币种、付款金额、付款币种、支付方式，作为<b>边特征</b> <code>edge_attr</code>（第 36 格）。注意这是有方向的图：钱从付款方流向收款方。</p>`,
+      cells: [37, 39, 41], highlight: ["mapping_dict", "torch.stack"],
+      draw(svg, ctx) {
+        const P = [[120, 110], [120, 250], [330, 180]];
+        P.forEach((p, i) => { K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 18, fill: ACC }); K.svg(svg, "text", { x: p[0], y: p[1] + 5, "text-anchor": "middle", "font-size": 13, fill: "var(--panel)", "font-weight": 700 }, i); });
+        K.arrow(svg, 138, 118, 312, 172, { color: "var(--accent)", sw: 2 }); K.arrow(svg, 138, 242, 312, 188, { color: "var(--accent)", sw: 2 });
+        K.svg(svg, "text", { x: 420, y: 60, "font-size": 13, "font-weight": 700 }, "edge_index");
+        const rows = [[0, 1], [2, 2]];
+        rows.forEach((r, i) => r.forEach((v, j) => { const t = K.svg(svg, "text", { x: 440 + j * 50, y: 95 + i * 34, "font-size": 18, "font-family": "var(--mono)" }, v); t.style.opacity = 0; ctx.wait(300 + j * 400).then((ok) => ok && ctx.tween(300, (u) => (t.style.opacity = u))); }));
+        K.svg(svg, "text", { x: 420, y: 96, "font-size": 11, "text-anchor": "end", class: "muted" }, "付款");
+        K.svg(svg, "text", { x: 420, y: 130, "font-size": 11, "text-anchor": "end", class: "muted" }, "收款");
+        K.svg(svg, "text", { x: 420, y: 190, "font-size": 13, "font-weight": 700 }, "edge_attr（每条边 6 个数）");
+        ["时间", "收款额", "收款币", "付款额", "付款币", "方式"].forEach((n, i) => K.node(svg, 420 + (i % 3) * 88, 205 + Math.floor(i / 3) * 44, 82, 34, n, { fs: 11 }));
+      },
+    },
+    {
+      title: "模型：两层 GAT 图注意力网络", kicker: "第 42–44 格 · GAT",
+      html: `<p>作者用<b>图注意力网络 GAT</b>：第一层 8 个注意力头，每头 16 维，拼成 128 维；第二层 1 个头，输出 4 维；再接一个线性层和 <b>Sigmoid</b>，输出 0–1 之间的“可疑概率”（第 43–44 格）。每层前后都有 0.6 的 dropout。</p><p>注意力的意思是：一个账户汇总邻居信息时，不是平均对待每个交易对手，而是<b>自己学</b>该更看重谁。比如一个账户的大部分对手都正常，但有一个对手频繁和可疑账户往来，模型可以学会多看它几眼。</p>`,
+      cells: [44], highlight: ["GATConv(in_channels, hidden_channels, heads", "self.sigmoid"],
+      draw(svg, ctx) {
+        const C = [360, 175], nb = [[180, 70], [540, 70], [170, 280], [550, 280], [360, 320]];
+        const sus = [0, 0, 1, 0, 0], raw = [0.2, 0.4, 2.0, 0.1, 0.3], ex = raw.map(Math.exp), S = ex.reduce((a, b) => a + b, 0), al = ex.map((v) => v / S);
+        const L = nb.map((p) => K.svg(svg, "line", { x1: C[0], y1: C[1], x2: p[0], y2: p[1], stroke: "var(--accent)", "stroke-width": 1 }));
+        nb.forEach((p, i) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 15, fill: sus[i] ? SUS : ACC }));
+        const me = K.svg(svg, "circle", { cx: C[0], cy: C[1], r: 20, fill: "var(--ink-3)", stroke: "var(--ink)", "stroke-width": 2 });
+        const tx = nb.map((p, i) => K.svg(svg, "text", { x: (p[0] + C[0]) / 2 + 12, y: (p[1] + C[1]) / 2, "font-size": 12, fill: "var(--accent)", "font-weight": 700 }, ""));
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, "font-weight": 700 }, "注意力系数 α：线越粗越受重视（示意数值）");
+        ctx.wait(300).then((ok) => ok && ctx.tween(1200, (t) => L.forEach((l, i) => { K.set(l, { "stroke-width": 1 + 16 * al[i] * t }); tx[i].textContent = "α=" + (al[i] * t).toFixed(2); })))
+          .then((ok) => ok && ctx.tween(600, (t) => K.set(me, { fill: t > 0.5 ? SUS : "var(--ink-3)" })));
+      },
+    },
+    {
+      title: "打包成 PyG 数据集", kicker: "第 45–46 格 · InMemoryDataset",
+      html: `<p>作者把前面所有函数整理进一个 PyG 的 <code>InMemoryDataset</code> 子类 <code>AMLtoGraph</code>：第一次运行时读 CSV、预处理、建节点和边，生成 <code>Data(x, edge_index, y, edge_attr)</code> 并存成 <code>data.pt</code>；以后直接读这个文件（第 46 格）。</p><p>这样做的好处是数据处理只做一次，训练脚本只要一行 <code>AMLtoGraph(路径)</code> 就能拿到整张图。</p>`,
+      cells: [46], highlight: ["class AMLtoGraph", "def process", "torch.save"],
+      draw(svg, ctx) {
+        const steps2 = ["读 CSV", "preprocess", "get_all_account", "get_node_attr", "get_edge_df", "Data(...)", "data.pt"];
+        const nodes = steps2.map((s, i) => { const g = K.node(svg, 20 + i * 100, 140, 90, 50, s, { fs: 11, stroke: i === 6 ? "var(--accent)" : "var(--line)", bold: i === 6 }); g.style.opacity = 0; return g; });
+        (async () => {
+          for (let i = 0; i < nodes.length; i++) { if (!(await ctx.tween(250, (t) => (nodes[i].style.opacity = t)))) return; if (i < 6) K.arrow(svg, 110 + i * 100, 165, 120 + i * 100, 165); }
+          K.svg(svg, "text", { x: 620, y: 230, "text-anchor": "middle", "font-size": 12, fill: "var(--accent)" }, "下次直接读取");
+        })();
+      },
+    },
+    {
+      title: "训练：邻居采样小批量，以及评估里的坑", kicker: "第 47–49 格 · 训练",
+      html: `<p>训练设置（第 48 格）：随机切出 10% 节点做验证、其余训练；用 <b>NeighborLoader</b> 每次取 256 个种子账户，再为每个种子采样最多 30 个邻居、两层（<code>[30]*2</code>）组成小图；损失 BCELoss，优化器 SGD，学习率 0.0001，100 轮。</p><p>这一格有几个问题：①“准确率”用 <code>pred == ground_truth</code> 比较 Sigmoid 小数和 0/1，几乎永远不相等；②<code>if epoch%10 == 0</code> 里的 <code>epoch</code> 是常数 100，条件恒成立；③损失和准确率算在整个采样小图上，而不是只算种子节点。</p>`,
+      cells: [48], highlight: ["NeighborLoader", "num_neighbors=[30] * 2", "(pred == ground_truth.unsqueeze(1))", "if epoch%10 == 0"],
+      draw(svg, ctx) {
+        const g = G.make(41, 60, 3, 0.12, 0.03), pos = G.layout(g, { x: 20, y: 20, w: 430, h: 300 }, 7);
+        const d = G.draw(svg, g, pos, { r: 5, fill: () => "var(--ink-3)" });
+        d.lines.forEach((l) => K.set(l, { opacity: 0.4 }));
+        const seeds = [0, 7, 14];
+        K.svg(svg, "text", { x: 480, y: 50, "font-size": 13, "font-weight": 700 }, "一个小批量 =");
+        K.svg(svg, "text", { x: 480, y: 76, "font-size": 12, fill: "var(--warn)" }, "● 种子账户（要训练的）");
+        K.svg(svg, "text", { x: 480, y: 98, "font-size": 12, fill: "var(--accent)" }, "● 采样来的 1 跳邻居");
+        K.svg(svg, "text", { x: 480, y: 120, "font-size": 12, fill: "var(--c3)" }, "● 采样来的 2 跳邻居");
+        K.svg(svg, "text", { x: 480, y: 170, "font-size": 12 }, "损失应该只算种子账户，");
+        K.svg(svg, "text", { x: 480, y: 190, "font-size": 12 }, "作者对整个小图都算了");
+        ctx.wait(400).then((ok) => {
+          if (!ok) return;
+          seeds.forEach((s) => K.set(d.nodes[s], { fill: "var(--warn)", r: 8 }));
+          const h1 = new Set(); seeds.forEach((s) => g.adj[s].forEach((v) => h1.add(v)));
+          return ctx.wait(600).then((ok2) => {
+            if (!ok2) return;
+            h1.forEach((v) => { if (!seeds.includes(v)) K.set(d.nodes[v], { fill: "var(--accent)", r: 6.5 }); });
+            const h2 = new Set(); h1.forEach((u) => g.adj[u].forEach((v) => { if (!h1.has(v) && !seeds.includes(v)) h2.add(v); }));
+            return ctx.wait(600).then((ok3) => ok3 && h2.forEach((v) => K.set(d.nodes[v], { fill: "var(--c3)", r: 6 })));
+          });
+        });
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+  G.selfcheck();
+
+  /* ---------- 实验 A：transform('mean') 的对齐问题 ---------- */
+  function makeTxTable(seed, n) {
+    const r = K.rng(seed), accs = ["A", "B", "C", "D", "E"], T = [];
+    for (let i = 0; i < n; i++) T.push({ idx: i, a: accs[Math.floor(r() * 5)], v: Math.round(20 + r() * 480) });
+    T.sort((x, y) => x.a.localeCompare(y.a) || x.idx - y.idx); // 作者在 preprocess 里按账户排序，但保留原来的行索引
+    return T;
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "mode", label: "把平均值放回账户表的方式", value: "row", options: [["row", "按行号对齐（第 31 格的写法）"], ["acc", "按账户对齐（正确：groupby().mean() 再按账户合并）"]] },
+      { id: "n", label: "付款表行数", min: 6, max: 12, step: 1, value: 8 },
+      { id: "seed", label: "换一组数据", button: true },
+    ],
+    note: "左边是一张小付款表：已按账户排序（和作者第 19 格一样），但 pandas 排序后仍保留原来的行号（索引）。右边是账户表（5 个账户，行号 0–4）。浏览器现场按两种方式算“平均付款”：按行号对齐时，账户表第 i 行拿到的是“原始行号为 i 的那笔转账所属账户”的平均值，行号 ≥ 5 的转账结果直接丢掉；按账户对齐才是每个账户自己的平均值。",
+    render(svg, v) {
+      const T = makeTxTable(9 + v.seed * 5, v.n), accs = ["A", "B", "C", "D", "E"];
+      const mean = {}; accs.forEach((a) => { const xs = T.filter((t) => t.a === a).map((t) => t.v); mean[a] = xs.length ? xs.reduce((p, q) => p + q, 0) / xs.length : null; });
+      const tf = {}; T.forEach((t) => (tf[t.idx] = mean[t.a])); // transform('mean')：每一行都是它所属账户的均值，索引 = 原始行号
+      K.svg(svg, "text", { x: 20, y: 24, "font-size": 12, "font-weight": 700 }, "付款表（原始行号 · 账户 · 金额 · transform 结果）");
+      T.forEach((t, i) => {
+        K.svg(svg, "text", { x: 24, y: 50 + i * 26, "font-size": 12, "font-family": "var(--mono)" }, `${t.idx}`);
+        K.svg(svg, "text", { x: 56, y: 50 + i * 26, "font-size": 12, "font-family": "var(--mono)", fill: K.colors[accs.indexOf(t.a)] }, t.a);
+        K.svg(svg, "text", { x: 90, y: 50 + i * 26, "font-size": 12, "font-family": "var(--mono)" }, String(t.v));
+        K.svg(svg, "text", { x: 150, y: 50 + i * 26, "font-size": 12, "font-family": "var(--mono)", class: "muted" }, tf[t.idx].toFixed(1));
+      });
+      K.svg(svg, "text", { x: 360, y: 24, "font-size": 12, "font-weight": 700 }, "账户表（行号 · 账户 · 得到的平均付款）");
+      let wrong = 0;
+      accs.forEach((a, i) => {
+        const got = v.mode === "row" ? (tf[i] != null ? tf[i] : null) : mean[a];
+        const ok = got == null ? mean[a] == null : mean[a] != null && Math.abs(got - mean[a]) < 1e-9;
+        if (!ok) wrong++;
+        const y = 60 + i * 50;
+        K.svg(svg, "rect", { x: 356, y: y - 22, width: 270, height: 38, rx: 6, fill: "var(--panel-2)", stroke: ok ? "var(--good)" : "var(--bad)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 368, y, "font-size": 13, "font-family": "var(--mono)" }, `${i}`);
+        K.svg(svg, "text", { x: 396, y, "font-size": 13, "font-weight": 700, fill: K.colors[i] }, `账户 ${a}`);
+        K.svg(svg, "text", { x: 470, y, "font-size": 13, "font-family": "var(--mono)" }, got == null ? "空 → 0" : got.toFixed(1));
+        K.svg(svg, "text", { x: 560, y, "font-size": 11, class: "muted" }, `应为 ${mean[a] == null ? "0" : mean[a].toFixed(1)}`);
+        const row = T.findIndex((t) => t.idx === i);
+        if (v.mode === "row" && row >= 0) K.svg(svg, "line", { x1: 190, y1: 46 + row * 26, x2: 354, y2: y - 4, stroke: ok ? "var(--good)" : "var(--bad)", "stroke-dasharray": "4 3" });
+      });
+      return { readout: [
+        { k: "特征算错的账户", v: `${wrong} / 5`, color: wrong ? "var(--bad)" : "var(--good)" },
+        { k: "说明", v: v.mode === "row" ? "按行号对齐" : "按账户对齐" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：洗钱的几种形状 + 可疑性沿资金流扩散 ---------- */
+  function pattern(kind, seed) {
+    const r = K.rng(seed), n = 32, E = [], add = (a, b) => E.push([a, b]);
+    for (let i = 0; i < 34; i++) { const a = 8 + Math.floor(r() * 24), b = 8 + Math.floor(r() * 24); if (a !== b) add(a, b); }
+    const bad = new Set();
+    if (kind === "fanout") { for (let k = 1; k <= 6; k++) add(0, k); for (let k = 0; k <= 6; k++) bad.add(k); }
+    if (kind === "fanin") { for (let k = 1; k <= 6; k++) add(k, 0); for (let k = 0; k <= 6; k++) bad.add(k); }
+    if (kind === "cycle") { for (let k = 0; k < 6; k++) add(k, (k + 1) % 6); for (let k = 0; k < 6; k++) bad.add(k); }
+    if (kind === "gather") { for (let k = 1; k <= 4; k++) { add(0, k); add(k, 5); } for (let k = 0; k <= 5; k++) bad.add(k); }
+    // 洗钱账户也和普通账户有少量往来
+    [...bad].forEach((k) => { if (r() < 0.5) add(k, 8 + Math.floor(r() * 24)); });
+    return { n, E, bad };
+  }
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "kind", label: "洗钱形状", value: "cycle", options: [["fanout", "分散转出：1 个账户 → 很多账户"], ["fanin", "集中汇入：很多账户 → 1 个账户"], ["cycle", "绕圈：A→B→C→D→E→F→A"], ["gather", "分散再汇集：1 → 4 → 1"]] },
+      { id: "hop", label: "消息传递层数", min: 0, max: 5, step: 1, value: 2 },
+      { id: "keep", label: "每传一层保留的比例", min: 0.2, max: 1, step: 0.05, value: 0.6, fmt: (x) => x.toFixed(2) },
+      { id: "seed", label: "换背景", button: true },
+    ],
+    note: "银行已经确认了 1 个洗钱账户（金色描边），其余账户都不知道。每传一层，每个账户把邻居（不分转入转出）的可疑分数取平均、乘上保留比例，加到自己身上。层数 0 时只有已知的那一个；看看要传几层，整个洗钱团伙（黑框）才会被“染红”，同时周围的普通账户被误伤了多少。这就是 GNN 让信息沿资金流扩散的直观效果（这里不训练参数）。",
+    render(svg, v) {
+      const P = pattern(v.kind, 3 + v.seed * 7), n = P.n, adj = Array.from({ length: n }, () => []);
+      P.E.forEach(([a, b]) => { adj[a].push(b); adj[b].push(a); });
+      const known = 0;
+      let s = new Array(n).fill(0); s[known] = 1;
+      for (let k = 0; k < v.hop; k++) s = s.map((x, i) => x + (adj[i].length ? (v.keep * adj[i].reduce((q, j) => q + s[j], 0)) / adj[i].length : 0));
+      const mx = Math.max(...s.filter((_, i) => i !== known), 1e-9);
+      const g = { n, k: 1, cls: new Array(n).fill(0), edges: P.E, adj };
+      const pos = G.layout(g, { x: 20, y: 20, w: 440, h: 340 }, 5, 160);
+      P.E.forEach(([a, b]) => { const ang = Math.atan2(pos[b][1] - pos[a][1], pos[b][0] - pos[a][0]); K.arrow(svg, pos[a][0] + 8 * Math.cos(ang), pos[a][1] + 8 * Math.sin(ang), pos[b][0] - 9 * Math.cos(ang), pos[b][1] - 9 * Math.sin(ang), { color: P.bad.has(a) && P.bad.has(b) ? SUS : "var(--line)", sw: 1.2 }); });
+      pos.forEach((p, i) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: i === known ? 10 : 7, fill: SUS, "fill-opacity": i === known ? 1 : 0.08 + 0.92 * Math.min(1, s[i] / mx), stroke: i === known ? "var(--warn)" : P.bad.has(i) ? "var(--ink)" : "var(--panel)", "stroke-width": i === known ? 3.5 : P.bad.has(i) ? 2.5 : 1 }));
+      const rank = s.map((x, i) => [x, i]).filter(([, i]) => i !== known).sort((a, b) => b[0] - a[0]);
+      const k = P.bad.size - 1, hit = rank.slice(0, k).filter(([x, i]) => x > 0 && P.bad.has(i)).length;
+      const touched = s.filter((x, i) => i !== known && x > 0).length, fp = s.filter((x, i) => x > 0 && !P.bad.has(i)).length;
+      K.svg(svg, "text", { x: 480, y: 40, "font-size": 12, "font-weight": 700 }, "金色描边 = 已确认的洗钱账户");
+      K.svg(svg, "text", { x: 480, y: 62, "font-size": 12 }, "黑框 = 同一团伙（真实答案）");
+      K.svg(svg, "text", { x: 480, y: 84, "font-size": 12 }, "红色越深 = 分数越高");
+      return { readout: [
+        { k: `前 ${k} 名命中团伙成员`, v: `${hit} / ${k}`, color: hit === k ? "var(--good)" : "var(--warn)" },
+        { k: "被“染”到的账户", v: String(touched) },
+        { k: "其中普通账户", v: String(fp), color: fp > k ? "var(--bad)" : "var(--ink)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：概率 == 标签 ---------- */
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "p", label: "可疑账户占比", min: 0.01, max: 0.3, step: 0.01, value: 0.05, fmt: (x) => (x * 100).toFixed(0) + "%" },
+      { id: "sep", label: "模型的区分能力", min: 0, max: 4, step: 0.1, value: 2, fmt: (x) => x.toFixed(1) },
+      { id: "thr", label: "阈值（概率 ≥ 阈值判为可疑）", min: 0.05, max: 0.95, step: 0.05, value: 0.5, fmt: (x) => x.toFixed(2) },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "浏览器里模拟 2,000 个验证账户和一个输出 Sigmoid 概率的模型（可疑账户的得分平均高出“区分能力”个单位）。分别按三种方式算：作者的“概率 == 标签”、先过阈值再比较的准确率、以及什么都不做全猜“正常”的准确率；再看可疑账户的召回率。",
+    render(svg, v) {
+      const r = K.rng(21 + v.seed * 3), N = 2000, y = [], pr = [];
+      for (let i = 0; i < N; i++) { const yy = r() < v.p ? 1 : 0; y.push(yy); pr.push(K.sigmoid(K.randn(r) + (yy ? v.sep / 2 : -v.sep / 2) - 1.5)); }
+      let eq = 0, acc = 0, base = 0, tp = 0, pos = 0;
+      for (let i = 0; i < N; i++) { if (pr[i] === y[i]) eq++; const h = pr[i] >= v.thr ? 1 : 0; if (h === y[i]) acc++; if (!y[i]) base++; if (y[i]) { pos++; if (h) tp++; } }
+      const items = [["作者：概率 == 标签", eq / N, "var(--bad)"], ["过阈值后的准确率", acc / N, "var(--accent)"], ["全猜“正常”", base / N, "var(--ink-3)"], ["可疑账户召回率", pos ? tp / pos : 0, "var(--c6)"]];
+      const ax = K.axes(svg, { x: 50, y: 20, w: 560, h: 230 }, [0, 4], [0, 1], { xticks: 0, yticks: 4, yfmt: (x) => (x * 100).toFixed(0) + "%" });
+      items.forEach(([nm, val, c], i) => {
+        K.svg(svg, "rect", { x: ax.sx(i + 0.15), y: ax.sy(val), width: ax.sx(0.7) - ax.sx(0), height: Math.max(1, ax.sy(0) - ax.sy(val)), fill: c, rx: 3 });
+        K.svg(svg, "text", { x: ax.sx(i + 0.5), y: ax.sy(val) - 6, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, (val * 100).toFixed(1) + "%");
+        K.svg(svg, "text", { x: ax.sx(i + 0.5), y: 272, "text-anchor": "middle", "font-size": 12 }, nm);
+      });
+      K.svg(svg, "text", { x: 50, y: 310, "font-size": 12, class: "muted" }, `模型输出示例：${pr.slice(0, 4).map((x) => x.toFixed(4)).join("、")} …（没有一个正好等于 0 或 1）`);
+      return { readout: [
+        { k: "作者的写法", v: (eq / N * 100).toFixed(1) + "%", color: "var(--bad)" },
+        { k: "正确的准确率", v: (acc / N * 100).toFixed(1) + "%" },
+        { k: "召回率", v: (pos ? (tp / pos) * 100 : 0).toFixed(1) + "%" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

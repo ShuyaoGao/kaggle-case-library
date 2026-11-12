@@ -1,0 +1,572 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>预测模型运行快慢</title>
+<meta name="description" content="Kaggle 案例拆解：Google“Fast or Slow? Predict AI Model Runtime”比赛官方入门 notebook。把 AI 模型的计算图当成图，用 TensorFlow-GNN 和残差图卷积给不同的编译配置排序，并用 ListMLE 损失和 OPA 指标训练评估。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">计算图 · 排序学习 · TensorFlow-GNN</div>
+  <h1>哪种设置让 AI 模型跑得更快？用图神经网络给配置排名</h1>
+  <p class="en">Starter notebook: Fast or Slow with TensorFlow GNN</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span><span class="tag ml">优化与运筹</span>
+    <span class="tag method">计算图</span><span class="tag method">TF-GNN GraphTensor</span><span class="tag method">异构节点 / 边集</span>
+    <span class="tag method">对称归一化图卷积</span><span class="tag method">残差连接</span><span class="tag method">分段 dropout</span><span class="tag method">ListMLE 排序损失</span><span class="tag method">OPA 指标</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Gusthema</b>（Kaggle 官方，比赛入门 notebook）</span>
+    <span>Kaggle 点赞 <b>369</b>（2026-11 抓取）</span>
+    <span>比赛 <b>predict-ai-model-runtime</b>（Google - Fast or Slow? Predict AI Model Runtime，TPU 图数据）</span>
+    <span><a href="https://www.kaggle.com/code/gusthema/starter-notebook-fast-or-slow-with-tensorflow-gnn" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">AI 模型的“计算图”和不同编译配置下的运行时间</div><p>每个 AI 模型是一张图：节点是一个个运算（加法、矩阵乘法……），边是数据从一个运算流向下一个。同一张图用不同的配置编译，运行时间不同。<span data-cell="18">出处</span> <span data-cell="23">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">给同一张图的各种配置，按快慢排个序</div><p>不需要预测准确的时间，只需要排对顺序，所以标签直接除以 1e7 缩小。<span data-cell="12">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">TF-GNN + 残差图卷积 + 排序损失</div><p>操作码嵌入、配置特征拼接，在对称归一化的邻接矩阵上做图卷积，汇总成一个分数；用 ListMLE 损失训练、OPA 评估。<span data-cell="36">出处</span> <span data-cell="39">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">跑通了 Layout 部分的完整流程</div><p>示例只训练 1 轮，验证 OPA 打印在运行输出里，文字没给分数；Tile 部分写着“九月底前补上”。<span data-cell="41">出处</span> <span data-cell="47">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">Google 提供的 <b>TPU 计算图数据</b>（TpuGraphs）。机器学习编译器（XLA）在把模型放到 TPU 芯片上运行前，要为图里的一些运算选“配置”（比如张量在内存里怎么排列），不同选择跑起来快慢不同。比赛要求为每张图的候选配置预测快慢顺序。notebook 没有给出图的数量，下面只写 notebook 里出现的结构。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">Layout 数据的四个子集</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>维度</th><th>取值</th><th>说明</th></tr>
+        <tr><td>来源 SOURCE</td><td><code>xla</code> / <code>nlp</code></td><td>两类模型来源</td></tr>
+        <tr><td>搜索方式 SEARCH</td><td><code>random</code> / <code>default</code></td><td>候选配置是怎么产生的</td></tr>
+      </table></div>
+      <p style="font-size:14px">四种组合各训练一次、各出一个 CSV，最后拼起来（<span data-cell="44">第 44 格</span>）。还有一个 Tile 数据集，notebook 写着之后补充（<span data-cell="47">第 47 格</span>）。</p>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">每批图数</div><div class="v">16</div></div>
+        <div class="stat-tile"><div class="k">每图每批配置数</div><div class="v">5</div></div>
+        <div class="stat-tile"><div class="k">每图最多保留节点</div><div class="v">1,000</div></div>
+        <div class="stat-tile"><div class="k">每图配置数上限</div><div class="v">500</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">见 <span data-cell="10">第 10 格</span>、<span data-cell="12">第 12 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">一张图（GraphTensor）里有什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>名称</th><th>类型</th><th>含义</th></tr>
+        <tr><td><code>op</code></td><td>节点集</td><td>运算节点：操作码 <code>op</code> + 数值特征 <code>feats</code></td></tr>
+        <tr><td><code>nconfig</code></td><td>节点集（虚拟）</td><td>可配置节点的配置特征，每张图有 5 份（5 个配置）</td></tr>
+        <tr><td><code>g</code></td><td>节点集</td><td>图级别：<code>graph_id</code>（模型名）、<code>runtimes</code>（<b>答案</b>：各配置的运行时间）</td></tr>
+        <tr><td><code>feed</code></td><td>边集</td><td>真正的计算图：运算 → 运算</td></tr>
+        <tr><td><code>config</code></td><td>边集</td><td>nconfig → 它对应的那个 op</td></tr>
+        <tr><td><code>g_op</code> / <code>g_config</code></td><td>边集</td><td>把节点按所属的图分组，用于全图池化</td></tr>
+        <tr><td><code>sampled_feed</code> / <code>sampled_config</code></td><td>边集</td><td>只保留部分节点后的边，用于分段 dropout</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">见 <span data-cell="18">第 18 格</span>、<span data-cell="23">第 23 格</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="23">
+    <h3>动手试试 A · 分段 dropout：只保留一段节点，边还剩多少 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="41">
+    <h3>动手试试 B · 只要排对顺序：OPA 指标和 ListMLE 损失 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">notebook 给出的要点</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>只需要排序，所以运行时间（大约在十万量级）除以 1e7 当标签</td><td><span data-cell="12">第 12 格</span></td></tr>
+        <tr><td>用 TF-GNN 写模型时可以“当作只有一张图”来写，自动推广到一批图</td><td><span data-cell="13">第 13 格</span></td></tr>
+        <tr><td>图卷积用 Kipf & Welling 的对称归一化邻接矩阵（加自环、变无向）</td><td><span data-cell="32">第 32 格</span></td></tr>
+        <tr><td>分段 dropout：全图前向一次（不回传梯度），再只在采样的边上前向一次</td><td><span data-cell="36">第 36 格</span></td></tr>
+        <tr><td>Layout 部分更难，分数主要由它决定，所以先发布；Tile 部分之后补</td><td><span data-cell="47">第 47 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">示例训练只跑 1 轮（第 41 格 <code>epochs = 1</code>），训练和验证 OPA 打印在运行输出里，notebook 文字没有给出分数，这里不列。</p>
+      <h3>读代码时值得注意的地方</h3>
+      <ul class="tight">
+        <li><b>只训练 1 轮</b>：第 41 格写了早停逻辑（5 轮不涨就停），但 <code>epochs = 1</code>，早停实际不会触发。这是入门示例，真正比赛要多训练。</li>
+        <li><b>配置特征乘以 100</b>（第 37 格）：没有解释的经验常数，相当于手动放大配置特征的影响。</li>
+        <li><b>几处未完成的文字</b>：第 3 格的 GitHub 链接是空的，第 9 格说明只写了半句，第 18 格提到的 <code>CONFIGS_PER_GRAPH_PER_EPOCH</code> 和代码里的 <code>CONFIGS_PER_GRAPH</code> 名字不一致，Tile 部分没有写。</li>
+        <li><b>“连续编号保留”是简化做法</b>：作者自己说分段 dropout 只保留编号连续的节点，欢迎改进（第 23 格；实验 A）。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>不用真的在芯片上跑，就能估计哪种编译配置更快，帮编译器自动挑选，省下大量试跑时间。</li>
+        <li><b>同类问题：</b>数据库查询计划选择、芯片电路布局、程序性能预测、云计算资源调度：对象本身是一张图，要在多个方案里挑最好的。</li>
+        <li><b>可迁移的套路：</b>把“方案”作为节点上的额外特征 → 同一张图对每个方案各算一个分数 → 用排序损失只学相对顺序 → 用成对排序准确率评估。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>MLP 小工具、操作码嵌入 <span data-cell="7">第 7 格</span></li>
+        <li><code>tf.data</code> + GraphTensor 批处理（合并成一张大图） <span data-cell="12">第 12 格</span></li>
+        <li>配置特征用 config 邻接矩阵对齐到 op 节点，并广播到 5 份 <span data-cell="29">第 29 格</span> <span data-cell="31">第 31 格</span></li>
+        <li>Â = D<sup>-1/2</sup>(A + Aᵀ + I)D<sup>-1/2</sup> 图卷积 <span data-cell="33">第 33 格</span></li>
+        <li>ResModel：prenet → 2 层带残差的图卷积 → 池化 → postnet <span data-cell="37">第 37 格</span></li>
+        <li>ListMLE 损失、Adam（学习率 1e-3，梯度裁剪 0.5）、OPA 指标 <span data-cell="39">第 39 格</span></li>
+        <li>测试集每 50 个配置一批推理，按分数排序写 CSV <span data-cell="43">第 43 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>为什么这个比赛只要求“排对顺序”，而不要求预测准确的运行时间？对编译器来说，哪种信息更有用？</li>
+      <li>计算图本来是有方向的（数据从前往后流），作者却用 A + Aᵀ 把它变成无向的。这样做得到了什么、又丢掉了什么？</li>
+      <li>一张大模型的计算图可能有上万个节点。分段 dropout 只拿一段节点来训练，会不会漏掉远处节点之间的关系？</li>
+      <li>OPA 只看“两两比较对不对”。如果最快的那个配置排错了，但其他都排对了，OPA 还会很高吗？编译器会满意吗？</li>
+      <li>CNN 处理的图片大小固定、RNN 处理的是一条序列。为什么 AI 模型的计算图不能直接用 CNN 或 RNN 处理？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Gusthema（Kaggle），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。比赛：Google - Fast or Slow? Predict AI Model Runtime（TpuGraphs 数据集）。
+</footer>
+</main>
+
+<script src="nb/tpu-runtime-tfgnn.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* ===== 本页图神经网络小工具（页面专用，不改共用文件） ===== */
+  const G = {};
+  /* 自查开关：网址带 ?fast 时用定时器代替 requestAnimationFrame（无界面截图时动画也能播完），并折叠代码 */
+  G.fast = /[?&]fast/.test(location.search);
+  if (G.fast) window.requestAnimationFrame = (cb) => setTimeout(() => cb(performance.now()), 8);
+  G.selfcheck = function () {
+    if (!G.fast) return;
+    setTimeout(() => {
+      if (/[?&]labs/.test(location.search)) {
+        const box = document.createElement("div"); const m = document.querySelector("main"); m.insertBefore(box, m.firstChild);
+        document.querySelectorAll(".inline-lab").forEach((x) => box.appendChild(x));
+        return;
+      }
+      if (/[?&]nofold/.test(location.search)) return;
+      const b = document.querySelector('[data-a="fold"]'); if (b) b.click();
+    }, 50);
+  };
+  /* 随机“社团图”：n 个点、k 类；同类连边概率 pIn，异类 pOut */
+  G.make = function (seed, n, k, pIn, pOut) {
+    const r = K.rng(seed), cls = [], edges = [], adj = Array.from({ length: n }, () => []);
+    for (let i = 0; i < n; i++) cls.push(i % k);
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+      if (r() < (cls[i] === cls[j] ? pIn : pOut)) { edges.push([i, j]); adj[i].push(j); adj[j].push(i); }
+    }
+    // 保证没有孤立点：孤立点随机连一个同类点
+    for (let i = 0; i < n; i++) if (!adj[i].length) {
+      let j = i; while (j === i || cls[j] !== cls[i]) j = Math.floor(r() * n);
+      edges.push([i, j]); adj[i].push(j); adj[j].push(i);
+    }
+    return { n, k, cls, edges, adj };
+  };
+  G.grav = 1;
+  /* 简单力导向布局（确定性），返回 [[x,y]...] 落在 box 里 */
+  G.layout = function (g, box, seed, iters) {
+    const r = K.rng(seed || 1), n = g.n, P = [];
+    for (let i = 0; i < n; i++) {
+      const a = (2 * Math.PI * g.cls[i]) / Math.max(1, g.k) + r() * 1.2, d = 0.25 + r() * 0.2;
+      P.push([0.5 + Math.cos(a) * d, 0.5 + Math.sin(a) * d]);
+    }
+    const it = iters || 160, kk = 0.6 / Math.sqrt(n);
+    for (let t = 0; t < it; t++) {
+      const D = P.map(() => [0, 0]), temp = 0.05 * (1 - t / it) + 0.002;
+      for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+        let dx = P[i][0] - P[j][0], dy = P[i][1] - P[j][1], d2 = dx * dx + dy * dy + 1e-6, f = (kk * kk) / d2;
+        D[i][0] += dx * f; D[i][1] += dy * f; D[j][0] -= dx * f; D[j][1] -= dy * f;
+      }
+      g.edges.forEach(([a, b]) => {
+        const dx = P[a][0] - P[b][0], dy = P[a][1] - P[b][1], d = Math.sqrt(dx * dx + dy * dy) + 1e-6, f = d / kk;
+        D[a][0] -= (dx / d) * f * d; D[a][1] -= (dy / d) * f * d; D[b][0] += (dx / d) * f * d; D[b][1] += (dy / d) * f * d;
+      });
+      for (let i = 0; i < n; i++) {
+        D[i][0] += (0.5 - P[i][0]) * G.grav; D[i][1] += (0.5 - P[i][1]) * G.grav;
+        const L = Math.sqrt(D[i][0] ** 2 + D[i][1] ** 2) + 1e-9, s = Math.min(L, temp);
+        P[i][0] = K.clamp(P[i][0] + (D[i][0] / L) * s + 0, -2, 3);
+        P[i][1] = K.clamp(P[i][1] + (D[i][1] / L) * s + 0, -2, 3);
+      }
+    }
+    const xs = P.map((p) => p[0]), ys = P.map((p) => p[1]);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys), m = 10;
+    return P.map(([x, y]) => [box.x + m + ((x - x0) / (x1 - x0 || 1)) * (box.w - 2 * m), box.y + m + ((y - y0) / (y1 - y0 || 1)) * (box.h - 2 * m)]);
+  };
+  /* 画图：返回 {nodes, lines} */
+  G.draw = function (svg, g, pos, opt) {
+    opt = opt || {};
+    const lines = g.edges.map(([a, b]) => K.svg(svg, "line", { x1: pos[a][0], y1: pos[a][1], x2: pos[b][0], y2: pos[b][1], stroke: "var(--line)", "stroke-width": opt.ew || 1.2 }));
+    const nodes = pos.map((p, i) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: opt.r || 6, fill: opt.fill ? opt.fill(i) : K.colors[g.cls[i] % 6], stroke: "var(--panel)", "stroke-width": 1.5 }));
+    return { nodes, lines };
+  };
+  /* 一个“消息”小圆点沿边从 a 飞到 b */
+  G.fly = function (svg, ctx, pa, pb, color, ms) {
+    const d = K.svg(svg, "circle", { cx: pa[0], cy: pa[1], r: 4, fill: color || "var(--accent)" });
+    return ctx.tween(ms || 600, (t) => { d.setAttribute("cx", K.lerp(pa[0], pb[0], t)); d.setAttribute("cy", K.lerp(pa[1], pb[1], t)); }).then((ok) => { d.remove(); return ok; });
+  };
+  /* 一轮消息传递：H 是每个点的向量；mode = mean / sum / max；self 是否带上自己 */
+  G.prop = function (H, adj, mode, self) {
+    return H.map((h, i) => {
+      const nb = self ? adj[i].concat([i]) : adj[i];
+      if (!nb.length) return h.slice();
+      const out = h.map(() => (mode === "max" ? -Infinity : 0));
+      nb.forEach((j) => H[j].forEach((v, d) => { if (mode === "max") out[d] = Math.max(out[d], v); else out[d] += v; }));
+      if (mode === "mean") return out.map((v) => v / nb.length);
+      return out;
+    });
+  };
+  /* GCN 式对称归一化传播：D^-1/2 (A+I) D^-1/2 H */
+  G.gcn = function (H, adj) {
+    const deg = adj.map((a) => a.length + 1);
+    return H.map((h, i) => {
+      const out = h.map((v) => v / deg[i]);
+      adj[i].forEach((j) => { const w = 1 / Math.sqrt(deg[i] * deg[j]); H[j].forEach((v, d) => (out[d] += w * v)); });
+      return out;
+    });
+  };
+  /* 多分类逻辑回归（softmax），全批量梯度下降 */
+  G.softmaxFit = function (X, y, K_, epochs, lr, l2) {
+    const D = X[0].length, W = Array.from({ length: K_ }, () => new Array(D + 1).fill(0));
+    for (let e = 0; e < epochs; e++) {
+      const Gr = W.map((w) => w.map(() => 0));
+      for (let i = 0; i < X.length; i++) {
+        const p = G.softmaxP(W, X[i]);
+        for (let c = 0; c < K_; c++) { const g = p[c] - (y[i] === c ? 1 : 0); for (let d = 0; d < D; d++) Gr[c][d] += g * X[i][d]; Gr[c][D] += g; }
+      }
+      for (let c = 0; c < K_; c++) for (let d = 0; d <= D; d++) W[c][d] -= lr * (Gr[c][d] / X.length + (d < D ? (l2 || 0) * W[c][d] : 0));
+    }
+    return W;
+  };
+  G.softmaxP = function (W, x) {
+    const z = W.map((w) => { let s = w[w.length - 1]; for (let d = 0; d < x.length; d++) s += w[d] * x[d]; return s; });
+    const m = Math.max(...z), ex = z.map((v) => Math.exp(v - m)), S = ex.reduce((a, b) => a + b, 0);
+    return ex.map((v) => v / S);
+  };
+  G.argmax = (a) => a.reduce((bi, v, i) => (v > a[bi] ? i : bi), 0);
+  /* 一圈圈扩散的“跳数”环 */
+  G.ring = function (svg, p, r, color) { return K.svg(svg, "circle", { cx: p[0], cy: p[1], r, fill: "none", stroke: color || "var(--accent)", "stroke-width": 2, "stroke-dasharray": "5 4" }); };
+  /* 小工具：节点向量 → 颜色（取最大类的颜色，透明度=置信度） */
+  G.paint = function (el, vec) {
+    const s = vec.reduce((a, b) => a + Math.max(0, b), 0) || 1, c = G.argmax(vec), conf = Math.max(0, vec[c]) / s;
+    K.set(el, { fill: K.colors[c % 6], "fill-opacity": 0.25 + 0.75 * conf });
+  };
+
+
+  const OPC = { input: "var(--ink-3)", matmul: "var(--c1)", add: "var(--c3)", relu: "var(--c4)", conv: "var(--c2)", out: "var(--c6)" };
+  /* 一张小计算图（示意） */
+  const CG = {
+    nodes: [["input", 60, 170], ["conv", 170, 90], ["conv", 170, 250], ["add", 290, 170], ["relu", 400, 170], ["matmul", 510, 110], ["matmul", 510, 230], ["add", 620, 170], ["out", 700, 170]],
+    edges: [[0, 1], [0, 2], [1, 3], [2, 3], [3, 4], [4, 5], [4, 6], [5, 7], [6, 7], [7, 8]],
+    cfg: [1, 2, 5, 6],
+  };
+  function drawCG(svg, opt) {
+    opt = opt || {};
+    const P = CG.nodes.map((n) => [n[1], n[2]]);
+    CG.edges.forEach(([a, b]) => K.arrow(svg, P[a][0] + 18, P[a][1] + (P[b][1] - P[a][1]) * 0.15, P[b][0] - 20, P[b][1] - (P[b][1] - P[a][1]) * 0.12, { color: "var(--ink-3)" }));
+    const nodes = CG.nodes.map((n, i) => K.svg(svg, "circle", { cx: n[1], cy: n[2], r: 18, fill: OPC[n[0]], stroke: CG.cfg.includes(i) && opt.cfg ? "var(--warn)" : "var(--panel)", "stroke-width": CG.cfg.includes(i) && opt.cfg ? 3.5 : 1.5 }));
+    CG.nodes.forEach((n) => K.svg(svg, "text", { x: n[1], y: n[2] + 34, "text-anchor": "middle", "font-size": 11 }, n[0]));
+    return { P, nodes };
+  }
+
+  const steps = [
+    {
+      at: 0, title: "开场：预测 AI 模型在 TPU 上跑多快", kicker: "第 0–4 格 · 介绍与安装",
+      html: `<p>这是比赛方给参赛者的官方入门 notebook。它会教你：安装 TF-GNN（TensorFlow 的图神经网络库）和 TF-Ranking（排序学习库）、读入数据、理解一批图的结构、写一个 GNN 模型并训练、生成提交文件（第 0 格）。</p><p>读数据和写模型的辅助代码来自另一个项目（第 3–4 格）：<code>layout_data</code>、<code>tile_data</code> 读数据，<code>implicit</code> 提供“隐式邻接矩阵”，方便用矩阵乘法写图卷积。</p>`,
+      cells: [0, 2, 4], highlight: ["tensorflow_gnn", "tensorflow_ranking"],
+      draw(svg, ctx) {
+        const d = drawCG(svg);
+        d.nodes.forEach((n) => (n.style.opacity = 0));
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13 }, "一个 AI 模型 = 一张计算图：节点是运算，箭头是数据流（示意）");
+        (async () => {
+          for (let i = 0; i < d.nodes.length; i++) if (!(await ctx.tween(150, (t) => (d.nodes[i].style.opacity = t)))) return;
+          for (const [a, b] of CG.edges) if (!(await G.fly(svg, ctx, d.P[a], d.P[b], "var(--warn)", 250))) return;
+        })();
+      },
+    },
+    {
+      title: "两个小零件：MLP 与操作码嵌入", kicker: "第 5–7 格 · 辅助函数",
+      html: `<p><code>_mlp</code>：给定每层宽度，搭一个多层全连接网络，每层带 L2 正则（第 7 格）。</p><p><code>_OpEmbedding</code>：每个运算节点有一个整数<b>操作码</b>（比如 7 代表加法、23 代表矩阵乘法）。整数本身没有大小意义，所以用一个可学习的<b>嵌入表</b>把每种操作码变成一串数字，作为新特征 <code>op_e</code> 加到节点上。</p>`,
+      cells: [7], highlight: ["def _mlp", "class _OpEmbedding", "Embedding("],
+      draw(svg, ctx) {
+        const ops = [["add", 3], ["matmul", 7], ["conv", 12], ["relu", 5]];
+        K.svg(svg, "text", { x: 40, y: 34, "font-size": 13, "font-weight": 700 }, "操作码（整数）→ 查嵌入表 → 一串可学习的数字");
+        const r = K.rng(4);
+        ops.forEach(([n, id], i) => {
+          const y = 60 + i * 66;
+          K.node(svg, 40, y, 120, 44, `${n}\n操作码 ${id}`, { stroke: OPC[n], sw: 2, fs: 12 });
+          const cells = [];
+          for (let d = 0; d < 12; d++) { const v = K.randn(r); cells.push(K.svg(svg, "rect", { x: 300 + d * 30, y: y + 8, width: 26, height: 28, rx: 3, fill: v > 0 ? "var(--c3)" : "var(--c6)", "fill-opacity": 0 })); cells[d]._v = Math.min(1, Math.abs(v)); }
+          const a = K.arrow(svg, 160, y + 22, 296, y + 22, { color: "var(--ink-3)" }); a.style.opacity = 0;
+          ctx.wait(i * 400).then((ok) => ok && ctx.tween(400, (t) => { a.style.opacity = t; cells.forEach((c) => K.set(c, { "fill-opacity": c._v * t })); }));
+        });
+      },
+    },
+    {
+      title: "选一个子集：xla / nlp × random / default", kicker: "第 8–10 格 · 常量",
+      html: `<p>Layout 数据分四个子集：模型来源 <code>xla</code> 或 <code>nlp</code>，候选配置的产生方式 <code>random</code>（随机）或 <code>default</code>（默认策略）。这份 notebook 先拿 xla + random 演示，其他三个组合改两个常量重跑即可（第 10、44 格）。</p><p>批大小：每批 16 张图，每张图每次随机取 5 个配置；每张图最多保留 1,000 个节点（用于后面的分段 dropout）。</p>`,
+      cells: [10], highlight: ["SOURCE = 'xla'", "SEARCH = 'random'", "BATCH_SIZE = 16", "CONFIGS_PER_GRAPH = 5", "MAX_KEEP_NODES = 1000"],
+      draw(svg, ctx) {
+        const cells = [["xla", "random"], ["xla", "default"], ["nlp", "random"], ["nlp", "default"]];
+        cells.forEach(([a, b], i) => {
+          const g = K.node(svg, 120 + (i % 2) * 260, 60 + Math.floor(i / 2) * 120, 220, 90, `${a} × ${b}`, { bold: true, stroke: i === 0 ? "var(--accent)" : "var(--line)", sw: i === 0 ? 3 : 1 });
+          g.style.opacity = 0; ctx.wait(i * 250).then((ok) => ok && ctx.tween(300, (t) => (g.style.opacity = t)));
+        });
+        K.svg(svg, "text", { x: 120, y: 320, "font-size": 12 }, "本 notebook 演示蓝框这一个；四个都跑完再把结果拼起来");
+      },
+    },
+    {
+      title: "准备数据：运行时间缩小当标签", kicker: "第 11–12 格 · tf.data",
+      html: `<p>用辅助模块读入 npz 文件（第一次运行要建缓存，约 10 分钟）。配置数少于 5 的图不要，多于 500 的也过滤掉以加快速度（第 12 格）。</p><p>标签：每张图各个配置的运行时间 <code>runtimes</code>，<b>除以 1e7</b>。作者说明：运行时间大约在十万量级，但比赛只要求排序，所以缩放不影响结果。16 张图被 <code>merge_batch_to_components</code> 合并成<b>一张大图</b>（互不相连的 16 块），一次处理。</p>`,
+      cells: [12], highlight: ["/ 1e7", "max_train_configs=500", "merge_batch_to_components"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "16 张小图 → 合并成一张“大图”（各块互不相连）");
+        const blocks = [];
+        for (let k = 0; k < 8; k++) {
+          const g = G.make(30 + k, 6, 1, 0.5, 0), x0 = 40 + (k % 4) * 160, y0 = 50 + Math.floor(k / 4) * 130;
+          const pos = G.layout(g, { x: x0, y: y0, w: 120, h: 90 }, k, 80);
+          const box = K.svg(svg, "rect", { x: x0 - 6, y: y0 - 6, width: 132, height: 102, rx: 8, fill: "none", stroke: "var(--line)" });
+          const dr = G.draw(svg, g, pos, { r: 4, fill: () => K.colors[k % 6] });
+          blocks.push({ box, x0, y0 });
+        }
+        K.svg(svg, "text", { x: 30, y: 325, "font-size": 12, class: "muted" }, "（画了 8 张；每张图还带 5 个配置的运行时间 ÷ 1e7）");
+        ctx.wait(700).then((ok) => ok && ctx.tween(800, (t) => blocks.forEach((b) => K.set(b.box, { "stroke-dasharray": `${4 + 6 * t} ${4 * t}` }))));
+        const big = K.svg(svg, "rect", { x: 26, y: 38, width: 650, height: 270, rx: 12, fill: "none", stroke: "var(--accent)", "stroke-width": 0 });
+        ctx.wait(1600).then((ok) => ok && ctx.tween(500, (t) => K.set(big, { "stroke-width": 3 * t })));
+      },
+    },
+    {
+      title: "GraphTensor：节点集、边集、上下文", kicker: "第 13–18 格 · TF-GNN 速成",
+      html: `<p>TF-GNN 用 <code>GraphTensor</code> 表示图，里面有三样东西（第 15 格）：</p><ul class="tight"><li><b>node_sets</b>：按节点类型分组的特征表。这里有三种节点：运算 <code>op</code>、可配置节点的配置 <code>nconfig</code>、图本身 <code>g</code>；</li><li><b>edge_sets</b>：按边类型分组的“起点编号 → 终点编号”列表，默认有方向；</li><li><b>context</b>：每张图的全局信息（这里没用，改用节点集 <code>g</code>）。</li></ul><p>第 18 格解释：<code>g</code> 里的 <code>runtimes</code> 是 16 × 5 的表，第 i 张图用第 j 个配置编译时的运行时间。</p>`,
+      cells: [14, 17], highlight: ["node_sets", "context"],
+      notes: { 18: "这里提到的 CONFIGS_PER_GRAPH_PER_EPOCH 在代码里叫 CONFIGS_PER_GRAPH" },
+      draw(svg, ctx) {
+        const parts = [["node_sets", ["op：运算节点（操作码 + 特征）", "nconfig：配置特征（每图 5 份）", "g：图级（模型名、运行时间）"], "var(--c1)"], ["edge_sets", ["feed：运算 → 运算", "config：nconfig → op", "g_op / g_config：分组", "sampled_*：分段 dropout"], "var(--c2)"]];
+        parts.forEach(([t, items, c], k) => {
+          const x = 40 + k * 340;
+          const h = K.node(svg, x, 30, 300, 40, t, { bold: true, stroke: c, sw: 2 });
+          items.forEach((it, i) => { const g = K.node(svg, x + 20, 86 + i * 52, 280, 40, it, { fs: 12 }); g.style.opacity = 0; ctx.wait(300 + (k * 4 + i) * 220).then((ok) => ok && ctx.tween(250, (u) => (g.style.opacity = u))); });
+        });
+      },
+    },
+    {
+      title: "边集：真正的计算图和几种“辅助边”", kicker: "第 19–23 格 · 边集",
+      html: `<p>打印各个边集（第 20、22 格）。作者的说明（第 21、23 格）：</p><ul class="tight"><li><code>feed</code>：真正的计算图，运算之间的数据流；</li><li><code>config</code>：每个虚拟的配置节点指向它所配置的那个运算，度为 1；</li><li><code>g_op</code>、<code>g_config</code>：把节点按“属于第几张图”分组，用来做全图池化；</li><li><code>sampled_feed</code>、<code>sampled_config</code>：为了<b>分段 dropout</b>，只保留随机选中的一段节点，<b>两端都被保留的边才留下</b>。作者的简化实现保留的是<b>编号连续</b>的节点，并欢迎大家改进。</li></ul>`,
+      cells: [20, 22], highlight: ["edge_sets['config']", "adjacency.source", "adjacency.target"],
+      draw(svg, ctx) {
+        const d = drawCG(svg, { cfg: true });
+        const cfgP = CG.cfg.map((i) => [d.P[i][0], d.P[i][1] < 170 ? d.P[i][1] - 70 : d.P[i][1] + 70]);
+        const virt = cfgP.map((p, k) => { const e = K.svg(svg, "rect", { x: p[0] - 12, y: p[1] - 12, width: 24, height: 24, rx: 4, fill: "var(--warn)" }); e.style.opacity = 0; return e; });
+        const lines = cfgP.map((p, k) => { const l = K.svg(svg, "line", { x1: p[0], y1: p[1], x2: d.P[CG.cfg[k]][0], y2: d.P[CG.cfg[k]][1], stroke: "var(--warn)", "stroke-dasharray": "4 3", "stroke-width": 2 }); l.style.opacity = 0; return l; });
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 12 }, "黑箭头 = feed（计算图）；黄方块 = nconfig 配置节点，黄虚线 = config 边（示意）");
+        ctx.wait(500).then((ok) => ok && ctx.tween(800, (t) => { virt.forEach((v) => (v.style.opacity = t)); lines.forEach((l) => (l.style.opacity = t)); }));
+      },
+    },
+    {
+      title: "操作码嵌入 + 配置特征", kicker: "第 24–27 格 · 特征",
+      html: `<p>先试用前面的嵌入层：数据集里一共有 <code>num_ops</code> 种操作码，嵌入成 16 维（演示用）。嵌入后 <code>op</code> 节点多了一个特征 <code>op_e</code>（第 25–26 格）。</p><p>然后取出两样东西准备拼接：每个运算节点的 <code>op_e</code>，和每个可配置节点的配置特征 <code>feats</code>（第 27 格）。两者的形状对不上，下一章解决。</p>`,
+      cells: [25, 27], highlight: ["_OpEmbedding(num_ops, 16)", "op_e", "['nconfig']['feats']"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 40, y: 34, "font-size": 13, "font-weight": 700 }, "op_e：每个运算节点一行（9 行）");
+        for (let i = 0; i < 9; i++) for (let d = 0; d < 8; d++) K.svg(svg, "rect", { x: 40 + d * 22, y: 50 + i * 28, width: 20, height: 24, fill: OPC[CG.nodes[i][0]], "fill-opacity": 0.35 + 0.08 * ((i + d) % 6) });
+        K.svg(svg, "text", { x: 360, y: 34, "font-size": 13, "font-weight": 700 }, "配置特征：只有 4 个可配置节点 × 5 个配置");
+        for (let k = 0; k < 4; k++) for (let c = 0; c < 5; c++) {
+          const e = K.svg(svg, "rect", { x: 360 + c * 60, y: 50 + k * 60, width: 52, height: 48, rx: 4, fill: "var(--warn)", "fill-opacity": 0 });
+          ctx.wait((k * 5 + c) * 60).then((ok) => ok && ctx.tween(200, (t) => K.set(e, { "fill-opacity": (0.25 + 0.15 * c) * t })));
+        }
+        K.svg(svg, "text", { x: 360, y: 310, "font-size": 12, class: "muted" }, "行数不同（9 vs 4），还多了“配置”这一维");
+      },
+    },
+    {
+      title: "对齐：把配置特征补到每个运算上，再复制 5 份", kicker: "第 28–31 格 · 形状对齐",
+      html: `<p>两处不一致（第 28 格）：①运算节点多、可配置节点少；②配置特征多一维（5 个配置）。</p><p>办法：用 <code>config</code> 边集的邻接矩阵去乘配置特征，可配置的运算拿到自己的配置，不可配置的运算得到全 0（第 29 格）；再把 <code>op_e</code> 复制 5 份叠成“立方体”，和配置特征拼在一起（第 31 格）。之后每个运算节点都有 5 套特征，<b>同一张图对 5 个配置各算一遍</b>。</p>`,
+      cells: [29, 31], highlight: ["config_adj @ config_features", "tf.stack([op_e] * CONFIGS_PER_GRAPH, axis=1)", "tf.concat"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 12, "font-weight": 700 }, "每行 = 一个运算节点；每列块 = 一个配置");
+        for (let i = 0; i < 9; i++) {
+          const cfg = CG.cfg.indexOf(i);
+          K.svg(svg, "circle", { cx: 40, cy: 60 + i * 30, r: 9, fill: OPC[CG.nodes[i][0]] });
+          for (let c = 0; c < 5; c++) {
+            const x = 70 + c * 125;
+            K.svg(svg, "rect", { x, y: 50 + i * 30, width: 60, height: 22, fill: OPC[CG.nodes[i][0]], "fill-opacity": 0.5 });
+            const e = K.svg(svg, "rect", { x: x + 62, y: 50 + i * 30, width: 50, height: 22, fill: cfg >= 0 ? "var(--warn)" : "var(--panel-2)", "fill-opacity": 0, stroke: "var(--line)" });
+            ctx.wait(400 + i * 80).then((ok) => ok && ctx.tween(300, (t) => K.set(e, { "fill-opacity": cfg >= 0 ? (0.25 + 0.15 * c) * t : t })));
+          }
+        }
+        for (let c = 0; c < 5; c++) K.svg(svg, "text", { x: 70 + c * 125 + 56, y: 335, "text-anchor": "middle", "font-size": 11 }, "配置 " + (c + 1));
+        K.svg(svg, "text", { x: 470, y: 30, "font-size": 11, class: "muted" }, "左半 = op_e 复制，右半 = 配置（灰 = 不可配置补 0）");
+      },
+    },
+    {
+      title: "在归一化邻接矩阵上做图卷积", kicker: "第 32–35 格 · 消息传递",
+      html: `<p>图卷积可以写成“用某种邻接矩阵左乘特征矩阵”。作者用 Kipf & Welling（2017）的做法（第 32 格）：</p><ol class="tight"><li>A + Aᵀ：把有向的计算图变成<b>无向</b>，信息能前后双向流动；</li><li>+ I：加上<b>自环</b>，每个节点也保留自己的信息；</li><li>两边各乘度的 −1/2 次方：<b>对称归一化</b>，避免连得多的节点数值越滚越大。</li></ol><p>于是一次消息传递就是 <code>Â @ X</code>（第 35 格）：每个运算节点得到自己和前后相邻运算的加权平均。</p>`,
+      cells: [33, 35], highlight: ["adj_op_op + adj_op_op.transpose()", "add_eye()", "normalize_symmetric()", "adj_op_op_hat @ combined_features"],
+      draw(svg, ctx) {
+        const d = drawCG(svg, { cfg: true });
+        const lab = K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, "font-weight": 700 }, "");
+        (async () => {
+          lab.textContent = "A + Aᵀ：箭头两个方向都能传消息";
+          if (!(await ctx.wait(500))) return;
+          const c = 4;
+          const nb = CG.edges.filter(([a, b]) => a === c || b === c).map(([a, b]) => (a === c ? b : a));
+          await Promise.all(nb.map((j) => G.fly(svg, ctx, d.P[j], d.P[c], "var(--accent)", 800)));
+          if (!ctx.alive()) return;
+          lab.textContent = "+ I：节点也听自己的；再对称归一化后求加权和";
+          await ctx.tween(500, (t) => K.set(d.nodes[c], { r: 18 + 6 * Math.sin(t * Math.PI) }));
+          if (!ctx.alive()) return;
+          lab.textContent = "所有节点同时做：Â @ X";
+          await Promise.all(CG.edges.flatMap(([a, b]) => [G.fly(svg, ctx, d.P[a], d.P[b], "var(--accent)", 700), G.fly(svg, ctx, d.P[b], d.P[a], "var(--accent)", 700)]));
+        })();
+      },
+    },
+    {
+      title: "ResModel：残差图卷积 + 分段 dropout + 池化", kicker: "第 36–37 格 · 完整模型",
+      html: `<p><code>ResModel</code>（第 37 格）的流程：</p><ol class="tight"><li>操作码嵌入，与数值特征拼接；配置特征乘以 100 后对齐、拼接；过一个 MLP（prenet）；</li><li>两层图卷积：每层先拼上配置特征，乘 Â，过 MLP，再<b>加回输入</b>（残差连接）；</li><li>分段 dropout：先在全图上算一遍但不回传梯度，再只在 <code>sampled_*</code> 边上算一遍；被选中的节点用第二遍的结果，其余用第一遍的；</li><li>按 <code>g_op</code>、<code>g_config</code> 把节点汇总到图级别，过 postnet，<b>每个配置输出一个分数</b>。</li></ol>`,
+      cells: [37], highlight: ["x += y", "tf.stop_gradient", "edgeset_prefix='sampled_'", "tf.where(is_selected, x_backprop, x_full)", "100 * (adj_config @ config_features)"],
+      notes: { 37: "配置特征乘以 100 是没有解释的经验常数" },
+      draw(svg, ctx) {
+        const boxes = [["嵌入 + 拼接", 20], ["prenet MLP", 140], ["图卷积 1", 260], ["图卷积 2", 380], ["池化到图", 500], ["postnet → 分数", 610]];
+        const nodes = boxes.map(([t, x]) => { const g = K.node(svg, x, 140, 100, 56, t, { fs: 12, stroke: t.startsWith("图卷积") ? "var(--accent)" : "var(--line)", sw: t.startsWith("图卷积") ? 2 : 1 }); g.style.opacity = 0; return g; });
+        (async () => {
+          for (let i = 0; i < nodes.length; i++) { if (!(await ctx.tween(220, (t) => (nodes[i].style.opacity = t)))) return; if (i < nodes.length - 1) K.arrow(svg, boxes[i][1] + 100, 168, boxes[i + 1][1] - 2, 168); }
+          [260, 380].forEach((x) => K.svg(svg, "path", { d: `M${x - 20},150 C${x - 20},90 ${x + 120},90 ${x + 120},140`, fill: "none", stroke: "var(--accent)", "stroke-dasharray": "4 3", "stroke-width": 2 }));
+          K.svg(svg, "text", { x: 300, y: 82, "font-size": 12, fill: "var(--accent)" }, "残差：x += 图卷积(x)");
+          K.svg(svg, "text", { x: 20, y: 260, "font-size": 12 }, "分段 dropout：全图算一遍（不求梯度）+ 只在采样的一段上算一遍（求梯度）");
+          K.svg(svg, "text", { x: 20, y: 290, "font-size": 12 }, "输出：每张图 5 个分数，对应 5 个配置");
+        })();
+      },
+    },
+    {
+      title: "ListMLE 排序损失与 OPA 指标，训练 1 轮", kicker: "第 38–41 格 · 训练",
+      html: `<p>损失用 TF-Ranking 的 <b>ListMLE</b>：把每张图的 5 个配置看成一个列表，训练模型给出的分数顺序和真实运行时间的顺序一致（第 39 格）。优化器 Adam，学习率 1e-3，梯度裁剪 0.5。</p><p>指标是 <b>OPA</b>（Ordered Pair Accuracy，成对顺序准确率）：在所有“两两配对”中，模型排对先后的比例。第 41 格写了“记录最好的验证 OPA、5 轮不涨就停”的循环，但示例里 <code>epochs = 1</code>，只训练 1 轮。</p>`,
+      cells: [39, 41], highlight: ["ListMLELoss", "OPAMetric", "clipnorm=0.5", "epochs = 1"],
+      draw(svg, ctx) {
+        const rt = [3.2, 1.1, 4.5, 2.0, 2.7], sc = [3.0, 1.5, 4.1, 2.9, 2.2];
+        const ax = K.axes(svg, { x: 60, y: 30, w: 260, h: 250 }, [0, 5], [0, 5], { xlabel: "真实运行时间", ylabel: "模型分数" });
+        rt.forEach((r, i) => K.svg(svg, "circle", { cx: ax.sx(r), cy: ax.sy(sc[i]), r: 8, fill: K.colors[i] }));
+        K.svg(svg, "text", { x: 380, y: 40, "font-size": 13, "font-weight": 700 }, "两两比较（共 10 对）");
+        const pairs = []; for (let i = 0; i < 5; i++) for (let j = i + 1; j < 5; j++) pairs.push([i, j]);
+        let ok = 0;
+        pairs.forEach(([i, j], k) => {
+          const right = (rt[i] - rt[j]) * (sc[i] - sc[j]) > 0; if (right) ok++;
+          const t = K.svg(svg, "text", { x: 380 + (k % 2) * 150, y: 70 + Math.floor(k / 2) * 26, "font-size": 12, fill: right ? "var(--good)" : "var(--bad)" }, `配置 ${i + 1} vs ${j + 1}：${right ? "✓" : "✗"}`);
+          t.style.opacity = 0; ctx.wait(k * 150).then((o) => o && ctx.tween(150, (u) => (t.style.opacity = u)));
+        });
+        const res = K.svg(svg, "text", { x: 380, y: 230, "font-size": 15, "font-weight": 700 }, "");
+        ctx.wait(1700).then((o) => { if (o) res.textContent = `OPA = ${ok} / 10 = ${(ok / 10).toFixed(1)}（示意数据）`; });
+      },
+    },
+    {
+      title: "测试集推理与提交", kicker: "第 42–47 格 · 生成 CSV",
+      html: `<p>对测试集的每张图，把它的所有配置每 50 个一批送进模型（不做分段 dropout，<code>backprop=False</code>），拼起所有分数，再用 <code>argsort</code> 按分数排出配置编号的顺序，写成 “ID, TopConfigs” 的 CSV（第 43 格）。</p><p>四个子集各跑一遍后，用 <code>cat</code> 把四个 CSV 拼成一个（第 44–46 格）。Tile 部分的代码作者写着“九月底前补上”，因为 Layout 更难、分数也主要由它决定（第 47 格）。</p>`,
+      cells: [43, 45], highlight: ["_INFERENCE_CONFIGS_BATCH_SIZE = 50", "tf.argsort(all_scores)", "inference_layout_all.csv"],
+      draw(svg, ctx) {
+        const sc = [0.7, 0.2, 0.9, 0.4, 0.55, 0.1, 0.8, 0.3];
+        K.svg(svg, "text", { x: 40, y: 34, "font-size": 13, "font-weight": 700 }, "一张测试图的 8 个配置（示意）：分数 → 排序");
+        const order = sc.map((s, i) => [s, i]).sort((a, b) => a[0] - b[0]).map((x) => x[1]);
+        const bars = sc.map((s, i) => { const b = K.svg(svg, "rect", { x: 60 + i * 76, y: 250 - s * 180, width: 56, height: s * 180, rx: 4, fill: "var(--c1)" }); const t = K.svg(svg, "text", { x: 88 + i * 76, y: 270, "text-anchor": "middle", "font-size": 12 }, "配置 " + i); return { b, t }; });
+        ctx.wait(700).then((ok) => ok && ctx.tween(1200, (t) => order.forEach((i, rank) => { const x = K.lerp(60 + i * 76, 60 + rank * 76, t); bars[i].b.setAttribute("x", x); bars[i].t.setAttribute("x", x + 28); })))
+          .then((ok) => ok && K.svg(svg, "text", { x: 40, y: 310, "font-size": 13, "font-family": "var(--mono)" }, "layout:xla:random:<图名>, " + order.join(";")));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+  G.selfcheck();
+
+  /* ---------- 实验 A：分段 dropout ---------- */
+  function makeDag(seed, n) {
+    const r = K.rng(seed), E = [];
+    for (let i = 1; i < n; i++) { const k = 1 + (r() < 0.35 ? 1 : 0); for (let t = 0; t < k; t++) { const j = Math.max(0, i - 1 - Math.floor(r() * Math.min(i, 6))); if (!E.some(([a, b]) => a === j && b === i)) E.push([j, i]); } }
+    return E;
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "keep", label: "保留的节点比例（≈ MAX_KEEP_NODES / 节点数）", min: 0.1, max: 1, step: 0.05, value: 0.4, fmt: (v) => (v * 100).toFixed(0) + "%" },
+      { id: "how", label: "怎么挑要保留的节点", value: "contig", options: [["contig", "编号连续的一段（作者的简化做法）"], ["random", "完全随机挑"]] },
+      { id: "seed", label: "重新抽", button: true },
+    ],
+    note: "一张 60 个运算的模拟计算图，节点按编号从左到右排（越靠右越晚执行），边多数连向附近的节点。分段 dropout 只保留一部分节点，两端都被保留的边才进入 sampled_feed。比较“连续一段”和“随机挑”：同样保留 40% 的节点，哪种留下的边更多？留下的边越多，这一段里的消息传递就越完整。",
+    render(svg, v) {
+      const n = 60, E = makeDag(7, n), r = K.rng(31 + v.seed * 13), k = Math.round(n * v.keep);
+      let keep;
+      if (v.how === "contig") { const s = Math.floor(r() * (n - k + 1)); keep = new Set(Array.from({ length: k }, (_, i) => s + i)); }
+      else { const ids = Array.from({ length: n }, (_, i) => [r(), i]).sort((a, b) => a[0] - b[0]).slice(0, k).map((x) => x[1]); keep = new Set(ids); }
+      const X = (i) => 30 + (i / (n - 1)) * 580, Y = (i) => 70 + ((i * 37) % 7) * 26;
+      let kept = 0;
+      E.forEach(([a, b]) => { const ok = keep.has(a) && keep.has(b); if (ok) kept++; K.svg(svg, "path", { d: `M${X(a)},${Y(a)} Q${(X(a) + X(b)) / 2},${Math.min(Y(a), Y(b)) - 20} ${X(b)},${Y(b)}`, fill: "none", stroke: ok ? "var(--accent)" : "var(--line)", "stroke-width": ok ? 2 : 1 }); });
+      for (let i = 0; i < n; i++) K.svg(svg, "circle", { cx: X(i), cy: Y(i), r: 5, fill: keep.has(i) ? "var(--accent)" : "var(--panel-2)", stroke: "var(--ink-3)" });
+      K.svg(svg, "text", { x: 30, y: 30, "font-size": 12 }, "蓝点 = 保留的节点；蓝线 = 两端都保留、进入 sampled_feed 的边");
+      K.svg(svg, "text", { x: 30, y: 280, "font-size": 11, class: "muted" }, "← 先执行的运算　　　　　　　　　　　　　　　　　　　后执行的运算 →");
+      return { readout: [
+        { k: "保留节点", v: `${k} / ${n}` },
+        { k: "保留的边", v: `${kept} / ${E.length}`, color: "var(--accent)" },
+        { k: "边保留率", v: ((kept / E.length) * 100).toFixed(0) + "%" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：OPA 与 ListMLE ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "noise", label: "模型分数的噪声（越大越不准）", min: 0, max: 3, step: 0.05, value: 0.6, fmt: (v) => v.toFixed(2) },
+      { id: "scale", label: "把所有分数乘以", min: 0.1, max: 5, step: 0.1, value: 1, fmt: (v) => "× " + v.toFixed(1) },
+      { id: "shift", label: "把所有分数加上", min: -5, max: 5, step: 0.5, value: 0, fmt: (v) => (v >= 0 ? "+ " : "− ") + Math.abs(v).toFixed(1) },
+      { id: "seed", label: "换一张图", button: true },
+    ],
+    note: "一张图有 10 个候选配置（真实运行时间是模拟的）。模型分数 = 真实时间 + 噪声，再整体乘一个数、加一个数。浏览器现场计算 OPA（45 对里排对的比例）、ListMLE 损失（按真实顺序依次“选出”每个配置的负对数概率），以及均方误差 MSE。拖“乘以”和“加上”：OPA 和最快配置的排名完全不变，MSE 却变了，这就是“只要排序”时可以随意缩放标签的原因。",
+    render(svg, v) {
+      const r = K.rng(5 + v.seed * 9), n = 10;
+      const rt = Array.from({ length: n }, () => 1 + r() * 4);
+      const sc = rt.map((t) => (t + K.randn(r) * v.noise) * v.scale + v.shift);
+      let ok = 0, tot = 0; for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) { tot++; if ((rt[i] - rt[j]) * (sc[i] - sc[j]) > 0) ok++; }
+      // ListMLE：真实顺序按运行时间从大到小（与 notebook 用运行时间作标签一致）
+      const ord = rt.map((t, i) => [t, i]).sort((a, b) => b[0] - a[0]).map((x) => x[1]);
+      let lml = 0; for (let k = 0; k < n; k++) { const rest = ord.slice(k), m = Math.max(...rest.map((i) => sc[i])); const lse = m + Math.log(rest.reduce((s, i) => s + Math.exp(sc[i] - m), 0)); lml += lse - sc[ord[k]]; }
+      const mse = rt.reduce((s, t, i) => s + (t - sc[i]) ** 2, 0) / n;
+      const fastest = rt.indexOf(Math.min(...rt)), predFast = sc.indexOf(Math.min(...sc));
+      const lo = Math.min(...sc, 0), hi = Math.max(...sc, 5);
+      const ax = K.axes(svg, { x: 60, y: 20, w: 540, h: 240 }, [0, 5.5], [lo - 0.5, hi + 0.5], { xlabel: "真实运行时间（模拟）", ylabel: "模型分数" });
+      rt.forEach((t, i) => K.svg(svg, "circle", { cx: ax.sx(t), cy: ax.sy(sc[i]), r: i === fastest ? 9 : 6, fill: i === fastest ? "var(--good)" : "var(--c1)", stroke: i === predFast ? "var(--warn)" : "var(--panel)", "stroke-width": i === predFast ? 3 : 1 }));
+      K.svg(svg, "text", { x: 60, y: 315, "font-size": 12, class: "muted" }, "绿点 = 真正最快的配置；金色描边 = 模型认为最快的配置");
+      return { readout: [
+        { k: "OPA", v: (ok / tot).toFixed(3), color: "var(--good)" },
+        { k: "ListMLE 损失", v: lml.toFixed(2) },
+        { k: "MSE", v: mse.toFixed(2) },
+        { k: "最快的找对了吗", v: fastest === predFast ? "对" : "不对", color: fastest === predFast ? "var(--good)" : "var(--bad)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

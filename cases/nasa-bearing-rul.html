@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>轴承剩余寿命</title>
+<meta name="description" content="Kaggle 案例拆解：从 NASA IMS 轴承的振动信号里提取 RMS、峭度、峰峰值等特征，用 PCA 合成健康指标，再拟合指数退化曲线、按阈值预测故障时刻。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">振动信号 · 退化建模 · 剩余寿命预测</div>
+  <h1>听轴承“说话”：从振动信号预测它什么时候坏</h1>
+  <p class="en">NASA Bearing Dataset RUL Prediction</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">振动时域特征</span><span class="tag method">RMS / 峭度 / 峰峰值</span><span class="tag method">指数移动平均 EMA</span>
+    <span class="tag method">PCA 健康指标</span><span class="tag method">指数退化模型</span><span class="tag method">阈值法预测故障时刻</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Furkan Çitil</b></span>
+    <span>Kaggle 点赞 <b>451</b>（2026-11 抓取）</span>
+    <span>数据集 <b>vinayak123tyagi/bearing-dataset</b></span>
+    <span><a href="https://www.kaggle.com/code/furkancitil/nasa-bearing-dataset-rul-prediction" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">4 个轴承从新转到坏的振动录音</div><p>同一根轴上装 4 个轴承，恒速运转直到损坏，每隔约 10 分钟用加速度传感器录 1 秒振动。作者用了第 1、2 组实验。<span data-cell="3">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">轴承会在第几个记录周期坏掉</div><p>每读入一段新数据，就预测一次“健康指标什么时候越过报警线”，从而得到剩余寿命。<span data-cell="23">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">特征 → 平滑 → PCA → 指数曲线 → 阈值</div><p>每段振动算 12 个统计特征；用 EMA 平滑；用 PCA 合成一个“健康指标”；拟合指数增长曲线，算它碰到阈值 2 的时刻。<span data-cell="19">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一个可演示的流程，没有量化评分</div><p>作者结论说这是“基本方法”，并建议以后定义评价指标、调超参数。<span data-cell="36">出处</span> 预测结果表在运行输出里，源码不带，这里不列。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>NASA Bearing Dataset</b>（美国辛辛那提大学智能维护系统中心 IMS 的轴承“跑到坏”实验，NASA 预测数据库收录）。以下信息来自 Kaggle 数据集说明。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">实验装置与规模</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">轴转速</div><div class="v">2000 转/分</div></div>
+        <div class="stat-tile"><div class="k">采样率 / 每文件点数</div><div class="v">20 kHz / 20,480</div></div>
+        <div class="stat-tile"><div class="k">第 1 组文件数（8 通道）</div><div class="v">2,156</div></div>
+        <div class="stat-tile"><div class="k">第 2 组文件数（4 通道）</div><div class="v">984</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">每个文件是一段 1 秒的振动快照，约每 10 分钟录一次。第 1 组结束时轴承 3 内圈损坏、轴承 4 滚动体损坏；第 2 组结束时轴承 1 外圈损坏（数据集说明，作者在 <span data-cell="26">第 26 格</span>、<span data-cell="35">第 35 格</span> 也引用了）。代码里用 2156、984 作为两组的最后一个周期 <span data-cell="25">出处</span> <span data-cell="34">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">一个文件、以及特征表里是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>字段</th><th>含义</th><th>类型</th></tr>
+        <tr><td>文件名 <code>2003.10.22.12.06.24</code></td><td>录音时刻（年.月.日.时.分.秒）<span data-cell="4">出处</span></td><td>时间</td></tr>
+        <tr><td>每列（第 1 组 8 列）</td><td>一个加速度传感器的读数，单位 g。第 1 组每个轴承 x、y 两个方向各一个</td><td>数值</td></tr>
+        <tr><td><code>B3_x_rms</code> 等</td><td>作者算出的特征：轴承号 + 方向 + 特征名。每个文件变成特征表的一行 <span data-cell="7">出处</span></td><td>数值</td></tr>
+        <tr><td><code>mean, std, skew, kurtosis, entropy, rms, max, p2p, crest, clearence, shape, impulse</code></td><td>12 个时域统计特征（见第 3 章）</td><td>数值</td></tr>
+        <tr><td>（没有现成答案列）</td><td><b>要预测的是</b>健康指标越过阈值的周期；作者手工写了每个阶段的“真实状态”用来对照 <span data-cell="25">出处</span></td><td>—</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="7">
+    <h3>动手试试 A · 给轴承“听诊”：故障冲击让哪些特征先变 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="23">
+    <h3>动手试试 B · 指数曲线外推：什么时候会碰到报警线 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>数据有限，选用“阈值法”：建退化模型，用阈值估计故障时间</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>对比 SMA、CMA、EMA 后，EMA(40) 最能反映数据的真实走势</td><td><span data-cell="12">第 12 格</span></td></tr>
+        <tr><td>用方差最大的第一主成分作为健康指标，只用最近 n 个点拟合指数模型</td><td><span data-cell="17">第 17 格</span></td></tr>
+        <tr><td>同样的流程在第 2 组（外圈故障）上也试了一遍</td><td><span data-cell="27">第 27 格</span></td></tr>
+        <tr><td>这是基本方法；今后可改进滤波、试其他时序模型、定义评价指标并调参</td><td><span data-cell="36">第 36 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">作者没有给出量化分数，每次预测的故障周期和“是否在真实寿命之前报警”都在运行输出表里，源码不带输出，这里不列。</p>
+      <p class="callout">读代码发现的问题（原文未改）：①<code>fit_exp</code> 里 y 用的是全局变量 <code>degredation</code> 而不是传入的 <code>df</code>，碰巧能跑 <span data-cell="19">第 19 格</span>；②公式写的 clearance = 峰值 / (…)²，代码只算了分母 <span data-cell="7">第 7 格</span>；③文字说前 550 个周期健康，第 1 组代码却从 600 开始 <span data-cell="20">第 20 格</span> <span data-cell="21">第 21 格</span>；④<code>early_cycles_pca</code> 算出来没有用到 <span data-cell="22">第 22 格</span>；⑤每次都在新数据上重新做 PCA，主成分的方向和尺度会跟着变，而阈值固定为 2；⑥“真实状态”分段是手写的数字，没有注明来源 <span data-cell="25">第 25 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>正在运转的轴承、齿轮箱，根据最近的振动趋势估计还剩多久会越过报警线，提前安排停机换件。</li>
+        <li><b>同类问题：</b>风机主轴承、机床主轴、水泵、电机、高铁轮对的状态监测；任何“没有很多坏件历史，但能持续采集振动”的场景。</li>
+        <li><b>可迁移的套路：</b>原始波形 → 时域/频域特征 → 平滑 → 合成一个健康指标 → 选退化模型（指数、线性）→ 阈值外推 → 用足够多的“跑到坏”数据检验报警提前量。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>时域特征 12 个（绝对均值、标准差、偏度、峭度、熵、RMS、最大值、峰峰值、峰值因子、裕度、波形因子、脉冲因子）<span data-cell="7">第 7 格</span></li>
+        <li>平滑：SMA(5)、CMA、EMA(40) <span data-cell="15">第 15 格</span></li>
+        <li>健康指标：PCA 第一主成分，减去最小值 <span data-cell="19">第 19 格</span></li>
+        <li>退化模型：<code>a·exp(|b|·x)</code>，<code>scipy.optimize.curve_fit</code> 拟合最近 250 点 <span data-cell="19">第 19 格</span></li>
+        <li>预测：阈值 2，故障周期 = ln(2/a)/|b|，每 25 个周期滚动一次 <span data-cell="23">第 23 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者说“轴承退化像放射性元素衰变，是指数变化”。衰变是越来越少，轴承振动是越来越大，这个类比哪里对、哪里不对？</li>
+      <li>报警阈值 2 是怎么来的？如果每次 PCA 的尺度都在变，固定阈值还合理吗？你会怎么定阈值？</li>
+      <li>指数拟合只用最近 250 个点。窗口太短、太长分别有什么风险？（可以在实验 B 里试）</li>
+      <li>作者没有定义评价指标。你会怎么给“故障时间预测”打分？报得太早和报得太晚，该怎么区别惩罚？</li>
+      <li>只有 3 组“跑到坏”的实验，能训练一个像发动机案例那样的回归模型吗？为什么作者选了阈值法？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Furkan Çitil，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：IMS, University of Cincinnati, Bearing Data Set（NASA Prognostics Data Repository；Kaggle 镜像 vinayak123tyagi/bearing-dataset）。
+</footer>
+</main>
+
+<script src="nb/nasa-bearing-rul.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const FS = 20000;
+
+  /* 生成一段振动信号：随机噪声 + 轴频正弦 + 故障冲击（每隔 1/ff 秒一次，激起 3 kHz 共振并衰减） */
+  function vib(seed, n, amp, ff, noise) {
+    const r = K.rng(seed), x = new Array(n).fill(0);
+    for (let i = 0; i < n; i++) x[i] = noise * K.randn(r) + 0.05 * Math.sin(2 * Math.PI * 33.3 * i / FS);
+    if (amp > 0 && ff > 0) {
+      const per = FS / ff;
+      for (let t0 = r() * per; t0 < n; t0 += per * (0.98 + 0.04 * r())) {
+        const s = Math.floor(t0), a = amp * (0.7 + 0.6 * r());
+        for (let k = 0; k < 120 && s + k < n; k++) x[s + k] += a * Math.exp(-k / 18) * Math.sin(2 * Math.PI * 3000 * k / FS);
+      }
+    }
+    return x;
+  }
+  function stats(x) {
+    const n = x.length; let m = 0, ma = 0, mx = 0, mn = 0; x.forEach((v) => { m += v; ma += Math.abs(v); if (v > mx) mx = v; if (v < mn) mn = v; });
+    m /= n; ma /= n; let s2 = 0, s4 = 0, sq = 0; x.forEach((v) => { s2 += (v - m) ** 2; s4 += (v - m) ** 4; sq += v * v; });
+    const sd = Math.sqrt(s2 / n), rms = Math.sqrt(sq / n), peak = Math.max(mx, -mn);
+    return { rms, kurt: s4 / n / (sd ** 4), p2p: mx - mn, crest: peak / rms, ma };
+  }
+  function dftMag(x, fmax) { // 单边幅值谱，0..fmax Hz
+    const n = x.length, out = [], df = FS / n;
+    for (let k = 1; k * df <= fmax; k++) { let re = 0, im = 0; const w = 2 * Math.PI * k / n; for (let i = 0; i < n; i++) { re += x[i] * Math.cos(w * i); im -= x[i] * Math.sin(w * i); } out.push([k * df, 2 * Math.hypot(re, im) / n]); }
+    return out;
+  }
+  const path = (pts, sx, sy) => pts.map((p, i) => (i ? "L" : "M") + sx(p[0]).toFixed(1) + "," + sy(p[1]).toFixed(1)).join("");
+
+  const steps = [
+    {
+      title: "预测性维护的三条路，作者选了“阈值法”", kicker: "第 0–1 格 · 背景", at: 0, cells: [0], highlight: ["Threshold Data", "limited amount of run-to-failure data"],
+      html: `<p>作者先列出预测剩余寿命的三类思路：</p><ul class="tight"><li><b>寿命数据法</b>：统计大量同类零件“用多久坏”，按概率估计</li><li><b>跑到坏数据法</b>：有很多台机器的完整“从新到坏”记录，拿新机器去比对（上一个发动机案例就是这种）</li><li><b>阈值法</b>：没什么坏件历史时，给健康指标建一个退化模型，看它什么时候越过阈值</li></ul><p>轴承“跑到坏”的数据只有几组，所以作者选了<b>阈值法</b>。</p>`,
+      draw(svg, ctx) {
+        const items = [["寿命数据法", "很多零件的寿命统计", "var(--c4)"], ["跑到坏数据法", "很多台完整的退化记录", "var(--c2)"], ["阈值法 ✔", "一条退化曲线 + 一条报警线", "var(--c1)"]];
+        const gs = items.map((d, i) => { const g = K.node(svg, 30 + i * 230, 40, 210, 70, d[0] + "\n" + d[1], { fill: `color-mix(in srgb, ${d[2]} 16%, var(--panel))`, stroke: d[2], bold: i === 2 }); g.style.opacity = 0; return g; });
+        const ax = K.axes(svg, { x: 90, y: 150, w: 560, h: 150 }, [0, 100], [0, 3], { xlabel: "运行时间", yticks: 0 });
+        K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(100), y1: ax.sy(2), y2: ax.sy(2), stroke: "var(--bad)", "stroke-dasharray": "5 3" });
+        K.svg(svg, "text", { x: ax.sx(2), y: ax.sy(2) - 6, "font-size": 12, fill: "var(--bad)" }, "报警阈值");
+        const p = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        (async () => {
+          for (const g of gs) if (!(await ctx.tween(350, (t) => (g.style.opacity = t)))) return;
+          await ctx.tween(1800, (t) => { const pts = []; for (let x = 0; x <= 100 * t; x += 1) pts.push([x, 0.15 * Math.exp(0.028 * x)]); p.setAttribute("d", path(pts, ax.sx, ax.sy)); });
+        })();
+      },
+    },
+    {
+      title: "读一个振动文件：听轴承的“心跳”", kicker: "第 2–4 格 · 读数据", cells: [2, 3, 4], highlight: ["read_csv", "vibration/acceleration(g)"],
+      html: `<p>作者先设好三组实验的路径，然后读第 1 组的第一个文件画出来：横轴是采样点，纵轴是加速度（单位 g）。</p><p>健康的轴承振动像均匀的“沙沙声”；内圈、外圈或滚动体上出现小坑后，每当滚珠碾过坑，就会“咯噔”一下，波形上出现一个个<b>冲击尖峰</b>。动画上下对比两种波形（模拟信号）。</p>`,
+      draw(svg, ctx) {
+        const n = 600, a = vib(3, n, 0, 0, 0.08), b = vib(3, n, 0.9, 160, 0.08);
+        const ax1 = K.axes(svg, { x: 50, y: 20, w: 640, h: 120 }, [0, n], [-1.2, 1.2], { xticks: 0, yticks: 0 }), ax2 = K.axes(svg, { x: 50, y: 190, w: 640, h: 120 }, [0, n], [-1.2, 1.2], { xticks: 0, yticks: 0 });
+        K.svg(svg, "text", { x: 56, y: 34, "font-size": 13, fill: "var(--good)" }, "健康：均匀的“沙沙声”");
+        K.svg(svg, "text", { x: 56, y: 204, "font-size": 13, fill: "var(--bad)" }, "有缺陷：周期性的“咯噔”冲击");
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 1 }), p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 1 });
+        K.svg(svg, "text", { x: 50, y: 334, "font-size": 11, class: "muted" }, "示意：0.03 秒的模拟振动（真实文件是 1 秒、20,480 个点）");
+        ctx.tween(2200, (t) => { const m = Math.floor(n * t); p1.setAttribute("d", path(a.slice(0, m).map((v, i) => [i, v]), ax1.sx, ax1.sy)); p2.setAttribute("d", path(b.slice(0, m).map((v, i) => [i, v]), ax2.sx, ax2.sy)); });
+      },
+    },
+    {
+      title: "12 个时域特征：把一秒钟的振动浓缩成几个数", kicker: "第 5–6 格 · 特征定义", cells: [5, 6], highlight: ["Kurtosis", "Crest Factor", "RMS"],
+      html: `<p>一个文件有两万多个点，直接比太费劲。作者给每段振动算 12 个统计量，最重要的几个：</p><ul class="tight"><li><b>RMS</b>（均方根）：振动的“能量”，越大说明晃得越厉害</li><li><b>峭度</b>：分布的尾巴有多长，偶尔出现大尖峰时会猛涨。作者写道：故障刚出现时峭度会上升</li><li><b>峰值因子</b> = 最大值 / RMS：尖不尖。作者写道：故障往往先改变“尖锐程度”，再改变能量，可作早期预警</li><li><b>峰峰值</b>：最高点减最低点</li></ul><p>动画：同一段信号逐渐加入冲击，看 RMS 和峭度谁涨得快。</p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 40, y: 20, w: 400, h: 280 }, [0, 400], [-2, 2], { xticks: 0, yticks: 0 });
+        const p = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 1 });
+        const names = ["RMS", "峭度", "峰值因子"], cols = ["var(--c1)", "var(--c6)", "var(--c3)"];
+        const bars = names.map((nm, i) => { K.svg(svg, "text", { x: 470, y: 60 + i * 80, "font-size": 13, "font-weight": 700, fill: cols[i] }, nm); return { r: K.svg(svg, "rect", { x: 470, y: 68 + i * 80, width: 0, height: 18, rx: 3, fill: cols[i] }), t: K.svg(svg, "text", { x: 470, y: 104 + i * 80, "font-size": 12, class: "muted" }, "") }; });
+        const base = stats(vib(5, 2000, 0, 0, 0.1));
+        ctx.tween(3000, (t) => {
+          const x = vib(5, 2000, 1.6 * t, 150, 0.1), s = stats(x);
+          p.setAttribute("d", path(x.slice(0, 400).map((v, i) => [i, v]), ax.sx, ax.sy));
+          const v = [s.rms / base.rms, s.kurt / base.kurt, s.crest / base.crest];
+          bars.forEach((b, i) => { b.r.setAttribute("width", Math.min(200, 40 * v[i])); b.t.textContent = "是健康时的 " + v[i].toFixed(1) + " 倍"; });
+        });
+      },
+    },
+    {
+      title: "特征提取：2156 个文件 → 一张特征表", kicker: "第 7–11 格 · 特征工程", cells: [7, 9, 11], highlight: ["def time_features", "calculate_clearence", "to_csv"],
+      html: `<p><code>time_features</code> 函数逐个读文件，对每一列（每个传感器）算 12 个特征，拼成一行，行名是文件名里的时间。第 1 组 8 个通道 × 12 个特征 = 96 列；跑完存成 CSV 再读回来。</p><p>这样，第 1 组 2156 个文件就变成了一张 2156 行的表，<b>每一行代表“那 10 分钟里轴承的状态”</b>，按时间排好序。</p><p class="callout">小问题：说明里的 clearance（裕度因子）是“峰值 ÷ (√|x| 的均值)²”，代码只算了分母。</p>`,
+      draw(svg, ctx) {
+        const files = [];
+        for (let i = 0; i < 6; i++) { const g = K.node(svg, 30, 30 + i * 46, 150, 36, "2003.10.22." + (12 + i) + "…", {}); files.push(g); }
+        const hdr = ["rms", "kurt", "p2p", "crest", "…"];
+        hdr.forEach((h, j) => { K.svg(svg, "rect", { x: 380 + j * 64, y: 30, width: 60, height: 28, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" }); K.svg(svg, "text", { x: 410 + j * 64, y: 49, "font-size": 12, "text-anchor": "middle", "font-family": "var(--mono)" }, h); });
+        const ar = K.arrow(svg, 190, 160, 360, 160); K.svg(svg, "text", { x: 200, y: 150, "font-size": 12, class: "muted" }, "每个文件算 12 个统计量");
+        const rows = [];
+        for (let i = 0; i < 6; i++) { const g = K.svg(svg, "g"); g.style.opacity = 0; for (let j = 0; j < 5; j++) { K.svg(g, "rect", { x: 380 + j * 64, y: 64 + i * 40, width: 60, height: 34, rx: 3, fill: "var(--c1)", "fill-opacity": 0.08 + 0.12 * i / 5 + 0.05 * j / 5, stroke: "var(--line)" }); } rows.push(g); }
+        K.svg(svg, "text", { x: 380, y: 330, "font-size": 12, class: "muted" }, "越往下越接近损坏，颜色越深（示意）");
+        (async () => { for (let i = 0; i < 6; i++) { if (!(await ctx.tween(300, (t) => { files[i].style.opacity = 1 - 0.6 * t; rows[i].style.opacity = t; }))) return; } })();
+      },
+    },
+    {
+      title: "平滑：SMA、CMA、EMA 选哪个", kicker: "第 12–16 格 · 去噪", cells: [12, 13, 14, 15], highlight: ["rolling(window=5)", "expanding", "ewm(span=40"],
+      html: `<p>特征曲线噪声很大。作者以轴承 4 的 <code>B4_x_mean</code> 为例，比较三种平滑：</p><ul class="tight"><li><b>SMA</b> 简单移动平均：最近 5 个点等权平均</li><li><b>CMA</b> 累积平均：从开头到现在所有点的平均</li><li><b>EMA</b> 指数移动平均：越新的点权重越大，越老的点权重按比例衰减</li></ul><p>作者的结论：<b>EMA(40)</b> 最能反映真实走势。<span data-cell="12">出处</span> 动画里可以看到 CMA 太迟钝，SMA(5) 还很抖。</p>`,
+      draw(svg, ctx) {
+        const r = K.rng(12), n = 300, y = [];
+        for (let i = 0; i < n; i++) y.push(0.2 + (i > 200 ? Math.pow((i - 200) / 100, 2) * 1.2 : 0) + K.randn(r) * 0.12);
+        const sma = y.map((v, i) => (i < 4 ? null : (y[i] + y[i - 1] + y[i - 2] + y[i - 3] + y[i - 4]) / 5));
+        let c = 0; const cma = y.map((v, i) => { c += v; return i < 9 ? null : c / (i + 1); });
+        const al = 2 / 41; let e = y[0]; const ema = y.map((v) => (e = al * v + (1 - al) * e));
+        const ax = K.axes(svg, { x: 50, y: 20, w: 620, h: 270 }, [0, n], [-0.2, 1.6], { xlabel: "周期", yticks: 0 });
+        K.svg(svg, "path", { d: path(y.map((v, i) => [i, v]), ax.sx, ax.sy), fill: "none", stroke: "var(--ink-3)", "stroke-width": 1, opacity: 0.5 });
+        const S = [[sma, "var(--c2)", "SMA(5)"], [cma, "var(--c4)", "CMA"], [ema, "var(--c1)", "EMA(40)"]];
+        const ps = S.map((s, k) => { K.svg(svg, "text", { x: 70 + k * 110, y: 40, "font-size": 13, "font-weight": 700, fill: s[1] }, s[2]); return K.svg(svg, "path", { d: "", fill: "none", stroke: s[1], "stroke-width": 2.2 }); });
+        K.svg(svg, "text", { x: 70, y: 334, "font-size": 11, class: "muted" }, "灰线：模拟的原始特征；后段开始退化");
+        ctx.tween(2600, (t) => { const m = Math.floor(n * t); S.forEach((s, k) => ps[k].setAttribute("d", path(s[0].slice(0, m).map((v, i) => [i, v]).filter((p) => p[1] != null), ax.sx, ax.sy))); });
+      },
+    },
+    {
+      title: "PCA 健康指标 + 指数退化模型", kicker: "第 17–20 格 · 建模思路", cells: [17, 19], highlight: ["PCA()", "explained_variance_ratio_", "a*np.exp(abs(b)*x)", "x[-base:]"],
+      html: `<p>几个特征一起看太乱，作者用 <b>PCA（主成分分析）</b>把它们压成一个数：找到所有特征“一起变化最大”的那个方向，把每个时刻投影上去，就是<b>第一主成分 PC1</b>，当作健康指标（再减去最小值，让它从 0 开始）。</p><p>然后假设退化是<b>指数增长</b>：<code>y = a·e<sup>|b|·x</sup></code>，用 <code>curve_fit</code> 只拟合<b>最近 250 个点</b>，避免早期平稳段把曲线拉平。</p><p class="callout">函数 <code>fit_exp(df, …)</code> 里 y 取的是全局变量 <code>degredation</code>，不是参数 <code>df</code>，属于碰巧能跑的写法。</p>`,
+      draw(svg, ctx) {
+        const r = K.rng(21), P = [];
+        for (let i = 0; i < 60; i++) { const t = r(); P.push([140 + t * 220 + K.randn(r) * 18, 260 - t * 180 + K.randn(r) * 18]); }
+        const ds = P.map((p) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 4, fill: "var(--c1)", opacity: 0.7 }));
+        K.svg(svg, "text", { x: 40, y: 30, "font-size": 12, class: "muted" }, "横轴：max 特征   纵轴：p2p 特征（示意）");
+        const pc = K.svg(svg, "line", { x1: 250, y1: 170, x2: 250, y2: 170, stroke: "var(--c6)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 380, y: 70, "font-size": 13, fill: "var(--c6)" }, "PC1：变化最大的方向");
+        const ux = 220 / Math.hypot(220, 180), uy = -180 / Math.hypot(220, 180);
+        ctx.tween(900, (t) => { pc.setAttribute("x1", 250 - 160 * ux * t); pc.setAttribute("y1", 170 - 160 * uy * t); pc.setAttribute("x2", 250 + 160 * ux * t); pc.setAttribute("y2", 170 + 160 * uy * t); })
+          .then((ok) => ok && ctx.tween(1200, (t) => ds.forEach((d, i) => { const dx = P[i][0] - 250, dy = P[i][1] - 170, s = dx * ux + dy * uy; d.setAttribute("cx", K.lerp(P[i][0], 250 + s * ux, t)); d.setAttribute("cy", K.lerp(P[i][1], 170 + s * uy, t)); })))
+          .then((ok) => { if (!ok) return; K.svg(svg, "text", { x: 470, y: 230, "font-size": 13 }, "每个点落到线上的位置"); K.svg(svg, "text", { x: 470, y: 250, "font-size": 13 }, "= 这一时刻的健康指标"); });
+      },
+    },
+    {
+      title: "边走边预测：每 25 个周期重拟合一次", kicker: "第 21–24 格 · 滚动预测", cells: [21, 22, 23], highlight: ["prediction_cycle = 600", "thres = 2", "np.log(thres/m)", "increment_cycle =25"],
+      html: `<p>作者模拟“轴承正在运行”：先只给前 600 个周期的数据，选轴承 3 的 <code>max、p2p、rms</code> 三个特征，EMA 平滑 → PCA → 拟合指数曲线 → 解方程 <code>a·e<sup>|b|·x</sup> = 2</code>，得到预测的故障周期 <code>ln(2/a)/|b|</code>。</p><p>然后周期往前推 25 个，<b>再跑一次这格代码</b>（注释写着“run this again, again”），记下每次的预测。动画就是这个过程：数据每多 25 个点，红色预测曲线就重新拟合一次。</p>`,
+      draw(svg, ctx) {
+        const r = K.rng(40), N = 900, hi = [];
+        for (let i = 0; i < N; i++) hi.push(Math.max(0, 0.08 * Math.exp(0.0042 * i) - 0.08 + K.randn(r) * 0.06 + 0.1));
+        const ax = K.axes(svg, { x: 50, y: 20, w: 620, h: 270 }, [0, 1000], [0, 3], { xlabel: "周期", ylabel: "健康指标" });
+        K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(1000), y1: ax.sy(2), y2: ax.sy(2), stroke: "var(--bad)", "stroke-dasharray": "5 3" });
+        const dots = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 1.2 }), fit = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2 });
+        const lab = K.svg(svg, "text", { x: 70, y: 44, "font-size": 13, "font-family": "var(--mono)" }, "");
+        const mk = K.svg(svg, "line", { x1: 0, x2: 0, y1: ax.sy(2) - 10, y2: ax.sy(0), stroke: "var(--c6)", "stroke-dasharray": "2 3" });
+        (async () => {
+          for (let cur = 500; cur <= 875; cur += 25) {
+            const xs = [], ys = []; for (let i = Math.max(0, cur - 250); i < cur; i++) if (hi[i] > 0.01) { xs.push(i); ys.push(Math.log(hi[i])); }
+            let mx = 0, my = 0; xs.forEach((x, i) => { mx += x; my += ys[i]; }); mx /= xs.length; my /= xs.length;
+            let sxy = 0, sxx = 0; xs.forEach((x, i) => { sxy += (x - mx) * (ys[i] - my); sxx += (x - mx) ** 2; });
+            const b = Math.abs(sxy / sxx), a = Math.exp(my - b * mx), fc = Math.log(2 / a) / b;
+            dots.setAttribute("d", path(hi.slice(0, cur).map((v, i) => [i, v]), ax.sx, ax.sy));
+            const pts = []; for (let x = 0; x <= Math.min(1000, fc + 20); x += 5) pts.push([x, Math.min(3, a * Math.exp(b * x))]);
+            fit.setAttribute("d", path(pts, ax.sx, ax.sy));
+            mk.setAttribute("x1", ax.sx(Math.min(1000, fc))); mk.setAttribute("x2", ax.sx(Math.min(1000, fc)));
+            lab.textContent = `当前周期 ${cur} → 预测故障周期 ≈ ${Math.round(fc)}`;
+            if (!(await ctx.wait(450))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "对照真实状态：报警来得早不早", kicker: "第 25–26 格 · 检验", cells: [25, 26], highlight: ["isvalid", "Inner_race_failure", "2156"],
+      html: `<p>作者把每次的预测故障周期放进一张表，加一列 <code>isvalid</code>：预测值是否小于 2156（第 1 组的最后一个周期），也就是<b>报警是否发生在真正坏掉之前</b>。</p><p>再按周期给每一行贴上“真实状态”：早期、正常、可疑、即将失效 / 内圈失效等。这些分段边界是作者在代码里直接写的数字，没有说明来源。数据集说明写明：第 1 组结束时轴承 3 内圈损坏、轴承 4 滚动体损坏。<span data-cell="26">出处</span></p>`,
+      draw(svg, ctx) {
+        const segs = [[0, 500, "早期", "var(--c4)"], [500, 1790, "正常", "var(--good)"], [1790, 2120, "可疑", "var(--warn)"], [2120, 2156, "内圈失效", "var(--bad)"]];
+        const sx = K.scale(0, 2156, 40, 680);
+        K.svg(svg, "text", { x: 40, y: 40, "font-size": 13, "font-weight": 700 }, "轴承 3 的“真实状态”分段（第 25 格代码里写的边界）");
+        const rs = segs.map((s) => { const r0 = K.svg(svg, "rect", { x: sx(s[0]), y: 60, width: 0, height: 40, fill: s[3], opacity: 0.7 }); return r0; });
+        segs.forEach((s) => K.svg(svg, "text", { x: (sx(s[0]) + sx(s[1])) / 2, y: 120, "text-anchor": "middle", "font-size": 12 }, s[2]));
+        [0, 500, 1790, 2120, 2156].forEach((v, i) => K.svg(svg, "text", { x: sx(v), y: 140 + (i === 4 ? 14 : 0), "text-anchor": "middle", "font-size": 11, class: "muted" }, v));
+        K.svg(svg, "text", { x: 40, y: 200, "font-size": 13 }, "每一次预测：");
+        const ex = [[1900, 2080, true], [2000, 2140, true], [2050, 2210, false]];
+        ctx.tween(1200, (t) => rs.forEach((r0, i) => r0.setAttribute("width", (sx(segs[i][1]) - sx(segs[i][0])) * t))).then(async (ok) => {
+          if (!ok) return;
+          for (let i = 0; i < ex.length; i++) {
+            const y = 230 + i * 34, [cur, pred, valid] = ex[i];
+            K.svg(svg, "circle", { cx: sx(cur), cy: y, r: 5, fill: "var(--c1)" });
+            K.svg(svg, "line", { x1: sx(cur), x2: sx(Math.min(pred, 2156)), y1: y, y2: y, stroke: valid ? "var(--good)" : "var(--bad)", "stroke-width": 2 });
+            K.svg(svg, "text", { x: sx(Math.min(pred, 2156)) - 4, y: y + 4, "font-size": 12, "text-anchor": "end", fill: valid ? "var(--good)" : "var(--bad)" }, valid ? "✓ 报在坏之前" : "✗ 报晚了 →");
+            if (!(await ctx.wait(500))) return;
+          }
+          K.svg(svg, "text", { x: 40, y: 334, "font-size": 11, class: "muted" }, "下面三条预测是示意，不是作者的运行结果");
+        });
+      },
+    },
+    {
+      title: "换到第二组实验：外圈故障", kicker: "第 27–35 格 · 第二组验证", cells: [27, 29, 32, 33, 34], highlight: ["id_set=2", "selected_features = ['max','p2p']", "prediction_cycle = 550", "984"],
+      html: `<p>同一套流程搬到第 2 组：这一组每个轴承只有一个传感器（4 列）。作者改用轴承 1 的 <code>max、p2p</code> 两个特征，从第 550 个周期开始预测，每次往前 25 个周期。</p><p><code>is valid</code> 列判断预测值是否小于 984（第 2 组的最后一个周期）。数据集说明：第 2 组结束时轴承 1 外圈损坏。<span data-cell="35">出处</span></p><p>注意：第 1 组用了 3 个特征、第 2 组用了 2 个，起始周期也不同，说明这些设置是针对每组手动挑的。</p>`,
+      draw(svg, ctx) {
+        const parts = [["内圈", 70, "var(--c6)"], ["外圈", 120, "var(--c1)"], ["滚动体", 95, "var(--c3)"]];
+        const cx = 200, cy = 175;
+        const outer = K.svg(svg, "circle", { cx, cy, r: 120, fill: "none", stroke: "var(--c1)", "stroke-width": 16 });
+        K.svg(svg, "circle", { cx, cy, r: 70, fill: "none", stroke: "var(--c6)", "stroke-width": 16 });
+        K.svg(svg, "circle", { cx, cy, r: 50, fill: "var(--panel-2)", stroke: "var(--ink-3)" });
+        K.svg(svg, "text", { x: cx, y: cy + 5, "text-anchor": "middle", "font-size": 12 }, "轴");
+        const balls = []; for (let k = 0; k < 10; k++) balls.push(K.svg(svg, "circle", { cx, cy, r: 13, fill: "var(--c3)", opacity: 0.85 }));
+        const pit = K.svg(svg, "circle", { cx: cx + 120, cy, r: 6, fill: "var(--bad)" });
+        K.svg(svg, "text", { x: cx + 136, y: cy + 4, "font-size": 12, fill: "var(--bad)" }, "外圈小坑");
+        const bang = K.svg(svg, "text", { x: 420, y: 120, "font-size": 22, "font-weight": 700, fill: "var(--bad)" }, "");
+        K.svg(svg, "text", { x: 420, y: 60, "font-size": 13 }, "滚珠每碾过一次小坑 → 一次冲击");
+        K.svg(svg, "text", { x: 420, y: 82, "font-size": 13 }, "冲击的节奏 = 故障特征频率");
+        K.svg(svg, "text", { x: 420, y: 210, "font-size": 12, class: "muted" }, "内圈、外圈、滚动体坏了，冲击节奏各不相同，");
+        K.svg(svg, "text", { x: 420, y: 230, "font-size": 12, class: "muted" }, "所以听“节奏”能分辨是哪里坏了（示意）");
+        let last = -1;
+        ctx.tween(5000, (t) => {
+          const ph = t * Math.PI * 2 * 1.5;
+          balls.forEach((b, k) => { const a = ph + k * Math.PI / 5; b.setAttribute("cx", cx + 95 * Math.cos(a)); b.setAttribute("cy", cy + 95 * Math.sin(a)); });
+          const hit = Math.floor((ph / (Math.PI / 5)));
+          if (hit !== last) { last = hit; bang.textContent = "咯噔！"; } else if ((ph % (Math.PI / 5)) > 0.25) bang.textContent = "";
+        });
+      },
+    },
+    {
+      title: "结论与改进方向", kicker: "第 36–39 格 · 总结", cells: [36], highlight: ["performance evaluating metric"],
+      html: `<p>作者总结：先提取能反映状态的特征，用 PCA 降成 1 个，再拟合指数函数预测故障周期。今后可以：①用更好的滤波；②试别的时间序列预测模型；③<b>定义一个评价指标</b>，并调超参数。</p><p>第 ③ 点很关键：现在只有“报警在不在坏之前”这一个是/否判断，没有衡量“提前了多少”“预测有多稳”。作者最后说明这项工作是在一家预测性维护公司实习期间完成的。</p>`,
+      draw(svg, ctx) {
+        const steps = ["振动波形", "12 个特征", "EMA 平滑", "PCA → 健康指标", "指数拟合", "阈值 → 故障周期"];
+        const gs = steps.map((s, i) => { const g = K.node(svg, 20 + (i % 3) * 235, 40 + Math.floor(i / 3) * 150, 200, 64, s, { bold: i === 5 }); g.style.opacity = 0; return g; });
+        const ars = [[220, 72, 255, 72], [455, 72, 490, 72], [590, 104, 120, 190], [220, 222, 255, 222], [455, 222, 490, 222]].map((a) => { const e = K.arrow(svg, ...a); e.style.opacity = 0; return e; });
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 13, fill: "var(--warn)" }, "还缺：评价指标（提前量、稳定性）和更多“跑到坏”数据的检验");
+        (async () => { for (let i = 0; i < 6; i++) { if (!(await ctx.tween(300, (t) => { gs[i].style.opacity = t; if (i) ars[i - 1].style.opacity = t; }))) return; } })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：振动特征与包络谱 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 400,
+    controls: [
+      { id: "amp", label: "故障冲击强度（0 = 健康）", min: 0, max: 2, step: 0.05, value: 0.6, fmt: (v) => v.toFixed(2) },
+      { id: "ff", label: "冲击节奏：每秒几次（故障特征频率，Hz）", min: 60, max: 300, step: 5, value: 160 },
+      { id: "noise", label: "背景噪声", min: 0.05, max: 0.5, step: 0.01, value: 0.15, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "重新录一段", button: true },
+    ],
+    note: "现场生成 0.1 秒、20 kHz 采样的模拟振动（2048 点）：噪声 + 轴频 33 Hz + 周期性冲击（每次激起 3 kHz 共振并衰减）。上图是波形；下图是“包络谱”：先取绝对值再平滑得到包络，再做傅里叶变换。冲击节奏会在下图对应频率处出现尖峰。",
+    render(svg, v) {
+      const n = 2048, x = vib(77 + v.seed * 31, n, v.amp, v.ff, v.noise), s = stats(x);
+      const ax1 = K.axes(svg, { x: 40, y: 10, w: 580, h: 150 }, [0, n / FS * 1000], [-3, 3], { xlabel: "时间（毫秒）", yticks: 0 });
+      K.svg(svg, "path", { d: path(x.map((y, i) => [i / FS * 1000, K.clamp(y, -3, 3)]), ax1.sx, ax1.sy), fill: "none", stroke: "var(--c1)", "stroke-width": 0.8 });
+      // 包络：|x| 后做 20 点滑动平均，去均值
+      const ab = x.map(Math.abs), env = ab.map((_, i) => { let s0 = 0, c = 0; for (let k = Math.max(0, i - 10); k <= Math.min(n - 1, i + 10); k++) { s0 += ab[k]; c++; } return s0 / c; });
+      const me = env.reduce((a, b) => a + b, 0) / n, sp = dftMag(env.map((e) => e - me), 500);
+      const top = Math.max(0.02, ...sp.map((p) => p[1]));
+      const ax2 = K.axes(svg, { x: 40, y: 220, w: 580, h: 140 }, [0, 500], [0, top * 1.1], { xlabel: "包络谱频率（Hz）", yticks: 0 });
+      sp.forEach((p) => K.svg(svg, "line", { x1: ax2.sx(p[0]), x2: ax2.sx(p[0]), y1: ax2.sy(0), y2: ax2.sy(p[1]), stroke: "var(--c6)", "stroke-width": 2.4 }));
+      if (v.amp > 0) K.svg(svg, "text", { x: ax2.sx(v.ff), y: 214, "text-anchor": "middle", "font-size": 11, fill: "var(--warn)" }, "▼ 设定的冲击节奏 " + v.ff + " Hz");
+      let best = sp[0]; sp.forEach((p) => { if (p[0] > 40 && p[1] > best[1]) best = p; });
+      return { readout: [
+        { k: "RMS（能量）", v: s.rms.toFixed(3) },
+        { k: "峭度（健康≈3）", v: s.kurt.toFixed(2), color: s.kurt > 4 ? "var(--bad)" : "var(--good)" },
+        { k: "峰值因子", v: s.crest.toFixed(2), color: s.crest > 5 ? "var(--bad)" : "var(--good)" },
+        { k: "包络谱最高峰（>40Hz）", v: Math.round(best[0]) + " Hz" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：指数外推 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "cur", label: "当前运行到第几个周期", min: 400, max: 980, step: 5, value: 700 },
+      { id: "base", label: "只用最近多少个点拟合（作者用 250）", min: 40, max: 600, step: 10, value: 250 },
+      { id: "thr", label: "报警阈值（作者用 2）", min: 0.8, max: 3, step: 0.05, value: 2, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "换一个轴承", button: true },
+    ],
+    note: "模拟一条健康指标：前段平稳，后段指数上升，真实在约第 1000 周期越过 2.0 附近。用最近 n 个点拟合 y = a·e^(b·x)（这里用对数线性最小二乘，原作者用 curve_fit 非线性拟合），求曲线碰到阈值的周期。往右拖“当前周期”，看预测是否逐渐收敛。",
+    render(svg, v) {
+      const r = K.rng(300 + v.seed * 11), N = 1100, hi = [];
+      const g = 0.0045 + r() * 0.001;
+      for (let i = 0; i < N; i++) hi.push(Math.max(0.005, 0.12 + 0.02 * Math.exp(g * i) + K.randn(r) * 0.05));
+      let trueFail = N; for (let i = 0; i < N; i++) if (0.12 + 0.02 * Math.exp(g * i) >= v.thr) { trueFail = i; break; }
+      const ax = K.axes(svg, { x: 50, y: 15, w: 570, h: 290 }, [0, N], [0, 3.2], { xlabel: "周期", ylabel: "健康指标" });
+      const cur = v.cur, lo = Math.max(0, cur - v.base);
+      K.svg(svg, "rect", { x: ax.sx(lo), y: 15, width: ax.sx(cur) - ax.sx(lo), height: 290, fill: "var(--accent)", "fill-opacity": 0.1 });
+      K.svg(svg, "path", { d: path(hi.slice(0, cur).map((y, i) => [i, y]), ax.sx, ax.sy), fill: "none", stroke: "var(--c1)", "stroke-width": 1 });
+      K.svg(svg, "path", { d: path(hi.slice(cur).map((y, i) => [i + cur, y]), ax.sx, ax.sy), fill: "none", stroke: "var(--ink-3)", "stroke-width": 1, opacity: 0.35 });
+      K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(N), y1: ax.sy(v.thr), y2: ax.sy(v.thr), stroke: "var(--bad)", "stroke-dasharray": "5 3" });
+      let mx = 0, my = 0, n = 0; for (let i = lo; i < cur; i++) { mx += i; my += Math.log(hi[i]); n++; } mx /= n; my /= n;
+      let sxy = 0, sxx = 0; for (let i = lo; i < cur; i++) { sxy += (i - mx) * (Math.log(hi[i]) - my); sxx += (i - mx) ** 2; }
+      const b = sxy / sxx, a = Math.exp(my - b * mx);
+      const fc = b > 0 ? Math.log(v.thr / a) / b : Infinity;
+      const pts = []; for (let x = 0; x <= N; x += 5) { const y = a * Math.exp(b * x); if (y > 3.2) break; pts.push([x, y]); }
+      K.svg(svg, "path", { d: path(pts, ax.sx, ax.sy), fill: "none", stroke: "var(--c6)", "stroke-width": 2.2 });
+      if (isFinite(fc) && fc < N) K.svg(svg, "line", { x1: ax.sx(fc), x2: ax.sx(fc), y1: ax.sy(v.thr), y2: ax.sy(0), stroke: "var(--c6)", "stroke-dasharray": "2 3" });
+      K.svg(svg, "line", { x1: ax.sx(trueFail), x2: ax.sx(trueFail), y1: ax.sy(v.thr), y2: ax.sy(0), stroke: "var(--ink)", "stroke-dasharray": "6 3" });
+      K.svg(svg, "text", { x: 60, y: 350, "font-size": 12, class: "muted" }, "蓝：已看到的数据  淡灰：未来  阴影：拟合窗口  红线：拟合曲线  黑虚线：真实越线时刻");
+      const err = isFinite(fc) ? fc - trueFail : NaN;
+      return { readout: [
+        { k: "预测故障周期", v: isFinite(fc) ? String(Math.round(fc)) : "不会越线" },
+        { k: "真实越线周期", v: trueFail >= N ? "—" : String(trueFail) },
+        { k: "预测 − 真实", v: isNaN(err) ? "—" : (err > 0 ? "+" : "") + Math.round(err), color: isNaN(err) || err > 0 ? "var(--bad)" : "var(--good)" },
+        { k: "预测剩余寿命", v: isFinite(fc) ? String(Math.max(0, Math.round(fc - cur))) + " 周期" : "—" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

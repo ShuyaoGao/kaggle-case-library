@@ -1,0 +1,664 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>乳腺癌病理切片</title>
+<meta name="description" content="Kaggle 案例拆解：在 50×50 的乳腺病理切片小块上识别浸润性导管癌（IDC），按病人切分、加权损失、F1 分数、学习率搜索，最后把预测拼回整张切片看“癌症概率地图”。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">病理切片 · 二分类 · 迁移学习</div>
+  <h1>乳腺癌病理切片：把一张大切片切成 27 万个小块，逐块判断有没有癌</h1>
+  <p class="en">Breast Cancer（Predicting invasive ductal carcinoma in tissue slices）</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">按病人切分</span><span class="tag method">数据增强（翻转）</span><span class="tag method">ResNet18 迁移学习</span>
+    <span class="tag method">加权交叉熵</span><span class="tag method">F1 分数</span><span class="tag method">学习率搜索</span><span class="tag method">循环学习率</span><span class="tag method">概率热力图</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Laura Fink（allunia）</b></span>
+    <span>Kaggle 点赞 <b>2,932</b>（2026-11 抓取）</span>
+    <span>数据集 <b>paultimothymooney/breast-histopathology-images</b></span>
+    <span><a href="https://www.kaggle.com/code/allunia/breast-cancer" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">162 张乳腺癌病理切片切出的 50×50 小块</div><p>病理切片是把手术切下的组织切成极薄的片、染色后放到显微镜下扫描。每个小块都标了“有没有 IDC”。（数据集说明）</p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这个小块里有没有浸润性导管癌</div><p>浸润性导管癌（IDC）是最常见的乳腺癌类型，作者说约占八成。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">按病人切分 + ResNet18 + 加权损失</div><p>同一个病人的小块只放在训练、开发、测试中的一处；用预训练的 ResNet18 只训练新的分类头；用类别权重对付不平衡。<span data-cell="53">出处</span> <span data-cell="78">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">把预测拼回切片，画出癌症概率地图</div><p>和病理医生标的红色区域对照看。作者没有写最终分数，结论一节是空的。<span data-cell="105">出处</span></p></div>
+  </div>
+  <p class="callout warn">本页只讲 notebook 的方法，不提供医疗建议。病理诊断由病理科医生完成，模型最多辅助医生更快找到可疑区域。</p>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>Breast Histopathology Images</b>，来自 Janowczyk 与 Madabhushi 的研究。原始数据是 162 张在 40 倍镜下扫描的乳腺癌标本整片图像，从中切出 50×50 像素的小块。以下规模来自数据集说明页和作者第 13、17 格的文字。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">小块总数</div><div class="v">277,524</div></div>
+        <div class="stat-tile"><div class="k">小块尺寸</div><div class="v">50×50</div></div>
+        <div class="stat-tile"><div class="k">无 IDC（0）</div><div class="v">198,738</div></div>
+        <div class="stat-tile"><div class="k">有 IDC（1）</div><div class="v" style="color:var(--c6)">78,786</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">以上四个数字来自数据集说明。作者第 13 格写“将近 280 个病人”<span data-cell="13">出处</span>，第 17 格写“大约 28 万个小块”<span data-cell="17">出处</span>。数据集说明说原始标本是 162 张整片图像，和作者数出的病人文件夹数不完全一样，以数据集说明和你自己数到的为准。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">文件怎么组织、每个字段是什么</h3>
+      <p style="font-size:14px">每个病人一个文件夹，里面分 <code>0/</code> 和 <code>1/</code> 两个子文件夹。文件名格式（数据集说明给的例子）：<code>10253_idx5_x1351_y1101_class0.png</code></p>
+      <div class="scroll-x"><table class="res">
+        <tr><th>字段</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>patient_id</code></td><td>病人编号（如 10253）</td><td>文本</td></tr>
+        <tr><td><code>x</code>, <code>y</code></td><td>这个小块在整张切片上的位置坐标</td><td>整数</td></tr>
+        <tr><td><code>target</code></td><td><b>要预测的答案</b>：1 = 含 IDC，0 = 不含</td><td>类别</td></tr>
+        <tr><td><code>path</code></td><td>图片文件路径</td><td>文本</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">作者在第 19 格把它们整理成一张表 <span data-cell="19">出处</span>，第 35 格从文件名里拆出 x、y 坐标 <span data-cell="35">出处</span>。页面中的切片图由代码画成示意：粉色是间质（结缔组织），紫色小点是细胞核，白色空洞是乳腺导管。真实切片是 H&amp;E 染色：苏木精把细胞核染成紫蓝色，伊红把其他组织染成粉红色。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="53">
+    <h3>动手试试 A · 按小块切还是按病人切 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="86">
+    <h3>动手试试 B · 精确率、召回率与 F1 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="92">
+    <h3>动手试试 C · 学习率搜索：一边加大步子一边看损失 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>病人不到 300 个，相对于将来要用的病人数很少，很容易过拟合到这批病人上</td><td><span data-cell="13">第 13 格</span></td></tr>
+        <tr><td>每个病人的小块数量差别很大；有的病人超过 80% 的小块含 IDC；整体上无 IDC 的小块更多</td><td><span data-cell="25">第 25 格</span></td></tr>
+        <tr><td>含癌小块看起来更紫、细胞更密，但也有很紫的健康小块；要小心模型把“导管多”学成“有癌”</td><td><span data-cell="33">第 33 格</span>、<span data-cell="45">第 45 格</span></td></tr>
+        <tr><td>按病人切出的测试集，含癌小块比例比训练集和开发集高</td><td><span data-cell="61">第 61 格</span></td></tr>
+        <tr><td>学习率搜索：损失在学习率超过约 0.005 后开始上升，所以循环学习率取 1e-6 到 0.006</td><td><span data-cell="94">第 94 格</span>、<span data-cell="95">第 95 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">作者的结论一节是空的（第 110 格），“深入分析”一节也标着 TODO（第 106 格）。损失曲线、概率地图、混淆矩阵都在运行输出里，Kaggle 下载的源码不带输出，这里不列分数。</p>
+      <h3>原作者的问题（如实列出，原文未改）</h3>
+      <ul class="tight">
+        <li><b>精确率和召回率的公式写反了</b>：第 85 格把 TP/(TP+FP) 写成召回率，实际上那是精确率；代码里的 <code>f1_score</code> 函数是对的。<span data-cell="85">第 85 格</span> <span data-cell="86">第 86 格</span></li>
+        <li><b>“概率”算法不规范</b>：模型输出两个类别的打分，作者只拿第 2 个打分做 sigmoid 当“癌症概率”，规范做法是对两个打分做 softmax。<span data-cell="103">第 103 格</span></li>
+        <li>损失曲线图里测试集的图例也写成了 "dev"。<span data-cell="100">第 100 格</span></li>
+        <li>画切片时标题用的是变量 <code>patient_id</code>（前面循环剩下的值），不是当前画的病人编号，图上的病人号可能不对。<span data-cell="44">第 44 格</span> <span data-cell="105">第 105 格</span></li>
+        <li>循环学习率的周期设成 <code>2*NUM_EPOCHS</code>=60 步，但调度器每个批次都走一步，函数注释建议的是“2 倍的每轮批次数”，实际周期远短于注释的本意。<span data-cell="97">第 97 格</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一张病理切片的每个小块打出“含癌概率”，拼成热力图，帮病理医生先看最可疑的区域。</li>
+        <li><b>同类问题：</b>淋巴结转移检测、前列腺癌分级、卫星图里找建筑，凡是“大图切小块、逐块判断、再拼回去”的任务。</li>
+        <li><b>可迁移的套路：</b>按病人（或按来源）切分 → 看各数据集的目标分布 → 类别权重 → 用 F1 而非准确率 → 学习率搜索 → 把预测放回原始空间看是否合理。</li>
+        <li><b>边界：</b>不同医院的染色深浅、扫描仪都不同，模型换医院往往会变差。它只是辅助，不能代替病理医生诊断。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>按病人切分 70/15/15 <span data-cell="53">第 53 格</span></li>
+        <li>训练增强：随机水平、垂直翻转；ImageNet 均值方差标准化 <span data-cell="63">第 63 格</span></li>
+        <li>ResNet18 + 新的三层分类头，只训练分类头 <span data-cell="78">第 78 格</span> <span data-cell="97">第 97 格</span></li>
+        <li>类别权重 + 交叉熵 <span data-cell="81">第 81 格</span></li>
+        <li>F1 分数 <span data-cell="86">第 86 格</span></li>
+        <li>学习率范围搜索 + 三角循环学习率 <span data-cell="91">第 91 格</span></li>
+        <li>概率热力图 <span data-cell="105">第 105 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>为什么一定要按病人切分，而不是把 27 万个小块打乱随机切？如果随机切，分数会偏高还是偏低？</li>
+      <li>作者发现“紫色多”不一定代表有癌，可能只是导管多。模型如果学到了这种“捷径”，会出什么问题？怎么检查？</li>
+      <li>在病理筛查里，漏掉一个癌区和多标一个可疑区，哪个代价更大？F1 把两者同等看待，合适吗？</li>
+      <li>作者只训练了 ResNet18 最后的分类头。什么情况下应该把前面的卷积层也一起训练？</li>
+      <li>测试集里含癌小块的比例比训练集高，这会让测试分数偏向哪边？</li>
+      <li>换一家医院，染色更深或更浅，模型可能会怎样？可以用什么办法缓解？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Laura Fink（allunia），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意，切片图由代码生成。数据集：Breast Histopathology Images（Janowczyk A., Madabhushi A.）。本页内容不构成医疗建议。
+</footer>
+</main>
+
+<script src="nb/breast-idc-histopathology.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* 自查开关：网址带 ?fast 时动画直接跳到最后一帧（无界面截图用） */
+  if (/[?&]fast/.test(location.search)) { K.tween = (ms, fn, ctx) => { if (ctx && !ctx.alive()) return Promise.resolve(false); fn(1, 1); return Promise.resolve(true); }; K.wait = (ms, ctx) => Promise.resolve(!ctx || ctx.alive()); }
+  if (/[?&]fold/.test(location.search)) document.head.appendChild(Object.assign(document.createElement("style"), { textContent: ".walk .ch-cells > .cell, .walk .cell-note { display: none !important; }" }));
+  /* ===== 页面专用：像素图工具（用代码生成小图，在浏览器里真算卷积、模糊、池化、几何变换） ===== */
+  const PX = (function () {
+    function rgbOf(name, fb) {
+      let s = (K.css(name) || fb || "#888888").trim();
+      if (s[0] !== "#") return [128, 128, 128];
+      if (s.length === 4) s = "#" + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+      return [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
+    }
+    function grid(W, H, f) { const a = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) a[y * W + x] = f(x, y); return { W, H, a }; }
+    /* 彩色图：{W,H,rgb:[R,G,B]}，每个通道取值 0–1 */
+    function rgbGrid(W, H, f) { const R = new Float32Array(W * H), G = new Float32Array(W * H), B = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const c = f(x, y), i = y * W + x; R[i] = c[0]; G[i] = c[1]; B[i] = c[2]; } return { W, H, rgb: [R, G, B] }; }
+    const chan = (m, c) => ({ W: m.W, H: m.H, a: m.rgb[c] });
+    const fromChans = (ch) => ({ W: ch[0].W, H: ch[0].H, rgb: ch.map((c) => c.a) });
+    const gray = (m) => (m.rgb ? grid(m.W, m.H, (x, y) => { const i = y * m.W + x; return 0.299 * m.rgb[0][i] + 0.587 * m.rgb[1][i] + 0.114 * m.rgb[2][i]; }) : m);
+    function at(m, x, y) { return m.a[y * m.W + x]; }
+    function atClamp(m, x, y) { x = x < 0 ? 0 : x >= m.W ? m.W - 1 : x; y = y < 0 ? 0 : y >= m.H ? m.H - 1 : y; return m.a[y * m.W + x]; }
+    function atZero(m, x, y) { return x < 0 || y < 0 || x >= m.W || y >= m.H ? 0 : m.a[y * m.W + x]; }
+    /* padding='same'：边界外按 0 补 */
+    function conv(m, k) { const n = k.length, r = (n - 1) / 2; return grid(m.W, m.H, (x, y) => { let s = 0; for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) s += k[j][i] * atZero(m, x + i - r, y + j - r); return s; }); }
+    function map(m, f) { if (m.rgb) return { W: m.W, H: m.H, rgb: m.rgb.map((a) => { const o = new Float32Array(a.length); for (let i = 0; i < a.length; i++) o[i] = f(a[i], i); return o; }) }; const o = { W: m.W, H: m.H, a: new Float32Array(m.a.length) }; for (let i = 0; i < m.a.length; i++) o.a[i] = f(m.a[i], i); return o; }
+    const relu = (m) => map(m, (v) => (v > 0 ? v : 0));
+    function pool(m, s) { s = s || 2; const W = Math.ceil(m.W / s), H = Math.ceil(m.H / s); return grid(W, H, (x, y) => { let b = -Infinity; for (let j = 0; j < s; j++) for (let i = 0; i < s; i++) { const xx = x * s + i, yy = y * s + j; if (xx < m.W && yy < m.H) b = Math.max(b, at(m, xx, yy)); } return b; }); }
+    function range(m) { let lo = Infinity, hi = -Infinity; for (const v of m.a) { if (v < lo) lo = v; if (v > hi) hi = v; } return [lo, hi]; }
+    /* 可分离高斯模糊（边界用最近像素），彩色图逐通道做 */
+    function blur(m, sigma) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => blur(chan(m, c), sigma)));
+      if (sigma <= 0.01) return m;
+      const r = Math.max(1, Math.ceil(sigma * 3)), w = [];
+      let s = 0;
+      for (let i = -r; i <= r; i++) { const v = Math.exp((-i * i) / (2 * sigma * sigma)); w.push(v); s += v; }
+      for (let i = 0; i < w.length; i++) w[i] /= s;
+      const t = grid(m.W, m.H, (x, y) => { let a = 0; for (let i = -r; i <= r; i++) a += w[i + r] * atClamp(m, x + i, y); return a; });
+      return grid(m.W, m.H, (x, y) => { let a = 0; for (let i = -r; i <= r; i++) a += w[i + r] * atClamp(t, x, y + i); return a; });
+    }
+    function bilinear(m, x, y) {
+      const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+      return (atClamp(m, x0, y0) * (1 - fx) + atClamp(m, x0 + 1, y0) * fx) * (1 - fy) + (atClamp(m, x0, y0 + 1) * (1 - fx) + atClamp(m, x0 + 1, y0 + 1) * fx) * fy;
+    }
+    /* 绕中心旋转/缩放/平移/翻转；fill：'nearest' 用最近像素，数字表示边界外填这个值 */
+    function affine(m, p) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => affine(chan(m, c), p)));
+      const th = ((p.rot || 0) * Math.PI) / 180, c = Math.cos(th), s = Math.sin(th), z = p.zoom || 1;
+      const cx = (m.W - 1) / 2, cy = (m.H - 1) / 2, tx = (p.tx || 0) * m.W, ty = (p.ty || 0) * m.H;
+      return grid(m.W, m.H, (x, y) => {
+        let u = x - cx - tx, v = y - cy - ty;
+        if (p.flip) u = -u;
+        if (p.vflip) v = -v;
+        const a = (c * u + s * v) / z + cx, b = (-s * u + c * v) / z + cy;
+        if (p.fill != null && p.fill !== "nearest" && (a < -0.5 || b < -0.5 || a > m.W - 0.5 || b > m.H - 0.5)) return p.fill;
+        return bilinear(m, a, b);
+      });
+    }
+    function resize(m, W, H) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => resize(chan(m, c), W, H)));
+      return grid(W, H, (x, y) => bilinear(m, ((x + 0.5) * m.W) / W - 0.5, ((y + 0.5) * m.H) / H - 0.5));
+    }
+    function toURL(m, mode, lo, hi) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      if (m.rgb) {
+        for (let i = 0; i < m.W * m.H; i++) { for (let c = 0; c < 3; c++) d[i * 4 + c] = Math.max(0, Math.min(1, m.rgb[c][i])) * 255; d[i * 4 + 3] = 255; }
+      } else {
+        const P = rgbOf("--panel", "#ffffff"), A = rgbOf("--c1"), B = rgbOf("--c6");
+        if (lo == null || hi == null) { const r = range(m); if (lo == null) lo = r[0]; if (hi == null) hi = r[1]; }
+        const span = hi - lo || 1, amax = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+        for (let i = 0; i < m.a.length; i++) {
+          const v = m.a[i]; let r, gg, b;
+          if (mode === "div") { const t = Math.max(-1, Math.min(1, v / amax)), C = t >= 0 ? B : A, k = Math.abs(t); r = P[0] + (C[0] - P[0]) * k; gg = P[1] + (C[1] - P[1]) * k; b = P[2] + (C[2] - P[2]) * k; }
+          else if (mode === "heat") { const k = Math.max(0, Math.min(1, (v - lo) / span)); r = P[0] + (B[0] - P[0]) * k; gg = P[1] + (B[1] - P[1]) * k; b = P[2] + (B[2] - P[2]) * k; }
+          else { const k = Math.max(0, Math.min(1, (v - lo) / span)) * 255; r = gg = b = k; }
+          d[i * 4] = r; d[i * 4 + 1] = gg; d[i * 4 + 2] = b; d[i * 4 + 3] = 255;
+        }
+      }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    function draw(svg, x, y, w, h, m, mode, lo, hi, smooth) {
+      const e = K.svg(svg, "image", { x, y, width: w, height: h, preserveAspectRatio: "none" });
+      if (!smooth) e.style.imageRendering = "pixelated";
+      e.setAttribute("href", toURL(m, mode, lo, hi));
+      K.svg(svg, "rect", { x, y, width: w, height: h, fill: "none", stroke: "var(--line)" });
+      return e;
+    }
+    function update(e, m, mode, lo, hi) { e.setAttribute("href", toURL(m, mode, lo, hi)); }
+    function lines(svg, x, y, w, h, W, H, op) {
+      const g = K.svg(svg, "g");
+      for (let i = 0; i <= W; i++) K.svg(g, "line", { x1: x + (w * i) / W, x2: x + (w * i) / W, y1: y, y2: y + h, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      for (let j = 0; j <= H; j++) K.svg(g, "line", { y1: y + (h * j) / H, y2: y + (h * j) / H, x1: x, x2: x + w, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      return g;
+    }
+    const smooth = (e0, e1, x) => { const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+    const blob = (x, y, cx, cy, sx, sy) => Math.exp(-(((x - cx) * (x - cx)) / (2 * sx * sx) + ((y - cy) * (y - cy)) / (2 * sy * sy)));
+    /* 平滑噪声：几层不同频率的随机网格插值叠加，用来做纹理 */
+    function noise(W, H, seed, cells) {
+      const r = K.rng(seed || 1), n = cells || 6, g0 = grid(n + 1, n + 1, () => r());
+      return grid(W, H, (x, y) => bilinear(g0, (x / W) * n, (y / H) * n));
+    }
+    return { grid, rgbGrid, chan, fromChans, gray, at, atClamp, conv, map, relu, pool, range, blur, bilinear, affine, resize, toURL, draw, update, lines, smooth, blob, noise, rgbOf };
+  })();
+
+
+  /* ===== 用代码画一块示意 H&E 切片（RGB 0–1）=====
+   * idc：是否含癌（细胞核更多、更大、更挤）；stain：病人的染色深浅；hue：偏色 */
+  function patch(N, idc, seed, stain, hue) {
+    const r = K.rng(seed), nuc = [], holes = [];
+    stain = stain == null ? 1 : stain; hue = hue || 0;
+    const n = idc ? 22 + Math.floor(r() * 10) : 7 + Math.floor(r() * 6);
+    for (let i = 0; i < n; i++) nuc.push([r(), r(), (idc ? 0.05 : 0.035) + r() * (idc ? 0.035 : 0.015), 0.6 + r() * 0.8]);
+    if (!idc || r() < 0.3) holes.push([0.2 + r() * 0.6, 0.2 + r() * 0.6, 0.1 + r() * 0.12]);
+    const tex = PX.noise(N, N, seed + 5, 5);
+    return PX.rgbGrid(N, N, (px, py) => {
+      const x = (px + 0.5) / N, y = (py + 0.5) / N, i = py * N + px;
+      let c = [0.93, 0.66 + 0.08 * tex.a[i], 0.8];
+      let k = 0;
+      for (const q of nuc) { const d = Math.hypot((x - q[0]) * q[3], (y - q[1]) / q[3]); k = Math.max(k, 1 - PX.smooth(q[2] * 0.6, q[2], d)); }
+      const nc = [0.36 + hue, 0.18, 0.55 - hue];
+      c = c.map((v, j) => v + (nc[j] - v) * k * 0.9);
+      for (const h of holes) { const d = Math.hypot(x - h[0], y - h[1]); const w = 1 - PX.smooth(h[2] * 0.8, h[2], d); c = c.map((v) => v + (0.97 - v) * w); }
+      return c.map((v) => 1 - (1 - v) * stain);
+    });
+  }
+
+  const steps = [
+    {
+      title: "病人文件夹里装着什么", kicker: "第 7–22 格 · 数据结构", at: 7,
+      html: `<p>作者一层层打开文件夹：最外层是 <code>IDC_regular_ps50_idx5</code>，里面是一个个<b>病人编号</b>文件夹（作者数出将近 280 个），每个病人下面再分 <code>0/</code>（无 IDC）和 <code>1/</code>（有 IDC）。</p><p>作者一个个文件夹数过去，总共大约 28 万个小块。他没有把图片都读进内存，而是把每块的<b>路径、病人编号、标签</b>存进一张表 <code>data</code>，训练时再按路径一批批读。这是处理大图像数据的常用做法。</p>`,
+      cells: [12, 15, 19], highlight: ["IDC_regular_ps50_idx5", "data.iloc[k][\"target\"] = c"],
+      draw(svg, ctx) {
+        K.node(svg, 20, 140, 170, 50, "IDC_regular_ps50_idx5", { bold: true, fs: 12 });
+        const pats = ["10253", "10254", "13616", "…"];
+        const els = [];
+        pats.forEach((p, i) => {
+          const y = 30 + i * 80;
+          els.push(K.arrow(svg, 190, 165, 240, y + 20), K.node(svg, 240, y, 100, 40, "病人 " + p, { fs: 12 }));
+          if (p !== "…") {
+            els.push(K.arrow(svg, 340, y + 20, 380, y + 8), K.node(svg, 380, y - 6, 50, 26, "0/", { fs: 12 }));
+            els.push(K.arrow(svg, 340, y + 20, 380, y + 34), K.node(svg, 380, y + 22, 50, 26, "1/", { fs: 12, stroke: "var(--c6)" }));
+            for (let k = 0; k < 5; k++) {
+              els.push(PX.draw(svg, 450 + k * 30, y - 6, 26, 26, patch(20, false, i * 10 + k, 1), null, null, null, true));
+              els.push(PX.draw(svg, 450 + k * 30, y + 22, 26, 26, patch(20, true, i * 10 + k + 50, 1), null, null, null, true));
+            }
+          }
+        });
+        K.svg(svg, "text", { x: 610, y: 30, "font-size": 12, class: "muted" }, "50×50 小块");
+        K.svg(svg, "text", { x: 610, y: 46, "font-size": 12, class: "muted" }, "（示意图）");
+        els.forEach((e) => (e.style.opacity = 0));
+        (async () => { for (const e of els) { if (!(await ctx.tween(60, (t) => (e.style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      title: "每个病人有多少块、癌占几成", kicker: "第 23–25 格 · 探索分析", at: 23,
+      html: `<p>三张直方图回答三个问题：</p><ul class="tight"><li>每个病人有多少小块？<b>差别很大</b>。作者追问：是切片大小不同，还是分辨率不同？</li><li>每个病人有百分之多少的小块含 IDC？有的病人<b>超过 80%</b>，说明切片可能只拍了肿瘤附近</li><li>总体上含 IDC 的小块比不含的<b>少</b>，类别不平衡</li></ul><p>动画里的分布形状是示意，具体请看作者网页上的图。</p>`,
+      cells: [24], highlight: ["cancer_perc"],
+      draw(svg, ctx) {
+        const r = K.rng(8), A = [], B = [];
+        for (let i = 0; i < 280; i++) { A.push(Math.exp(K.randn(r) * 0.6 + 6.6)); B.push(K.clamp(0.28 + K.randn(r) * 0.2, 0.01, 0.95)); }
+        const hist = (v, lo, hi, n) => { const h = Array(n).fill(0); v.forEach((x) => h[K.clamp(Math.floor(((x - lo) / (hi - lo)) * n), 0, n - 1)]++); return h; };
+        const panels = [[hist(A, 0, 2500, 20), "每个病人的小块数", "var(--c5)"], [hist(B, 0, 1, 20), "含 IDC 小块的比例", "var(--c6)"]];
+        const bars = [];
+        panels.forEach((p, k) => {
+          const x0 = 20 + k * 240, mx = Math.max(...p[0]);
+          K.svg(svg, "text", { x: x0, y: 30, "font-size": 13, "font-weight": 700 }, p[1]);
+          p[0].forEach((h, i) => bars.push({ e: K.svg(svg, "rect", { x: x0 + i * 10, y: 290, width: 9, height: 0, fill: p[2] }), h: (h / mx) * 230 }));
+        });
+        K.svg(svg, "text", { x: 500, y: 30, "font-size": 13, "font-weight": 700 }, "全部小块");
+        const b0 = K.svg(svg, "rect", { x: 520, y: 290, width: 60, height: 0, fill: "var(--c3)" }), b1 = K.svg(svg, "rect", { x: 610, y: 290, width: 60, height: 0, fill: "var(--c6)" });
+        K.svg(svg, "text", { x: 550, y: 310, "text-anchor": "middle", "font-size": 12 }, "0 无");
+        K.svg(svg, "text", { x: 640, y: 310, "text-anchor": "middle", "font-size": 12 }, "1 有");
+        K.svg(svg, "text", { x: 20, y: 325, "font-size": 11.5, class: "muted" }, "左、中两张为示意分布；右图按数据集说明的 198,738 : 78,786 画");
+        ctx.tween(1300, (t) => {
+          bars.forEach((b) => { b.e.setAttribute("height", b.h * t); b.e.setAttribute("y", 290 - b.h * t); });
+          const h0 = 230 * t, h1 = 230 * (78786 / 198738) * t;
+          b0.setAttribute("height", h0); b0.setAttribute("y", 290 - h0); b1.setAttribute("height", h1); b1.setAttribute("y", 290 - h1);
+        });
+      },
+    },
+    {
+      title: "看一眼：有癌和没癌的小块", kicker: "第 26–33 格 · 看图", at: 26,
+      html: `<p>各随机抽 50 块含 IDC 和不含 IDC 的小块看。作者的观察：</p><ul class="tight"><li>有的小块是残缺的，比 50×50 小</li><li>含癌的小块<b>更紫、细胞更挤</b></li><li>但也有很紫的健康小块</li><li>白色的洞可能是乳腺导管</li></ul><p>紫色来自 H&amp;E 染色：细胞核被染成紫蓝色。细胞核多、挤在一起，往往说明细胞在异常增生。作者也承认很想知道病理医生具体看哪些标准。</p>`,
+      cells: [30, 32],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 20, y: 26, "font-size": 13, "font-weight": 700, fill: "var(--c6)" }, "含 IDC（示意）");
+        K.svg(svg, "text", { x: 370, y: 26, "font-size": 13, "font-weight": 700, fill: "var(--c3)" }, "不含 IDC（示意）");
+        const tiles = [];
+        for (let i = 0; i < 12; i++) {
+          tiles.push(PX.draw(svg, 20 + (i % 4) * 82, 40 + Math.floor(i / 4) * 92, 76, 76, patch(40, true, 100 + i, 0.8 + (i % 3) * 0.1), null, null, null, true));
+          tiles.push(PX.draw(svg, 370 + (i % 4) * 82, 40 + Math.floor(i / 4) * 92, 76, 76, patch(40, i === 5, 200 + i, 0.8 + (i % 3) * 0.1), null, null, null, true));
+        }
+        tiles.forEach((t) => (t.style.opacity = 0));
+        K.svg(svg, "text", { x: 370, y: 330, "font-size": 11.5, fill: "var(--warn)" }, "第 2 行第 2 块：健康但很紫（容易被误判）");
+        (async () => { for (const t of tiles) { if (!(await ctx.tween(70, (k) => (t.style.opacity = k)))) return; } })();
+      },
+    },
+    {
+      title: "用文件名里的坐标拼回整张切片", kicker: "第 34–40 格 · 空间结构", at: 34,
+      html: `<p>文件名里藏着位置：<code>…_x1351_y1101_class0.png</code>。作者写函数把 <code>x</code>、<code>y</code> 拆出来，再按坐标把每个病人的小块画成散点：蓝色无癌、红色有癌。</p><p>这样就能看到“癌在切片上的分布”：通常连成一片。作者也注意到有些地方缺了小块，可能是制片时丢了或被预处理去掉了。</p>`,
+      cells: [35, 39], highlight: ["rsplit(\"_\", n=4, expand=True)"],
+      draw(svg, ctx) {
+        const file = K.svg(svg, "text", { x: 20, y: 30, "font-size": 15, "font-family": "var(--mono)" }, "10253_idx5_x1351_y1101_class0.png");
+        K.svg(svg, "text", { x: 20, y: 54, "font-size": 12, class: "muted" }, "按 _ 从右往左拆 4 刀 → x=1351, y=1101, class=0");
+        const ax = K.axes(svg, { x: 60, y: 76, w: 420, h: 214 }, [0, 30], [0, 18], { xticks: 0, yticks: 0, xlabel: "x 坐标", ylabel: "y 坐标" });
+        const r = K.rng(4), pts = [];
+        for (let gx = 0; gx < 30; gx++) for (let gy = 0; gy < 18; gy++) {
+          const inT = ((gx - 15) / 14) ** 2 + ((gy - 9) / 8.5) ** 2 < 1 + 0.15 * Math.sin(gx);
+          if (!inT || r() < 0.06) continue;
+          const can = ((gx - 19) / 6) ** 2 + ((gy - 7) / 4.5) ** 2 < 1 + (r() - 0.5) * 0.5;
+          pts.push(K.svg(svg, "rect", { x: ax.sx(gx), y: ax.sy(gy + 1), width: ax.sx(1) - ax.sx(0) - 1, height: ax.sy(0) - ax.sy(1) - 1, fill: can ? "var(--c6)" : "var(--c1)", opacity: 0 }));
+        }
+        K.svg(svg, "text", { x: 510, y: 140, "font-size": 12.5, fill: "var(--c6)" }, "■ 含 IDC 的小块");
+        K.svg(svg, "text", { x: 510, y: 164, "font-size": 12.5, fill: "var(--c1)" }, "■ 不含 IDC 的小块");
+        K.svg(svg, "text", { x: 510, y: 200, "font-size": 12, class: "muted" }, "空白处 = 缺失的小块");
+        K.svg(svg, "text", { x: 510, y: 220, "font-size": 12, class: "muted" }, "（示意）");
+        ctx.tween(1600, (t) => pts.forEach((p, i) => K.set(p, { opacity: i / pts.length < t ? 0.85 : 0 })));
+      },
+    },
+    {
+      title: "重建组织图像：癌长在哪里", kicker: "第 41–46 格 · 拼图", at: 41,
+      html: `<p>更进一步：把每个小块的<b>像素</b>按坐标贴回一张大画布，重建出整张切片；再做一张同样大小的“掩膜”，把含癌小块涂成红色叠上去。</p><p>作者的观察：颜色深、偏紫的区域更可能是癌，但并不总是。他提醒：<b>如果紫色区域其实是导管更多</b>，模型可能会学成“导管 = 癌”，这是一种危险的捷径。</p>`,
+      cells: [42, 44], highlight: ["grid[y_start:y_end, x_start:x_end] = image", "mask[y_start:y_end, x_start:x_end, 0] = 250"],
+      draw(svg, ctx) {
+        const G = 9, S = 34, tiles = [], ov = [];
+        for (let gx = 0; gx < G; gx++) for (let gy = 0; gy < 7; gy++) {
+          if (((gx - 4) / 4.6) ** 2 + ((gy - 3) / 3.6) ** 2 > 1) continue;
+          const can = ((gx - 5.5) / 2.2) ** 2 + ((gy - 2.5) / 2) ** 2 < 1;
+          const x = 20 + gx * S, y = 30 + gy * S;
+          const e = PX.draw(svg, x + 300, y, S, S, patch(24, can, gx * 7 + gy, 0.9), null, null, null, true); e.nextSibling.remove(); tiles.push({ e, x, y });
+          const o = K.svg(svg, "rect", { x: x + 340, y, width: S, height: S, fill: "var(--c6)", opacity: 0 });
+          if (can) ov.push(o); else o.remove();
+        }
+        K.svg(svg, "text", { x: 20, y: 22, "font-size": 13 }, "零散的小块");
+        K.svg(svg, "text", { x: 360, y: 22, "font-size": 13 }, "按坐标拼回 + 癌区涂红（示意）");
+        tiles.forEach((t, i) => { t.sx = 20 + (i % 9) * 36 + (i * 13) % 7; t.sy = 40 + Math.floor(i / 9) * 40 + (i * 7) % 9; t.e.setAttribute("x", t.sx); t.e.setAttribute("y", t.sy); });
+        ctx.wait(500).then((ok) => ok && ctx.tween(1600, (k) => tiles.forEach((t) => { t.e.setAttribute("x", K.lerp(t.sx, t.x + 340, k)); t.e.setAttribute("y", K.lerp(t.sy, t.y, k)); })))
+          .then((ok) => { if (ok) ov.forEach((o) => o.setAttribute("x", +o.getAttribute("x") - 0)); return ok && ctx.tween(700, (k) => ov.forEach((o) => K.set(o, { opacity: 0.4 * k }))); });
+      },
+    },
+    {
+      title: "按病人切分：70% 训练，15% 开发，15% 测试", kicker: "第 47–61 格 · 验证策略", at: 47,
+      html: `<p>这是整份 notebook 最重要的设计之一：<b>先切病人，再取小块</b>。30% 的病人拿出来，再对半分成开发集（dev，相当于验证集）和测试集。同一个病人的小块只会出现在一处。</p><p>为什么？同一个病人的小块染色、组织形态都很像。如果随机切小块，测试集里全是“熟人的兄弟”，分数会虚高。</p><p>代价是没法按标签分层，作者发现<b>测试集含癌比例更高</b>（第 61 格）。他也承认 30% 这个比例是随手定的，以后可以按肿瘤大小等特征给病人分组再切。</p>`,
+      cells: [53], highlight: ["train_test_split(patients"],
+      draw(svg, ctx) {
+        const cols = K.colors, r = K.rng(3), pats = [];
+        for (let p = 0; p < 20; p++) pats.push({ c: cols[p % 6], set: p < 14 ? 0 : p < 17 ? 1 : 2, n: 3 + Math.floor(r() * 4) });
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 13 }, "每种颜色 = 一个病人的所有小块（示意）");
+        const els = [];
+        pats.forEach((p, i) => { for (let k = 0; k < p.n; k++) els.push({ p, e: K.svg(svg, "rect", { x: 20 + (i % 10) * 68 + k * 10, y: 40 + Math.floor(i / 10) * 40, width: 9, height: 26, fill: p.c, opacity: 0.85 }), k }); });
+        const lab = [["训练 70%", 20], ["开发 15%", 400], ["测试 15%", 560]];
+        lab.forEach((l) => K.svg(svg, "text", { x: l[1], y: 160, "font-size": 13, "font-weight": 700 }, l[0]));
+        const cnt = [0, 0, 0];
+        const tgt = pats.map((p) => { const j = cnt[p.set]++; return p.set === 0 ? [20 + (j % 7) * 52, 175 + Math.floor(j / 7) * 70] : [(p.set === 1 ? 400 : 560) + (j % 2) * 70, 175 + Math.floor(j / 2) * 70]; });
+        const idx = new Map(pats.map((p, i) => [p, i]));
+        ctx.wait(600).then((ok) => ok && ctx.tween(1600, (t) => els.forEach((d) => { const i = idx.get(d.p); d.e.setAttribute("x", K.lerp(20 + (i % 10) * 68 + d.k * 10, tgt[i][0] + d.k * 8, t)); d.e.setAttribute("y", K.lerp(40 + Math.floor(i / 10) * 40, tgt[i][1], t)); })));
+      },
+    },
+    {
+      title: "数据增强：只用翻转", kicker: "第 62–70 格 · 预处理与增强", at: 62,
+      html: `<p>作者的原则是“先从最简单的开始”。训练时只做三件事：缩放到 50×50、随机<b>水平翻转</b>、随机<b>垂直翻转</b>；验证和测试只缩放。然后按 ImageNet 的均值和方差标准化（因为后面要用 ImageNet 上预训练的网络）。</p><p>为什么翻转合理？卷积网络对平移不敏感，但对旋转、翻转敏感；而一块组织在切片上本来就可能朝任何方向，翻过来它还是同一块组织，标签不变。</p>`,
+      cells: [63], highlight: ["RandomHorizontalFlip", "RandomVerticalFlip"],
+      draw(svg, ctx) {
+        const base = patch(40, true, 7, 0.95);
+        const vs = [["原图", {}], ["水平翻转", { flip: true }], ["垂直翻转", { vflip: true }], ["两个都翻", { flip: true, vflip: true }]];
+        const els = vs.map((v, i) => { const e = PX.draw(svg, 20 + i * 172, 60, 150, 150, base, null, null, null, true); K.svg(svg, "text", { x: 95 + i * 172, y: 235, "text-anchor": "middle", "font-size": 13 }, v[0]); return e; });
+        K.svg(svg, "text", { x: 20, y: 40, "font-size": 13 }, "同一块组织的四种朝向（浏览器现场翻转）");
+        K.svg(svg, "text", { x: 20, y: 280, "font-size": 12.5, class: "muted" }, "标签都还是“含 IDC”。一张图变出 4 张，模型不会只记住某个固定朝向。");
+        (async () => { for (let i = 1; i < 4; i++) { if (!(await ctx.wait(500))) return; els[i].setAttribute("href", PX.toURL(PX.affine(base, vs[i][1]))); } })();
+      },
+    },
+    {
+      title: "借一个 ResNet18，只换最后的分类头", kicker: "第 71–78 格 · 迁移学习", at: 71,
+      html: `<p>数据集按病人算很小，作者担心过拟合，于是用<b>迁移学习</b>：拿一个在 ImageNet（一百多万张日常照片）上训练好的 ResNet18，保留前面所有卷积层，只把最后一层换成新的分类头：<code>512→256→2</code>，中间有 ReLU、BatchNorm、Dropout(0.5)。</p><p>后面训练时优化器只拿了 <code>model.fc.parameters()</code>，也就是<b>只训练新的分类头</b>，前面的层不动。动画里灰色的是冻结的主干，彩色的是新装上的头。</p>`,
+      cells: [72, 78], highlight: ["resnet18", "model.fc = nn.Sequential"],
+      draw(svg, ctx) {
+        const blocks = ["卷积 7×7", "残差块 ×2", "残差块 ×2", "残差块 ×2", "残差块 ×2", "平均池化"];
+        blocks.forEach((b, i) => { K.node(svg, 20 + i * 82, 120, 74, 90, b, { fs: 11.5, fill: "var(--panel-2)" }); });
+        K.svg(svg, "text", { x: 20, y: 100, "font-size": 13, fill: "var(--ink-3)" }, "🔒 冻结：ImageNet 上学到的边缘、纹理、形状检测器");
+        const head = [["512→256", "var(--c1)"], ["256→2", "var(--c1)"], ["有癌 / 无癌", "var(--c6)"]];
+        const hs = head.map((h, i) => { const g = K.node(svg, 520 + (i % 2) * 0 , 60 + i * 80, 170, 56, h[0], { stroke: h[1], bold: true }); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 520, y: 40, "font-size": 13, fill: "var(--accent)" }, "✏️ 新装的分类头：要训练");
+        const old = K.node(svg, 520, 140, 170, 56, "原来的 1000 类输出", { stroke: "var(--ink-3)" });
+        ctx.wait(700).then((ok) => ok && ctx.tween(600, (t) => (old.style.opacity = 1 - t))).then((ok) => ok && ctx.tween(900, (t) => hs.forEach((h, i) => (h.style.opacity = K.clamp(t * 3 - i, 0, 1)))));
+      },
+    },
+    {
+      title: "加权交叉熵：癌症小块的错算得更重", kicker: "第 79–84 格 · 损失函数", at: 79,
+      html: `<p>损失函数用交叉熵，作者用两个输出神经元（而不是一个），这样方便算真阳性、假阳性。</p><p>因为无癌小块多、有癌小块少，作者用 <code>compute_class_weight("balanced")</code> 给两类加<b>权重</b>：权重 = 总数 ÷（2 × 这一类的数量），少的那一类权重更高。效果是：模型在一个癌症小块上犯错，要比在一个健康小块上犯错扣更多分。</p>`,
+      cells: [81, 84], highlight: ["compute_class_weight", "CrossEntropyLoss(weight=class_weights)"],
+      draw(svg, ctx) {
+        const n0 = 198738, n1 = 78786, w0 = (n0 + n1) / (2 * n0), w1 = (n0 + n1) / (2 * n1);
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13 }, "按数据集说明的总数算出的 balanced 权重（作者实际只用训练集算，数值会略有不同）");
+        const bx = 120, sc = 300 / 200000;
+        const rows = [["无 IDC", n0, w0, "var(--c3)"], ["有 IDC", n1, w1, "var(--c6)"]];
+        const els = rows.map((r, i) => {
+          const y = 80 + i * 110;
+          K.svg(svg, "text", { x: 20, y: y + 22, "font-size": 14, "font-weight": 700, fill: r[3] }, r[0]);
+          const cnt = K.svg(svg, "rect", { x: bx, y, width: 0, height: 32, fill: r[3], opacity: 0.8 });
+          K.svg(svg, "text", { x: bx, y: y + 52, "font-size": 12, class: "muted" }, `数量 ${r[1].toLocaleString()}`);
+          const wt = K.svg(svg, "text", { x: 470, y: y + 24, "font-size": 18, "font-weight": 700, fill: r[3] }, "");
+          return { cnt, wt, r };
+        });
+        K.svg(svg, "text", { x: 470, y: 300, "font-size": 12.5 }, "数量 × 权重 ≈ 两类各占一半的“话语权”");
+        ctx.tween(1400, (t) => els.forEach((e) => { e.cnt.setAttribute("width", e.r[1] * sc * t); e.wt.textContent = t > 0.5 ? `权重 ${e.r[2].toFixed(2)}` : ""; }));
+      },
+    },
+    {
+      title: "评估指标：F1 分数", kicker: "第 85–86 格 · 怎么算好", at: 85,
+      html: `<p>作者先说明为什么不用准确率：不平衡时，全猜“无癌”也有不低的准确率。他选 <b>F1 分数</b>：精确率和召回率的<b>调和平均</b>，两者中只要有一个低，F1 就会被拉下来。作者举的例子：召回 0.1、精确 0.6，算术平均 0.35，F1 只有 0.17。<span data-cell="85">第 85 格</span></p><ul class="tight"><li><b>精确率</b> = 真阳性 /（真阳性 + 假阳性）：报“有癌”的里面，真有癌的比例</li><li><b>召回率</b>（医学上叫<b>敏感度</b>）= 真阳性 /（真阳性 + 假阴性）：真有癌的里面，被找出来的比例</li></ul><p class="callout warn">原文第 85 格的两个公式写反了（把精确率的公式标成了召回率），但第 86 格的代码是对的。</p>`,
+      cells: [86], highlight: ["precision = tp / (tp + fp + epsilon)", "recall = tp / (tp + fn + epsilon)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 300, h: 260 }, [0, 1], [0, 1], { xlabel: "召回率", ylabel: "精确率", xticks: 2, yticks: 2 });
+        for (let gx = 0; gx < 20; gx++) for (let gy = 0; gy < 20; gy++) {
+          const R = (gx + 0.5) / 20, P = (gy + 0.5) / 20, f = (2 * P * R) / (P + R);
+          K.svg(svg, "rect", { x: ax.sx(gx / 20), y: ax.sy((gy + 1) / 20), width: 15.5, height: 13.5, fill: K.heat(f) });
+        }
+        const dot = K.svg(svg, "circle", { cx: ax.sx(0.1), cy: ax.sy(0.6), r: 7, fill: "var(--c6)", stroke: "var(--panel)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 400, y: 60, "font-size": 13 }, "颜色越深 = F1 越高");
+        K.svg(svg, "text", { x: 400, y: 100, "font-size": 14, "font-weight": 700 }, "作者的例子（红点）");
+        const t1 = K.svg(svg, "text", { x: 400, y: 128, "font-size": 13 }, "召回 0.1，精确 0.6");
+        const t2 = K.svg(svg, "text", { x: 400, y: 154, "font-size": 13 }, "算术平均 = 0.35");
+        const t3 = K.svg(svg, "text", { x: 400, y: 180, "font-size": 13, fill: "var(--c6)", "font-weight": 700 }, "F1 = 2/(1/0.1 + 1/0.6) = 0.171");
+        K.svg(svg, "text", { x: 400, y: 230, "font-size": 12.5, class: "muted" }, "F1 偏向较小的那个值：");
+        K.svg(svg, "text", { x: 400, y: 250, "font-size": 12.5, class: "muted" }, "一边很差，整体就不会好看");
+        [t1, t2, t3].forEach((t) => (t.style.opacity = 0));
+        ctx.tween(600, (k) => dot.setAttribute("r", 7 + 4 * Math.sin(k * 6.28))).then((ok) => ok && ctx.tween(900, (k) => [t1, t2, t3].forEach((t, i) => (t.style.opacity = K.clamp(k * 3 - i, 0, 1)))));
+      },
+    },
+    {
+      title: "训练循环与学习率搜索", kicker: "第 87–95 格 · 找合适的步子", at: 87,
+      html: `<p>作者手写了训练循环：每轮依次跑训练、开发、测试三个阶段，训练阶段反向传播更新参数，记录每一步的损失；开发集准确率最高的那一轮的参数被保存下来。</p><p>学习率怎么定？作者做了<b>学习率范围搜索</b>：从 1e-6 开始，每个批次把学习率调大一点，一直到 0.1，记录平滑后的损失。<b>损失开始往上翘的地方</b>就是学习率的上限。作者的结论：超过约 0.005 损失就上升，于是取 1e-6 到 0.006。<span data-cell="94">第 94 格</span></p><p>正式训练用<b>三角循环学习率</b>：学习率在上下限之间来回爬升、下降，像锯齿。</p>`,
+      cells: [88, 91, 92], highlight: ["CyclicLR", "mode=\"triangular\"", "smoothed_loss = smoothing  * loss.item() + (1 - smoothing) * lr_find_loss[-1]"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 230 }, [0, 180], [0, 0.0065], { xlabel: "批次（示意）", ylabel: "学习率", xticks: 0, yfmt: (v) => v.toFixed(3) });
+        const pth = K.svg(svg, "path", { fill: "none", stroke: "var(--c2)", "stroke-width": 2.5 });
+        const lr = (s) => { const c = 60, ph = (s % c) / c; return 1e-6 + (0.006 - 1e-6) * (ph < 0.5 ? ph * 2 : 2 - ph * 2); };
+        K.svg(svg, "line", { x1: 60, x2: 660, y1: ax.sy(0.006), y2: ax.sy(0.006), stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+        K.svg(svg, "text", { x: 600, y: ax.sy(0.006) - 6, "font-size": 12 }, "上限 0.006");
+        K.svg(svg, "text", { x: 70, y: 330, "font-size": 12, class: "muted" }, "三角循环：学习率在 1e-6 和 0.006 之间来回（一个周期 60 步，见第 97 格）");
+        ctx.tween(2400, (t) => { let d = ""; for (let s = 0; s <= 180 * t; s++) d += (d ? "L" : "M") + ax.sx(s) + "," + ax.sy(lr(s)); pth.setAttribute("d", d); });
+      },
+    },
+    {
+      title: "训练 30 轮，或者直接加载结果", kicker: "第 96–101 格 · 训练", at: 96,
+      html: `<p>开头的设置 <code>run_training = False</code>，所以在 Kaggle 上运行时<b>并不真的训练</b>，而是加载作者事先训练好的模型和损失记录（另一个数据集 <code>breastcancermodel</code>）。真正训练时：30 轮、SGD 优化器、只更新分类头的参数、循环学习率。</p><p>然后画出训练、开发、测试三条损失曲线，看是否收敛。动画是示意曲线。</p><p class="note">第 100 格的图例把测试集也写成了 "dev"。循环学习率周期 60 步、每批走一步，周期比函数注释建议的短得多。</p>`,
+      cells: [97, 100], highlight: ["NUM_EPOCHS = 30", "optim.SGD(model.fc.parameters(), lr=0.01)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [0, 30], [0.2, 0.7], { xlabel: "轮次（示意曲线）", ylabel: "加权交叉熵", yfmt: (v) => v.toFixed(1) });
+        const r = K.rng(6), L = [[], [], []];
+        for (let e = 0; e <= 30; e++) { L[0].push(0.3 + 0.35 * Math.exp(-e / 5) + (r() - 0.5) * 0.01); L[1].push(0.34 + 0.3 * Math.exp(-e / 4) + (r() - 0.5) * 0.02); L[2].push(0.38 + 0.28 * Math.exp(-e / 4) + (r() - 0.5) * 0.02); }
+        const cols = ["var(--c1)", "var(--c2)", "var(--c3)"], names = ["训练", "开发", "测试"];
+        const ps = cols.map((c, i) => { K.svg(svg, "text", { x: 520 + i * 50, y: 50, "font-size": 12, fill: c }, names[i]); return K.svg(svg, "path", { fill: "none", stroke: c, "stroke-width": 2.5 }); });
+        ctx.tween(2000, (t) => ps.forEach((p, i) => p.setAttribute("d", L[i].slice(0, Math.round(t * 30) + 1).map((v, e) => (e ? "L" : "M") + ax.sx(e) + "," + ax.sy(v)).join(""))));
+      },
+    },
+    {
+      title: "癌症概率地图", kicker: "第 102–110 格 · 结果可视化", at: 102,
+      html: `<p>最后把模型对每个小块的预测“概率”按坐标贴回切片，得到一张<b>癌症概率热力图</b>，和医生标的红色区域并排比较（第 105 格，每个病人三张图：原切片、医生标注、模型概率）。</p><p>这种可视化比一个分数更直观：能看出模型漏在哪里、多报在哪里，是不是把导管当成了癌。</p><p class="callout warn">第 103 格只对第二个输出做 sigmoid 当概率，规范做法是对两个输出做 softmax 再取第二个。最后的“深入分析”标着 TODO，结论一节是空的。</p>`,
+      cells: [103, 105], highlight: ["sigmoid(proba[:, 1])", "mask_proba"],
+      draw(svg, ctx) {
+        const G = 12, S = 18, cells = [];
+        for (let gx = 0; gx < G; gx++) for (let gy = 0; gy < 10; gy++) {
+          if (((gx - 5.5) / 6) ** 2 + ((gy - 4.5) / 5) ** 2 > 1) continue;
+          const d = ((gx - 7.5) / 2.6) ** 2 + ((gy - 3.5) / 2.3) ** 2, truth = d < 1;
+          const p = K.clamp(1.1 - d * 0.55 + Math.sin(gx * 3 + gy) * 0.15, 0, 1);
+          cells.push({ gx, gy, truth, p });
+        }
+        const panels = [["切片（示意）", 20], ["医生标注", 250], ["模型概率", 480]];
+        panels.forEach((p) => K.svg(svg, "text", { x: p[1], y: 26, "font-size": 13, "font-weight": 700 }, p[0]));
+        cells.forEach((c) => {
+          PX.draw(svg, 20 + c.gx * S, 40 + c.gy * S, S, S, patch(14, c.truth, c.gx * 13 + c.gy, 0.9), null, null, null, true);
+          K.svg(svg, "rect", { x: 250 + c.gx * S, y: 40 + c.gy * S, width: S - 1, height: S - 1, fill: c.truth ? "var(--c6)" : "var(--panel-2)" });
+          c.e = K.svg(svg, "rect", { x: 480 + c.gx * S, y: 40 + c.gy * S, width: S - 1, height: S - 1, fill: "var(--panel-2)" });
+        });
+        K.svg(svg, "text", { x: 480, y: 250, "font-size": 12, class: "muted" }, "越红 = 模型认为越可能有癌");
+        K.svg(svg, "text", { x: 20, y: 300, "font-size": 12.5, class: "muted" }, "对照看：右图红区和中图基本重合的地方是答对的，多出来、缺掉的就是误报和漏报。");
+        ctx.tween(1600, (t) => cells.forEach((c) => K.set(c.e, { fill: `color-mix(in srgb, var(--c6) ${Math.round(c.p * 100 * t)}%, var(--panel-2))` })));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：按小块切 vs 按病人切 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 660, height: 350,
+    controls: [
+      { id: "split", label: "怎么切分训练 / 测试", value: "patch", options: [["patch", "随机切小块（同一病人可能两边都有）"], ["patient", "按病人切（作者的做法）"]] },
+      { id: "style", label: "病人之间的差异（染色、组织形态）", min: 0, max: 3, step: 0.1, value: 1.5, fmt: (v) => v.toFixed(1) },
+      { id: "k", label: "KNN 的邻居数 k", min: 1, max: 15, step: 2, value: 3 },
+      { id: "seed", label: "换一批病人", button: true },
+    ],
+    note: "浏览器里模拟 24 个病人、每人 30 个小块。每个小块用两个数概括（紫色程度、细胞密度），每个病人有自己的“风格”偏移，有癌小块整体更紫更密。用 KNN（看最像的 k 个邻居投票）分类，比较两种切法下测试准确率的差别。",
+    render(svg, v) {
+      const r = K.rng(77 + v.seed * 19), pts = [];
+      for (let p = 0; p < 24; p++) {
+        const ox = K.randn(r) * v.style * 0.8, oy = K.randn(r) * v.style * 0.8, rate = 0.15 + r() * 0.6;
+                for (let i = 0; i < 30; i++) { const y = r() < rate ? 1 : 0; pts.push({ p, y, x0: ox + (y ? 0.6 : -0.6) + K.randn(r) * 0.5, x1: oy + (y ? 0.42 : -0.42) + K.randn(r) * 0.5 }); }
+      }
+      let test;
+      if (v.split === "patient") { const tp = new Set([0, 1, 2, 3, 4, 5].map((i) => (i * 4 + v.seed) % 24)); test = (q) => tp.has(q.p); }
+      else { const rr = K.rng(5 + v.seed); pts.forEach((q) => (q.t = rr() < 0.25)); test = (q) => q.t; }
+      const tr = pts.filter((q) => !test(q)), te = pts.filter(test);
+      let ok = 0, sameP = 0;
+      te.forEach((q) => {
+        const nb = tr.map((t) => ({ t, d: (t.x0 - q.x0) ** 2 + (t.x1 - q.x1) ** 2 })).sort((a, b) => a.d - b.d).slice(0, v.k);
+        const vote = nb.reduce((a, b) => a + b.t.y, 0) / v.k;
+        if ((vote > 0.5 ? 1 : 0) === q.y) ok++;
+        sameP += nb.filter((b) => b.t.p === q.p).length / v.k;
+      });
+      const ax = K.axes(svg, { x: 50, y: 15, w: 390, h: 290 }, [-5, 5], [-5, 5], { xticks: 0, yticks: 0, xlabel: "紫色程度（示意）", ylabel: "细胞密度（示意）" });
+      pts.forEach((q) => {
+        const isT = test(q);
+        K.svg(svg, "circle", { cx: ax.sx(K.clamp(q.x0, -5, 5)), cy: ax.sy(K.clamp(q.x1, -5, 5)), r: isT ? 4 : 2.6, fill: isT ? "none" : q.y ? "var(--c6)" : "var(--c1)", stroke: isT ? (q.y ? "var(--c6)" : "var(--c1)") : "none", "stroke-width": 1.6, opacity: isT ? 1 : 0.55 });
+      });
+      K.svg(svg, "text", { x: 460, y: 40, "font-size": 12, fill: "var(--c6)" }, "● 有癌   ● 无癌（蓝）");
+      K.svg(svg, "text", { x: 460, y: 60, "font-size": 12 }, "实心 = 训练，空心 = 测试");
+      K.svg(svg, "text", { x: 460, y: 100, "font-size": 12, class: "muted" }, "随机切小块时，测试点的邻居");
+      K.svg(svg, "text", { x: 460, y: 118, "font-size": 12, class: "muted" }, "很多来自同一个病人，");
+      K.svg(svg, "text", { x: 460, y: 136, "font-size": 12, class: "muted" }, "分数会偏乐观。");
+      return { readout: [
+        { k: "测试准确率", v: ((ok / te.length) * 100).toFixed(1) + "%" },
+        { k: "邻居里“同一病人”的比例", v: ((sameP / te.length) * 100).toFixed(0) + "%", color: sameP / te.length > 0.2 ? "var(--bad)" : "var(--good)" },
+        { k: "测试小块数", v: te.length },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：精确率、召回率、F1 ---------- */
+  const Phi = (x) => 0.5 * (1 + erf(x / Math.SQRT2));
+  function erf(x) { const s = Math.sign(x); x = Math.abs(x); const t = 1 / (1 + 0.3275911 * x); const y = 1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x); return s * y; }
+  K.lab(document.getElementById("lab2"), {
+    width: 660, height: 320,
+    controls: [
+      { id: "t", label: "判为“有癌”的阈值", min: -2, max: 4, step: 0.05, value: 1, fmt: (v) => v.toFixed(2) },
+      { id: "d", label: "模型区分能力（两类得分相距几个标准差）", min: 0.5, max: 4, step: 0.1, value: 2, fmt: (v) => v.toFixed(1) },
+      { id: "pos", label: "含癌小块占比", min: 5, max: 50, step: 1, value: 28, fmt: (v) => v + "%" },
+    ],
+    note: "每 1 万个小块的期望结果：无癌小块得分 ~ N(0,1)，有癌 ~ N(区分能力,1)。默认含癌占比 28%，按数据集说明的 78,786 / 277,524 取整。拖动阈值，看精确率和召回率此消彼长，F1 总是贴近较小的那个。",
+    render(svg, v) {
+      const N = 10000, P = (N * v.pos) / 100, Ng = N - P;
+      const TP = P * (1 - Phi(v.t - v.d)), FP = Ng * (1 - Phi(v.t)), FN = P - TP, TN = Ng - FP;
+      const pre = TP + FP ? TP / (TP + FP) : 0, rec = TP / P, f1 = pre + rec ? (2 * pre * rec) / (pre + rec) : 0, acc = (TP + TN) / N;
+      const ax = K.axes(svg, { x: 50, y: 20, w: 330, h: 230 }, [-2, 4], [0, 1], { xlabel: "阈值", yfmt: (x) => x.toFixed(2), xticks: 6 });
+      const curve = (f, c) => { let d = ""; for (let t = -2; t <= 4.001; t += 0.05) { const tp = P * (1 - Phi(t - v.d)), fp = Ng * (1 - Phi(t)); const p = tp + fp ? tp / (tp + fp) : 1, rr = tp / P; d += (d ? "L" : "M") + ax.sx(t) + "," + ax.sy(f(p, rr)); } K.svg(svg, "path", { d, fill: "none", stroke: c, "stroke-width": 2 }); };
+      curve((p) => p, "var(--c1)"); curve((p, r) => r, "var(--c6)"); curve((p, r) => (p + r ? (2 * p * r) / (p + r) : 0), "var(--c3)"); curve((p, r) => (p + r) / 2, "var(--ink-3)");
+      K.svg(svg, "line", { x1: ax.sx(v.t), x2: ax.sx(v.t), y1: 20, y2: 250, stroke: "var(--ink)", "stroke-dasharray": "5 3" });
+      [["精确率", "var(--c1)"], ["召回率（敏感度）", "var(--c6)"], ["F1", "var(--c3)"], ["算术平均", "var(--ink-3)"]].forEach((l, i) => K.svg(svg, "text", { x: [50, 130, 270, 320][i], y: 300, "font-size": 12, fill: l[1] }, "— " + l[0]));
+      const M = [[TN, FP], [FN, TP]], lab = [["真无·判无", "真无·判有"], ["真有·判无", "真有·判有"]];
+      M.forEach((row, i) => row.forEach((x, j) => {
+        K.svg(svg, "rect", { x: 420 + j * 115, y: 40 + i * 90, width: 110, height: 85, rx: 6, fill: i === j ? "color-mix(in srgb, var(--c3) 20%, var(--panel))" : "color-mix(in srgb, var(--c6) 18%, var(--panel))" });
+        K.svg(svg, "text", { x: 475 + j * 115, y: 72 + i * 90, "text-anchor": "middle", "font-size": 12 }, lab[i][j]);
+        K.svg(svg, "text", { x: 475 + j * 115, y: 98 + i * 90, "text-anchor": "middle", "font-size": 17, "font-weight": 700, "font-family": "var(--mono)" }, Math.round(x));
+      }));
+      K.svg(svg, "text", { x: 420, y: 30, "font-size": 12, class: "muted" }, "每 1 万个小块");
+      return { readout: [
+        { k: "精确率", v: (pre * 100).toFixed(1) + "%" },
+        { k: "召回率（敏感度）", v: (rec * 100).toFixed(1) + "%" },
+        { k: "F1", v: f1.toFixed(3), color: "var(--c3)" },
+        { k: "准确率", v: (acc * 100).toFixed(1) + "%" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：学习率范围搜索 ---------- */
+  K.lab(document.getElementById("lab3"), {
+    width: 660, height: 320,
+    controls: [
+      { id: "end", label: "搜索的最大学习率（log10）", min: -2, max: 1.5, step: 0.1, value: 0.5, fmt: (v) => Math.pow(10, v).toPrecision(2) },
+      { id: "sm", label: "平滑系数 smoothing（作者用 0.2）", min: 0.02, max: 1, step: 0.02, value: 0.2, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "重新跑一次", button: true },
+    ],
+    note: "浏览器里真跑：一个两特征的逻辑回归，用小批量 SGD 训练 300 步，学习率从 1e-6 按指数增大到上限，记录每步损失并按作者的公式平滑（新损失×s + 旧平滑值×(1−s)）。红色竖线是平滑损失最低处，绿色竖线是它的十分之一（常用的保守选择）。",
+    render(svg, v) {
+      const r = K.rng(11 + v.seed * 3), X = [], Y = [];
+      for (let i = 0; i < 400; i++) { const y = r() < 0.3 ? 1 : 0; X.push([K.randn(r) + (y ? 1.2 : -0.6), K.randn(r) + (y ? 0.8 : -0.4)]); Y.push(y); }
+      let w = [0, 0], b = 0;
+      const lo = -6, hi = v.end, S = 300, L = [], LR = [];
+      for (let s = 0; s < S; s++) {
+        const lr = Math.pow(10, lo + ((hi - lo) * s) / (S - 1));
+        let g0 = 0, g1 = 0, gb = 0, loss = 0;
+        for (let k = 0; k < 16; k++) { const i = Math.floor(r() * 400), z = w[0] * X[i][0] + w[1] * X[i][1] + b, p = K.sigmoid(z), d = p - Y[i]; g0 += d * X[i][0]; g1 += d * X[i][1]; gb += d; loss += -(Y[i] ? Math.log(Math.max(p, 1e-9)) : Math.log(Math.max(1 - p, 1e-9))); }
+        loss /= 16; w[0] -= (lr * g0) / 16 * 40; w[1] -= (lr * g1) / 16 * 40; b -= (lr * gb) / 16 * 40;
+        const sm = s === 0 ? loss : v.sm * loss + (1 - v.sm) * L[s - 1];
+        L.push(Math.min(sm, 5)); LR.push(lr);
+      }
+      const ax = K.axes(svg, { x: 60, y: 20, w: 560, h: 240 }, [lo, hi], [0, Math.min(3, Math.max(...L) * 1.05)], { xlabel: "学习率（对数刻度，10 的几次方）", ylabel: "平滑后的损失", xfmt: (x) => x.toFixed(1), yfmt: (x) => x.toFixed(1) });
+      K.svg(svg, "path", { d: L.map((l, s) => (s ? "L" : "M") + ax.sx(Math.log10(LR[s])) + "," + ax.sy(Math.min(l, 3))).join(""), fill: "none", stroke: "var(--c2)", "stroke-width": 2 });
+      let bi = 0; L.forEach((l, s) => { if (l < L[bi]) bi = s; });
+      const best = LR[bi], safe = best / 10;
+      K.svg(svg, "line", { x1: ax.sx(Math.log10(best)), x2: ax.sx(Math.log10(best)), y1: 20, y2: 260, stroke: "var(--bad)", "stroke-dasharray": "5 3" });
+      K.svg(svg, "line", { x1: ax.sx(Math.log10(safe)), x2: ax.sx(Math.log10(safe)), y1: 20, y2: 260, stroke: "var(--good)", "stroke-dasharray": "5 3" });
+      return { readout: [
+        { k: "损失最低处的学习率", v: best.toExponential(1), color: "var(--bad)" },
+        { k: "保守选择（÷10）", v: safe.toExponential(1), color: "var(--good)" },
+        { k: "最后一步的损失", v: L[S - 1].toFixed(2) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,601 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>胃肠道器官分割</title>
+<meta name="description" content="Kaggle 案例拆解：UW-Madison 胃肠道分割比赛，在腹部 MRI 切片上逐像素圈出胃、小肠、大肠，帮助放疗避开健康器官。U-Net + EfficientNet 编码器、分组分层 K 折、Dice 与 Tversky 损失。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">腹部 MRI 切片 · 多标签语义分割 · 放疗规划</div>
+  <h1>胃肠道器官分割：给 MRI 切片上的胃、小肠、大肠逐像素“描边”</h1>
+  <p class="en">UWMGI: Unet [Train] [PyTorch]</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">语义分割</span><span class="tag method">U-Net</span><span class="tag method">EfficientNet-B1 编码器</span>
+    <span class="tag method">RLE 掩膜编码</span><span class="tag method">StratifiedGroupKFold</span><span class="tag method">Albumentations 增强</span>
+    <span class="tag method">BCE + Tversky 损失</span><span class="tag method">Dice / IoU</span><span class="tag method">混合精度</span><span class="tag method">余弦退火</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Awsaf</b></span>
+    <span>Kaggle 点赞 <b>1,499</b>（2026-11 抓取）</span>
+    <span>比赛 <b>uw-madison-gi-tract-image-segmentation</b></span>
+    <span><a href="https://www.kaggle.com/code/awsaf49/uwmgi-unet-train-pytorch" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">病人腹部 MRI 的一张张横切片</div><p>同一个病人（case）在不同的日子（day）扫描，每次扫描有很多张切片。答案是每张切片上胃、小肠、大肠的轮廓，用 RLE 编码存在表格里。<span data-cell="15">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">每个像素属不属于胃 / 小肠 / 大肠</div><p>比赛副标题：“在医学扫描中追踪健康器官，改进癌症治疗”。放疗时要让射线对准肿瘤、避开这些器官。<span data-cell="0">出处</span> 三种器官可能重叠，所以是<b>多标签</b>分割。<span data-cell="1">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">U-Net + 预训练 EfficientNet-B1</div><p>图片缩到 224×224；按病人分组切 5 折；翻转、平移缩放旋转、网格 / 弹性形变、随机挖洞；损失 = 一半 BCE + 一半 Tversky；Adam + 余弦退火训练 15 轮。<span data-cell="12">出处</span> <span data-cell="44">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">文字里没写分数</div><p>每轮的验证 Dice、IoU 打印在运行输出和 W&amp;B 面板里，源码不带输出，这里不列。注意作者<b>只训练了第 0 折</b>。<span data-cell="55">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛数据由美国威斯康星大学麦迪逊分校（UW-Madison）的放疗中心提供。作者没有每次都从 RLE 现场解码，而是用了自己提前转好的掩膜数据集 <code>awsaf49/uwmgi-mask-dataset</code>。<span data-cell="1">出处</span></p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">器官类别</div><div class="v">3 种</div></div>
+        <div class="stat-tile"><div class="k">模型输入尺寸</div><div class="v">224×224</div></div>
+        <div class="stat-tile"><div class="k">原始像素</div><div class="v">16 位灰度</div></div>
+        <div class="stat-tile"><div class="k">交叉验证</div><div class="v">5 折（按病人）</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">类别数、输入尺寸、折数见第 12 格 <span data-cell="12">出处</span>；原图是 uint16（16 位整数）见第 24 格 <span data-cell="24">出处</span>。切片总数作者没有直接写出；第 12 格学习率公式里用了 30000 这个数，可见他按大约 3 万张切片来估算每轮的步数。</p>
+      <p style="font-size:14px;color:var(--ink-2)">图片文件名里藏着 4 个数，例如 <code>276_276_1.63_1.63.png</code>：切片的高、宽（像素），以及每个像素在高、宽方向上代表多少毫米。<span data-cell="15">出处</span></p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">train.csv 每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>id</code></td><td>切片编号，由病人、扫描日、切片序号拼成</td><td>文字</td></tr>
+        <tr><td><code>class</code></td><td>器官：large_bowel 大肠 / small_bowel 小肠 / stomach 胃</td><td>类别</td></tr>
+        <tr><td><code>segmentation</code></td><td><b>要预测的答案</b>：该器官在这张切片上的区域，RLE 编码；空着表示这张切片上没有这个器官</td><td>文字（RLE）</td></tr>
+        <tr><td><code>case</code></td><td>病人编号（作者的掩膜数据集里已拆出）</td><td>整数</td></tr>
+        <tr><td><code>image_path</code> / <code>mask_path</code></td><td>图片、掩膜文件的位置</td><td>路径</td></tr>
+        <tr><td><code>height</code> / <code>width</code></td><td>切片的像素高、宽</td><td>整数</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">前三列来自比赛说明 <span data-cell="15">出处</span>，后几列在第 17、22、28、30 格里用到 <span data-cell="17">出处</span>。作者把每张切片的三行合成一行，并新加一列 <code>empty</code>：三种器官都没有的切片。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="26">
+    <h3>动手试试 A · RLE 编码：一张掩膜变成一串数字 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labA"></div>
+  </div>
+  <div data-at="44">
+    <h3>动手试试 B · Dice 和 IoU：预测的轮廓和真实轮廓重合了多少 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labB"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者的设计与说法</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>胃、大肠、小肠会重叠，所以是多标签分割，最后一层用 sigmoid 而不是 softmax</td><td><span data-cell="1">第 1 格</span></td></tr>
+        <tr><td>用 StratifiedGroupKFold：按病人分组避免泄漏，同时让“空切片”比例在各折一致</td><td><span data-cell="1">第 1 格</span> <span data-cell="28">第 28 格</span></td></tr>
+        <tr><td>模型：U-Net，编码器 EfficientNet-B1，ImageNet 预训练权重，输出 3 个通道</td><td><span data-cell="42">第 42 格</span></td></tr>
+        <tr><td>损失：0.5 × BCE + 0.5 × Tversky；评价：Dice 与 IoU（阈值 0.5）</td><td><span data-cell="44">第 44 格</span></td></tr>
+        <tr><td>按验证 Dice 保存最好的一轮</td><td><span data-cell="50">第 50 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">每轮的验证 Dice、IoU 和“Best Score”打印在运行输出里，并上传到 W&amp;B 面板；Kaggle 下载的源码不带输出，作者的文字里也没写具体数值，所以这里不列分数。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li>配置写的是 5 折，但训练循环是 <code>for fold in range(1)</code>，<b>只训练了第 0 折</b>。<span data-cell="55">出处</span></li>
+        <li>最后打印的 “Best Score” 输出的是 <code>best_jaccard</code>（IoU），而挑选最好一轮用的是 Dice，两个指标容易被看混。<span data-cell="50">出处</span></li>
+        <li>“Prediction” 一节的 <code>test_dataset</code> 其实取的是第 0 折验证集里非空的切片，不是比赛测试集。<span data-cell="57">出处</span></li>
+        <li><code>fetch_scheduler</code> 里有一处拼写错误 <code>CFG.scheduer</code>，只在选 ExponentialLR 时才会触发报错。<span data-cell="52">出处</span> <code>gray2rgb</code> 用了没导入的 <code>tf</code>，好在没被调用。<span data-cell="22">出处</span></li>
+        <li>学习率周期 <code>T_max</code> 按 30000 张图估算，而每折实际只用约五分之四的数据训练，学习率在 15 轮结束时还没降到最低点。<span data-cell="12">出处</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一张腹部 MRI 切片，输出胃、小肠、大肠三张“概率地图”，阈值 0.5 后得到轮廓；放疗医生原本要手工描很久，模型可以先给出初稿再由医生修改。</li>
+        <li><b>同类问题：</b>CT 上分割肝脏和肿瘤、脑 MRI 分割肿瘤、眼底血管分割、卫星图分割道路和建筑、工业零件缺陷区域分割。</li>
+        <li><b>可迁移的套路：</b>RLE ↔ 掩膜互转 → 按病人 / 按来源分组切折 → 图片和掩膜同步增强 → 预训练编码器的 U-Net → 区域重叠类损失（Dice / Tversky）+ 像素类损失（BCE）→ 用 Dice 挑模型。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>数据整理：每张切片合成一行，标记空切片 <span data-cell="17">第 17 格</span></li>
+        <li>编码：RLE 解码 / 编码 <span data-cell="26">第 26 格</span></li>
+        <li>切分：StratifiedGroupKFold（按病人分组、按空 / 非空分层） <span data-cell="28">第 28 格</span></li>
+        <li>增强：Albumentations（翻转、平移缩放旋转、网格 / 弹性形变、CoarseDropout） <span data-cell="32">第 32 格</span></li>
+        <li>模型：segmentation_models_pytorch 的 Unet + efficientnet-b1 <span data-cell="42">第 42 格</span></li>
+        <li>训练：混合精度、梯度累积、Adam、CosineAnnealingLR，W&amp;B 记录 <span data-cell="46">第 46 格</span> <span data-cell="52">第 52 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>为什么胃和大肠“重叠”就不能用 softmax？如果用了 softmax，模型输出会被迫满足什么条件？</li>
+      <li>同一个病人不同日子的扫描长得很像。如果按切片随机切折，而不是按病人分组，验证分数会怎样？</li>
+      <li>很多切片上三种器官都没有（空切片）。对一张空切片，模型什么都不画，Dice 应该算几分？作者的 epsilon 是怎么处理的？</li>
+      <li>CoarseDropout 在图片上随机挖洞，同时把掩膜对应位置也清零。这样做合理吗？对医学图片会不会有风险？</li>
+      <li>Tversky 损失可以调“漏画”和“多画”的惩罚比例。放疗时，漏画健康器官和多画一点，哪种错误更危险？</li>
+      <li>作者只训练了 1 折。只用 1 折的验证分数来判断模型好坏，可靠吗？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Awsaf，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意，图中的“MRI 切片”是用代码画的示意图，器官位置、形状都不是真实解剖。比赛数据：UW-Madison GI Tract Image Segmentation。
+</footer>
+</main>
+
+<script src="nb/gi-tract-unet-segmentation.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  if (/[?&]fast/.test(location.search)) { K.tween = (ms, fn, ctx) => { if (ctx && !ctx.alive()) return Promise.resolve(false); fn(1, 1); return Promise.resolve(true); }; K.wait = (ms, ctx) => Promise.resolve(!ctx || ctx.alive()); }
+  if (/[?&]fold/.test(location.search)) document.head.appendChild(Object.assign(document.createElement("style"), { textContent: ".walk .ch-cells > .cell, .walk .cell-note { display: none !important; }" }));
+  /* ===== 页面专用：像素图工具（用代码生成小图，在浏览器里真算卷积、模糊、池化、几何变换） ===== */
+  const PX = (function () {
+    function rgbOf(name, fb) {
+      let s = (K.css(name) || fb || "#888888").trim();
+      if (s[0] !== "#") return [128, 128, 128];
+      if (s.length === 4) s = "#" + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+      return [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
+    }
+    function grid(W, H, f) { const a = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) a[y * W + x] = f(x, y); return { W, H, a }; }
+    /* 彩色图：{W,H,rgb:[R,G,B]}，每个通道取值 0–1 */
+    function rgbGrid(W, H, f) { const R = new Float32Array(W * H), G = new Float32Array(W * H), B = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const c = f(x, y), i = y * W + x; R[i] = c[0]; G[i] = c[1]; B[i] = c[2]; } return { W, H, rgb: [R, G, B] }; }
+    const chan = (m, c) => ({ W: m.W, H: m.H, a: m.rgb[c] });
+    const fromChans = (ch) => ({ W: ch[0].W, H: ch[0].H, rgb: ch.map((c) => c.a) });
+    const gray = (m) => (m.rgb ? grid(m.W, m.H, (x, y) => { const i = y * m.W + x; return 0.299 * m.rgb[0][i] + 0.587 * m.rgb[1][i] + 0.114 * m.rgb[2][i]; }) : m);
+    function at(m, x, y) { return m.a[y * m.W + x]; }
+    function atClamp(m, x, y) { x = x < 0 ? 0 : x >= m.W ? m.W - 1 : x; y = y < 0 ? 0 : y >= m.H ? m.H - 1 : y; return m.a[y * m.W + x]; }
+    function atZero(m, x, y) { return x < 0 || y < 0 || x >= m.W || y >= m.H ? 0 : m.a[y * m.W + x]; }
+    /* padding='same'：边界外按 0 补 */
+    function conv(m, k) { const n = k.length, r = (n - 1) / 2; return grid(m.W, m.H, (x, y) => { let s = 0; for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) s += k[j][i] * atZero(m, x + i - r, y + j - r); return s; }); }
+    function map(m, f) { if (m.rgb) return { W: m.W, H: m.H, rgb: m.rgb.map((a) => { const o = new Float32Array(a.length); for (let i = 0; i < a.length; i++) o[i] = f(a[i], i); return o; }) }; const o = { W: m.W, H: m.H, a: new Float32Array(m.a.length) }; for (let i = 0; i < m.a.length; i++) o.a[i] = f(m.a[i], i); return o; }
+    const relu = (m) => map(m, (v) => (v > 0 ? v : 0));
+    function pool(m, s) { s = s || 2; const W = Math.ceil(m.W / s), H = Math.ceil(m.H / s); return grid(W, H, (x, y) => { let b = -Infinity; for (let j = 0; j < s; j++) for (let i = 0; i < s; i++) { const xx = x * s + i, yy = y * s + j; if (xx < m.W && yy < m.H) b = Math.max(b, at(m, xx, yy)); } return b; }); }
+    function range(m) { let lo = Infinity, hi = -Infinity; for (const v of m.a) { if (v < lo) lo = v; if (v > hi) hi = v; } return [lo, hi]; }
+    /* 可分离高斯模糊（边界用最近像素），彩色图逐通道做 */
+    function blur(m, sigma) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => blur(chan(m, c), sigma)));
+      if (sigma <= 0.01) return m;
+      const r = Math.max(1, Math.ceil(sigma * 3)), w = [];
+      let s = 0;
+      for (let i = -r; i <= r; i++) { const v = Math.exp((-i * i) / (2 * sigma * sigma)); w.push(v); s += v; }
+      for (let i = 0; i < w.length; i++) w[i] /= s;
+      const t = grid(m.W, m.H, (x, y) => { let a = 0; for (let i = -r; i <= r; i++) a += w[i + r] * atClamp(m, x + i, y); return a; });
+      return grid(m.W, m.H, (x, y) => { let a = 0; for (let i = -r; i <= r; i++) a += w[i + r] * atClamp(t, x, y + i); return a; });
+    }
+    function bilinear(m, x, y) {
+      const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+      return (atClamp(m, x0, y0) * (1 - fx) + atClamp(m, x0 + 1, y0) * fx) * (1 - fy) + (atClamp(m, x0, y0 + 1) * (1 - fx) + atClamp(m, x0 + 1, y0 + 1) * fx) * fy;
+    }
+    /* 绕中心旋转/缩放/平移/翻转；fill：'nearest' 用最近像素，数字表示边界外填这个值 */
+    function affine(m, p) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => affine(chan(m, c), p)));
+      const th = ((p.rot || 0) * Math.PI) / 180, c = Math.cos(th), s = Math.sin(th), z = p.zoom || 1;
+      const cx = (m.W - 1) / 2, cy = (m.H - 1) / 2, tx = (p.tx || 0) * m.W, ty = (p.ty || 0) * m.H;
+      return grid(m.W, m.H, (x, y) => {
+        let u = x - cx - tx, v = y - cy - ty;
+        if (p.flip) u = -u;
+        if (p.vflip) v = -v;
+        const a = (c * u + s * v) / z + cx, b = (-s * u + c * v) / z + cy;
+        if (p.fill != null && p.fill !== "nearest" && (a < -0.5 || b < -0.5 || a > m.W - 0.5 || b > m.H - 0.5)) return p.fill;
+        return bilinear(m, a, b);
+      });
+    }
+    function resize(m, W, H) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => resize(chan(m, c), W, H)));
+      return grid(W, H, (x, y) => bilinear(m, ((x + 0.5) * m.W) / W - 0.5, ((y + 0.5) * m.H) / H - 0.5));
+    }
+    function toURL(m, mode, lo, hi) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      if (m.rgb) {
+        for (let i = 0; i < m.W * m.H; i++) { for (let c = 0; c < 3; c++) d[i * 4 + c] = Math.max(0, Math.min(1, m.rgb[c][i])) * 255; d[i * 4 + 3] = 255; }
+      } else {
+        const P = rgbOf("--panel", "#ffffff"), A = rgbOf("--c1"), B = rgbOf("--c6");
+        if (lo == null || hi == null) { const r = range(m); if (lo == null) lo = r[0]; if (hi == null) hi = r[1]; }
+        const span = hi - lo || 1, amax = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+        for (let i = 0; i < m.a.length; i++) {
+          const v = m.a[i]; let r, gg, b;
+          if (mode === "div") { const t = Math.max(-1, Math.min(1, v / amax)), C = t >= 0 ? B : A, k = Math.abs(t); r = P[0] + (C[0] - P[0]) * k; gg = P[1] + (C[1] - P[1]) * k; b = P[2] + (C[2] - P[2]) * k; }
+          else if (mode === "heat") { const k = Math.max(0, Math.min(1, (v - lo) / span)); r = P[0] + (B[0] - P[0]) * k; gg = P[1] + (B[1] - P[1]) * k; b = P[2] + (B[2] - P[2]) * k; }
+          else { const k = Math.max(0, Math.min(1, (v - lo) / span)) * 255; r = gg = b = k; }
+          d[i * 4] = r; d[i * 4 + 1] = gg; d[i * 4 + 2] = b; d[i * 4 + 3] = 255;
+        }
+      }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    function draw(svg, x, y, w, h, m, mode, lo, hi, smooth) {
+      const e = K.svg(svg, "image", { x, y, width: w, height: h, preserveAspectRatio: "none" });
+      if (!smooth) e.style.imageRendering = "pixelated";
+      e.setAttribute("href", toURL(m, mode, lo, hi));
+      K.svg(svg, "rect", { x, y, width: w, height: h, fill: "none", stroke: "var(--line)" });
+      return e;
+    }
+    function update(e, m, mode, lo, hi) { e.setAttribute("href", toURL(m, mode, lo, hi)); }
+    function lines(svg, x, y, w, h, W, H, op) {
+      const g = K.svg(svg, "g");
+      for (let i = 0; i <= W; i++) K.svg(g, "line", { x1: x + (w * i) / W, x2: x + (w * i) / W, y1: y, y2: y + h, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      for (let j = 0; j <= H; j++) K.svg(g, "line", { y1: y + (h * j) / H, y2: y + (h * j) / H, x1: x, x2: x + w, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      return g;
+    }
+    const smooth = (e0, e1, x) => { const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+    const blob = (x, y, cx, cy, sx, sy) => Math.exp(-(((x - cx) * (x - cx)) / (2 * sx * sx) + ((y - cy) * (y - cy)) / (2 * sy * sy)));
+    /* 平滑噪声：几层不同频率的随机网格插值叠加，用来做纹理 */
+    function noise(W, H, seed, cells) {
+      const r = K.rng(seed || 1), n = cells || 6, g0 = grid(n + 1, n + 1, () => r());
+      return grid(W, H, (x, y) => bilinear(g0, (x / W) * n, (y / H) * n));
+    }
+    return { grid, rgbGrid, chan, fromChans, gray, at, atClamp, conv, map, relu, pool, range, blur, bilinear, affine, resize, toURL, draw, update, lines, smooth, blob, noise, rgbOf };
+  })();
+
+  /* ===== 示意腹部 MRI 切片：返回灰度图和三张掩膜（大肠、小肠、胃），位置形状均为虚构 ===== */
+  function abdomen(N, seed, dx) {
+    const r = K.rng(seed || 1), tex = PX.noise(N, N, (seed || 1) + 5, 9), off = dx || 0;
+    const sb = []; for (let i = 0; i < 7; i++) sb.push([0.44 + (r() - 0.5) * 0.18 + off, 0.6 + (r() - 0.5) * 0.14, 0.035 + r() * 0.025]);
+    const st = { cx: 0.64 + off + (r() - 0.5) * 0.04, cy: 0.38, rx: 0.13, ry: 0.085, a: -0.5 };
+    const lb = PX.grid(N, N, () => 0), sm = PX.grid(N, N, () => 0), stm = PX.grid(N, N, () => 0);
+    const img = PX.grid(N, N, (px, py) => {
+      const x = px / N, y = py / N, t = tex.a[py * N + px], i = py * N + px;
+      const body = Math.pow((x - 0.5) / 0.44, 2) + Math.pow((y - 0.53) / 0.37, 2);
+      if (body > 1) return 0.03 * t;
+      let v = 0.32 + 0.12 * t;
+      if (body > 0.82) v = 0.62 + 0.1 * t;
+      const u = x - st.cx, w = y - st.cy, ca = Math.cos(st.a), sa = Math.sin(st.a);
+      if (Math.pow((u * ca + w * sa) / st.rx, 2) + Math.pow((-u * sa + w * ca) / st.ry, 2) < 1) { stm.a[i] = 1; v = 0.72 + 0.12 * t; }
+      const d = Math.hypot(x - 0.5 - off * 0.5, (y - 0.55) * 1.15), ang = Math.atan2(y - 0.55, x - 0.5 - off * 0.5);
+      if (d > 0.24 && d < 0.3 && !(ang > 0.55 && ang < 2.6)) { lb.a[i] = 1; v = 0.5 + 0.2 * t; }
+      if (sb.some(([cx, cy, rr]) => Math.hypot(x - cx, y - cy) < rr)) { sm.a[i] = 1; v = 0.6 + 0.15 * t; }
+      if (Math.hypot(x - 0.5, (y - 0.82) * 1.2) < 0.06) v = 0.95;
+      return v;
+    });
+    return { img, masks: [lb, sm, stm] };
+  }
+  const MCOL = [[0.85, 0.15, 0.15], [0.15, 0.75, 0.2], [0.2, 0.35, 0.95]];
+  function overlay(img, masks, alpha, show) {
+    return PX.rgbGrid(img.W, img.H, (x, y) => {
+      const i = y * img.W + x, g = img.a[i];
+      let c = [g, g, g];
+      masks.forEach((m, k) => { if ((!show || show[k]) && m.a[i] > 0.5) c = c.map((v, j) => v * (1 - alpha) + MCOL[k][j] * alpha); });
+      return c;
+    });
+  }
+  function rleEncode(bits) { const p = [0, ...bits, 0], runs = []; for (let i = 1; i < p.length; i++) if (p[i] !== p[i - 1]) runs.push(i); for (let k = 1; k < runs.length; k += 2) runs[k] -= runs[k - 1]; return runs; }
+
+  const steps = [
+    {
+      at: 0, title: "任务：在 MRI 切片上圈出胃和肠", kicker: "第 0–9 格 · 任务与方法",
+      html: `<p>放射治疗要用高能射线照射肿瘤，但胃和肠就在旁边，被照到会受伤。医生每天要在 MRI 上手工描出这些器官，很费时间。比赛要求模型自动描出<b>胃、小肠、大肠</b>。<span data-cell="0">出处</span></p><p>这叫<b>语义分割</b>：不是给整张图一个答案，而是给<b>每一个像素</b>一个答案。作者特别指出：三种器官的区域会<b>重叠</b>，所以是“多标签”问题，每个器官单独一张“是 / 不是”的图，最后一层用 sigmoid（各自独立给概率），而不是 softmax（几个类别抢一个像素）。<span data-cell="1">出处</span></p>`,
+      cells: [0, 1],
+      draw(svg, ctx) {
+        const A = abdomen(120, 3);
+        PX.draw(svg, 30, 40, 250, 250, A.img, null, 0, 1, true);
+        K.svg(svg, "text", { x: 155, y: 30, "text-anchor": "middle", "font-size": 13 }, "示意 MRI 横切片（灰度）");
+        const ov = PX.draw(svg, 420, 40, 250, 250, overlay(A.img, A.masks, 0, null), null, null, null, true);
+        K.svg(svg, "text", { x: 545, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "要画出的三张掩膜");
+        K.arrow(svg, 295, 165, 405, 165);
+        const names = [["大肠", "#d92626"], ["小肠", "#26bf33"], ["胃", "#3359f2"]];
+        names.forEach(([n, c], k) => { K.svg(svg, "rect", { x: 300, y: 220 + k * 22, width: 12, height: 12, fill: c }); K.svg(svg, "text", { x: 318, y: 231 + k * 22, "font-size": 12 }, n); });
+        const show = [false, false, false];
+        (async () => {
+          for (let k = 0; k < 3; k++) {
+            if (!(await ctx.wait(400))) return;
+            show[k] = true;
+            if (!(await ctx.tween(500, (t) => PX.update(ov, overlay(A.img, A.masks, 0.55, show.map((s, j) => j < k || (j === k && t > 0.3))))))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "实验记录与配置", kicker: "第 9–14 格 · 配置",
+      html: `<p>作者用 <b>W&amp;B</b>（Weights &amp; Biases）记录每次实验：损失曲线、分数、配置、模型文件都传到网上面板，方便比较。<span data-cell="9">出处</span></p><p>配置集中在 <code>CFG</code> 里：模型 U-Net，编码器 EfficientNet-B1，输入 224×224，每批 128 张，训练 15 轮，学习率 2e-3，余弦退火降到 1e-6，5 折，3 个类别。<span data-cell="12">出处</span> 然后固定所有随机种子，让结果可以复现。<span data-cell="14">出处</span></p>`,
+      cells: [10, 12, 14], highlight: ["backbone      = 'efficientnet-b1'", "img_size      = [224, 224]", "epochs        = 15", "num_classes   = 3", "T_max"],
+      draw(svg, ctx) {
+        const cards = [["模型", "U-Net"], ["编码器", "EfficientNet-B1"], ["输入", "224×224"], ["批量", "128"], ["轮数", "15"], ["学习率", "2e-3 → 1e-6"], ["折数", "5"], ["类别", "3（多标签）"]];
+        const els = cards.map(([k, v], i) => { const g = K.node(svg, 30 + (i % 4) * 170, 60 + Math.floor(i / 4) * 110, 150, 80, k + "\n" + v, { fs: 14, fill: "color-mix(in srgb, var(--c" + (1 + (i % 5)) + ") 14%, var(--panel))", stroke: "var(--c" + (1 + (i % 5)) + ")" }); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 12, class: "muted" }, "seed = 101：每次运行同样的随机数，结果才能复现");
+        (async () => { for (const e of els) if (!(await ctx.tween(200, (t) => (e.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "读表：每张切片三条记录，合成一行", kicker: "第 15–19 格 · 元数据",
+      html: `<p>原始 <code>train.csv</code> 里，每张切片有三行：大肠、小肠、胃各一行，没有这个器官就空着。作者把同一张切片的三行合成一行，三段 RLE 放进一个列表，并算出总长度；总长度为 0 的切片标记为 <code>empty</code>（三种器官都没有）。<span data-cell="17">出处</span></p><p>然后画柱状图比较空切片和非空切片有多少。<span data-cell="19">出处</span> 空切片很多，这会影响后面的切折和评分。</p>`,
+      cells: [17, 19], highlight: ["agg(list)", "df['empty'] = (df.rle_len==0)"],
+      draw(svg, ctx) {
+        const rows = [["slice_0042", "大肠", "123 5 …"], ["slice_0042", "小肠", "（空）"], ["slice_0042", "胃", "880 12 …"], ["slice_0001", "大肠", "（空）"], ["slice_0001", "小肠", "（空）"], ["slice_0001", "胃", "（空）"]];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "原始：每张切片 3 行（示意）");
+        const els = rows.map(([a, b, c], i) => {
+          const g = K.svg(svg, "g");
+          K.svg(g, "rect", { x: 30, y: 42 + i * 38, width: 300, height: 32, rx: 4, fill: i < 3 ? "color-mix(in srgb, var(--c1) 12%, var(--panel))" : "color-mix(in srgb, var(--c2) 12%, var(--panel))", stroke: "var(--line)" });
+          K.svg(g, "text", { x: 40, y: 63 + i * 38, "font-size": 12 }, a); K.svg(g, "text", { x: 150, y: 63 + i * 38, "font-size": 12 }, b); K.svg(g, "text", { x: 220, y: 63 + i * 38, "font-size": 12, "font-family": "var(--mono)" }, c);
+          return g;
+        });
+        K.svg(svg, "text", { x: 400, y: 30, "font-size": 13, "font-weight": 700 }, "合并后：每张切片 1 行");
+        const m1 = K.node(svg, 400, 70, 290, 60, "slice_0042\n[RLE大肠, 空, RLE胃]  empty = False", { fs: 12, stroke: "var(--c1)" });
+        const m2 = K.node(svg, 400, 180, 290, 60, "slice_0001\n[空, 空, 空]  empty = True", { fs: 12, stroke: "var(--c2)" });
+        m1.style.opacity = m2.style.opacity = 0;
+        ctx.wait(500).then((ok) => ok && ctx.tween(800, (t) => els.forEach((g) => (g.style.opacity = 1 - t * 0.6)))).then((ok) => ok && ctx.tween(500, (t) => { m1.style.opacity = t; m2.style.opacity = t; }));
+      },
+    },
+    {
+      title: "掩膜与 RLE：一串数字记下一块区域", kicker: "第 20–26 格 · 工具函数",
+      html: `<p>掩膜就是一张和原图一样大的 0/1 图，1 表示“这个像素属于器官”。直接存很占地方，比赛用 <b>RLE（游程编码）</b>：把图按行拉成一长串，只记下“从第几个像素开始，连续几个是 1”。<span data-cell="26">出处</span></p><p><code>id2mask</code> 把三段 RLE 解码成三通道掩膜；<code>load_img</code> 读入 16 位灰度图，复制成 3 个通道，并<b>除以这张图自己的最大值</b>缩放到 0～1。<span data-cell="22">出处</span> <span data-cell="24">出处</span></p><p>下面的实验 A 现场演示 RLE 怎么编码。</p>`,
+      cells: [22, 24, 26], highlight: ["rle_decode", "rle_encode", "img/=mx"],
+      draw(svg, ctx) {
+        const W = 14, H = 6, bits = [];
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) bits.push(Math.hypot((x - 6.5) / 1.6, y - 2.5) < 2.6 ? 1 : 0);
+        const cs = 30, cells = [];
+        bits.forEach((b, i) => cells.push(K.svg(svg, "rect", { x: 40 + (i % W) * cs, y: 30 + Math.floor(i / W) * cs, width: cs - 2, height: cs - 2, rx: 2, fill: b ? "var(--c1)" : "var(--panel-2)", stroke: "var(--line)" })));
+        const runs = rleEncode(bits);
+        const txt = K.svg(svg, "text", { x: 40, y: 250, "font-size": 15, "font-family": "var(--mono)" }, "RLE: ");
+        K.svg(svg, "text", { x: 40, y: 290, "font-size": 12, class: "muted" }, "从左上角开始，一行接一行数；每两个数一组：起点（从 1 数起）、长度");
+        (async () => {
+          let s = "RLE:";
+          for (let k = 0; k < runs.length; k += 2) {
+            const st = runs[k] - 1, len = runs[k + 1];
+            if (!(await ctx.tween(350, (t) => { for (let j = 0; j < len; j++) K.set(cells[st + j], { fill: t > j / len ? "var(--c6)" : "var(--c1)" }); }))) return;
+            s += " " + runs[k] + " " + len; txt.textContent = s;
+          }
+        })();
+      },
+    },
+    {
+      title: "分组分层 K 折：同一个病人只能在一边", kicker: "第 27–28 格 · 切分",
+      html: `<p>同一个病人有好几天的扫描，每次几十上百张切片，相邻切片长得几乎一样。如果随便切，同一个人的切片会同时出现在训练集和验证集，模型等于“见过考题”，分数虚高。<span data-cell="1">出处</span></p><p>作者用 <code>StratifiedGroupKFold</code>：<b>按病人（case）分组</b>，一个病人的所有切片只进同一折；同时<b>按 empty 分层</b>，让每一折里空切片的比例差不多。<span data-cell="28">出处</span></p>`,
+      cells: [28], highlight: ["StratifiedGroupKFold", "groups = df[\"case\"]"],
+      draw(svg, ctx) {
+        const r = K.rng(6), pats = [];
+        for (let p = 0; p < 15; p++) { const n = 4 + Math.floor(r() * 5), sl = []; for (let j = 0; j < n; j++) sl.push(r() < 0.4); pats.push(sl); }
+        const groups = [];
+        pats.forEach((sl, p) => {
+          const g = K.svg(svg, "g");
+          sl.forEach((e, j) => K.svg(g, "rect", { x: 0, y: j * 9, width: 26, height: 7, rx: 1.5, fill: e ? "var(--ink-3)" : "var(--c" + (1 + (p % 5)) + ")", opacity: e ? 0.5 : 0.9 }));
+          K.svg(g, "text", { x: 13, y: -6, "text-anchor": "middle", "font-size": 10 }, "病人" + (p + 1));
+          const x0 = 30 + p * 44, y0 = 50;
+          g.setAttribute("transform", `translate(${x0},${y0})`);
+          groups.push({ g, x0, y0, f: p % 5, k: Math.floor(p / 5) });
+        });
+        K.svg(svg, "text", { x: 30, y: 24, "font-size": 12, class: "muted" }, "每个小条 = 一张切片（灰色 = 空切片），同一列是同一个病人（示意）");
+        for (let f = 0; f < 5; f++) { K.svg(svg, "rect", { x: 20 + f * 140, y: 170, width: 130, height: 140, rx: 8, fill: "none", stroke: "var(--line)", "stroke-dasharray": "4 3" }); K.svg(svg, "text", { x: 85 + f * 140, y: 302, "text-anchor": "middle", "font-size": 12 }, "第 " + f + " 折"); }
+        ctx.wait(600).then((ok) => ok && ctx.tween(1600, (t) => groups.forEach((o) => { const x = K.lerp(o.x0, 32 + o.f * 140 + o.k * 40, t), y = K.lerp(o.y0, 200, t); o.g.setAttribute("transform", `translate(${x},${y})`); })));
+      },
+    },
+    {
+      title: "数据集与增强：图片和掩膜一起变", kicker: "第 29–40 格 · 数据管道",
+      html: `<p><code>BuildDataset</code> 每次取一张图和它的掩膜。增强用 Albumentations 库，关键是<b>图片和掩膜同步变换</b>：图转了 10 度，答案也必须转 10 度。<span data-cell="30">出处</span></p><p>训练时的增强：缩放到 224；一半概率左右翻转；一半概率小幅平移、缩放（±5%）、旋转（±10°）；四分之一概率做网格形变或弹性形变（模拟肠子软软的形状变化）；一半概率随机挖 5～8 个小洞（图片和掩膜都填 0）。验证时只缩放。<span data-cell="32">出处</span></p><p>然后用 debug 模式取一小批数据画出来，检查掩膜和图片对得上。<span data-cell="39">出处</span></p>`,
+      cells: [30, 32, 38], highlight: ["HorizontalFlip", "ShiftScaleRotate", "GridDistortion", "ElasticTransform", "CoarseDropout"],
+      draw(svg, ctx) {
+        const A = abdomen(96, 8), base = overlay(A.img, A.masks, 0.5);
+        PX.draw(svg, 30, 60, 200, 200, base, null, null, null, true);
+        K.svg(svg, "text", { x: 130, y: 48, "text-anchor": "middle", "font-size": 13 }, "原图 + 掩膜");
+        const out = PX.draw(svg, 470, 60, 200, 200, base, null, null, null, true);
+        const lab = K.svg(svg, "text", { x: 570, y: 48, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "");
+        K.arrow(svg, 245, 160, 455, 160);
+        K.svg(svg, "text", { x: 350, y: 150, "text-anchor": "middle", "font-size": 12, class: "muted" }, "同一个变换同时作用于");
+        K.svg(svg, "text", { x: 350, y: 180, "text-anchor": "middle", "font-size": 12, class: "muted" }, "图片和掩膜");
+        const holes = [[20, 30], [60, 20], [40, 70], [75, 60], [15, 80]];
+        const seq = [
+          ["左右翻转", (t) => ({ flip: t > 0.5 })],
+          ["旋转 10°、放大 5%", (t) => ({ flip: true, rot: 10 * t, zoom: 1 + 0.05 * t })],
+          ["随机挖洞（CoarseDropout）", (t) => ({ flip: true, rot: 10, zoom: 1.05, holes: t })],
+        ];
+        (async () => {
+          for (const [name, f] of seq) {
+            lab.textContent = name;
+            if (!(await ctx.tween(900, (t) => {
+              const p = f(t); let m = PX.affine(base, { rot: p.rot || 0, zoom: p.zoom || 1, flip: p.flip, fill: 0 });
+              if (p.holes) { const k = Math.ceil(p.holes * holes.length); m = PX.fromChans([0, 1, 2].map((c) => PX.grid(96, 96, (x, y) => (holes.slice(0, k).some(([hx, hy]) => Math.abs(x - hx) < 5 && Math.abs(y - hy) < 5) ? 0 : m.rgb[c][y * 96 + x])))); }
+              PX.update(out, m);
+            }))) return;
+            if (!(await ctx.wait(400))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "U-Net：先压缩看全局，再放大画轮廓", kicker: "第 41–42 格 · 模型",
+      html: `<p><b>U-Net</b> 是医学图像分割最经典的结构，形状像字母 U：</p><ul class="tight"><li>左边<b>编码器</b>一路缩小图片、加深通道，看清“这是哪个器官”。作者用预训练的 EfficientNet-B1 当编码器。</li><li>右边<b>解码器</b>一路放大，恢复到原图大小，画出精确的边界。</li><li>中间的<b>跳连</b>把编码器每一层的细节直接送给解码器对应层，边界才不会糊。</li></ul><p>输出 3 个通道（每个器官一个），<code>activation=None</code> 表示先不加 sigmoid，留给损失函数和后面处理。<span data-cell="42">出处</span></p>`,
+      cells: [42], highlight: ["smp.Unet", "encoder_weights=\"imagenet\"", "classes=CFG.num_classes"],
+      draw(svg, ctx) {
+        const lv = [[60, 70, 120], [130, 110, 90], [200, 150, 60], [270, 190, 36]];
+        const enc = [], dec = [], skips = [];
+        lv.forEach(([x, y, h], i) => { enc.push(K.svg(svg, "rect", { x, y: y - h / 2 + 40, width: 26 + i * 6, height: h, rx: 3, fill: "color-mix(in srgb, var(--c1) " + (25 + i * 15) + "%, var(--panel))", stroke: "var(--c1)", opacity: 0 })); });
+        const bott = K.svg(svg, "rect", { x: 340, y: 240, width: 50, height: 24, rx: 3, fill: "var(--c2)", opacity: 0 });
+        lv.slice().reverse().forEach(([x, y, h], j) => { const i = 3 - j, X = 720 - x - 30 - i * 6; dec.push(K.svg(svg, "rect", { x: X, y: y - h / 2 + 40, width: 26 + i * 6, height: h, rx: 3, fill: "color-mix(in srgb, var(--c3) " + (25 + i * 15) + "%, var(--panel))", stroke: "var(--c3)", opacity: 0 })); skips.push(K.svg(svg, "line", { x1: x + 30 + i * 6, y1: y + 40, x2: X, y2: y + 40, stroke: "var(--warn)", "stroke-dasharray": "5 4", "stroke-width": 1.5, opacity: 0 })); });
+        K.svg(svg, "text", { x: 150, y: 30, "text-anchor": "middle", "font-size": 13, fill: "var(--c1)", "font-weight": 700 }, "编码器（EfficientNet-B1）↓");
+        K.svg(svg, "text", { x: 570, y: 30, "text-anchor": "middle", "font-size": 13, fill: "var(--c3)", "font-weight": 700 }, "↑ 解码器");
+        K.svg(svg, "text", { x: 365, y: 290, "text-anchor": "middle", "font-size": 12 }, "最小最深");
+        K.svg(svg, "text", { x: 360, y: 90, "text-anchor": "middle", "font-size": 12, fill: "var(--warn)" }, "跳连：把细节直接送过去");
+        K.svg(svg, "text", { x: 30, y: 320, "font-size": 12, class: "muted" }, "输入 224×224×3 → 输出 224×224×3（大肠 / 小肠 / 胃各一张概率图）");
+        (async () => {
+          for (const e of enc) if (!(await ctx.tween(220, (t) => (e.style.opacity = t)))) return;
+          if (!(await ctx.tween(220, (t) => (bott.style.opacity = t)))) return;
+          for (let j = 0; j < 4; j++) if (!(await ctx.tween(260, (t) => { dec[j].style.opacity = t; skips[3 - j].style.opacity = t; }))) return;
+        })();
+      },
+    },
+    {
+      title: "损失与指标：BCE + Tversky，用 Dice 打分", kicker: "第 43–44 格 · 损失函数",
+      html: `<p>作者准备了五种损失，最后用 <b>0.5 × BCE + 0.5 × Tversky</b>：<span data-cell="44">出处</span></p><ul class="tight"><li><b>BCE</b>（二元交叉熵）：逐像素打分，每个像素对错各算各的。</li><li><b>Tversky</b>：看整块区域的重叠程度，还能分别调节“漏画”和“多画”的惩罚。当两种惩罚一样时就是 Dice 损失。</li></ul><p>评价用 <b>Dice</b> = 2 × 重叠面积 ÷（预测面积 + 真实面积），和 <b>IoU</b> = 重叠面积 ÷ 合并面积。概率先按 0.5 变成 0/1。公式里加了一个很小的 <code>epsilon</code>，防止分母为 0。</p>`,
+      cells: [44], highlight: ["TverskyLoss", "def dice_coef", "def criterion", "epsilon=0.001"],
+      draw(svg, ctx) {
+        const A = K.svg(svg, "circle", { cx: 280, cy: 160, r: 90, fill: "var(--c1)", "fill-opacity": 0.35, stroke: "var(--c1)", "stroke-width": 2 });
+        const B = K.svg(svg, "circle", { cx: 440, cy: 160, r: 80, fill: "var(--c6)", "fill-opacity": 0.35, stroke: "var(--c6)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 200, y: 50, "font-size": 13, fill: "var(--c1)", "font-weight": 700 }, "真实轮廓");
+        K.svg(svg, "text", { x: 470, y: 50, "font-size": 13, fill: "var(--c6)", "font-weight": 700 }, "预测轮廓");
+        const txt = K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 15, "font-weight": 700 }, "");
+        function area(cx2, r2) { let ia = 0, a1 = 0, a2 = 0; for (let x = 180; x < 540; x += 4) for (let y = 60; y < 260; y += 4) { const p = Math.hypot(x - 280, y - 160) < 90, q = Math.hypot(x - cx2, y - 160) < r2; if (p) a1++; if (q) a2++; if (p && q) ia++; } return [ia, a1, a2]; }
+        ctx.wait(300).then((ok) => ok && ctx.tween(2200, (t) => { const cx = K.lerp(440, 290, t), rr = K.lerp(80, 88, t); K.set(B, { cx, r: rr }); const [i, a, b] = area(cx, rr); txt.textContent = `Dice = 2×重叠 /(真实+预测) = ${((2 * i) / (a + b)).toFixed(2)}　IoU = ${(i / (a + b - i)).toFixed(2)}`; }));
+      },
+    },
+    {
+      title: "训练一轮、验证一轮", kicker: "第 45–48 格 · 训练函数",
+      html: `<p><code>train_one_epoch</code>：取一批图 → 前向算预测 → 算损失 → 反向传播 → 更新参数 → 调学习率。两个省显存的技巧：</p><ul class="tight"><li><b>混合精度</b>（amp）：大部分计算用 16 位小数，更快、更省显存。<span data-cell="46">出处</span></li><li><b>梯度累积</b>：攒几批的梯度再更新一次，相当于用了更大的批量（这里批量已经是 128，所以累积次数算出来是 1）。</li></ul><p><code>valid_one_epoch</code> 在不算梯度的模式下跑验证集，把输出过一次 sigmoid，再算 Dice 和 IoU。<span data-cell="48">出处</span></p>`,
+      cells: [46, 48], highlight: ["amp.autocast", "scaler.scale(loss).backward()", "n_accumulate", "nn.Sigmoid()(y_pred)"],
+      draw(svg, ctx) {
+        const st = ["取一批图", "前向预测", "算损失", "反向传播", "更新参数", "调学习率"];
+        const cx = 360, cy = 165, R = 115, nodes = [];
+        st.forEach((s, i) => { const a = -Math.PI / 2 + (i * 2 * Math.PI) / st.length; nodes.push(K.node(svg, cx + R * Math.cos(a) - 55, cy + R * Math.sin(a) - 20, 110, 40, s, { fs: 12 })); });
+        K.svg(svg, "text", { x: cx, y: cy - 5, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "训练循环");
+        K.svg(svg, "text", { x: cx, y: cy + 16, "text-anchor": "middle", "font-size": 12, class: "muted" }, "16 位混合精度");
+        const dot = K.svg(svg, "circle", { r: 7, fill: "var(--accent)" });
+        ctx.tween(4000, (t) => { const a = -Math.PI / 2 + t * 4 * Math.PI; dot.setAttribute("cx", cx + (R - 30) * Math.cos(a)); dot.setAttribute("cy", cy + (R - 30) * Math.sin(a)); const k = Math.floor((t * 12) % 6); nodes.forEach((n, i) => (n.querySelector("rect").style.stroke = i === k ? "var(--accent)" : "var(--line)")); });
+      },
+    },
+    {
+      title: "保存最好的一轮，学习率按余弦曲线下降", kicker: "第 49–53 格 · 训练调度",
+      html: `<p><code>run_training</code> 每轮先训练、再验证，把分数传到 W&amp;B；只要验证 Dice 不比之前差，就把这一轮的模型存下来（<code>best_epoch-00.bin</code>），同时每轮也存一份最新模型。<span data-cell="50">出处</span></p><p>优化器用 Adam，学习率调度用<b>余弦退火</b>：学习率沿着半个余弦波从 2e-3 平滑地降到 1e-6，每一批都调一次。<span data-cell="52">出处</span></p><p>小问题：最后打印的 “Best Score” 其实是 IoU，挑模型用的却是 Dice。</p>`,
+      cells: [50, 52, 53], highlight: ["if val_dice >= best_dice", "CosineAnnealingLR", "optim.Adam"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 600, h: 230 }, [0, 15], [0, 2.1e-3], { xticks: 5, yfmt: (v) => (v * 1e3).toFixed(1), xlabel: "轮次", ylabel: "学习率 ×10⁻³" });
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const dice = [0.3, 0.55, 0.66, 0.72, 0.76, 0.79, 0.8, 0.79, 0.82, 0.83, 0.835, 0.84, 0.838, 0.845, 0.846];
+        const stars = [];
+        let best = -1;
+        dice.forEach((d, e) => { const s = K.svg(svg, "text", { x: ax.sx(e + 0.5), y: 290, "text-anchor": "middle", "font-size": 13, fill: "var(--good)" }, d >= best ? "★" : "·"); if (d >= best) best = d; s.style.opacity = 0; stars.push(s); });
+        K.svg(svg, "text", { x: 70, y: 312, "font-size": 11, class: "muted" }, "★ = 验证 Dice 不比之前差，存一次模型（Dice 序列为示意）");
+        ctx.tween(2600, (t) => { let d = ""; for (let x = 0; x <= 15 * t + 1e-9; x += 0.1) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(1e-6 + (2e-3 - 1e-6) * (1 + Math.cos((Math.PI * x) / 15)) / 2); path.setAttribute("d", d); stars.forEach((s, e) => (s.style.opacity = t * 15 > e ? 1 : 0)); });
+      },
+    },
+    {
+      title: "开始训练：其实只跑了第 0 折", kicker: "第 54–55 格 · 训练",
+      html: `<p>真正开始训练的这一格：对每一折，开一个 W&amp;B 记录，准备数据，建模型、优化器、调度器，然后训练 15 轮。<span data-cell="55">出处</span></p><p>但循环写的是 <code>for fold in range(1)</code>，所以<b>只训练了第 0 折</b>，其余 4 折没跑。这在比赛 notebook 里很常见（为了省 GPU 时间），但意味着报告的分数只来自一份验证集，偶然性更大；如果要做 5 个模型的平均，也需要把这里改成 <code>range(CFG.n_fold)</code>。</p>`,
+      cells: [55], highlight: ["for fold in range(1):"],
+      draw(svg, ctx) {
+        const els = [];
+        for (let f = 0; f < 5; f++) {
+          const g = K.node(svg, 40 + f * 130, 110, 110, 70, "第 " + f + " 折\n" + (f === 0 ? "训练 15 轮" : "没有运行"), { fs: 13, fill: f === 0 ? "color-mix(in srgb, var(--c3) 22%, var(--panel))" : "var(--panel-2)", stroke: f === 0 ? "var(--c3)" : "var(--line)", color: f === 0 ? "var(--ink)" : "var(--ink-3)" });
+          g.style.opacity = 0; els.push(g);
+        }
+        K.svg(svg, "text", { x: 360, y: 60, "text-anchor": "middle", "font-size": 15, "font-family": "var(--mono)" }, "for fold in range(1):   # 只有 fold = 0");
+        K.svg(svg, "text", { x: 360, y: 240, "text-anchor": "middle", "font-size": 13, fill: "var(--warn)" }, "配置写的是 n_fold = 5，实际只用了 1 折");
+        (async () => { for (const e of els) if (!(await ctx.tween(250, (t) => (e.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "预测：sigmoid 大于 0.5 就画上", kicker: "第 56–60 格 · 预测与可视化",
+      html: `<p>加载最好的模型，取第 0 折验证集里 5 张非空切片，输出过 sigmoid 得到三张概率图，大于 0.5 的像素就算这个器官，最后叠在图上画出来。<span data-cell="57">出处</span></p><p>注意：变量叫 <code>test_dataset</code>，但用的是验证集图片，不是比赛的测试集。真正生成提交文件在作者另一份“推理”notebook 里。<span data-cell="3">出处</span></p>`,
+      cells: [57, 58], highlight: ["(nn.Sigmoid()(pred)>0.5)", "fold==0 & empty==0"],
+      draw(svg, ctx) {
+        const A = abdomen(96, 21, 0.02), N = 96;
+        const prob = A.masks.map((m, k) => PX.blur(PX.map(m, (v, i) => v * 0.9 + 0.05 + 0.15 * Math.sin(i * 0.37 + k)), 2.2));
+        const names = ["大肠概率", "小肠概率", "胃概率"];
+        const ims = prob.map((p, k) => { const e = PX.draw(svg, 30, 20 + k * 102, 90, 90, p, "heat", 0, 1, true); K.svg(svg, "text", { x: 130, y: 70 + k * 102, "font-size": 12 }, names[k]); return e; });
+        void ims;
+        const thrTxt = K.svg(svg, "text", { x: 330, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "");
+        const outs = prob.map((p, k) => PX.draw(svg, 280, 20 + k * 102, 90, 90, PX.map(p, () => 0), null, 0, 1, true));
+        const fin = PX.draw(svg, 450, 50, 240, 240, A.img, null, 0, 1, true);
+        K.svg(svg, "text", { x: 570, y: 40, "text-anchor": "middle", "font-size": 13 }, "叠加结果（示意）");
+        ctx.wait(400).then((ok) => ok && ctx.tween(1600, (t) => {
+          const thr = 0.5; thrTxt.textContent = "阈值 0.5 → 0/1";
+          const bin = prob.map((p) => PX.map(p, (v) => (v > thr ? 1 : 0)));
+          outs.forEach((e, k) => PX.update(e, PX.map(bin[k], (v) => v * t), null, 0, 1));
+          PX.update(fin, overlay(A.img, bin, 0.5 * t));
+        }));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：RLE ---------- */
+  K.lab(document.getElementById("labA"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "shape", label: "掩膜形状", value: "ellipse", options: [["ellipse", "椭圆（像胃）"], ["ring", "C 形（像大肠）"], ["dots", "几个小圆（像小肠）"], ["empty", "空切片（没有器官）"]] },
+      { id: "size", label: "大小", min: 0.5, max: 1.5, step: 0.05, value: 1, fmt: (v) => v.toFixed(2) },
+      { id: "cx", label: "左右位置", min: 4, max: 20, step: 1, value: 12 },
+    ],
+    note: "网格是 24×14 的示意掩膜。浏览器按作者第 26 格 rle_encode 的做法现场编码：把图一行接一行拉成一长串，前后各补一个 0，找出 0→1 和 1→0 的位置，再把“结束位置”换成“长度”。同一种颜色的格子是同一段。",
+    render(svg, v) {
+      const W = 24, H = 14, bits = [];
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        let b = 0; const s = v.size;
+        if (v.shape === "ellipse") b = Math.pow((x - v.cx) / (5 * s), 2) + Math.pow((y - 6.5) / (3.5 * s), 2) < 1;
+        else if (v.shape === "ring") { const d = Math.hypot((x - v.cx) / 1.4, y - 6.5), a = Math.atan2(y - 6.5, x - v.cx); b = d > 3.2 * s && d < 5.2 * s && !(a > -0.7 && a < 0.7); }
+        else if (v.shape === "dots") b = [[0, 0], [4, 2], [-3, 3], [2, -3]].some(([dx, dy]) => Math.hypot(x - v.cx - dx, y - 6.5 - dy) < 1.8 * s);
+        bits.push(b ? 1 : 0);
+      }
+      const runs = rleEncode(bits), cs = 20, cols = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c5)"];
+      const owner = new Array(bits.length).fill(-1);
+      for (let k = 0; k < runs.length; k += 2) for (let j = 0; j < runs[k + 1]; j++) owner[runs[k] - 1 + j] = k / 2;
+      bits.forEach((b, i) => K.svg(svg, "rect", { x: 20 + (i % W) * cs, y: 10 + Math.floor(i / W) * cs, width: cs - 2, height: cs - 2, rx: 2, fill: b ? cols[owner[i] % 5] : "var(--panel-2)", stroke: "var(--line)" }));
+      const str = runs.join(" ") || "（空字符串）";
+      const lines = []; let cur = "";
+      str.split(" ").forEach((w) => { if ((cur + " " + w).length > 64) { lines.push(cur); cur = w; } else cur = cur ? cur + " " + w : w; });
+      if (cur) lines.push(cur);
+      lines.slice(0, 3).forEach((l, i) => K.svg(svg, "text", { x: 20, y: 296 + i * 14, "font-size": 12, "font-family": "var(--mono)" }, (i === 0 ? "RLE: " : "     ") + l));
+      const on = bits.reduce((a, b) => a + b, 0);
+      return { readout: [
+        { k: "掩膜像素（1 的个数）", v: on + " / " + bits.length },
+        { k: "段数", v: String(runs.length / 2) },
+        { k: "RLE 里的数字个数", v: String(runs.length) },
+        { k: "直接存 0/1 要", v: bits.length + " 个数" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：Dice / IoU ---------- */
+  K.lab(document.getElementById("labB"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "truth", label: "这张切片真实有没有器官", value: "yes", options: [["yes", "有（真实掩膜是一个圆）"], ["no", "没有（空切片）"]] },
+      { id: "dx", label: "预测轮廓左右偏移（像素）", min: -30, max: 30, step: 1, value: 8 },
+      { id: "r", label: "预测轮廓半径（真实为 20）", min: 0, max: 35, step: 1, value: 20 },
+      { id: "alpha", label: "Tversky 对“漏画”的惩罚 α（多画为 1−α）", min: 0.1, max: 0.9, step: 0.05, value: 0.5, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "在 80×60 的像素网格上逐像素现场计算：Dice、IoU 用作者第 44 格的公式（含 epsilon = 0.001），Tversky 指数 = 重叠 ÷（重叠 + α×漏画 + (1−α)×多画），Tversky 损失 = 1 − 它。α = 0.5 时 Tversky 指数就等于 Dice。试试：选“空切片”，把预测半径拖到 0，Dice 会变成 1；预测哪怕多画几个像素，Dice 就掉到接近 0。",
+    render(svg, v) {
+      const W = 80, H = 60, cs = 7, ox = 40, oy = 10;
+      let tp = 0, fp = 0, fn = 0;
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const t = v.truth === "yes" && Math.hypot(x - 40, y - 30) < 20, p = v.r > 0 && Math.hypot(x - 40 - v.dx, y - 30) < v.r;
+        if (t && p) tp++; else if (p) fp++; else if (t) fn++;
+        if (t || p) K.svg(svg, "rect", { x: ox + x * cs, y: oy + y * cs * 0.7, width: cs, height: cs * 0.7, fill: t && p ? "var(--c3)" : p ? "var(--c6)" : "var(--c1)", opacity: 0.85 });
+      }
+      K.svg(svg, "rect", { x: ox, y: oy, width: W * cs, height: H * cs * 0.7, fill: "none", stroke: "var(--line)" });
+      K.svg(svg, "text", { x: ox, y: 316, "font-size": 12, fill: "var(--c3)" }, "■ 重叠（画对）");
+      K.svg(svg, "text", { x: ox + 120, y: 316, "font-size": 12, fill: "var(--c6)" }, "■ 多画");
+      K.svg(svg, "text", { x: ox + 200, y: 316, "font-size": 12, fill: "var(--c1)" }, "■ 漏画");
+      const eps = 0.001, dice = (2 * tp + eps) / (2 * tp + fp + fn + eps), iou = (tp + eps) / (tp + fp + fn + eps);
+      const tv = (tp + eps) / (tp + v.alpha * fn + (1 - v.alpha) * fp + eps);
+      return { readout: [
+        { k: "Dice", v: dice.toFixed(3), color: dice > 0.8 ? "var(--good)" : dice < 0.5 ? "var(--bad)" : "var(--warn)" },
+        { k: "IoU", v: iou.toFixed(3) },
+        { k: "Tversky 损失", v: (1 - tv).toFixed(3) },
+        { k: "画对 / 多画 / 漏画", v: `${tp} / ${fp} / ${fn}` },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

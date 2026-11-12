@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>大模型解奥数题</title>
+<meta name="description" content="Kaggle 案例拆解：让 7B 数学大模型解奥赛题——边推理边写 Python 代码并真正运行、多次采样投票（自洽性）、按成功次数挑提示词、提前收工。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">文本 · 数学推理 · 大模型 + 代码执行</div>
+  <h1>让大模型做奥数：边想边写程序，做 19 遍再投票</h1>
+  <p class="en">Updated Code Interpretation（AI Mathematical Olympiad Progress Prize 1）</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">DeepSeekMath-7B</span><span class="tag method">工具调用：执行 Python</span><span class="tag method">SymPy</span>
+    <span class="tag method">自洽性投票</span><span class="tag method">温度采样</span><span class="tag method">停止词</span><span class="tag method">KV 缓存续写</span><span class="tag method">提前收工</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Lewis Tunstall</b>（在 abdurrafae 的 notebook 上做了适配，源头还有多位作者）</span>
+    <span>Kaggle 点赞 <b>1,173</b>（2026-11 抓取）</span>
+    <span>数据 <b>AI Mathematical Olympiad - Progress Prize 1（比赛）</b></span>
+    <span><a href="https://www.kaggle.com/code/lewtun/updated-code-interpretation" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">数学竞赛题（文字描述）</div><p>比赛通过专用接口 <code>aimo</code> 一题一题地发题，每题只有题目文字 <code>problem</code>。<span data-cell="4">出处</span> <span data-cell="17">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">一个整数答案（0~999）</div><p>代码把所有答案都对 1000 取余，提示词也强调最终答案是正整数。<span data-cell="12">出处</span> <span data-cell="16">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">7B 数学模型 + 运行代码 + 多次投票</div><p>模型写出 Python（SymPy）代码时暂停，真的去运行，把结果接回去继续写；每题最多做 19 遍，出现次数最多的答案胜出。<span data-cell="6">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一个能在时限内跑完的完整方案</div><p>作者 Lewis 说明只是把原 notebook 改成新的评测接口；分数在 Kaggle 页面上，源码文字里没有写。<span data-cell="1">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛 <b>AI Mathematical Olympiad (AIMO) Progress Prize 1</b>：题目来自数学竞赛，答案是整数。正式题目不能下载，只能在提交时通过 <code>aimo.make_env()</code> 的接口逐题读取、逐题提交。下面只列 notebook 里出现的信息。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">关键设定</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">每题最多尝试</div><div class="v">19 次</div></div>
+        <div class="stat-tile"><div class="k">每次最多生成</div><div class="v">2048 词元</div></div>
+        <div class="stat-tile"><div class="k">总时间预算</div><div class="v">31,500 秒</div></div>
+        <div class="stat-tile"><div class="k">答案范围</div><div class="v">0 ~ 999</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">19、2048、31500 见 <span data-cell="14">第 14 格</span>（注释：原 notebook 用 22 次，但会超时）；答案取余 1000 见 <span data-cell="12">第 12 格</span>。题目有多少道，notebook 没有写。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>id</code></td><td>题号</td><td>文本</td></tr>
+        <tr><td><code>problem</code></td><td>题目文字（可能含 LaTeX 公式）</td><td>文本</td></tr>
+        <tr><td><code>answer</code></td><td><b>要预测的答案</b>：整数；训练集里给出，测试时由模型填写后提交</td><td>整数</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">列名见 <span data-cell="17">第 17 格</span>（<code>test['problem']</code>、<code>sample_submission['answer']</code>）和 <span data-cell="21">第 21 格</span> 被注释掉的本地评测代码。源码不带运行输出，这里不举题目例子。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="14">
+    <h3>动手试试 A · 做几遍再投票，能多对几题 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labVote"></div>
+  </div>
+  <div data-at="16">
+    <h3>动手试试 B · 两种提示词，按成功次数抽签 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labPick"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的信息</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>本 notebook 只做了适配新评测接口所需的改动（Lewis）</td><td><span data-cell="1">第 1 格</span></td></tr>
+        <tr><td>自洽性：多次采样、取最常见答案；RL 微调过的 MMOS-DeepSeekMath-7B 写代码推理更稳，执行代码能减少算术“幻觉”</td><td><span data-cell="6">第 6 格</span></td></tr>
+        <tr><td>原 notebook 每题 22 次会超时，改成 19 次</td><td><span data-cell="14">第 14 格</span></td></tr>
+        <tr><td>新接口不允许对同一题重复调用，所以把“题目”和“重复次数”两层循环调换了顺序</td><td><span data-cell="17">第 17 格</span></td></tr>
+        <tr><td>待办：按题目长度调整温度</td><td><span data-cell="5">第 5 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">比赛得分只出现在 Kaggle 的提交记录里，notebook 的文字和注释没有写，所以这里不列分数。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一道有确定数值答案的题目，输出一个整数答案，以及得出它的推理和代码。</li>
+        <li><b>同类问题：</b>作业自动批改与讲解、物理 / 化学计算题、财务报表核算、需要“算准”的问答助手……凡是语言模型容易算错、但程序能算对的地方，都可以让模型“写代码、交给电脑算”。</li>
+        <li><b>可迁移的套路：</b>工具调用（模型负责想、程序负责算）→ 多次采样 + 多数投票 → 根据已经出现的一致程度提前停止，节省时间预算。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>答案抽取：<code>\boxed{}</code> 正则，失败就取最后一串数字 <span data-cell="11">第 11 格</span> <span data-cell="12">第 12 格</span></li>
+        <li>代码执行：写入文件、限时 7 秒运行、SymPy 符号自动设为实数 <span data-cell="12">第 12 格</span></li>
+        <li>模型：DeepSeekMath 7B，按层分到两张卡，遇到代码块停止 <span data-cell="15">第 15 格</span></li>
+        <li>两种提示词 <span data-cell="16">第 16 格</span>；主循环、投票、提前收工 <span data-cell="17">第 17 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>为什么同一个模型做同一道题 19 遍，答案会不一样？温度 0.9 的“随机性”在这里是好事还是坏事？</li>
+      <li>多数投票什么时候会失灵？如果模型在某道题上“稳定地错”，投票还能救回来吗？</li>
+      <li>每次尝试可能同时贡献两票（代码运行结果和 <code>\boxed{}</code> 里的答案）。这对投票有什么影响？</li>
+      <li>代码里按“文字答案次数”给第一种提示词（先写代码）加权、按“代码答案次数”给第二种加权。你觉得这样配对合理吗？如果换过来会怎样？</li>
+      <li>让模型的代码直接在比赛机器上运行，有什么风险？作者用了哪些办法限制（时间、异常处理）？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Lewis Tunstall，改编自 abdurrafae 的 Improved Code Interpretation，再往前有 xiaoz259、olyatsimboy、aatiffraz、thedrcat 等人的 notebook；版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Kaggle 比赛 AI Mathematical Olympiad - Progress Prize 1。
+</footer>
+</main>
+
+<script src="nb/aimo-code-interpretation.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const FAST = location.hash === "#fast";
+
+  function bubble(svg, x, y, w, lines, opt) {
+    opt = opt || {};
+    const g = K.svg(svg, "g");
+    const h = 14 + lines.length * 17;
+    K.svg(g, "rect", { x, y, width: w, height: h, rx: 8, fill: opt.fill || "var(--panel-2)", stroke: opt.stroke || "var(--line)" });
+    lines.forEach((t, i) => K.svg(g, "text", { x: x + 10, y: y + 20 + i * 17, "font-size": opt.fs || 12, "font-family": opt.mono ? "var(--mono)" : null, fill: opt.color || "var(--ink)" }, t));
+    return g;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "开场：一份层层转手的 notebook", kicker: "第 0–2 格 · 来历",
+      html: `<p>这份高票 notebook 的来历本身就很 Kaggle：Lewis 在 abdurrafae 的“改进版代码解释”上，只改了适配新评测接口的部分；abdurrafae 又改自 xiaoz259，再往前还致谢了 olyatsimboy、aatiffraz、thedrcat 的基线。</p><p>大家在公开 notebook 上接力改进，是 Kaggle 比赛里很常见的协作方式。</p>`,
+      cells: [0, 1, 2],
+      draw(svg, ctx) {
+        const chain = ["olyatsimboy 等\n基线", "xiaoz259\npure-rng", "abdurrafae\n改进代码解释", "Lewis Tunstall\n适配新接口"];
+        const g = chain.map((t, i) => { const e = K.node(svg, 20 + i * 178, 130, 150, 64, t, { stroke: i === 3 ? "var(--accent)" : "var(--line)", fill: i === 3 ? "var(--accent-soft)" : "var(--panel-2)" }); e.style.opacity = 0; return e; });
+        const ar = [0, 1, 2].map((i) => { const a = K.arrow(svg, 170 + i * 178, 162, 196 + i * 178, 162); a.style.opacity = 0; return a; });
+        K.svg(svg, "text", { x: 20, y: 90, "font-size": 13, class: "muted" }, "fork（复制一份再改）的接力链：");
+        K.svg(svg, "text", { x: 20, y: 260, "font-size": 12, class: "muted" }, "每个人在前一个人的公开代码上改一点，点赞最高的不一定是最初写的人");
+        (async () => { for (let i = 0; i < 4; i++) { if (!(await ctx.tween(300, (t) => (g[i].style.opacity = t)))) return; if (i < 3 && !(await ctx.tween(200, (t) => (ar[i].style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      title: "开始计时，连上比赛的发题接口", kicker: "第 3–4 格 · 评测 API",
+      html: `<p>第一件事是记下开始时间，后面要靠它判断“还剩多少时间”。然后 <code>aimo.make_env()</code> 连上比赛的评测接口，<code>iter_test()</code> 会一道一道地把题目发过来，每答完一题才能拿到下一题。</p><p>这种设计让参赛者看不到全部考题，也没法回头改答案。</p>`,
+      cells: [3, 4], highlight: ["NOTEBOOK_START_TIME = time.time()", "iter_test = env.iter_test()"],
+      draw(svg, ctx) {
+        const srv = K.node(svg, 30, 120, 150, 80, "比赛服务器\n（题目保密）", { bold: true });
+        const nb = K.node(svg, 520, 120, 170, 80, "我们的 notebook", {});
+        const clock = K.svg(svg, "text", { x: 520, y: 100, "font-size": 13, fill: "var(--warn)" }, "⏱ 0 秒");
+        const msgs = [];
+        (async () => {
+          for (let k = 0; k < 3; k++) {
+            const q = K.node(svg, 190, 110, 70, 30, "第 " + (k + 1) + " 题", { fs: 11, fill: "color-mix(in srgb, var(--c1) 20%, var(--panel))" });
+            if (!(await ctx.tween(FAST ? 1 : 700, (t) => q.setAttribute("transform", `translate(${250 * t},0)`)))) return;
+            q.remove();
+            const a = K.node(svg, 440, 180, 70, 30, "答案", { fs: 11, fill: "color-mix(in srgb, var(--c3) 20%, var(--panel))" });
+            if (!(await ctx.tween(FAST ? 1 : 700, (t) => { a.setAttribute("transform", `translate(${-250 * t},0)`); clock.textContent = "⏱ " + Math.round((k + t) * 1600) + " 秒"; }))) return;
+            a.remove();
+          }
+          K.svg(svg, "text", { x: 200, y: 260, "font-size": 13 }, "一题一题发、一题一题交，不能回头");
+        })();
+      },
+    },
+    {
+      at: 5, title: "自洽性：同一道题多做几遍再投票", kicker: "第 5–7 格 · 核心思路",
+      html: `<p>第 6 格说明了整份 notebook 的思路：<b>自洽性（self-consistency）</b>。普通做法让模型“一次性给答案”；自洽性是<b>带一点随机地做很多遍</b>，每遍的推理路线不同，最后取出现次数最多的答案。</p><p>模型选的是经过强化学习微调的 MMOS-DeepSeekMath-7B，作者的经验是它写代码推理更稳定；让代码真的跑起来，可以减少大模型最常犯的“算术幻觉”（推理对了、却把数算错）。第 7 格是几个开关：默认不做 4 位量化、续写时复用 KV 缓存。</p>`,
+      cells: [6, 7], highlight: ["Self-consistency", "QUANT = False", "USE_PAST_KEY = True"],
+      notes: { 7: "如果把 QUANT 改成 True，这一格会用到 torch.bfloat16，但 torch 要到第 8 格才导入，会报 NameError；默认 False，不影响运行。" },
+      draw(svg, ctx) {
+        const ans = [42, 42, 17, 42, 108, 42, 17, 42, 42, 5];
+        const pills = ans.map((a, i) => { const e = K.node(svg, 30 + (i % 5) * 76, 40 + Math.floor(i / 5) * 60, 64, 40, String(a), { fill: a === 42 ? "color-mix(in srgb, var(--good) 25%, var(--panel))" : "var(--panel-2)" }); e.style.opacity = 0; return e; });
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 12, class: "muted" }, "同一题做 10 遍得到的答案（示意）");
+        const cnt = {}; ans.forEach((a) => (cnt[a] = (cnt[a] || 0) + 1));
+        const keys = Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a]);
+        const bars = keys.map((k, i) => { K.svg(svg, "text", { x: 470, y: 64 + i * 40, "font-size": 13, "text-anchor": "end" }, k); return K.svg(svg, "rect", { x: 480, y: 48 + i * 40, width: 0, height: 24, rx: 3, fill: k === "42" ? "var(--good)" : "var(--ink-3)" }); });
+        const win = K.svg(svg, "text", { x: 30, y: 230, "font-size": 16, "font-weight": 700, fill: "var(--good)" }, "");
+        (async () => {
+          for (const p of pills) if (!(await ctx.tween(FAST ? 1 : 140, (t) => (p.style.opacity = t)))) return;
+          if (!(await ctx.tween(FAST ? 1 : 800, (t) => bars.forEach((b, i) => b.setAttribute("width", 30 * cnt[keys[i]] * t))))) return;
+          win.textContent = "投票结果：42（6 票）";
+        })();
+      },
+    },
+    {
+      title: "装载工具、固定随机种子", kicker: "第 8–10 格 · 准备",
+      html: `<p>导入 transformers，关掉一种省显存的注意力实现，固定随机种子为 42。第 9–10 格原本是读本地 csv 调试用的，现在被注释掉了，<code>PRIVATE = True</code> 表示按正式提交的设置运行。</p>`,
+      cells: [8, 9], highlight: ["set_seed(42)", "PRIVATE = True"],
+      draw(svg, ctx) {
+        const items = [["transformers", "加载模型、分词、生成"], ["set_seed(42)", "让随机过程可以复现"], ["PRIVATE = True", "按正式提交的参数跑"]];
+        items.forEach(([a, b], i) => {
+          const g = K.node(svg, 60 + i * 210, 120, 190, 80, a + "\n" + b, { fs: 12 });
+          g.style.opacity = 0;
+          ctx.wait(i * 300).then((ok) => ok && ctx.tween(300, (t) => (g.style.opacity = t)));
+        });
+      },
+    },
+    {
+      title: "从模型的话里抠出答案，并真的运行它的代码", kicker: "第 11–12 格 · 解析与执行",
+      html: `<p><code>process_text_output</code> 先找 <code>\\boxed{数字}</code>（数学题惯用的“答案框”），找不到就用 <code>naive_parse</code> 从后往前取最后一串数字，再对 1000 取余。</p><p><code>process_code</code> 把模型写的代码存成 <code>code.py</code>，用 <code>timeout 7</code> 限时 7 秒运行，取最后一行输出。还有两处小心思：把 <code>symbols(...)</code> 自动加上 <code>real=True</code>（让 SymPy 只在实数范围里解）；出错时把错误信息返回给模型，并提示“检查格式和导入”。</p>`,
+      cells: [11, 12], highlight: ["re.findall(r'\\\\boxed\\{(\\d+)\\}', result)", "batcmd = 'timeout 7 ' + sys.executable + ' code.py'", "% 1000"],
+      draw(svg, ctx) {
+        const out = bubble(svg, 20, 30, 330, ["……所以 n 的最小值是", "100 + 23 = 123，", "最终答案 \\boxed{123}"], { fs: 13 });
+        const code = bubble(svg, 20, 170, 330, ["from sympy import *", "x = symbols('x', real=True)", "print(solve(x**2-5*x+6, x))"], { mono: true, fs: 12 });
+        K.svg(svg, "text", { x: 20, y: 22, "font-size": 12, class: "muted" }, "模型的文字输出（示意）");
+        K.svg(svg, "text", { x: 20, y: 162, "font-size": 12, class: "muted" }, "模型写的代码（示意）");
+        const r1 = K.node(svg, 450, 50, 230, 50, "正则找到 \\boxed{123} → 123", { fill: "color-mix(in srgb, var(--good) 18%, var(--panel))", stroke: "var(--good)" });
+        const r2 = K.node(svg, 450, 190, 230, 50, "限时 7 秒运行 → [2, 3]", { fill: "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: "var(--c1)" });
+        const a1 = K.arrow(svg, 350, 75, 448, 75), a2 = K.arrow(svg, 350, 215, 448, 215);
+        const hl = K.svg(svg, "rect", { x: 30, y: 80, width: 0, height: 20, fill: "var(--warn)", opacity: 0.25 });
+        [r1, r2, a1, a2].forEach((e) => (e.style.opacity = 0));
+        (async () => {
+          if (!(await ctx.tween(600, (t) => hl.setAttribute("width", 130 * t)))) return;
+          for (const e of [a1, r1, a2, r2]) if (!(await ctx.tween(300, (t) => (e.style.opacity = t)))) return;
+        })();
+        K.svg(svg, "text", { x: 450, y: 300, "font-size": 12, class: "muted" }, "两种来源的答案都会参与投票");
+      },
+    },
+    {
+      title: "时间与次数的预算", kicker: "第 13–14 格 · 预算",
+      html: `<p>清理显存后定下预算：每题最多做 <code>n_repetitions = 19</code> 遍（注释说原来是 22，会超时）；每遍最多生成 2048 个词元；整份 notebook 的时间上限 <code>TIME_LIMIT = 31500</code> 秒，约 8 小时 45 分，超过就不再答新题。</p><p>“次数多一点更准”和“时间不够用”之间的取舍，是这类比赛最现实的问题。</p>`,
+      cells: [14], highlight: ["n_repetitions = 19 if PRIVATE else 4", "TIME_LIMIT = 31500"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 40, w: 600, h: 60 }, [0, 31500], [0, 1], { yticks: 0, xticks: 5, xlabel: "已用时间（秒）" });
+        const bar = K.svg(svg, "rect", { x: 60, y: 50, width: 0, height: 40, fill: "var(--c1)" });
+        K.svg(svg, "line", { x1: ax.sx(31500), x2: ax.sx(31500), y1: 30, y2: 110, stroke: "var(--bad)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: ax.sx(31500) - 4, y: 26, "text-anchor": "end", "font-size": 12, fill: "var(--bad)" }, "TIME_LIMIT 31500 秒");
+        K.svg(svg, "text", { x: 60, y: 180, "font-size": 13 }, "每道题：");
+        const reps = [];
+        for (let k = 0; k < 19; k++) reps.push(K.svg(svg, "rect", { x: 130 + k * 28, y: 165, width: 22, height: 22, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" }));
+        K.svg(svg, "text", { x: 130, y: 210, "font-size": 12, class: "muted" }, "最多 19 次尝试，每次最多 2048 个词元");
+        ctx.tween(FAST ? 10 : 2200, (t) => { bar.setAttribute("width", ax.sx(31500 * t * 0.92) - 60); reps.forEach((r, k) => K.set(r, { fill: k < t * 19 ? "var(--c1)" : "var(--panel-2)" })); });
+      },
+    },
+    {
+      title: "DeepSeekMath 拆到两张卡上，遇到代码块就停", kicker: "第 15 格 · 加载模型",
+      html: `<p>7B 模型用 <code>device_map</code> 手动分配：嵌入层和第 0–21 层放在 0 号卡，第 22–29 层和输出头放在 1 号卡。</p><p>关键是<b>停止词</b>：当模型刚写完 <code>\`\`\`output</code>、<code>\`\`\`python</code> 等标记时就暂停生成。这样一来，模型写完一段代码、正准备“想象”运行结果时，程序就接管过来，<b>真的运行代码</b>，把真实结果填回去。</p>`,
+      cells: [15], highlight: ["('model.layers.22', 1)", "stop_words = [\"```output\", \"```python\", \"```\\nOutput\" , \")\\n```\" , \"``````output\"]"],
+      draw(svg, ctx) {
+        const n = 30;
+        for (let i = 0; i < n; i++) K.svg(svg, "rect", { x: 30 + i * 21, y: 60, width: 17, height: 60, rx: 3, fill: i < 22 ? "var(--c1)" : "var(--c2)", opacity: 0.8 });
+        K.svg(svg, "text", { x: 30, y: 50, "font-size": 12, fill: "var(--c1)" }, "GPU 0：第 0–21 层");
+        K.svg(svg, "text", { x: 30 + 22 * 21, y: 50, "font-size": 12, fill: "var(--c2)" }, "GPU 1：第 22–29 层");
+        const text = "解：设 x 为……我们用 SymPy 来解方程。\n```python";
+        const t1 = K.svg(svg, "text", { x: 30, y: 190, "font-size": 14, "font-family": "var(--mono)" }, "");
+        const stop = K.svg(svg, "text", { x: 30, y: 240, "font-size": 14, "font-weight": 700, fill: "var(--warn)" }, "");
+        ctx.tween(FAST ? 10 : 2200, (t) => (t1.textContent = text.replace("\n", " ").slice(0, Math.round(t * text.length))))
+          .then((ok) => { if (ok) stop.textContent = "⏸ 碰到停止词 ```python / ```output → 暂停，交给程序处理"; });
+      },
+    },
+    {
+      title: "两种提示词：先写代码，或一步步推理", kicker: "第 16 格 · 提示词",
+      html: `<p>准备了两套模板：</p><ul class="tight"><li><b>code</b>：先列出用 SymPy 解题的步骤，“写清楚到连傻瓜都能照着做”，再写出完整的、带注释的脚本并打印结果；</li><li><b>cot</b>：分析题目、一步步思考，用程序得出答案。</li></ul><p>两者都要求把最终答案写进 <code>\\boxed{}</code>，并反复强调“答案是正整数，不是代数式”。每次尝试先抽签决定用哪套模板。</p>`,
+      cells: [16], highlight: ["determine a sympy-based approach", "think step by step to come to a solution with programs", "promplt_options = [code,cot]"],
+      draw(svg, ctx) {
+        const a = bubble(svg, 30, 40, 310, ["【code 模板】", "列出 SymPy 解法步骤……", "写出完整脚本并打印结果", "答案写在 \\boxed{} 里，必须是正整数"], { stroke: "var(--c1)" });
+        const b = bubble(svg, 380, 40, 310, ["【cot 模板】", "分析题目，一步步思考，", "用程序得出答案", "答案写在 \\boxed{} 里"], { stroke: "var(--c2)" });
+        [a, b].forEach((e) => (e.style.opacity = 0));
+        const dice = K.svg(svg, "text", { x: 360, y: 240, "text-anchor": "middle", "font-size": 18, "font-weight": 700 }, "");
+        (async () => {
+          if (!(await ctx.tween(400, (t) => (a.style.opacity = t)))) return;
+          if (!(await ctx.tween(400, (t) => (b.style.opacity = t)))) return;
+          dice.textContent = "🎲 每次尝试：按过去成功次数抽一套";
+        })();
+      },
+    },
+    {
+      title: "主循环（上）：按成功次数抽签选提示词", kicker: "第 17 格 · 尝试前的准备",
+      html: `<p>外层循环一题一题地拿题（Lewis 注释：新接口禁止对同一题重复调用，所以把“题目”放在外层、“重复次数”放在内层）。每次尝试前先检查：时间是否超限；当前最高票数是否已经大于 <code>√已尝试次数</code>，是的话就跳过剩下的尝试。</p><p>抽签：两套模板的权重是计数 <code>[text_answers, code_answers]</code>，初始为 (2, 3)；之后哪种方式产出了有效答案，对应计数就加 1，下次被抽中的机会就更大。这是一种很朴素的“边试边学”。</p>`,
+      cells: [17], highlight: ["starting_counts = (2,3)", "if best_count>np.sqrt(jj):", "p=counts/counts.sum()"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 220 }, [0, 19], [0, 10], { xlabel: "第几次尝试 jj", yfmt: (v) => v.toFixed(0) });
+        let d = "";
+        for (let j = 0; j <= 19; j += 0.2) d += (d ? "L" : "M") + ax.sx(j) + "," + ax.sy(Math.sqrt(j));
+        K.svg(svg, "path", { d, fill: "none", stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+        K.svg(svg, "text", { x: ax.sx(19) - 4, y: ax.sy(Math.sqrt(19)) - 8, "text-anchor": "end", "font-size": 12, fill: "var(--warn)" }, "√jj");
+        const votes = [0, 1, 1, 2, 3, 3, 4, 5, 5];
+        const pts = votes.map((v, j) => K.svg(svg, "circle", { cx: ax.sx(j), cy: ax.sy(v), r: 0, fill: "var(--c1)" }));
+        const lab = K.svg(svg, "text", { x: 70, y: 300, "font-size": 13 }, "蓝点 = 当前最高票数（示意）；蓝点高过黄线，就跳过后面的尝试");
+        (async () => {
+          for (let j = 0; j < votes.length; j++) {
+            if (!(await ctx.tween(FAST ? 1 : 200, (t) => pts[j].setAttribute("r", 5 * t)))) return;
+            if (votes[j] > Math.sqrt(j + 1)) { K.set(pts[j], { fill: "var(--good)" }); lab.textContent = `第 ${j + 1} 次之后最高票 ${votes[j]} > √${j + 1} ≈ ${Math.sqrt(j + 1).toFixed(2)}，剩下的尝试全部跳过`; K.set(lab, { fill: "var(--good)" }); return; }
+          }
+        })();
+      },
+    },
+    {
+      title: "主循环（下）：写代码 → 运行 → 接着写，最后投票", kicker: "第 17 格 · 工具调用与投票",
+      html: `<p>模型开始生成，碰到停止词就暂停：如果刚写下 <code>\`\`\`python</code>，就继续让它写代码；如果代码写完了，就把<b>目前为止所有成功的代码累积起来</b>重新运行，把真实输出接在后面（<code>\`\`\`output ... \`\`\`</code>），再让模型续写（复用 KV 缓存，不必从头算）。同样的错误连续出现就放弃这次尝试。</p><p>一次尝试结束后，代码运行结果和 <code>\\boxed{}</code> 里的答案<b>都</b>加入候选。统计出现最多的答案；某个答案超过 5 票就直接收工，提交当前票数最高的答案。</p>`,
+      cells: [17], highlight: ["code_output, CODE_STATUS = process_code(cummulative_code, return_shell_output=True)", "prompt = decoded_output+'```output\\n'+str(code_output)+'\\n```\\n'", "occurances = Counter(outputs).most_common()", "if occurances[0][1] > 5:"],
+      draw(svg, ctx) {
+        const nodes = [["模型写推理", 40, 40, "var(--c2)"], ["写出 ```python 代码", 270, 40, "var(--c2)"], ["程序真的运行（≤7 秒）", 500, 40, "var(--c1)"], ["结果接回：```output 6 ```", 500, 170, "var(--c1)"], ["模型继续写", 270, 170, "var(--c2)"], ["\\boxed{答案}", 40, 170, "var(--good)"]];
+        const g = nodes.map(([t, x, y, c]) => { const e = K.node(svg, x, y, 180, 52, t, { fs: 12, stroke: c, fill: `color-mix(in srgb, ${c} 12%, var(--panel))` }); e.style.opacity = 0.25; return e; });
+        const ar = [[220, 66, 268, 66], [450, 66, 498, 66], [590, 92, 590, 168], [498, 196, 452, 196], [268, 196, 222, 196]].map(([a, b, c, d]) => K.arrow(svg, a, b, c, d));
+        const loop = K.arrow(svg, 360, 168, 360, 94, { dash: "4 3", color: "var(--warn)" });
+        K.svg(svg, "text", { x: 368, y: 136, "font-size": 11, fill: "var(--warn)" }, "可能再写代码");
+        K.svg(svg, "text", { x: 40, y: 270, "font-size": 13 }, "每次尝试 → 代码结果 + \\boxed{} 答案 → 加入投票箱 → 某答案 > 5 票就收工");
+        (async () => {
+          for (let k = 0; k < g.length; k++) {
+            if (!(await ctx.tween(FAST ? 1 : 350, (t) => (g[k].style.opacity = 0.25 + 0.75 * t)))) return;
+          }
+        })();
+        ar.forEach((a) => (a.style.opacity = 1));
+      },
+    },
+    {
+      title: "收尾：被注释掉的本地评测", kicker: "第 18–22 格 · 收尾",
+      html: `<p>第 18–21 格都被注释掉了，原本用于在训练集上跑完后，把模型答案和标准答案对比、数一数答对几题。因为新接口里每答一题就直接 <code>env.predict</code> 提交了，这些代码不再需要。</p><p>最后一格写一个只打印 “done” 的 <code>code.py</code> 再运行一次，相当于把代码执行环境清理、确认一下。</p>`,
+      cells: [18, 21, 22], highlight: ["matches in"],
+      draw(svg, ctx) {
+        const lines = ["# df['model_answer'] = ...", "# df['match'] = df.answer == df.model_answer", "# print(f'{df.match.sum()} matches ...')"];
+        lines.forEach((l, i) => K.svg(svg, "text", { x: 40, y: 80 + i * 26, "font-size": 13, "font-family": "var(--mono)", class: "muted" }, l));
+        const strike = K.svg(svg, "line", { x1: 36, x2: 36, y1: 74 + 0, y2: 74, stroke: "var(--ink-3)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 40, y: 200, "font-size": 13 }, "本地评测（已注释）→ 改为每题直接 env.predict(提交)");
+        const done = K.svg(svg, "text", { x: 40, y: 260, "font-size": 18, "font-family": "var(--mono)", fill: "var(--good)" }, "");
+        ctx.tween(800, (t) => strike.setAttribute("x2", 36 + 380 * t)).then((ok) => { if (ok) done.textContent = "$ python code.py → done"; });
+      },
+    },
+  ];
+  if (FAST) steps.forEach((s) => { const d = s.draw; if (d) s.draw = (svg, ctx) => d(svg, Object.assign({}, ctx, { wait: () => Promise.resolve(ctx.alive()), tween: (ms, fn) => { fn(1, 1); return Promise.resolve(ctx.alive()); } })); });
+  K.pipeline(document.getElementById("pipe"), steps);
+  if (FAST) document.querySelectorAll('.ch-cells .cell').forEach((e) => (e.style.display = 'none'));
+
+  /* ---------- 实验 A：自洽性投票 ---------- */
+  K.lab(document.getElementById("labVote"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "p", label: "单次尝试答对的概率", min: 0.05, max: 0.8, step: 0.01, value: 0.3, fmt: (x) => Math.round(x * 100) + "%" },
+      { id: "spread", label: "错误答案有多分散（可能的错误答案个数）", min: 1, max: 30, step: 1, value: 8 },
+      { id: "n", label: "每题最多尝试次数", min: 1, max: 25, step: 1, value: 19 },
+      { id: "early", label: "提前收工规则", value: "on", options: [["on", "开（票数 > √次数 就跳过；> 5 票直接收工）"], ["off", "关（每题做满）"]] },
+    ],
+    note: "浏览器里模拟 500 道题：每次尝试以设定概率答对，答错时从若干个错误答案里随机挑一个。每次尝试投一票，最后取票数最多的答案（为简单起见，不模拟“一次尝试投两票”）。看看投票比只做一次能多对多少，以及提前收工省了多少次尝试。",
+    render(svg, v) {
+      const r = K.rng(77), Q = 500;
+      let single = 0, voted = 0, used = 0;
+      const curve = [];
+      for (let q = 0; q < Q; q++) {
+        const cnt = {}; let best = -1, bc = 0, first = null, tries = 0;
+        for (let j = 0; j < v.n; j++) {
+          if (v.early === "on" && bc > Math.sqrt(j)) continue;
+          tries++;
+          const a = r() < v.p ? 0 : 1 + Math.floor(r() * v.spread);
+          if (first === null) first = a;
+          cnt[a] = (cnt[a] || 0) + 1;
+          const top = Object.entries(cnt).sort((x, y) => y[1] - x[1])[0];
+          if (top[1] > bc) { best = +top[0]; bc = top[1]; }
+          if (v.early === "on" && top[1] > 5) break;
+        }
+        single += first === 0 ? 1 : 0; voted += best === 0 ? 1 : 0; used += tries;
+      }
+      for (let n = 1; n <= 25; n += 2) {
+        const r2 = K.rng(9 + n); let ok = 0;
+        for (let q = 0; q < 300; q++) { const cnt = {}; for (let j = 0; j < n; j++) { const a = r2() < v.p ? 0 : 1 + Math.floor(r2() * v.spread); cnt[a] = (cnt[a] || 0) + 1; } const top = Object.entries(cnt).sort((x, y) => y[1] - x[1])[0]; if (+top[0] === 0) ok++; }
+        curve.push([n, ok / 300]);
+      }
+      const ax = K.axes(svg, { x: 60, y: 20, w: 540, h: 230 }, [1, 25], [0, 1], { xlabel: "每题尝试次数（不提前收工）", yfmt: (x) => Math.round(x * 100) + "%" });
+      let d = ""; curve.forEach(([n, a]) => (d += (d ? "L" : "M") + ax.sx(n) + "," + ax.sy(a)));
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--good)", "stroke-width": 2.5 });
+      curve.forEach(([n, a]) => K.svg(svg, "circle", { cx: ax.sx(n), cy: ax.sy(a), r: 3, fill: "var(--good)" }));
+      K.svg(svg, "line", { x1: ax.sx(1), x2: ax.sx(25), y1: ax.sy(v.p), y2: ax.sy(v.p), stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+      K.svg(svg, "text", { x: ax.sx(25) - 4, y: ax.sy(v.p) - 6, "text-anchor": "end", "font-size": 12, class: "muted" }, "只做一次的正确率");
+      K.svg(svg, "line", { x1: ax.sx(v.n), x2: ax.sx(v.n), y1: 20, y2: 250, stroke: "var(--accent)" });
+      return { readout: [
+        { k: "只做 1 次：答对", v: ((single / Q) * 100).toFixed(1) + "%" },
+        { k: "投票后：答对", v: ((voted / Q) * 100).toFixed(1) + "%", color: voted > single ? "var(--good)" : "var(--bad)" },
+        { k: "平均每题实际尝试", v: (used / Q).toFixed(1) + " 次" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：按成功次数抽签 ---------- */
+  K.lab(document.getElementById("labPick"), {
+    width: 640, height: 316,
+    controls: [
+      { id: "pa", label: "code 模板：一次尝试能产出有效答案的概率", min: 0.05, max: 0.95, step: 0.05, value: 0.4, fmt: (x) => Math.round(x * 100) + "%" },
+      { id: "pb", label: "cot 模板：一次尝试能产出有效答案的概率", min: 0.05, max: 0.95, step: 0.05, value: 0.8, fmt: (x) => Math.round(x * 100) + "%" },
+      { id: "seed", label: "再跑一题", button: true },
+    ],
+    note: "按第 17 格的规则模拟一道题的 19 次尝试：抽中 code 模板的概率 = 计数 A /（A + B），初始 (2, 3)。这里为了看清“边试边学”，简化成：抽中哪套、它产出了有效答案，就给哪套的计数加 1。（原代码里计数加在“文字答案 / 代码答案”上，与模板的对应关系见课堂讨论第 4 题。）",
+    render(svg, v) {
+      const r = K.rng(500 + v.seed * 13);
+      let A = 2, B = 3;
+      const hist = [];
+      for (let j = 0; j < 19; j++) {
+        const pA = A / (A + B), useA = r() < pA, ok = r() < (useA ? v.pa : v.pb);
+        if (ok) { if (useA) A++; else B++; }
+        hist.push({ pA, useA, ok });
+      }
+      const ax = K.axes(svg, { x: 60, y: 20, w: 540, h: 200 }, [0, 19], [0, 1], { xlabel: "第几次尝试", yfmt: (x) => Math.round(x * 100) + "%" });
+      let d = ""; hist.forEach((h, j) => (d += (d ? "L" : "M") + ax.sx(j + 0.5) + "," + ax.sy(h.pA)));
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+      K.svg(svg, "text", { x: 64, y: 16, "font-size": 12, fill: "var(--c1)" }, "抽中 code 模板的概率");
+      hist.forEach((h, j) => K.node(svg, ax.sx(j) + 3, 262, 22, 22, h.useA ? "C" : "T", { fs: 11, rx: 4, fill: h.ok ? "color-mix(in srgb, var(--good) 30%, var(--panel))" : "var(--panel-2)", stroke: h.useA ? "var(--c1)" : "var(--c2)" }));
+      K.svg(svg, "text", { x: 60, y: 306, "font-size": 11, class: "muted" }, "C = 用 code 模板，T = 用 cot 模板；绿色 = 这次产出了有效答案");
+      return { readout: [
+        { k: "最终计数（code : cot）", v: `${A} : ${B}` },
+        { k: "最后一次抽中 code 的概率", v: Math.round(hist[18].pA * 100) + "%" },
+        { k: "19 次里用 code 的次数", v: hist.filter((h) => h.useA).length },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

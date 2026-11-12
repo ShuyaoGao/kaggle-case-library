@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>大模型池化方法</title>
+<meta name="description" content="Kaggle 案例拆解：给文章难度打分时，怎样把 Transformer 的输出“浓缩”成一个向量——CLS、平均、最大、Conv1D、层拼接、加权层、LSTM、注意力、WK 池化，并指出原代码中的几处 bug。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">文本 · 回归（可读性打分） · 预训练语言模型</div>
+  <h1>一篇文章读完，大模型脑子里留下了什么？十种“浓缩”方法</h1>
+  <p class="en">Utilizing Transformer Representations Efficiently</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">RoBERTa</span><span class="tag method">Pooler / CLS</span><span class="tag method">平均 / 最大池化</span>
+    <span class="tag method">Conv1D 池化</span><span class="tag method">层拼接</span><span class="tag method">加权层池化</span>
+    <span class="tag method">LSTM 池化</span><span class="tag method">注意力池化</span><span class="tag method">WK 池化</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>torch（rhtsingh）</b></span>
+    <span>Kaggle 点赞 <b>1,248</b>（2026-11 抓取）</span>
+    <span>数据 <b>CommonLit Readability Prize（比赛）</b></span>
+    <span><a href="https://www.kaggle.com/code/rhtsingh/utilizing-transformer-representations-efficiently" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">给学生读的英文短文选段</div><p>CommonLit 比赛的训练表，作者只取前 16 段 <code>excerpt</code>（文章节选）做演示。<span data-cell="5">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这段文字有多难读（一个连续分数）</div><p>比赛的目标是可读性分数，是连续值，所以每种方法最后都接一个只输出 1 个数的“回归头”。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">同一个 RoBERTa，十种取输出的方式</div><p>从最后一层取：Pooler、CLS、平均、最大、均值+最大、Conv1D；从所有层取：倒数第二层 CLS、拼接后四层、加权层、LSTM、注意力、WK 池化。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一份可以直接抄用的“池化工具箱”</div><p>每种方法都给出可运行代码和输出形状。作者个人偏好：最后 4 层的加权层池化；但也说没有一种方法永远最好。<span data-cell="39">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">这份 notebook 是一份<b>方法教程</b>：它不训练、不打分，只用比赛数据的前 16 段文字把每种池化方法跑一遍，打印张量的形状。比赛 <b>CommonLit Readability Prize</b> 的任务是给课堂阅读用的文章节选打“阅读难度”分。下面只列 notebook 里出现过的信息。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">演示用的规模</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">演示用的文本段数</div><div class="v">16</div></div>
+        <div class="stat-tile"><div class="k">每段最多词元数</div><div class="v">256</div></div>
+        <div class="stat-tile"><div class="k">每个词元的向量长度</div><div class="v">768</div></div>
+        <div class="stat-tile"><div class="k">隐藏状态层数</div><div class="v">13</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">16 段与 256 见 <span data-cell="5">第 5 格</span>，768 见 <span data-cell="20">第 20 格</span>（Conv1d 的输入通道），13 层（嵌入层 + 12 个 Transformer 块）见 <span data-cell="22">第 22 格</span> 注释。训练集一共多少段、分数范围多少，notebook 没有写，这里不列。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">用到的字段与张量</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>名字</th><th>是什么</th><th>形状</th></tr>
+        <tr><td><code>excerpt</code></td><td>训练表里的文章节选（英文），模型的输入</td><td>文本</td></tr>
+        <tr><td>可读性分数</td><td><b>要预测的答案</b>：连续值（第 0 格提到 continuous targets）；本 notebook 不用它训练</td><td>一个数</td></tr>
+        <tr><td><code>last_hidden_state</code></td><td>最后一层里每个词元的向量</td><td>[16, 256, 768]</td></tr>
+        <tr><td><code>hidden_states</code></td><td>所有 13 层的输出叠在一起</td><td>[13, 16, 256, 768]</td></tr>
+        <tr><td><code>attention_mask</code></td><td>哪些位置是真词（1），哪些是补齐的空位（0）</td><td>[16, 256]</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">三种输出的说明见 <span data-cell="0">第 0 格</span>。张量形状由代码里的参数推出（16 段、补齐到 256、roberta-base 隐藏维度 768）。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="14">
+    <h3>动手试试 A · CLS、平均、最大：补齐的空位会不会捣乱 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labPool"></div>
+  </div>
+  <div data-at="28">
+    <h3>动手试试 B · 加权层池化：让每一层的权重自己学出来 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labLayer"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>Transformer 不同层学到不同层次的信息：低层偏表面，中层偏句法，高层偏语义</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>BERT 原作者的实验里，拼接最后 4 层效果最好（作者转述）</td><td><span data-cell="0">第 0 格</span> <span data-cell="23">第 23 格</span></td></tr>
+        <tr><td>只用 pooler 向量已能大致区分样本，但仍有难例，所以值得用中间层</td><td><span data-cell="2">第 2 格</span></td></tr>
+        <tr><td>“加权层池化在任何任务上都是最好的”</td><td><span data-cell="25">第 25 格</span></td></tr>
+        <tr><td>“没有一种池化方法总是最好”，作者偏好最后 4 层的加权层池化</td><td><span data-cell="39">第 39 格</span></td></tr>
+        <tr><td>bert-as-service 默认取倒数第二层，被认为是比较合适的平衡点（作者转述 Han Xiao 的观察）</td><td><span data-cell="39">第 39 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">这份 notebook 的每个回归头都是新建的、没有训练过的 <code>nn.Linear</code>，只是为了演示输出形状，所以<b>没有任何分数</b>可以比较。第 25 格和第 39 格的两句话也互相矛盾，读者要自己在任务上实验。</p>
+      <h3>我们在代码里发现的问题</h3>
+      <ul class="tight">
+        <li><span data-cell="22">第 22 格</span>：注释说取“倒数第二层”，但 <code>all_hidden_states[11+1]</code> 是 13 份输出里的最后一份，也就是最后一层。</li>
+        <li><span data-cell="17">第 17 格</span>：<code>_, max_pooling_embeddings = torch.max(...)</code> 取到的是<b>最大值所在的位置（下标）</b>而不是最大值本身。</li>
+        <li><span data-cell="31">第 31 格</span>、<span data-cell="34">第 34 格</span>：各层 CLS 堆成 [批, 768, 12] 后用 <code>.view(-1, 12, 768)</code> 改形状，这会把数字重新排队而不是交换维度，应该用 <code>permute</code> / <code>transpose</code>。</li>
+        <li><span data-cell="34">第 34 格</span>：<code>nn.Parameter(...).float()</code> 返回的是普通张量，<code>q</code> 和 <code>w_h</code> 实际上不会被当作可训练参数。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一段课文，输出它的阅读难度分，帮老师给不同水平的学生挑合适的材料。</li>
+        <li><b>同类问题：</b>作文自动评分（如 Feedback Prize、AES 比赛）、评论情感打分、问答匹配、文本相似度、毒性检测……只要是“整段文字 → 一个或几个数”，都要先把词元向量浓缩成一个向量。</li>
+        <li><b>可迁移的套路：</b>先用最简单的 CLS / 平均池化做基线 → 再试中间层（倒数第二层、后 4 层加权）→ 每换一种头都在同一折交叉验证上比较，不要相信“某方法永远最好”。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>Pooler 输出 <span data-cell="5">第 5 格</span>；CLS <span data-cell="7">第 7 格</span></li>
+        <li>带掩码的平均池化 <span data-cell="11">第 11 格</span>；最大池化 <span data-cell="14">第 14 格</span>；均值+最大 <span data-cell="17">第 17 格</span></li>
+        <li>Conv1D 池化 <span data-cell="20">第 20 格</span></li>
+        <li>指定层的 CLS（本意倒数第二层） <span data-cell="22">第 22 格</span>；拼接后 4 层 <span data-cell="24">第 24 格</span>；加权层池化 <span data-cell="28">第 28 格</span></li>
+        <li>LSTM 池化 <span data-cell="31">第 31 格</span>；注意力池化 <span data-cell="34">第 34 格</span>；WK 池化 <span data-cell="37">第 37 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>“平均池化”为什么要用 attention_mask 跳过补齐的位置？如果一段文字只有 40 个词却补齐到 256，不跳过会发生什么？</li>
+      <li>第 17 格把“最大值的位置”当成了特征。这个 bug 为什么程序不会报错、形状也完全正确？怎样才能及早发现这类问题？</li>
+      <li>作者在第 25 格说加权层池化“在任何任务上都最好”，又在结尾说“没有一种方法总是最好”。你更相信哪一句？要怎么验证？</li>
+      <li>给文章难度打分，你觉得更依赖低层信息（生词、长单词）还是高层信息（句子结构、意思）？这和该选哪几层有什么关系？</li>
+      <li>这份 notebook 没有训练也没有分数，它的价值在哪里？如果你要把它用在作文自动评分比赛上，下一步该做什么实验？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 torch（Kaggle 账号 rhtsingh），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Kaggle 比赛 CommonLit Readability Prize。
+</footer>
+</main>
+
+<script src="nb/commonlit-transformer-pooling.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const FAST = location.hash === "#fast";
+
+  /* 示意词元序列：真词 + 补齐空位 */
+  const WORDS = ["<s>", "The", "old", "fox", "slept", "under", "the", "tall", "tree", "</s>"];
+  function tokenGrid(svg, x0, y0, nPad, opt) {
+    opt = opt || {};
+    const cw = opt.cw || 54, ch = opt.ch || 15, D = opt.D || 6, r = K.rng(opt.seed || 3);
+    const toks = WORDS.concat(Array(nPad).fill("<pad>"));
+    const vals = toks.map((t, i) => Array.from({ length: D }, () => (t === "<pad>" ? 0.1 + K.randn(r) * 0.05 : K.randn(r) * 0.6)));
+    const cells = [];
+    toks.forEach((t, i) => {
+      K.svg(svg, "text", { x: x0 + i * cw + cw / 2, y: y0 - 6, "text-anchor": "middle", "font-size": 11, fill: t === "<pad>" ? "var(--ink-3)" : t === "<s>" ? "var(--c2)" : "var(--ink)" }, t);
+      vals[i].forEach((v, d) => cells.push({ i, d, e: K.svg(svg, "rect", { x: x0 + i * cw + 3, y: y0 + d * ch, width: cw - 6, height: ch - 2, rx: 2, fill: t === "<pad>" ? "var(--panel-2)" : K.heat(v, true) }) }));
+    });
+    return { toks, vals, cells, cw, ch, D };
+  }
+
+  const steps = [
+    {
+      at: 0, title: "开场：同一个模型，输出可以怎么用", kicker: "第 0–2 格 · 引言",
+      html: `<p>通常的微调做法是：在预训练模型最后一层后面接一个输出层。作者提出，Transformer 有很多层，<b>不同层学到的东西不一样</b>：低层偏表面特征，中层偏句法，高层偏语义。</p><p>HuggingFace 的模型会给出三种输出：pooler output（[批, 768]）、last hidden state（[批, 长度, 768]）、hidden states（[层数, 批, 长度, 768]）。整份 notebook 就是在讲：怎样把这些三维、四维的数字<b>浓缩成每段文字一个向量</b>，再交给回归头打分。</p>`,
+      cells: [0, 1, 2],
+      draw(svg, ctx) {
+        const L = 13, T = 10;
+        const layers = [];
+        for (let l = 0; l < L; l++) {
+          const row = [];
+          for (let t = 0; t < T; t++) row.push(K.svg(svg, "rect", { x: 40 + t * 30, y: 300 - l * 21, width: 26, height: 17, rx: 3, fill: `color-mix(in srgb, var(--c${l < 4 ? 1 : l < 9 ? 3 : 2}) ${30 + l * 4}%, var(--panel))`, opacity: 0 }));
+          layers.push(row);
+          K.svg(svg, "text", { x: 34, y: 313 - l * 21, "text-anchor": "end", "font-size": 10, class: "muted" }, l === 0 ? "嵌入" : "第" + l + "层");
+        }
+        K.svg(svg, "text", { x: 190, y: 26, "text-anchor": "middle", "font-size": 12, class: "muted" }, "每列 = 一个词元，每格 = 一个 768 维向量（示意）");
+        const tips = [["低层：拼写、词形", 290, "var(--c1)"], ["中层：句法结构", 200, "var(--c3)"], ["高层：语义", 90, "var(--c2)"]];
+        const tx = tips.map(([t, y, c]) => { const e = K.svg(svg, "text", { x: 360, y, "font-size": 13, fill: c, "font-weight": 700 }, "← " + t); e.style.opacity = 0; return e; });
+        const q = K.node(svg, 520, 130, 180, 70, "怎样变成\n一个向量 → 一个分数？", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        q.style.opacity = 0;
+        (async () => {
+          for (let l = 0; l < L; l++) if (!(await ctx.tween(110, (t) => layers[l].forEach((c) => (c.style.opacity = t))))) return;
+          for (const e of tx) if (!(await ctx.tween(300, (t) => (e.style.opacity = t)))) return;
+          await ctx.tween(400, (t) => (q.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "第一种：Pooler 输出", kicker: "第 3–5 格 · 最简单的做法",
+      html: `<p>读入 CommonLit 训练表，取前 16 段 <code>excerpt</code>，用 <code>roberta-base</code> 的分词器补齐 / 截断到 256 个词元，跑一遍模型。</p><p><code>outputs[1]</code> 就是 <b>pooler output</b>：最后一层第一个词元的向量，再经过一个线性层和 tanh。后面接 <code>nn.Linear(768, 1)</code> 得到每段一个数。注意这里的线性层是新建的、没训练过的，只为演示形状。</p>`,
+      cells: [3, 5], highlight: ["pooler_output = outputs[1]", "nn.Linear(config.hidden_size, 1)"],
+      draw(svg, ctx) {
+        const g = tokenGrid(svg, 30, 50, 2, { cw: 52, ch: 14 });
+        const first = g.cells.filter((c) => c.i === 0);
+        const box = K.svg(svg, "rect", { x: 30, y: 44, width: 52, height: g.D * 14 + 10, fill: "none", stroke: "var(--c2)", "stroke-width": 2.5 });
+        const lin = K.node(svg, 260, 200, 150, 44, "Linear + tanh", {});
+        const head = K.node(svg, 470, 200, 130, 44, "Linear(768→1)", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const out = K.svg(svg, "text", { x: 640, y: 228, "font-size": 16, "font-weight": 700 }, "");
+        const a1 = K.arrow(svg, 56, 140, 258, 222), a2 = K.arrow(svg, 410, 222, 468, 222), a3 = K.arrow(svg, 600, 222, 632, 222);
+        [lin, head, a1, a2, a3].forEach((e) => (e.style.opacity = 0));
+        (async () => {
+          if (!(await ctx.tween(500, (t) => first.forEach((c) => (c.e.style.opacity = 0.4 + 0.6 * t))))) return;
+          for (const e of [a1, lin, a2, head, a3]) if (!(await ctx.tween(260, (t) => (e.style.opacity = t)))) return;
+          out.textContent = "分数";
+        })();
+        K.svg(svg, "text", { x: 30, y: 320, "font-size": 12, class: "muted" }, "只用第一个词元 <s>（RoBERTa 里相当于 BERT 的 [CLS]）的向量");
+        box.style.opacity = 1;
+      },
+    },
+    {
+      title: "CLS 向量：让开头那个特殊记号代表全文", kicker: "第 6–7 格 · 最后一层的第一个词元",
+      html: `<p>不经过 pooler 的线性层，直接从 <code>last_hidden_state</code>（[16, 256, 768]）里取第 0 个位置：<code>last_hidden_state[:, 0]</code>，得到 [16, 768]。</p><p>想法是：Transformer 里每个词都能“看到”所有其他词，所以开头那个特殊记号的向量里已经融合了全文的信息，够做简单的分类和打分。</p>`,
+      cells: [7], highlight: ["cls_embeddings = last_hidden_state[:, 0]"],
+      draw(svg, ctx) {
+        const n = WORDS.length, xs = WORDS.map((_, i) => 50 + i * 66);
+        WORDS.forEach((w, i) => K.node(svg, xs[i] - 28, 270, 56, 30, w, { fs: 11, stroke: i === 0 ? "var(--c2)" : "var(--line)" }));
+        const lines = [];
+        for (let i = 1; i < n; i++) lines.push(K.svg(svg, "path", { d: `M${xs[i]},268 Q${(xs[i] + xs[0]) / 2},${150 - i * 6} ${xs[0]},268`, fill: "none", stroke: "var(--c2)", "stroke-width": 1.4, opacity: 0 }));
+        K.svg(svg, "text", { x: 360, y: 40, "text-anchor": "middle", "font-size": 13 }, "注意力让 <s> 从每个词那里“收集”信息（示意）");
+        const glow = K.svg(svg, "circle", { cx: xs[0], cy: 240, r: 0, fill: "var(--c2)", opacity: 0.5 });
+        ctx.tween(FAST ? 10 : 2000, (t) => lines.forEach((l, i) => (l.style.opacity = K.clamp(t * n - i, 0, 1) * 0.8))).then((ok) => ok && ctx.tween(600, (t) => glow.setAttribute("r", 18 * t)));
+      },
+    },
+    {
+      title: "平均池化：记得跳过补齐的空位", kicker: "第 8–11 格 · 带掩码的均值",
+      html: `<p>另一种思路：把所有词元的向量取平均。但每段都被补齐到 256，短文后面有很多 <code>&lt;pad&gt;</code> 空位，直接 <code>torch.mean</code> 会把它们也算进去。</p><p>作者分四步：① 把 attention_mask 扩展成和隐藏状态一样的形状；② 只把真词的向量加起来；③ 数一数真词有几个；④ 相除。<code>clamp(min=1e-9)</code> 防止除以 0。</p>`,
+      cells: [9, 11], highlight: ["input_mask_expanded = attention_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()", "sum_embeddings / sum_mask"],
+      draw(svg, ctx) {
+        const g = tokenGrid(svg, 20, 40, 3, { cw: 52, ch: 16, D: 6 });
+        const mask = g.toks.map((t) => (t === "<pad>" ? 0 : 1));
+        mask.forEach((m, i) => K.svg(svg, "text", { x: 20 + i * 52 + 26, y: 152, "text-anchor": "middle", "font-size": 12, fill: m ? "var(--good)" : "var(--bad)", "font-weight": 700 }, "mask " + m));
+        const res = [];
+        for (let d = 0; d < g.D; d++) res.push(K.svg(svg, "rect", { x: 330, y: 190 + d * 20, width: 60, height: 17, rx: 2, fill: "var(--panel-2)" }));
+        K.svg(svg, "text", { x: 360, y: 182, "text-anchor": "middle", "font-size": 12 }, "平均后的向量");
+        const n = mask.reduce((a, b) => a + b, 0);
+        const mean = Array.from({ length: g.D }, (_, d) => g.vals.reduce((s, v, i) => s + v[d] * mask[i], 0) / n);
+        const pads = g.cells.filter((c) => !mask[c.i]);
+        ctx.wait(500)
+          .then((ok) => ok && ctx.tween(700, (t) => pads.forEach((c) => (c.e.style.opacity = 1 - 0.85 * t))))
+          .then((ok) => ok && ctx.tween(1200, (t) => g.cells.forEach((c) => { if (mask[c.i]) { c.e.setAttribute("x", K.lerp(20 + c.i * 52 + 3, 333, t)); c.e.setAttribute("y", K.lerp(40 + c.d * 16, 190 + c.d * 20, t)); c.e.style.opacity = 1 - 0.7 * t; } })))
+          .then((ok) => { if (ok) res.forEach((r, d) => K.set(r, { fill: K.heat(mean[d] * 2, true) })); });
+        K.svg(svg, "text", { x: 420, y: 250, "font-size": 12, class: "muted" }, `只除以真词个数 ${n}，不是总长度 ${g.toks.length}`);
+      },
+    },
+    {
+      title: "最大池化：每一维挑最大的那个", kicker: "第 12–14 格 · 带掩码的最大值",
+      html: `<p>同样用 last hidden state，但对每一维取所有词元里的<b>最大值</b>。先把补齐位置设成 −1e9（一个极小的数），保证它们永远不会被选中。</p><p>平均池化反映“整体气质”，最大池化抓“最突出的信号”，比如一个特别难的生僻词。</p>`,
+      cells: [13, 14], highlight: ["last_hidden_state[input_mask_expanded == 0] = -1e9", "torch.max(last_hidden_state, 1)[0]"],
+      draw(svg, ctx) {
+        const g = tokenGrid(svg, 20, 40, 3, { cw: 52, ch: 18, D: 6, seed: 9 });
+        const mask = g.toks.map((t) => (t === "<pad>" ? 0 : 1));
+        const res = [], win = [];
+        for (let d = 0; d < g.D; d++) {
+          let bi = 0, bv = -1e9;
+          g.vals.forEach((v, i) => { if (mask[i] && v[d] > bv) { bv = v[d]; bi = i; } });
+          win.push(bi);
+          res.push(K.svg(svg, "rect", { x: 620, y: 40 + d * 18, width: 50, height: 16, rx: 2, fill: "var(--panel-2)" }));
+          res[d].bv = bv;
+        }
+        K.svg(svg, "text", { x: 645, y: 32, "text-anchor": "middle", "font-size": 12 }, "结果");
+        const ring = K.svg(svg, "rect", { x: 0, y: 0, width: 52, height: 18, fill: "none", stroke: "var(--warn)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 20, y: 300, "font-size": 12, class: "muted" }, "每一行（每一维）只留下最大的那一格；<pad> 先被设成 −1e9，永远选不上");
+        (async () => {
+          for (let d = 0; d < g.D; d++) {
+            K.set(ring, { x: 20 + win[d] * 52 + 1, y: 40 + d * 18 - 1 });
+            if (!(await ctx.tween(FAST ? 1 : 450, (t) => K.set(res[d], { fill: K.heat(res[d].bv * t, true) })))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "均值 + 最大拼起来（以及一个 bug）", kicker: "第 15–17 格 · Mean-Max",
+      html: `<p>“很多 kernel 和比赛里最常用的技巧”：把平均池化和最大池化的结果<b>首尾拼接</b>，得到 1536 维，回归头的输入也变成 <code>hidden_size*2</code>。作者说明这里没有处理补齐位置。</p><p>注意：<code>torch.max</code> 返回（最大值, 位置）两样东西，第 17 格写成 <code>_, max_pooling_embeddings = ...</code>，拿到的是<b>位置下标</b>，扔掉的才是最大值。形状完全正确，所以程序不会报错。</p>`,
+      cells: [17], highlight: ["_, max_pooling_embeddings = torch.max(last_hidden_state, 1)", "torch.cat((mean_pooling_embeddings, max_pooling_embeddings), 1)"],
+      notes: { 17: "bug：torch.max(x, 1) 返回 (values, indices)，这里接收到的是 indices（第几个词元最大），应写成 max_pooling_embeddings, _ = torch.max(...)。" },
+      draw(svg, ctx) {
+        const r = K.rng(4), D = 8;
+        const mean = Array.from({ length: D }, () => K.randn(r) * 0.4), mx = Array.from({ length: D }, () => 0.5 + r() * 0.8), idx = Array.from({ length: D }, () => Math.floor(r() * 200));
+        const row = (vals, x, y, col, lab, txt) => { K.svg(svg, "text", { x, y: y - 8, "font-size": 12 }, lab); return vals.map((v, i) => { const e = K.svg(svg, "rect", { x: x + i * 34, y, width: 30, height: 28, rx: 3, fill: col(v) }); if (txt) K.svg(svg, "text", { x: x + i * 34 + 15, y: y + 19, "text-anchor": "middle", "font-size": 10 }, txt(v)); return e; }); };
+        row(mean, 30, 50, (v) => K.heat(v * 2, true), "平均池化（768 维，画 8 维）");
+        row(mx, 370, 50, (v) => K.heat(v, true), "最大值 values（应该用这个）", (v) => v.toFixed(1));
+        row(idx, 370, 130, () => "color-mix(in srgb, var(--bad) 20%, var(--panel))", "最大值所在位置 indices（代码实际拿到的）", (v) => v);
+        K.svg(svg, "text", { x: 30, y: 230, "font-size": 13, "font-weight": 700 }, "拼接结果 = [ 平均 | 位置下标 ] → 1536 维");
+        const cat = [];
+        for (let i = 0; i < 16; i++) cat.push(K.svg(svg, "rect", { x: 30 + i * 40, y: 245, width: 36, height: 30, rx: 3, fill: i < 8 ? K.heat(mean[i] * 2, true) : "color-mix(in srgb, var(--bad) 20%, var(--panel))", opacity: 0 }));
+        K.svg(svg, "text", { x: 30, y: 310, "font-size": 12, fill: "var(--bad)" }, "形状对、不报错，但后一半是 0~255 的整数下标，不是语义特征");
+        ctx.wait(600).then((ok) => ok && ctx.tween(1400, (t) => cat.forEach((c, i) => (c.style.opacity = K.clamp(t * 16 - i, 0, 1)))));
+      },
+    },
+    {
+      title: "Conv1D 池化：一维卷积扫过词序列", kicker: "第 18–20 格 · 卷积头",
+      html: `<p>把 [批, 256, 768] 转成 [批, 768, 256]，用一维卷积沿着词序列滑动：第一层把 768 维压到 256 维、每次看相邻 2 个词元；第二层再压到 1 维；最后对所有位置取最大值，直接得到每段一个数。</p><p>作者说这种头在推特情感抽取、Jigsaw 毒性评论等比赛里用过，思路是“滑过所有词元，找出最重要的那几个”。</p>`,
+      cells: [20], highlight: ["nn.Conv1d(768, 256, kernel_size=2, padding=1)", "torch.max(cnn_embeddings, 2)"],
+      draw(svg, ctx) {
+        const n = 10, xs = Array.from({ length: n }, (_, i) => 60 + i * 62);
+        WORDS.forEach((w, i) => K.node(svg, xs[i] - 26, 240, 52, 30, w, { fs: 11 }));
+        const r = K.rng(6), act = WORDS.map(() => r());
+        act[7] = 0.95;
+        const bars = act.map((a, i) => K.svg(svg, "rect", { x: xs[i] - 14, y: 200, width: 28, height: 0, fill: "var(--accent)" }));
+        const win = K.svg(svg, "rect", { x: xs[0] - 30, y: 236, width: 122, height: 38, rx: 6, fill: "none", stroke: "var(--warn)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 60, y: 30, "font-size": 12, class: "muted" }, "卷积窗口（2 个词元）滑过，每个位置输出一个数（示意）");
+        const best = K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--good)" }, "");
+        (async () => {
+          for (let i = 0; i < n; i++) {
+            K.set(win, { x: xs[i] - 30 });
+            if (!(await ctx.tween(FAST ? 1 : 220, (t) => { const h = 150 * act[i] * t; bars[i].setAttribute("y", 200 - h); bars[i].setAttribute("height", h); }))) return;
+          }
+          K.set(bars[7], { fill: "var(--good)" });
+          best.textContent = "取所有位置的最大值 → 这一段的分数";
+        })();
+      },
+    },
+    {
+      title: "Hidden States：每一层都有输出，试试倒数第二层", kicker: "第 21–22 格 · 中间层 CLS",
+      html: `<p>打开 <code>output_hidden_states</code>，模型会把<b>嵌入层 + 12 个 Transformer 块</b>共 13 份输出都交出来，叠成 [13, 16, 256, 768]，编号 [0] 到 [12]。</p><p>BERT 原作者的实验里，用<b>倒数第二层</b>有时比最后一层还好。代码注释写“倒数第二层”，取的是 <code>all_hidden_states[layer_index+1]</code>，<code>layer_index = 11</code>，也就是 [12]。但 [12] 是<b>最后一层</b>，真正的倒数第二层是 [11]（或 <code>[-2]</code>）。这里的 +1 多加了一次。</p>`,
+      cells: [22], highlight: ["config.update({'output_hidden_states':True})", "all_hidden_states[layer_index+1, :, 0]"],
+      notes: { 22: "注释说取倒数第二层，但 layer_index+1 = 12 指向的是 13 份输出里的最后一份（最后一层）；倒数第二层应为 all_hidden_states[11] 或 [-2]。" },
+      draw(svg, ctx) {
+        const L = 13, rows = [];
+        for (let l = 0; l < L; l++) {
+          rows.push(K.svg(svg, "rect", { x: 140, y: 300 - l * 21, width: 300, height: 17, rx: 3, fill: "var(--panel-2)", stroke: "var(--line)" }));
+          K.svg(svg, "text", { x: 130, y: 313 - l * 21, "text-anchor": "end", "font-size": 11 }, `[${l}] ` + (l === 0 ? "嵌入层" : "第 " + l + " 块"));
+        }
+        const pick = K.svg(svg, "rect", { x: 140, y: 300 - 12 * 21, width: 30, height: 17, rx: 3, fill: "var(--c2)" });
+        pick.style.opacity = 0;
+        K.svg(svg, "text", { x: 470, y: 300 - 12 * 21 + 13, "font-size": 12, fill: "var(--c2)" }, "← [12] 最后一层：代码实际取到的");
+        const lab = K.svg(svg, "text", { x: 470, y: 300 - 11 * 21 + 13, "font-size": 12, fill: "var(--accent)", "font-weight": 700 }, "");
+        const pick2 = K.svg(svg, "rect", { x: 140, y: 300 - 11 * 21, width: 30, height: 17, rx: 3, fill: "var(--accent)" });
+        pick2.style.opacity = 0;
+        K.svg(svg, "text", { x: 470, y: 150, "font-size": 12, class: "muted" }, "每行最左一格 = 这一层的 CLS 位置");
+        (async () => {
+          if (!(await ctx.tween(FAST ? 1 : 1200, (t) => rows.forEach((r, l) => (r.style.opacity = K.clamp(t * L - l, 0, 1)))))) return;
+          if (!(await ctx.tween(400, (t) => (pick.style.opacity = t)))) return;
+          if (!(await ctx.tween(400, (t) => (pick2.style.opacity = t)))) return;
+          lab.textContent = "← [11] 倒数第二层：注释想要的";
+        })();
+        K.svg(svg, "text", { x: 470, y: 290, "font-size": 11, class: "muted" }, "layer_index = 11，再 +1 → [12]");
+        K.svg(svg, "text", { x: 470, y: 306, "font-size": 11, class: "muted" }, "多加了一次 1，取成了最后一层");
+      },
+    },
+    {
+      title: "拼接最后四层", kicker: "第 23–24 格 · Concatenate Pooling",
+      html: `<p>BERT 原作者的实验里，<b>把最后 4 层拼起来</b>效果最好。代码把 <code>all_hidden_states[-1]</code> 到 <code>[-4]</code> 沿最后一维拼接，变成每个词元 3072 维，再取 CLS 位置，回归头输入改成 <code>hidden_size*4</code>。</p><p>好处是同时保留了几层的信息；代价是向量变成 4 倍长，回归头的参数也多了 4 倍。</p>`,
+      cells: [24], highlight: ["all_hidden_states[-1], all_hidden_states[-2], all_hidden_states[-3], all_hidden_states[-4]", "config.hidden_size*4"],
+      draw(svg, ctx) {
+        const cols = ["var(--c1)", "var(--c3)", "var(--c4)", "var(--c2)"];
+        const segs = [0, 1, 2, 3].map((k) => {
+          K.svg(svg, "text", { x: 30, y: 74 + k * 50, "font-size": 12 }, `第 ${12 - k} 层 CLS（768）`);
+          return K.svg(svg, "rect", { x: 170, y: 60 + k * 50, width: 120, height: 22, rx: 3, fill: cols[k] });
+        });
+        K.svg(svg, "text", { x: 170, y: 290, "font-size": 13, "font-weight": 700 }, "拼成 3072 维 → Linear(3072 → 1)");
+        ctx.wait(500).then((ok) => ok && ctx.tween(FAST ? 10 : 1500, (t) => segs.forEach((s, k) => { s.setAttribute("x", K.lerp(170, 170 + k * 120, t)); s.setAttribute("y", K.lerp(60 + k * 50, 250, t)); })));
+      },
+    },
+    {
+      title: "加权层池化：让模型自己学每层的权重", kicker: "第 25–28 格 · Weighted Layer Pooling",
+      html: `<p>作者引用研究：最适合迁移的表示往往在<b>中间层</b>，顶层更偏向预训练任务本身。加权层池化给第 <code>layer_start</code> 层之后的每一层一个<b>可学习的权重</b>（初始都是 1），把各层按权重平均。</p><p>这里 <code>layer_start = 9</code>，取第 9–12 层共 4 层，再取 CLS 位置接回归头。作者在第 25 格说它“在任何任务上都最好”，结尾又说“没有方法总是最好”，但他个人偏好这一种。</p>`,
+      cells: [26, 28], highlight: ["nn.Parameter(", "(weight_factor*all_layer_embedding).sum(dim=0) / self.layer_weights.sum()", "layer_start = 9"],
+      draw(svg, ctx) {
+        const L = 13, ws = [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1], target = [0, 0, 0, 0, 0, 0, 0, 0, 0, 1.6, 1.3, 0.7, 0.4];
+        const bars = [];
+        for (let l = 0; l < L; l++) {
+          K.svg(svg, "text", { x: 40 + l * 50 + 20, y: 300, "text-anchor": "middle", "font-size": 11, fill: l >= 9 ? "var(--ink)" : "var(--ink-3)" }, l === 0 ? "嵌入" : l);
+          bars.push(K.svg(svg, "rect", { x: 40 + l * 50 + 5, y: 280, width: 30, height: 0, fill: l >= 9 ? "var(--accent)" : "var(--line)" }));
+        }
+        K.svg(svg, "line", { x1: 30, x2: 690, y1: 280, y2: 280, stroke: "var(--ink-3)" });
+        const lab = K.svg(svg, "text", { x: 40, y: 30, "font-size": 13, "font-weight": 700 }, "初始：第 9–12 层权重都是 1");
+        const set = (w) => bars.forEach((b, l) => { const h = 100 * w[l]; b.setAttribute("y", 280 - h); b.setAttribute("height", h); });
+        set(ws);
+        ctx.wait(900).then((ok) => { if (ok) lab.textContent = "训练中：权重随梯度更新（示意）"; return ok && ctx.tween(FAST ? 10 : 2000, (t) => set(ws.map((w, l) => K.lerp(w, target[l], t)))); })
+          .then((ok) => { if (ok) lab.textContent = "输出 = Σ wₗ·hₗ / Σ wₗ（权重变化为示意）"; });
+      },
+    },
+    {
+      title: "LSTM 池化：把 12 层的 CLS 当成一句话来读", kicker: "第 29–31 格 · LSTM Pooling",
+      html: `<p>从第 1 层到第 12 层，CLS 向量是一个“从抽象到具体”的序列。作者用一个 LSTM（隐藏 256 维）按层的顺序读这 12 个向量，取最后一步的输出，再接回归头。</p><p>代码细节：12 个 [批, 768] 用 <code>stack(dim=-1)</code> 堆成 [批, 768, 12]，再 <code>.view(-1, 12, 768)</code>。<code>view</code> 只是按原顺序重新切块，不会交换维度，所以“第几层”和“第几维”被混在一起了，正确写法是 <code>permute(0, 2, 1)</code>。</p>`,
+      cells: [31], highlight: ["hidden_states.view(-1, self.num_hidden_layers, self.hidden_size)", "out[:, -1, :]"],
+      notes: { 31: "bug：stack(dim=-1) 得到 [批, 768, 12]，view(-1, 12, 768) 会按内存顺序重排，层与维度错位；应改成 torch.stack(..., dim=1) 或 .permute(0, 2, 1)。" },
+      draw(svg, ctx) {
+        const n = 12, xs = Array.from({ length: n }, (_, i) => 50 + i * 54);
+        xs.forEach((x, i) => K.node(svg, x - 22, 250, 44, 34, "L" + (i + 1), { fs: 11 }));
+        const cells = xs.map((x) => K.svg(svg, "rect", { x: x - 18, y: 160, width: 36, height: 36, rx: 6, fill: "var(--panel-2)", stroke: "var(--c4)" }));
+        for (let i = 0; i < n; i++) K.arrow(svg, xs[i], 248, xs[i], 198);
+        for (let i = 0; i < n - 1; i++) K.arrow(svg, xs[i] + 18, 178, xs[i + 1] - 18, 178, { color: "var(--c4)" });
+        K.svg(svg, "text", { x: 50, y: 310, "font-size": 12, class: "muted" }, "每层 CLS 向量依次送入 LSTM（示意）");
+        const out = K.node(svg, xs[n - 1] - 40, 70, 80, 40, "256 维\n→ 分数", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        out.style.opacity = 0;
+        const ar = K.arrow(svg, xs[n - 1], 158, xs[n - 1], 112); ar.style.opacity = 0;
+        (async () => {
+          for (let i = 0; i < n; i++) if (!(await ctx.tween(FAST ? 1 : 160, (t) => K.set(cells[i], { fill: `color-mix(in srgb, var(--c4) ${Math.round(t * 55)}%, var(--panel-2))` })))) return;
+          await ctx.tween(400, (t) => (out.style.opacity = ar.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "注意力池化：用一个查询向量给各层打分", kicker: "第 32–34 格 · Attention Pooling",
+      html: `<p>同样拿 12 层的 CLS 向量 h，但不按顺序读，而是用一个可学习的查询向量 q 和每层做点积，softmax 成权重，加权求和后再乘一个矩阵 W<sub>h</sub> 压到 128 维：<code>o = Wₕᵀ · softmax(q·hᵀ) · h</code>。</p><p>这一格有和上一章一样的 <code>.view</code> 问题；另外 <code>nn.Parameter(...).float()</code> 会返回一个普通张量，<code>q</code> 和 <code>W_h</code> 其实不会被注册为模型参数，训练时不会更新。</p>`,
+      cells: [34], highlight: ["v = F.softmax(v, -1)", "nn.Parameter(torch.from_numpy(q_t)).float()"],
+      notes: { 34: "bug：nn.Parameter(t).float() 的结果不是 Parameter，不会出现在 model.parameters() 里；应写 nn.Parameter(torch.from_numpy(q_t).float())。view 的问题同第 31 格。" },
+      draw(svg, ctx) {
+        const n = 12, r = K.rng(21), sc = Array.from({ length: n }, (_, i) => -1 + 2.2 * Math.exp(-((i - 8) ** 2) / 6) + K.randn(r) * 0.2);
+        const ex = sc.map(Math.exp), s = ex.reduce((a, b) => a + b, 0), w = ex.map((e) => e / s);
+        const q = K.node(svg, 300, 20, 120, 36, "查询向量 q", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const bars = w.map((v, i) => {
+          K.svg(svg, "text", { x: 60 + i * 52 + 16, y: 300, "text-anchor": "middle", "font-size": 11 }, "L" + (i + 1));
+          return K.svg(svg, "rect", { x: 60 + i * 52, y: 280, width: 32, height: 0, fill: "var(--accent)" });
+        });
+        const lines = w.map((v, i) => K.svg(svg, "line", { x1: 360, y1: 56, x2: 76 + i * 52, y2: 120, stroke: "var(--accent)", "stroke-width": 1, opacity: 0 }));
+        K.svg(svg, "text", { x: 60, y: 110, "font-size": 12, class: "muted" }, "softmax(q·h) = 每层的权重（示意）");
+        (async () => {
+          if (!(await ctx.tween(FAST ? 1 : 600, (t) => lines.forEach((l) => (l.style.opacity = t * 0.6))))) return;
+          await ctx.tween(FAST ? 1 : 1200, (t) => bars.forEach((b, i) => { const h = 150 * (w[i] / Math.max(...w)) * t; b.setAttribute("y", 280 - h); b.setAttribute("height", h); lines[i].style.strokeWidth = 0.5 + 6 * w[i] * t; }));
+        })();
+      },
+    },
+    {
+      title: "WK 池化：看每个词在层与层之间有多少“新意”", kicker: "第 35–38 格 · SBERT-WK",
+      html: `<p>来自论文 SBERT-WK。分两步：① 对每个词元，比较它在相邻几层里的向量，用 QR 分解算出“和上下层一致的程度”和“这一层带来的新信息”，据此把多层融合成一个词向量；② 再按每个词在层间变化的大小（方差）衡量这个词有多重要，加权平均成句子向量。</p><p>作者提醒：QR 分解在 GPU 上很慢，所以要搬到 CPU 上算，整个方法比较慢。</p>`,
+      cells: [37, 38], highlight: ["Q, R = torch.qr(window_matrix.T)", "alpha_novelty[k] = torch.abs(r[-1]) / torch.norm(r)", "var_token[token_index] = torch.var(sim_map.diagonal(-1))"],
+      draw(svg, ctx) {
+        const L = 4, T = WORDS.length - 1;
+        const r = K.rng(31), imp = Array.from({ length: T }, () => 0.2 + r() * 0.8);
+        const grid = [];
+        for (let l = 0; l < L; l++) for (let t = 0; t < T; t++) grid.push({ l, t, e: K.svg(svg, "rect", { x: 70 + t * 66, y: 60 + l * 34, width: 56, height: 28, rx: 3, fill: `color-mix(in srgb, var(--c4) ${25 + l * 12 + Math.round(r() * 20)}%, var(--panel))` }) });
+        for (let l = 0; l < L; l++) K.svg(svg, "text", { x: 62, y: 79 + l * 34, "text-anchor": "end", "font-size": 11 }, "第" + (9 + l) + "层");
+        WORDS.slice(0, T).forEach((w, t) => K.svg(svg, "text", { x: 98 + t * 66, y: 50, "text-anchor": "middle", "font-size": 11 }, w));
+        const uni = WORDS.slice(0, T).map((w, t) => K.svg(svg, "rect", { x: 70 + t * 66, y: 220, width: 56, height: 0, rx: 3, fill: "var(--c2)" }));
+        K.svg(svg, "text", { x: 70, y: 210, "font-size": 12, class: "muted" }, "① 每个词把 4 层融合成一个向量；② 柱高 = 这个词的重要性（示意）");
+        ctx.wait(500).then((ok) => ok && ctx.tween(FAST ? 10 : 1500, (t) => { grid.forEach((g) => (g.e.style.opacity = 1 - 0.6 * t)); uni.forEach((u, i) => u.setAttribute("height", 80 * imp[i] * t)); }));
+      },
+    },
+    {
+      title: "回顾：没有永远最好的池化", kicker: "第 39 格 · 总结",
+      html: `<p>回到开头那张图：作者把 BERT 原作者比较过的组合（最后一层、倒数第二层、拼接后四层、加权和……）都实现了，还加了更多方法，每个都能直接替换进自己的模型。</p><p>结尾的态度很重要：<b>池化方法的效果因任务而异，没有一种永远最好</b>；作者自己偏好最后 4 层的加权层池化。bert-as-service 默认用倒数第二层，被认为是一个折中的好选择。</p>`,
+      cells: [39],
+      draw(svg, ctx) {
+        const items = [["Pooler / CLS", "最后一层第 1 个词元", 1], ["平均 / 最大", "最后一层所有词元", 1], ["均值+最大 / Conv1D", "最后一层 + 小网络", 1], ["倒数第二层 CLS", "中间层", 2], ["拼接 / 加权后 4 层", "多层合并", 2], ["LSTM / 注意力", "12 层 CLS 序列", 2], ["WK 池化", "所有词元 × 多层", 3]];
+        items.forEach(([a, b, k], i) => {
+          const g = K.node(svg, 40 + (i % 2) * 330, 20 + Math.floor(i / 2) * 76, 310, 60, a + "\n" + b, { fill: `color-mix(in srgb, var(--c${k}) 14%, var(--panel))`, stroke: `var(--c${k})` });
+          g.style.opacity = 0;
+          ctx.wait(150 * i).then((ok) => ok && ctx.tween(300, (t) => (g.style.opacity = t)));
+        });
+      },
+    },
+  ];
+  if (FAST) steps.forEach((s) => { const d = s.draw; if (d) s.draw = (svg, ctx) => d(svg, Object.assign({}, ctx, { wait: () => Promise.resolve(ctx.alive()), tween: (ms, fn) => { fn(1, 1); return Promise.resolve(ctx.alive()); } })); });
+  K.pipeline(document.getElementById("pipe"), steps);
+  if (FAST) document.querySelectorAll('.ch-cells .cell').forEach((e) => (e.style.display = 'none'));
+
+  /* ---------- 实验 A：池化方式 ---------- */
+  K.lab(document.getElementById("labPool"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "pad", label: "补齐的空位个数（真词 10 个）", min: 0, max: 40, step: 1, value: 10 },
+      { id: "how", label: "池化方式", value: "mean_m", options: [["cls", "CLS（第 1 个词元）"], ["mean_m", "平均（跳过空位，第 11 格）"], ["mean_u", "平均（不跳过空位）"], ["max_m", "最大（空位设 −1e9，第 14 格）"], ["max_u", "最大（不处理空位）"], ["argmax", "第 17 格的写法：取最大值的位置"]] },
+    ],
+    note: "每个词元是一个 8 维的示意向量，空位 <pad> 的向量是一个固定的小值。浏览器现场按所选方式算出“这段话的向量”，并和“没有任何补齐时”的结果比较。拖动补齐个数：好的池化方式结果不应该变。",
+    render(svg, v) {
+      const D = 8, r = K.rng(12), real = [];
+      for (let i = 0; i < 10; i++) real.push(Array.from({ length: D }, () => K.randn(r) * 0.7));
+      const padv = Array.from({ length: D }, (_, d) => 0.9 - d * 0.05);
+      const pool = (nPad) => {
+        const X = real.concat(Array(nPad).fill(padv)), mask = X.map((_, i) => (i < 10 ? 1 : 0));
+        return Array.from({ length: D }, (_, d) => {
+          if (v.how === "cls") return X[0][d];
+          if (v.how === "mean_m") return X.reduce((s, x, i) => s + x[d] * mask[i], 0) / 10;
+          if (v.how === "mean_u") return X.reduce((s, x) => s + x[d], 0) / X.length;
+          if (v.how === "max_m") return Math.max(...X.map((x, i) => (mask[i] ? x[d] : -1e9)));
+          if (v.how === "max_u") return Math.max(...X.map((x) => x[d]));
+          let bi = 0; X.forEach((x, i) => { if (x[d] > X[bi][d]) bi = i; }); return bi;
+        });
+      };
+      const a = pool(v.pad), b = pool(0);
+      const toks = WORDS.concat(Array(Math.min(v.pad, 14)).fill("pad"));
+      const cw = Math.min(40, 600 / toks.length);
+      toks.forEach((t, i) => {
+        const vec = i < 10 ? real[i] : padv;
+        vec.forEach((x, d) => K.svg(svg, "rect", { x: 20 + i * cw, y: 20 + d * 12, width: cw - 2, height: 11, fill: i < 10 ? K.heat(x, true) : "var(--line)" }));
+      });
+      if (v.pad > 14) K.svg(svg, "text", { x: 20 + toks.length * cw + 4, y: 70, "font-size": 12, class: "muted" }, `… 共 ${v.pad} 个空位`);
+      K.svg(svg, "text", { x: 20, y: 132, "font-size": 12, class: "muted" }, "前 10 列 = 真词（颜色 = 数值），灰色 = 补齐空位");
+      const mx = Math.max(1, ...a.map(Math.abs), ...b.map(Math.abs));
+      const ax = K.axes(svg, { x: 60, y: 160, w: 540, h: 140 }, [0, D], [-mx, mx], { xticks: 0, yticks: 2, yfmt: (q) => q.toFixed(1) });
+      const bw = 540 / D;
+      for (let d = 0; d < D; d++) {
+        K.svg(svg, "rect", { x: ax.sx(d) + 6, y: ax.sy(Math.max(0, b[d])), width: bw / 2 - 8, height: Math.abs(ax.sy(b[d]) - ax.sy(0)), fill: "var(--ink-3)" });
+        K.svg(svg, "rect", { x: ax.sx(d) + bw / 2, y: ax.sy(Math.max(0, a[d])), width: bw / 2 - 8, height: Math.abs(ax.sy(a[d]) - ax.sy(0)), fill: "var(--accent)" });
+      }
+      K.svg(svg, "text", { x: 60, y: 324, "font-size": 12, class: "muted" }, "灰 = 没有空位时的结果   蓝 = 当前结果（8 维）");
+      const diff = Math.sqrt(a.reduce((s, x, d) => s + (x - b[d]) ** 2, 0));
+      return { readout: [
+        { k: "向量长度", v: v.how === "argmax" ? "8（但都是下标）" : "8" },
+        { k: "和“无空位”结果的差距", v: diff.toFixed(3), color: diff < 1e-6 ? "var(--good)" : "var(--bad)" },
+        { k: "结论", v: diff < 1e-6 ? "不受补齐影响 ✓" : "被补齐带偏了", color: diff < 1e-6 ? "var(--good)" : "var(--bad)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：加权层池化（玩具回归） ---------- */
+  K.lab(document.getElementById("labLayer"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "mode", label: "层权重怎么定", value: "learn", options: [["last", "只用最后一层"], ["equal", "后几层等权平均（初始值）"], ["learn", "梯度下降学习权重"]] },
+      { id: "start", label: "layer_start（从第几层开始）", min: 1, max: 12, step: 1, value: 9 },
+      { id: "peak", label: "有用信息最多的层（模拟设定）", min: 1, max: 12, step: 1, value: 8 },
+      { id: "seed", label: "换一批模拟数据", button: true },
+    ],
+    note: "模拟 120 段文字：每层给每段一个数 hₗ，真实难度主要藏在“有用信息最多的层”附近，其他层信息越来越少、噪声越来越多。按第 28 格的公式算 Σwₗhₗ/Σwₗ，再用最小二乘拟合一条直线，看 RMSE（越小越好）。“学习”模式在浏览器里跑 300 步梯度下降更新权重。",
+    render(svg, v) {
+      const N = 120, L = 12, r = K.rng(50 + v.seed * 11);
+      const y = [], H = [];
+      for (let i = 0; i < N; i++) {
+        const t = K.randn(r);
+        y.push(t);
+        const row = [];
+        for (let l = 1; l <= L; l++) { const q = Math.exp(-((l - v.peak) ** 2) / 8); row.push(q * t + K.randn(r) * (0.35 + 0.8 * (1 - q))); }
+        H.push(row);
+      }
+      const idx = []; for (let l = v.start; l <= L; l++) idx.push(l - 1);
+      let w = idx.map(() => 1);
+      if (v.mode === "last") { w = idx.map((l) => (l === L - 1 ? 1 : 0)); }
+      const pooled = (w) => H.map((h) => { let s = 0, ws = 0; idx.forEach((l, k) => { s += w[k] * h[l]; ws += w[k]; }); return s / (ws || 1); });
+      const fit = (p) => { const mx = p.reduce((a, b) => a + b, 0) / N, my = y.reduce((a, b) => a + b, 0) / N; let sxy = 0, sxx = 0; p.forEach((x, i) => { sxy += (x - mx) * (y[i] - my); sxx += (x - mx) ** 2; }); const a = sxx ? sxy / sxx : 0, b = my - a * mx; const rmse = Math.sqrt(p.reduce((s, x, i) => s + (a * x + b - y[i]) ** 2, 0) / N); return { a, b, rmse }; };
+      if (v.mode === "learn") {
+        for (let it = 0; it < 300; it++) {
+          const p = pooled(w), f = fit(p), ws = w.reduce((a, b) => a + b, 0) || 1;
+          const g = w.map(() => 0);
+          p.forEach((x, i) => { const e = f.a * x + f.b - y[i]; idx.forEach((l, k) => { g[k] += (2 / N) * e * f.a * (H[i][l] - x) / ws; }); });
+          w = w.map((wk, k) => Math.max(0.001, wk - 0.8 * g[k]));
+        }
+      }
+      const p = pooled(w), f = fit(p);
+      const ax = K.axes(svg, { x: 50, y: 20, w: 560, h: 130 }, [0.5, 12.5], [0, Math.max(...w) * 1.15 || 1], { xticks: 0, yticks: 2, yfmt: (q) => q.toFixed(1) });
+      for (let l = 1; l <= L; l++) {
+        const k = idx.indexOf(l - 1), val = k >= 0 ? w[k] : 0;
+        K.svg(svg, "rect", { x: ax.sx(l) - 16, y: ax.sy(val), width: 32, height: ax.sy(0) - ax.sy(val), fill: l === v.peak ? "var(--good)" : "var(--accent)" });
+        K.svg(svg, "text", { x: ax.sx(l), y: 166, "text-anchor": "middle", "font-size": 11, fill: k >= 0 ? "var(--ink)" : "var(--ink-3)" }, l);
+      }
+      K.svg(svg, "text", { x: 54, y: 14, "font-size": 12, class: "muted" }, "各层权重 wₗ（绿 = 模拟中信息最多的层）");
+      const ax2 = K.axes(svg, { x: 50, y: 195, w: 260, h: 115 }, [Math.min(...p), Math.max(...p)], [-3, 3], { xticks: 0, yticks: 2, xlabel: "池化后的值", yfmt: (q) => q.toFixed(0) });
+      p.forEach((x, i) => K.svg(svg, "circle", { cx: ax2.sx(x), cy: ax2.sy(K.clamp(y[i], -3, 3)), r: 2.2, fill: "var(--c1)", opacity: 0.6 }));
+      const x0 = Math.min(...p), x1 = Math.max(...p);
+      K.svg(svg, "line", { x1: ax2.sx(x0), y1: ax2.sy(K.clamp(f.a * x0 + f.b, -3, 3)), x2: ax2.sx(x1), y2: ax2.sy(K.clamp(f.a * x1 + f.b, -3, 3)), stroke: "var(--c2)", "stroke-width": 2 });
+      K.svg(svg, "text", { x: 340, y: 230, "font-size": 12 }, "纵轴 = 模拟的“真实难度”");
+      K.svg(svg, "text", { x: 340, y: 252, "font-size": 12 }, "橙线 = 拟合出来的回归头");
+      return { readout: [
+        { k: "RMSE（越小越好）", v: f.rmse.toFixed(3), color: f.rmse < 0.6 ? "var(--good)" : "var(--bad)" },
+        { k: "参与平均的层数", v: idx.length },
+        { k: "权重最大的层", v: "第 " + (idx[w.indexOf(Math.max(...w))] + 1) + " 层" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,640 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>蘑菇有毒吗</title>
+<meta name="description" content="Kaggle 案例拆解：根据菌盖、菌褶、菌柄等外形特征判断蘑菇可食还是有毒，缺失值处理、类别编码、XGBoost（一棵棵决策树接力）、MCC 指标与 LIME 单样本解释。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格数据 · 二分类 · 生物 / 食品安全</div>
+  <h1>蘑菇有毒吗：让一棵棵决策树从外形规则里找答案</h1>
+  <p class="en">🌴Mushroom🎉Classification📈Analysis</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">缺失值统计与删除</span><span class="tag method">众数填充</span><span class="tag method">KNN 填补</span>
+    <span class="tag method">Cramér's V 关联矩阵</span><span class="tag method">序号编码</span>
+    <span class="tag method">XGBoost</span><span class="tag method">MCC 指标</span><span class="tag method">LIME 解释</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Satya（satyaprakashshukl）</b></span>
+    <span>Kaggle 点赞 <b>488</b>（2026-11 抓取）</span>
+    <span>数据 <b>playground-series-s4e8</b>（Kaggle 2024 年 8 月 Playground 比赛）</span>
+    <span><a href="https://www.kaggle.com/code/satyaprakashshukl/mushroom-classification-analysis" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">一张“蘑菇外形登记表”</div><p>每行一朵蘑菇，列是菌盖形状、菌盖颜色、菌褶间距、菌柄表面、孢子印颜色等外形特征，大多是用字母表示的类别。比赛数据由一个在 UCI 蘑菇数据集上训练的深度学习模型生成。<span data-cell="2">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">可食（e）还是有毒（p）</div><p>标准的二分类。比赛用 <b>MCC（马修斯相关系数）</b>打分，它同时照顾四种对错情况，比准确率更难“糊弄”。<span data-cell="2">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">补缺 → 编码 → XGBoost → LIME</div><p>统计并处理大量缺失值，把字母类别变成数字，用 XGBoost（很多棵决策树接力纠错）分类，再用 LIME 解释“为什么判这朵有毒”。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">在 20% 验证集上算 MCC 并提交</div><p>作者在第 61 格打印验证集 MCC，但具体数值只在运行输出里，源码不带，作者文字也没写。<span data-cell="61">出处</span></p></div>
+  </div>
+  <p class="callout warn">这是一个机器学习练习，<b>不能用来判断野外采到的蘑菇能不能吃</b>。数据是模型合成的，外形相似的毒蘑菇和可食蘑菇在现实中很难区分，误判一次就可能致命。</p>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">kernel 元数据同时挂了 <code>uciml/mushroom-classification</code> 和比赛 <code>playground-series-s4e8</code>，但第 8 格实际读的是<b>比赛的 train.csv / test.csv</b>。<span data-cell="8">出处</span> 比赛说明写明：这份数据是用 UCI 蘑菇数据集训练的深度学习模型生成的。<span data-cell="2">出处</span></p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">train.csv 文件大小</div><div class="v">约 168 MB</div></div>
+        <div class="stat-tile"><div class="k">test.csv 文件大小</div><div class="v">约 109 MB</div></div>
+        <div class="stat-tile"><div class="k">去掉 id 后的列数</div><div class="v">22 / 21</div></div>
+        <div class="stat-tile"><div class="k">类别</div><div class="v">e 可食 / p 有毒</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">文件大小来自比赛文件列表（Kaggle API）。列数见作者第 14 格说明“21 and 22 columns”（训练集多一列答案 class）<span data-cell="14">出处</span>。作者没写行数；第 56–60 格引用的行号超过 290 万，可见训练集有几百万行 <span data-cell="59">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么（只列 notebook 里出现过的）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>白话含义</th><th>类型</th></tr>
+        <tr><td><code>class</code></td><td><b>要预测的答案</b>：e 可食，p 有毒</td><td>类别</td></tr>
+        <tr><td><code>cap-shape</code></td><td>菌盖（“伞面”）的形状</td><td>类别</td></tr>
+        <tr><td><code>cap-color</code></td><td>菌盖颜色</td><td>类别</td></tr>
+        <tr><td><code>cap-surface</code></td><td>菌盖表面：光滑、有鳞片、黏……</td><td>类别</td></tr>
+        <tr><td><code>gill-attachment</code></td><td>菌褶（伞背面一片片的“鳃”）怎样连在菌柄上</td><td>类别</td></tr>
+        <tr><td><code>gill-spacing</code></td><td>菌褶之间排得密还是疏</td><td>类别</td></tr>
+        <tr><td><code>stem-root</code> / <code>stem-surface</code></td><td>菌柄（“伞把”）根部形态 / 表面</td><td>类别</td></tr>
+        <tr><td><code>veil-type</code> / <code>veil-color</code></td><td>菌幕（幼时包住菌褶的薄膜）类型 / 颜色</td><td>类别</td></tr>
+        <tr><td><code>spore-print-color</code></td><td>孢子印颜色：把菌盖扣在纸上，落下的孢子粉的颜色</td><td>类别</td></tr>
+        <tr><td><code>id</code></td><td>行编号，第 13 格删掉</td><td>编号</td></tr>
+      </table></div>
+      <p style="font-size:13px;color:var(--ink-3)">其余列名没有在作者文字里出现，这里不列。第 27 格对数值列用中位数填补，说明表里也有少量数值列。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="48">
+    <h3>动手试试 A · 准确率和 MCC，谁更难被糊弄 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="49">
+    <h3>动手试试 B · 亲手长一棵决策树：规则是怎么挑出来的 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论与做法</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>训练集和测试集有相同的高缺失列</td><td><span data-cell="24">第 24 格</span></td></tr>
+        <tr><td>stem-root、veil-type、veil-color、spore-print-color 缺失超过 80%</td><td><span data-cell="24">第 24 格</span></td></tr>
+        <tr><td>cap-surface、gill-attachment、gill-spacing、stem-surface 缺失约 16%–63%</td><td><span data-cell="24">第 24 格</span></td></tr>
+        <tr><td>缺失超过 95% 的列删掉，其余类别列用众数、数值列用中位数补</td><td><span data-cell="27">第 27 格</span></td></tr>
+        <tr><td>XGBoost：100 棵树、最大深度 14，在 20% 分层验证集上监控 MCC</td><td><span data-cell="49">第 49 格</span></td></tr>
+        <tr><td>用 LIME 解释 5 朵蘑菇的单独判断</td><td><span data-cell="56">第 56–60 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">原 notebook 的验证集 MCC 写在运行输出里（第 61 格的 print），Kaggle 下载的源码不带输出，作者文字里也没写具体数值，所以这里不列分数。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li>LabelEncoder 按字母顺序把 e 编成 0、p 编成 1，但 LIME 的 <code>class_names=['Poisnous','edible']</code> 顺序反了，解释图上两类的名字会对调 <span data-cell="52">第 52 格</span>。</li>
+        <li>第 27 格已经把所有缺失都填上，第 34–35 格的 KNN 填补实际上没有空可填 <span data-cell="35">第 35 格</span>；第 32 格又按 95% 删列一次，与第 27 格重复。</li>
+        <li>第 23 格打印的提示写“超过 10% 缺失”，代码条件却是 <code>&gt; 0</code> <span data-cell="23">第 23 格</span>。</li>
+        <li>训练集和测试集分别做 KNN 填补（各自的类别编号表）<span data-cell="35">第 35 格</span>；变量名 <code>test_pred_prob</code> 里装的其实是 0/1 类别，不是概率 <span data-cell="62">第 62 格</span>。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一条记录的若干类别特征，输出两类之一，并能用 LIME 说明是哪几个特征把它推向这一类。</li>
+        <li><b>同类问题：</b>种子是否发芽、病虫害有无、食品抽检是否合格、牲畜是否患病，凡是“特征多为类别、答案二选一”的表都适用。</li>
+        <li><b>可迁移的套路：</b>先统计缺失率再决定删列还是填补 → 类别转数字 → 分层切验证集 → 树模型 → 选和比赛一致的指标 → 抽几条样本做解释。</li>
+        <li><b>不能做：</b>代替专家鉴定野生蘑菇。模型只在“合成数据”里学到相关性，而且对毒蘑菇来说一次漏判的代价远大于误判。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>缺失统计与可视化 <span data-cell="23">第 23 格</span> <span data-cell="25">第 25 格</span></li>
+        <li>删高缺失列 + 众数 / 中位数填补 <span data-cell="27">第 27 格</span></li>
+        <li>类别特征关联矩阵（dython） <span data-cell="28">第 28 格</span></li>
+        <li>旭日图、桑基图、堆叠柱 <span data-cell="29">第 29–31 格</span></li>
+        <li>KNNImputer <span data-cell="34">第 34 格</span>；OrdinalEncoder、LabelEncoder <span data-cell="36">第 36 格</span></li>
+        <li>XGBClassifier + 自定义 MCC <span data-cell="48">第 48 格</span> <span data-cell="49">第 49 格</span></li>
+        <li>LIME 表格解释器 <span data-cell="52">第 52 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>判蘑菇时，“把毒蘑菇判成可食”和“把可食判成有毒”哪个代价大？MCC 对两种错误一视同仁，这合理吗？如果你来定比赛指标会怎么改？</li>
+      <li>有的列缺失超过 80%。作者用“出现最多的值”去填，这会让数据变成什么样？“缺失”本身会不会就是一条有用的线索？</li>
+      <li>第 27 格填完缺失后，第 34 格的 KNN 填补还有作用吗？读别人代码时怎样发现这种“白跑一遍”的步骤？</li>
+      <li>LIME 的类名写反了。如果你只看解释图不看代码，会得出什么错误结论？这说明解释工具本身也需要检查什么？</li>
+      <li>数据是深度学习模型“合成”出来的。在合成数据上学到的规则，能不能直接搬到真实蘑菇上？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Satya（satyaprakashshukl），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Kaggle Playground Series S4E8（由 UCI Mushroom 数据集训练的模型生成）。
+</footer>
+</main>
+
+<script src="nb/mushroom-tree-rules.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const fade = (els, t) => els.forEach((e) => (e.style.opacity = t));
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+  const soft = (c, p) => `color-mix(in srgb, ${c} ${p || 16}%, var(--panel))`;
+
+  /* 一朵示意蘑菇 */
+  function mushroom(svg, x, y, s, capFill, opt) {
+    opt = opt || {};
+    const g = K.svg(svg, "g", { transform: `translate(${x},${y}) scale(${s})` });
+    K.svg(g, "path", { d: "M-8,0 L-10,46 Q0,52 10,46 L8,0 Z", fill: "var(--panel-2)", stroke: "var(--ink-3)" });
+    K.svg(g, "path", { d: "M-34,2 Q-34,-34 0,-36 Q34,-34 34,2 Z", fill: capFill, stroke: "var(--ink-3)" });
+    for (let i = -3; i <= 3; i++) K.svg(g, "line", { x1: i * 8, y1: 2, x2: i * 3, y2: 8, stroke: "var(--ink-3)", "stroke-width": 0.8 });
+    if (opt.dots) [[-14, -18], [8, -24], [18, -10], [-4, -8]].forEach((p) => K.svg(g, "circle", { cx: p[0], cy: p[1], r: 3.5, fill: "var(--panel)" }));
+    return g;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "题目：外形特征 → 可食还是有毒", kicker: "第 0–4 格 · 比赛介绍与导入",
+      html: `<p>这是 Kaggle 2024 年 8 月的 Playground 练习赛：给每朵蘑菇的一串外形特征，判断它是 <b>e（edible，可食）</b>还是 <b>p（poisonous，有毒）</b>。<span data-cell="2">第 2 格</span></p><p>比赛数据不是野外实测，而是用 UCI 蘑菇数据集训练出的深度学习模型“造”出来的。第 4 格导入了 XGBoost、LightGBM 等工具（实际只用到 XGBoost）。</p>`,
+      cells: [2, 4], highlight: ["edible ('e') or poisonous ('p')", "XGBRegressor"],
+      draw(svg, ctx) {
+        const m = mushroom(svg, 110, 160, 1.6, soft("var(--c4)", 60), { dots: true });
+        const feats = ["菌盖形状：凸", "菌盖颜色：棕", "菌褶间距：密", "菌柄表面：光滑", "孢子印：白"];
+        const fs = feats.map((f, i) => K.node(svg, 250, 40 + i * 52, 150, 40, f, { fs: 12 }));
+        const ar = feats.map((f, i) => K.arrow(svg, 402, 60 + i * 52, 520, 165));
+        const box = K.node(svg, 522, 130, 90, 70, "模型", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const e = K.node(svg, 630, 90, 70, 44, "e 可食", { stroke: "var(--good)", color: "var(--good)" });
+        const p = K.node(svg, 630, 196, 70, 44, "p 有毒", { stroke: "var(--bad)", color: "var(--bad)" });
+        K.svg(svg, "text", { x: 20, y: 328, "font-size": 12, class: "muted" }, "示意：特征取值是举例，不是数据里的真实行");
+        hide([...fs, ...ar, box, e, p]);
+        (async () => {
+          for (let i = 0; i < fs.length; i++) if (!(await ctx.tween(260, (t) => fade([fs[i], ar[i]], t)))) return;
+          if (!(await ctx.tween(400, (t) => fade([box], t)))) return;
+          await ctx.tween(500, (t) => fade([e, p], t));
+        })();
+      },
+    },
+    {
+      title: "评价指标 MCC：四个格子都要顾到", kicker: "第 5–7 格 · 评估方式",
+      html: `<p>比赛用 <b>马修斯相关系数 MCC</b> 打分。它用混淆矩阵的四个格子 TP、TN、FP、FN 一起算：</p><p style="font-family:var(--mono);font-size:14px">MCC = (TP·TN − FP·FN) / √((TP+FP)(TP+FN)(TN+FP)(TN+FN))</p><p>取值 −1 到 1：1 是全对，0 相当于瞎猜，−1 是全反。只要有一类几乎没判对，MCC 就会掉下来，所以比准确率更难“糊弄”。第 6 格是作者贴的公式图（图片附件，下载的源码里看不到）。</p>`,
+      cells: [5],
+      draw(svg, ctx) {
+        const lab = [["TP\n毒判毒", "var(--good)"], ["FN\n毒判可食", "var(--bad)"], ["FP\n可食判毒", "var(--warn)"], ["TN\n可食判可食", "var(--good)"]];
+        const cells = lab.map((d, i) => K.node(svg, 60 + (i % 2) * 130, 60 + Math.floor(i / 2) * 120, 122, 112, d[0], { fill: soft(d[1], 18), stroke: d[1] }));
+        K.svg(svg, "text", { x: 185, y: 44, "text-anchor": "middle", "font-size": 12, class: "muted" }, "预测：有毒      预测：可食");
+        hide(cells);
+        cells.forEach((c, i) => ctx.wait(150 + i * 250).then((ok) => ok && ctx.tween(350, (t) => fade([c], t))));
+        const f1 = K.svg(svg, "text", { x: 360, y: 100, "font-size": 14, "font-weight": 700 }, "准确率 = (TP+TN) / 全部");
+        const f2 = K.svg(svg, "text", { x: 360, y: 128, "font-size": 12, class: "muted" }, "只看对角线，少数类全错也可能很高");
+        const f3 = K.svg(svg, "text", { x: 360, y: 190, "font-size": 14, "font-weight": 700, fill: "var(--accent)" }, "MCC：分子是 TP·TN − FP·FN");
+        const f4 = K.svg(svg, "text", { x: 360, y: 218, "font-size": 12, class: "muted" }, "分母把四个格子都乘进去，任何一类偏了都会被罚");
+        const f5 = K.svg(svg, "text", { x: 360, y: 270, "font-size": 13, fill: "var(--warn)" }, "1 = 全对   0 = 和瞎猜一样   −1 = 全反");
+        hide([f1, f2, f3, f4, f5]);
+        ctx.wait(1300).then((ok) => ok && ctx.tween(500, (t) => fade([f1, f2], t))).then((ok) => ok && ctx.tween(500, (t) => fade([f3, f4], t))).then((ok) => ok && ctx.tween(500, (t) => fade([f5], t)));
+      },
+    },
+    {
+      title: "读入比赛数据，去掉 id", kicker: "第 8–16 格 · 读数据",
+      html: `<p>第 8 格从 <code>playground-series-s4e8</code> 读入训练集、测试集和提交样例；第 12 格看形状；第 13 格删掉对预测没用的 <code>id</code> 列。</p><p>作者在第 14 格总结：行数很多（“Looks Heavy”），列数 22 和 21，很多特征有缺失值。</p>`,
+      cells: [8, 12, 13], highlight: ["playground-series-s4e8", "drop(columns=['id'])"],
+      draw(svg, ctx) {
+        const cols = ["id", "class", "cap-shape", "cap-color", "gill-spacing", "…"];
+        const xs = cols.map((c, i) => 40 + i * 112);
+        const heads = cols.map((c, i) => K.node(svg, xs[i], 50, 104, 34, c, { fs: 12, bold: true, fill: i === 1 ? soft("var(--c6)") : "var(--panel-2)" }));
+        const cells = [];
+        for (let r = 0; r < 6; r++) cols.forEach((c, i) => {
+          const txt = i === 0 ? String(r) : i === 1 ? (r % 3 ? "e" : "p") : i === 5 ? "…" : (r * 7 + i) % 4 === 0 ? "（空）" : "字母";
+          cells.push({ i, g: K.node(svg, xs[i], 92 + r * 34, 104, 30, txt, { fs: 11, color: txt === "（空）" ? "var(--warn)" : "var(--ink-2)" }) });
+        });
+        K.svg(svg, "text", { x: 40, y: 320, "font-size": 12, class: "muted" }, "示意表格：“字母”代表类别代码，“（空）”代表缺失；不是真实数据行");
+        const x = K.svg(svg, "text", { x: xs[0] + 52, y: 40, "text-anchor": "middle", "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "删掉 id");
+        x.style.opacity = 0;
+        ctx.wait(900).then((ok) => ok && ctx.tween(400, (t) => (x.style.opacity = t))).then((ok) => ok && ctx.tween(900, (t) => {
+          heads[0].style.opacity = 1 - t; cells.filter((c) => c.i === 0).forEach((c) => (c.g.style.opacity = 1 - t));
+        }));
+      },
+    },
+    {
+      title: "每个类别列有多少种取值", kicker: "第 17–22 格 · 了解特征",
+      html: `<p>第 16 格 <code>info()</code> 看每列类型和非空数量；第 18、19 格对训练集和测试集的每个文字列数一数<b>有多少种不同取值</b>（nunique）。</p><p>这一步很重要：一个列如果有几十种取值，后面编码时就要想清楚怎么处理；训练集和测试集取值种类不一致，说明测试集可能出现“没见过的字母”。</p>`,
+      cells: [17], highlight: ["nunique()"],
+      draw(svg, ctx) {
+        const cols = [["cap-shape", 7], ["cap-color", 12], ["gill-spacing", 3], ["stem-surface", 8], ["veil-color", 6]];
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 13, class: "muted" }, "把每列出现过的字母“倒进筐里”去重计数（取值个数为示意）");
+        const r = K.rng(4), drops = [];
+        cols.forEach((c, k) => {
+          const x = 40 + k * 138;
+          K.svg(svg, "rect", { x, y: 230, width: 120, height: 70, rx: 8, fill: "var(--panel-2)", stroke: "var(--line)" });
+          K.svg(svg, "text", { x: x + 60, y: 320, "text-anchor": "middle", "font-size": 12 }, c[0]);
+          const cnt = K.svg(svg, "text", { x: x + 60, y: 272, "text-anchor": "middle", "font-size": 22, "font-weight": 700, fill: "var(--accent)" }, "0");
+          for (let j = 0; j < 14; j++) {
+            const v = Math.floor(r() * c[1]);
+            drops.push({ k, v, cnt, x: x + 15 + r() * 90, t0: j * 0.06 + k * 0.02, e: K.svg(svg, "text", { x: x + 60, y: 50, "font-size": 13, "text-anchor": "middle", "font-family": "var(--mono)" }, String.fromCharCode(97 + v)) });
+          }
+        });
+        const seen = cols.map(() => new Set());
+        ctx.tween(2600, (t, raw) => drops.forEach((d) => {
+          const u = K.clamp((raw - d.t0) / 0.3, 0, 1);
+          d.e.setAttribute("x", d.x); d.e.setAttribute("y", 50 + u * 180); d.e.style.opacity = u >= 1 ? 0 : 1;
+          if (u >= 1 && !d.done) { d.done = 1; seen[d.k].add(d.v); d.cnt.textContent = seen[d.k].size; }
+        }));
+      },
+    },
+    {
+      title: "缺失值到底有多严重", kicker: "第 23–26 格 · 缺失统计",
+      html: `<p>第 23 格算出每列缺失的百分比，第 25 格画成柱状图。作者在第 24 格总结：</p><ul class="tight"><li><b>stem-root、veil-type、veil-color、spore-print-color</b> 缺失超过 80%</li><li><b>cap-surface、gill-attachment、gill-spacing、stem-surface</b> 缺失约 16%–63%</li><li>训练集和测试集的高缺失列相同</li></ul><p>动画里柱子的高低只表示“哪些多、哪些少”，具体百分比要看作者的运行输出。小问题：第 23 格打印的提示写“超过 10%”，代码条件却是 <code>&gt; 0</code>。</p>`,
+      cells: [23, 25], highlight: ["missing_train[missing_train > 0]", "more than 10% missing values"],
+      draw(svg, ctx) {
+        const items = [["veil-type", 0.95], ["spore-print", 0.9], ["veil-color", 0.88], ["stem-root", 0.85], ["stem-surface", 0.62], ["gill-spacing", 0.42], ["cap-surface", 0.24], ["gill-attach", 0.18]];
+        const ax = K.axes(svg, { x: 60, y: 30, w: 620, h: 240 }, [0, items.length], [0, 1], { xticks: 0, yticks: 0, ylabel: "缺失比例（示意）" });
+        const bw = 620 / items.length - 14;
+        const thr = K.svg(svg, "line", { x1: 60, x2: 680, y1: ax.sy(0.8), y2: ax.sy(0.8), stroke: "var(--bad)", "stroke-dasharray": "5 3" });
+        K.svg(svg, "text", { x: 676, y: ax.sy(0.8) - 6, "text-anchor": "end", "font-size": 12, fill: "var(--bad)" }, "作者：超过 80% 的四列");
+        const bars = items.map((d, i) => {
+          K.svg(svg, "text", { x: 67 + i * (bw + 14) + bw / 2, y: 290, "text-anchor": "middle", "font-size": 11 }, d[0]);
+          return K.svg(svg, "rect", { x: 67 + i * (bw + 14), y: ax.sy(0), width: bw, height: 0, rx: 3, fill: d[1] > 0.8 ? "var(--bad)" : "var(--warn)" });
+        });
+        K.svg(svg, "text", { x: 60, y: 326, "font-size": 12, class: "muted" }, "柱高为示意，只表示作者文字里说的“高缺失 / 中等缺失”两档");
+        ctx.tween(1500, (t) => bars.forEach((b, i) => { const h = ax.sy(0) - ax.sy(items[i][1] * t); b.setAttribute("y", ax.sy(0) - h); b.setAttribute("height", h); }));
+      },
+    },
+    {
+      title: "删掉几乎全空的列，其余用众数补", kicker: "第 27 格 · 缺失处理",
+      html: `<p>第 27 格分两步：</p><ol class="tight"><li>缺失超过 <b>95%</b> 的列直接删掉（训练集和测试集删同样的列）。</li><li>剩下的缺失：文字列用训练集里<b>出现最多的值（众数）</b>填，数值列用<b>中位数</b>填；测试集也用训练集算出的值填，避免“偷看”测试集。</li></ol><p>众数填补简单，但当一列七八成是空的时候，填完后这一列会被同一个值“淹没”。</p>`,
+      cells: [27], highlight: ["missing_threshold = 0.95", "mode()[0]", "median()"],
+      draw(svg, ctx) {
+        const vals = ["b", "s", "", "b", "", "y", "b", "", "s", "b", "", "b"];
+        const freq = {}; vals.forEach((v) => v && (freq[v] = (freq[v] || 0) + 1));
+        const mode = Object.keys(freq).sort((a, b) => freq[b] - freq[a])[0];
+        K.svg(svg, "text", { x: 40, y: 30, "font-size": 13, "font-weight": 700 }, "某一列（示意）");
+        const cells = vals.map((v, i) => {
+          const x = 40 + (i % 6) * 70, y = 50 + Math.floor(i / 6) * 60;
+          K.svg(svg, "rect", { x, y, width: 62, height: 50, rx: 6, fill: v ? "var(--panel-2)" : soft("var(--warn)", 20), stroke: v ? "var(--line)" : "var(--warn)" });
+          return K.svg(svg, "text", { x: x + 31, y: y + 31, "text-anchor": "middle", "font-size": 18, "font-family": "var(--mono)" }, v || "?");
+        });
+        const tally = Object.keys(freq).map((k, i) => K.svg(svg, "text", { x: 500, y: 70 + i * 28, "font-size": 15, "font-family": "var(--mono)" }, `${k}：${"■".repeat(freq[k])} ${freq[k]}`));
+        const pick = K.svg(svg, "text", { x: 500, y: 170, "font-size": 14, "font-weight": 700, fill: "var(--accent)" }, `众数 = ${mode}`);
+        hide([...tally, pick]);
+        const drop = K.node(svg, 40, 210, 640, 60, "另一列：95% 以上都是空 → 整列删掉", { fill: soft("var(--bad)", 14), stroke: "var(--bad)" });
+        drop.style.opacity = 0;
+        ctx.tween(600, (t) => fade(tally, t))
+          .then((ok) => ok && ctx.tween(400, (t) => fade([pick], t)))
+          .then((ok) => ok && ctx.tween(900, (t) => vals.forEach((v, i) => { if (!v) { cells[i].textContent = mode; cells[i].style.fill = `color-mix(in srgb, var(--accent) ${Math.round(t * 100)}%, var(--ink))`; } })))
+          .then((ok) => ok && ctx.tween(500, (t) => (drop.style.opacity = t)))
+          .then((ok) => ok && ctx.tween(700, (t) => (drop.style.opacity = 1 - t * 0.6)));
+      },
+    },
+    {
+      title: "类别特征之间的关联矩阵", kicker: "第 28 格 · 关联分析",
+      html: `<p>类别列不能直接算普通相关系数。作者用 <code>dython</code> 的 <code>associations</code>，对前 1 万行算“名义变量之间的关联强度”（默认是 Cramér's V，取值 0 到 1，越大说明两列越常“一起变”），画成热力图。</p><p>重点看最后答案 <code>class</code> 那一行：哪些外形特征和“有没有毒”关系最紧。注意只用了前 1 万行，相对几百万行的全量只是一个小样本。</p>`,
+      cells: [28], highlight: ["associations(df_train[:10000]"],
+      draw(svg, ctx) {
+        const names = ["class", "cap-shape", "cap-color", "gill-spacing", "stem-surface", "ring"];
+        const n = names.length, r = K.rng(11), M = [];
+        for (let i = 0; i < n; i++) { M[i] = []; for (let j = 0; j < n; j++) M[i][j] = i === j ? 1 : j < i ? M[j][i] : 0.05 + r() * 0.5; }
+        const s = 44, x0 = 160, y0 = 30;
+        names.forEach((nm, i) => {
+          K.svg(svg, "text", { x: x0 - 8, y: y0 + i * s + 27, "text-anchor": "end", "font-size": 12 }, nm);
+          K.svg(svg, "text", { x: x0 + i * s + 22, y: y0 + n * s + 16, "text-anchor": "middle", "font-size": 10 }, nm.slice(0, 6));
+        });
+        const cells = [];
+        for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) cells.push({ i, j, e: K.svg(svg, "rect", { x: x0 + j * s, y: y0 + i * s, width: s - 2, height: s - 2, rx: 3, fill: "var(--panel-2)" }) });
+        const hl = K.svg(svg, "rect", { x: x0 - 3, y: y0 - 3, width: n * s + 4, height: s + 4, rx: 4, fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        hl.style.opacity = 0;
+        K.svg(svg, "text", { x: 470, y: 60, "font-size": 13 }, "颜色越深 = 两列越常一起变");
+        K.svg(svg, "text", { x: 470, y: 84, "font-size": 12, class: "muted" }, "数值为示意，不是作者结果");
+        const t2 = K.svg(svg, "text", { x: 470, y: 140, "font-size": 13, fill: "var(--accent)", "font-weight": 700 }, "第一行：各特征与“有没有毒”");
+        t2.style.opacity = 0;
+        ctx.tween(1400, (t) => cells.forEach((c) => { if ((c.i + c.j) / (2 * n) <= t) c.e.setAttribute("fill", K.heat(M[c.i][c.j])); }))
+          .then((ok) => ok && ctx.tween(500, (t) => fade([hl, t2], t)));
+      },
+    },
+    {
+      title: "菌盖形状 × 菌盖颜色：旭日图和桑基图", kicker: "第 29–31 格 · 可视化",
+      html: `<p>作者在前 1 万行上，按 <code>cap-shape</code> 和 <code>cap-color</code> 两列分组计数，用三种图展示同一张交叉表：旭日图（内圈形状、外圈颜色）、桑基图（从形状“流”向颜色的带子越粗，数量越多）、堆叠柱状图。</p><p>这一段是看数据长相，不改变数据。三种图画的是同一组数字，可以让学生比较哪种最好读。</p>`,
+      cells: [29, 30, 31], highlight: ["px.sunburst", "go.Sankey", "barmode='stack'"],
+      draw(svg, ctx) {
+        const L = ["凸形", "平形", "钟形"], R = ["棕", "白", "灰", "红"];
+        const flows = [[0, 0, 30], [0, 1, 14], [0, 2, 10], [1, 0, 18], [1, 3, 12], [1, 1, 8], [2, 2, 9], [2, 3, 5]];
+        const totL = L.map((_, i) => flows.filter((f) => f[0] === i).reduce((a, f) => a + f[2], 0));
+        const totR = R.map((_, i) => flows.filter((f) => f[1] === i).reduce((a, f) => a + f[2], 0));
+        const k = 2.3, gap = 16;
+        let y = 30; const ly = totL.map((t) => { const v = y; y += t * k + gap; return v; });
+        y = 30; const ry = totR.map((t) => { const v = y; y += t * k + gap; return v; });
+        L.forEach((nm, i) => { K.svg(svg, "rect", { x: 140, y: ly[i], width: 18, height: totL[i] * k, fill: "var(--c1)" }); K.svg(svg, "text", { x: 132, y: ly[i] + totL[i] * k / 2 + 4, "text-anchor": "end", "font-size": 13 }, nm); });
+        R.forEach((nm, i) => { K.svg(svg, "rect", { x: 560, y: ry[i], width: 18, height: totR[i] * k, fill: K.colors[(i + 1) % 6] }); K.svg(svg, "text", { x: 586, y: ry[i] + totR[i] * k / 2 + 4, "font-size": 13 }, nm); });
+        const offL = ly.slice(), offR = ry.slice();
+        const bands = flows.map((f) => {
+          const h = f[2] * k, a = offL[f[0]], b = offR[f[1]]; offL[f[0]] += h; offR[f[1]] += h;
+          const d = `M158,${a} C360,${a} 360,${b} 560,${b} L560,${b + h} C360,${b + h} 360,${a + h} 158,${a + h} Z`;
+          return K.svg(svg, "path", { d, fill: K.colors[(f[1] + 1) % 6], "fill-opacity": 0, stroke: "none" });
+        });
+        K.svg(svg, "text", { x: 20, y: 330, "font-size": 12, class: "muted" }, "桑基图示意：带子宽度 = 这种“形状 + 颜色”组合的数量（数字为示意）");
+        (async () => { for (const b of bands) if (!(await ctx.tween(260, (t) => b.setAttribute("fill-opacity", 0.45 * t)))) return; })();
+      },
+    },
+    {
+      title: "再删一次列，并准备 KNN 填补", kicker: "第 32–35 格 · KNN 填补",
+      html: `<p>第 32 格按第 23 格算好的缺失率（&gt;95%）又删了一次列，和第 27 格做的是同一件事。第 34 格定义 <code>knn_impute</code>：把文字类别临时换成编号，用 <b>KNNImputer</b> 找最像的 5 行，用它们的值来补空格，再把编号换回文字。</p><p class="callout warn">但第 27 格已经把所有空格补完了，所以第 35 格的 KNN 填补实际上没有空可填，只是把数据“转了一圈”。另外 pandas 的 <code>cat.codes</code> 会把缺失编成 −1，KNNImputer 只认 NaN，即使有空也识别不到。训练集和测试集还各自单独编号、单独填补。</p>`,
+      cells: [32, 34, 35], highlight: ["KNNImputer(n_neighbors=n_neighbors)", "cat.codes"],
+      draw(svg, ctx) {
+        const r = K.rng(8), pts = [];
+        for (let i = 0; i < 40; i++) { const c = i < 20 ? 0 : 1; pts.push([c ? 470 + K.randn(r) * 60 : 230 + K.randn(r) * 60, 170 + K.randn(r) * 60, c]); }
+        pts.forEach((p) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 6, fill: p[2] ? "var(--c2)" : "var(--c1)", opacity: 0.75 }));
+        const q = [300, 160];
+        const nn = pts.slice().sort((a, b) => Math.hypot(a[0] - q[0], a[1] - q[1]) - Math.hypot(b[0] - q[0], b[1] - q[1])).slice(0, 5);
+        const qe = K.svg(svg, "circle", { cx: q[0], cy: q[1], r: 9, fill: "var(--panel)", stroke: "var(--warn)", "stroke-width": 3 });
+        const qt = K.svg(svg, "text", { x: q[0], y: q[1] + 5, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, "?");
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 13, class: "muted" }, "带“?”的行有一格空着：找最像的 5 行，看它们这一格填的是什么（示意）");
+        const lines = nn.map((p) => K.svg(svg, "line", { x1: q[0], y1: q[1], x2: q[0], y2: q[1], stroke: "var(--warn)", "stroke-dasharray": "3 3" }));
+        const votes = nn.reduce((a, p) => a + p[2], 0), fill = votes >= 3 ? "var(--c2)" : "var(--c1)";
+        ctx.wait(500).then((ok) => ok && ctx.tween(1000, (t) => lines.forEach((l, i) => { l.setAttribute("x2", K.lerp(q[0], nn[i][0], t)); l.setAttribute("y2", K.lerp(q[1], nn[i][1], t)); })))
+          .then((ok) => ok && ctx.tween(600, (t) => { qe.setAttribute("fill", `color-mix(in srgb, ${fill} ${Math.round(t * 100)}%, var(--panel))`); if (t > 0.5) qt.textContent = ""; }));
+        K.svg(svg, "text", { x: 20, y: 326, "font-size": 12, fill: "var(--warn)" }, "本 notebook 里：第 27 格已补完，这一步其实没有空格可填");
+      },
+    },
+    {
+      title: "把字母变成数字", kicker: "第 36–44 格 · 编码",
+      html: `<p>XGBoost 只吃数字。第 36 格用 <b>OrdinalEncoder</b> 把每个类别列的字母按顺序编成 0、1、2……；测试集用训练集的“字典”转换，没见过的字母编成 −1。第 41 格用 <b>LabelEncoder</b> 把答案 e/p 编成 0/1（按字母顺序，e→0，p→1）。第 43 格拆出特征 X 和答案 y。</p><p>序号编码会给类别强加一个“大小顺序”（棕=0、白=1、红=2 并不代表红比棕“大”），但决策树类模型只是用“≤ 某个数”来切分，受影响比线性模型小。</p>`,
+      cells: [36, 41, 43], highlight: ["OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)", "le.fit_transform"],
+      draw(svg, ctx) {
+        const letters = ["b", "n", "w", "n", "y", "b", "w", "n"], dict = { b: 0, n: 1, w: 2, y: 3 };
+        K.svg(svg, "text", { x: 60, y: 34, "font-size": 13, "font-weight": 700 }, "cap-color（示意）");
+        K.svg(svg, "text", { x: 470, y: 34, "font-size": 13, "font-weight": 700 }, "class");
+        const els = letters.map((l, i) => K.svg(svg, "text", { x: 90, y: 70 + i * 32, "font-size": 18, "font-family": "var(--mono)" }, l));
+        const ys = ["e", "p", "e", "e", "p", "p", "e", "p"];
+        const yEls = ys.map((l, i) => K.svg(svg, "text", { x: 490, y: 70 + i * 32, "font-size": 18, "font-family": "var(--mono)", fill: l === "p" ? "var(--bad)" : "var(--good)" }, l));
+        const dic = K.node(svg, 180, 100, 200, 120, "字典（按字母排序）\nb → 0   n → 1\nw → 2   y → 3\n没见过 → −1", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const dic2 = K.node(svg, 560, 120, 120, 70, "e → 0\np → 1", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        hide([dic, dic2]);
+        ctx.tween(500, (t) => fade([dic, dic2], t)).then(async (ok) => {
+          if (!ok) return;
+          for (let i = 0; i < letters.length; i++) {
+            if (!(await ctx.tween(220, (t) => { els[i].style.opacity = 1 - Math.abs(1 - 2 * t); yEls[i].style.opacity = 1 - Math.abs(1 - 2 * t); if (t > 0.5) { els[i].textContent = dict[letters[i]]; yEls[i].textContent = ys[i] === "p" ? 1 : 0; } }))) return;
+          }
+        });
+      },
+    },
+    {
+      title: "切出 20% 验证集，定义 MCC", kicker: "第 45–48 格 · 验证准备",
+      html: `<p>第 45 格用 <code>train_test_split</code> 留出 20% 做验证，<code>stratify=y</code> 让两边“有毒/可食”的比例一样。第 48 格写了一个给 XGBoost 用的 MCC 函数：概率大于 0.5 判为 1（有毒），再算 MCC。</p><p>这样训练时就能在验证集上直接看比赛用的指标。下面的实验 A 可以自己体会 MCC 和准确率的区别。</p>`,
+      cells: [45, 48], highlight: ["stratify=y", "matthews_corrcoef(y_true, y_pred)"],
+      draw(svg, ctx) {
+        const r = K.rng(2), dots = [];
+        for (let i = 0; i < 100; i++) dots.push({ p: r() < 0.55, e: K.svg(svg, "circle", { cx: 60 + (i % 20) * 22, cy: 60 + Math.floor(i / 20) * 26, r: 8, fill: "var(--c1)" }) });
+        dots.forEach((d) => d.e.setAttribute("fill", d.p ? "var(--bad)" : "var(--good)"));
+        K.svg(svg, "text", { x: 60, y: 30, "font-size": 13, class: "muted" }, "红 = 有毒，绿 = 可食（示意 100 朵）");
+        const pos = dots.filter((d) => d.p), neg = dots.filter((d) => !d.p);
+        const val = [...pos.slice(0, Math.round(pos.length * 0.2)), ...neg.slice(0, Math.round(neg.length * 0.2))];
+        const lab = K.svg(svg, "text", { x: 560, y: 120, "font-size": 13 }, "");
+        ctx.wait(700).then((ok) => ok && ctx.tween(1200, (t) => val.forEach((d, k) => {
+          d.e.setAttribute("cx", K.lerp(+d.e.getAttribute("cx"), 560 + (k % 5) * 24, t * 0.25));
+          d.e.setAttribute("cy", K.lerp(+d.e.getAttribute("cy"), 160 + Math.floor(k / 5) * 26, t * 0.25));
+        }))).then((ok) => { if (ok) { lab.textContent = `验证集：有毒 ${val.filter((d) => d.p).length}，可食 ${val.filter((d) => !d.p).length}`; } });
+        K.svg(svg, "text", { x: 60, y: 220, "font-size": 13 }, "分层抽样：两边的红绿比例保持一致");
+        K.svg(svg, "text", { x: 60, y: 290, "font-size": 13, "font-family": "var(--mono)" }, "y_pred = (概率 > 0.5) → MCC(y_true, y_pred)");
+      },
+    },
+    {
+      title: "XGBoost：一棵棵决策树接力纠错", kicker: "第 49–51 格 · 建模",
+      html: `<p>作者的模型是 <b>XGBClassifier</b>：<code>n_estimators=100</code> 棵树，每棵最深 14 层，每棵只用 80% 的行（subsample）和 60% 的列（colsample_bytree），并在验证集上监控 MCC。</p><p>每一棵树都是一串“如果……就……”的规则，例如“如果菌褶间距 ≤ 1 且 菌柄表面 ≤ 3，往左走”。第 1 棵树先粗分，第 2 棵专门去修第 1 棵分错的蘑菇，依次接力，最后把 100 棵树的打分加起来再变成概率。下面的实验 B 用浏览器现场长一棵树，看规则是怎么挑出来的。</p>`,
+      cells: [49], highlight: ["XGBClassifier", "max_depth=14", "n_estimators=100", "eval_metric=mcc_metric"],
+      draw(svg, ctx) {
+        const r = K.rng(5), P = [];
+        for (let i = 0; i < 14; i++) { const poison = r() < 0.5; P.push({ poison, s: 0, x: 470 + (i % 7) * 32, y: poison ? 90 : 230 }); }
+        K.svg(svg, "text", { x: 470, y: 50, "font-size": 12, class: "muted" }, "每朵蘑菇的累计得分（>0 判有毒）");
+        const dots = P.map((p) => K.svg(svg, "circle", { cx: p.x, cy: 160, r: 9, fill: p.poison ? "var(--bad)" : "var(--good)", opacity: 0.85 }));
+        K.svg(svg, "line", { x1: 460, x2: 700, y1: 160, y2: 160, stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+        K.svg(svg, "text", { x: 704, y: 120, "font-size": 11, "text-anchor": "end", fill: "var(--bad)" }, "有毒 ↑");
+        K.svg(svg, "text", { x: 704, y: 210, "font-size": 11, "text-anchor": "end", fill: "var(--good)" }, "可食 ↓");
+        const trees = [];
+        for (let k = 0; k < 4; k++) {
+          const x = 30 + k * 104, g = K.svg(svg, "g"); g.style.opacity = 0;
+          K.svg(g, "circle", { cx: x + 45, cy: 90, r: 10, fill: "var(--c1)" });
+          K.svg(g, "line", { x1: x + 45, y1: 100, x2: x + 22, y2: 140, stroke: "var(--ink-3)" });
+          K.svg(g, "line", { x1: x + 45, y1: 100, x2: x + 68, y2: 140, stroke: "var(--ink-3)" });
+          K.svg(g, "circle", { cx: x + 22, cy: 148, r: 8, fill: "var(--c3)" });
+          K.svg(g, "circle", { cx: x + 68, cy: 148, r: 8, fill: "var(--c3)" });
+          K.svg(g, "text", { x: x + 45, y: 185, "text-anchor": "middle", "font-size": 12 }, `第 ${k + 1} 棵`);
+          K.svg(g, "text", { x: x + 45, y: 205, "text-anchor": "middle", "font-size": 11, class: "muted" }, k ? "修上一棵的错" : "先粗分");
+          if (k < 3) K.arrow(g, x + 82, 120, x + 100, 120);
+          trees.push(g);
+        }
+        K.svg(svg, "text", { x: 30, y: 270, "font-size": 13 }, "得分 = 第1棵 + 第2棵 + … + 第100棵 → sigmoid → 概率");
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12, class: "muted" }, "示意：只画 4 棵、每棵 1 层；作者的是 100 棵、每棵最深 14 层");
+        (async () => {
+          for (let k = 0; k < 4; k++) {
+            if (!(await ctx.tween(400, (t) => (trees[k].style.opacity = t)))) return;
+            const step = [0.5, 0.3, 0.2, 0.12][k];
+            const from = P.map((p) => p.s);
+            P.forEach((p, i) => { const err = (p.poison ? 1 : -1) - Math.tanh(p.s); p.s += step * (err + (r() - 0.5) * 0.8); });
+            if (!(await ctx.tween(700, (t) => dots.forEach((d, i) => d.setAttribute("cy", 160 - K.lerp(from[i], P[i].s, t) * 70))))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "LIME：这一朵为什么被判有毒", kicker: "第 52–60 格 · 单样本解释",
+      html: `<p>100 棵深树加起来，人很难直接读懂。作者用 <b>LIME</b> 解释单个预测：在某朵蘑菇周围随机“改一改”特征造出很多假样本，让 XGBoost 给它们打分，再用一个简单的线性模型去贴近这些打分。线性模型的系数就说明“哪几个特征把这朵蘑菇推向有毒、哪几个推向可食”。第 56–60 格各解释了验证集里的一朵。</p><p class="callout warn">第 52 格的 <code>class_names=['Poisnous','edible']</code> 顺序写反了：LabelEncoder 是 e→0（可食）、p→1（有毒），所以解释图上两类的名字是对调的。变量名 <code>redict_fn_xgb</code> 少了一个 p，不影响运行。</p>`,
+      cells: [52, 56], highlight: ["class_names=['Poisnous','edible']", "explain_instance"],
+      draw(svg, ctx) {
+        const r = K.rng(13), c = [200, 170];
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 13, class: "muted" }, "① 在这朵周围造假样本 → ② 复杂模型打分 → ③ 用一条直线局部近似（示意）");
+        const f = (x, y) => Math.sin((x - 120) / 50) + (y - 170) / 70 > 0;
+        const samples = [];
+        for (let i = 0; i < 60; i++) samples.push([c[0] + K.randn(r) * 70, c[1] + K.randn(r) * 60]);
+        const els = samples.map((p) => K.svg(svg, "circle", { cx: c[0], cy: c[1], r: 4, fill: "var(--ink-3)", opacity: 0.7 }));
+        K.svg(svg, "circle", { cx: c[0], cy: c[1], r: 9, fill: "var(--accent)" });
+        const line = K.svg(svg, "line", { x1: 80, y1: 250, x2: 330, y2: 80, stroke: "var(--ink)", "stroke-width": 2, opacity: 0 });
+        const bars = [["菌褶间距", 0.8], ["孢子印颜色", 0.55], ["菌盖颜色", -0.35], ["菌柄表面", 0.25], ["菌盖形状", -0.15]];
+        const be = bars.map((b, i) => {
+          K.svg(svg, "text", { x: 530, y: 92 + i * 40, "text-anchor": "end", "font-size": 12 }, b[0]);
+          return K.svg(svg, "rect", { x: 540, y: 78 + i * 40, width: 0, height: 22, rx: 3, fill: b[1] > 0 ? "var(--bad)" : "var(--good)" });
+        });
+        K.svg(svg, "line", { x1: 540, x2: 540, y1: 70, y2: 280, stroke: "var(--ink-3)" });
+        K.svg(svg, "text", { x: 545, y: 300, "font-size": 11, fill: "var(--bad)" }, "→ 推向有毒");
+        K.svg(svg, "text", { x: 535, y: 300, "font-size": 11, "text-anchor": "end", fill: "var(--good)" }, "推向可食 ←");
+        ctx.tween(900, (t) => els.forEach((e, i) => { e.setAttribute("cx", K.lerp(c[0], samples[i][0], t)); e.setAttribute("cy", K.lerp(c[1], samples[i][1], t)); }))
+          .then((ok) => ok && ctx.tween(600, (t) => els.forEach((e, i) => e.setAttribute("fill", t > 0.5 ? (f(samples[i][0], samples[i][1]) ? "var(--bad)" : "var(--good)") : "var(--ink-3)"))))
+          .then((ok) => ok && ctx.tween(500, (t) => line.setAttribute("opacity", t)))
+          .then((ok) => ok && ctx.tween(900, (t) => be.forEach((b, i) => { const w = Math.abs(bars[i][1]) * 140 * t; b.setAttribute("width", w); b.setAttribute("x", bars[i][1] > 0 ? 540 : 540 - w); })));
+      },
+    },
+    {
+      title: "验证集打分、预测测试集、提交", kicker: "第 61–70 格 · 收尾",
+      html: `<p>第 61 格打印验证集上的 MCC；第 62 格对测试集预测，<code>XGB.predict</code> 直接给出 0/1（变量名叫 <code>test_pred_prob</code>，其实不是概率）；第 64 格用 LabelEncoder 把 0/1 翻回 e/p；第 67 格写出 <code>submission.csv</code>，第 68 格画提交结果里两类各有多少。</p><p>具体 MCC 数值只在运行输出里，源码不带，这里不写。</p>`,
+      cells: [61, 62, 64, 67], highlight: ["matthews_corrcoef(test_y, y_pred)", "le.inverse_transform"],
+      draw(svg, ctx) {
+        const steps = ["验证集 MCC\n（第 61 格）", "测试集预测 0/1\n（第 62 格）", "0/1 → e/p\n（第 64 格）", "submission.csv\n（第 67 格）"];
+        const ns = steps.map((s, i) => K.node(svg, 20 + i * 178, 120, 150, 70, s, { fill: i === 3 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 3 ? "var(--accent)" : "var(--line)" }));
+        const as = [0, 1, 2].map((i) => K.arrow(svg, 172 + i * 178, 155, 196 + i * 178, 155));
+        hide([...ns, ...as]);
+        (async () => { for (let i = 0; i < 4; i++) { if (!(await ctx.tween(350, (t) => fade(i ? [ns[i], as[i - 1]] : [ns[i]], t)))) return; } })();
+        K.svg(svg, "text", { x: 20, y: 250, "font-size": 13, class: "muted" }, "具体分数在作者的运行输出里，源码不带，本页不列");
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：准确率 vs MCC ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "p", label: "毒蘑菇占比", min: 1, max: 90, step: 1, value: 55, fmt: (v) => v + "%" },
+      { id: "sens", label: "毒蘑菇被认出来的比例（召回率）", min: 0, max: 100, step: 1, value: 95, fmt: (v) => v + "%" },
+      { id: "spec", label: "可食蘑菇被判对的比例", min: 0, max: 100, step: 1, value: 95, fmt: (v) => v + "%" },
+    ],
+    note: "按 1000 朵蘑菇现场算混淆矩阵、准确率和 MCC。试试：把毒蘑菇占比拉到 5%，“可食判对”拉到 100%，再把“认出毒蘑菇”拉到 0%（模型永远说可食）：准确率仍有 95%，MCC 却是 0。",
+    render(svg, v) {
+      const N = 1000, P = N * v.p / 100, Ng = N - P;
+      const TP = P * v.sens / 100, FN = P - TP, TN = Ng * v.spec / 100, FP = Ng - TN;
+      const den = Math.sqrt((TP + FP) * (TP + FN) * (TN + FP) * (TN + FN));
+      const mcc = den > 0 ? (TP * TN - FP * FN) / den : 0, acc = (TP + TN) / N;
+      const cells = [["TP 毒判毒", TP, "var(--good)"], ["FN 毒判可食", FN, "var(--bad)"], ["FP 可食判毒", FP, "var(--warn)"], ["TN 可食判可食", TN, "var(--good)"]];
+      K.svg(svg, "text", { x: 40, y: 24, "font-size": 12, class: "muted" }, "列：模型说有毒 / 模型说可食；行：真的有毒 / 真的可食");
+      cells.forEach((c, i) => {
+        const x = 40 + (i % 2) * 150, y = 36 + Math.floor(i / 2) * 130, a = c[1] / N;
+        K.svg(svg, "rect", { x, y, width: 142, height: 122, rx: 8, fill: `color-mix(in srgb, ${c[2]} ${Math.round(10 + a * 80)}%, var(--panel))`, stroke: c[2] });
+        K.svg(svg, "text", { x: x + 71, y: y + 48, "text-anchor": "middle", "font-size": 13 }, c[0]);
+        K.svg(svg, "text", { x: x + 71, y: y + 80, "text-anchor": "middle", "font-size": 24, "font-weight": 700 }, Math.round(c[1]));
+      });
+      const bar = (y, label, val, lo, color) => {
+        K.svg(svg, "text", { x: 370, y: y - 8, "font-size": 13 }, label);
+        K.svg(svg, "rect", { x: 370, y, width: 250, height: 22, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" });
+        const z = 370 + 250 * (0 - lo) / (1 - lo);
+        if (lo < 0) K.svg(svg, "line", { x1: z, x2: z, y1: y - 3, y2: y + 25, stroke: "var(--ink-3)" });
+        const x1 = 370 + 250 * (Math.min(val, 0) - lo) / (1 - lo), x2 = 370 + 250 * (Math.max(val, 0) - lo) / (1 - lo);
+        K.svg(svg, "rect", { x: lo < 0 ? x1 : 370, y, width: lo < 0 ? x2 - x1 : 250 * val, height: 22, rx: 4, fill: color });
+      };
+      bar(80, "准确率（0 到 1）", acc, 0, "var(--c1)");
+      bar(170, "MCC（−1 到 1，竖线是 0）", mcc, -1, mcc < 0.3 ? "var(--bad)" : "var(--good)");
+      K.svg(svg, "text", { x: 370, y: 250, "font-size": 12, class: "muted" }, `漏掉的毒蘑菇：${Math.round(FN)} 朵 / 1000`);
+      return { readout: [
+        { k: "准确率", v: (acc * 100).toFixed(1) + "%" },
+        { k: "MCC", v: mcc.toFixed(3), color: mcc < 0.3 ? "var(--bad)" : "var(--good)" },
+        { k: "漏判毒蘑菇", v: Math.round(FN) + " 朵", color: FN > 0 ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：用信息增益现场长一棵决策树 ---------- */
+  const FEATS = [
+    { k: "菌褶间距", v: ["密", "中", "疏"] },
+    { k: "孢子印颜色", v: ["白", "棕", "黑", "绿"] },
+    { k: "菌柄表面", v: ["光滑", "鳞片", "纤维"] },
+    { k: "菌盖颜色", v: ["白", "棕", "红", "黄"] },
+  ];
+  // 模拟“真实规律”：孢子印绿 → 多半有毒；菌褶密且菌柄鳞片 → 多半有毒；其余看菌盖红
+  function genData(seed, n, noise) {
+    const r = K.rng(seed), X = [], y = [];
+    for (let i = 0; i < n; i++) {
+      const x = FEATS.map((f) => Math.floor(r() * f.v.length));
+      let p = x[1] === 3 ? 0.95 : x[0] === 0 && x[2] === 1 ? 0.9 : x[3] === 2 ? 0.7 : 0.12;
+      p = p * (1 - noise) + 0.5 * noise;
+      X.push(x); y.push(r() < p ? 1 : 0);
+    }
+    return { X, y };
+  }
+  const H = (a, b, crit) => { const n = a + b; if (!n) return 0; const p = a / n, q = b / n; return crit === "gini" ? 1 - p * p - q * q : -(p ? p * Math.log2(p) : 0) - (q ? q * Math.log2(q) : 0); };
+  function grow(idx, D, depth, maxD, crit, minLeaf) {
+    const pos = idx.reduce((s, i) => s + D.y[i], 0), neg = idx.length - pos;
+    const node = { n: idx.length, pos, neg, pred: pos >= neg ? 1 : 0, imp: H(pos, neg, crit) };
+    if (depth >= maxD || !pos || !neg) return node;
+    let best = null;
+    FEATS.forEach((f, fi) => f.v.forEach((_, vi) => {
+      const L = idx.filter((i) => D.X[i][fi] === vi), R = idx.filter((i) => D.X[i][fi] !== vi);
+      if (L.length < minLeaf || R.length < minLeaf) return;
+      const lp = L.reduce((s, i) => s + D.y[i], 0), rp = R.reduce((s, i) => s + D.y[i], 0);
+      const gain = node.imp - (L.length * H(lp, L.length - lp, crit) + R.length * H(rp, R.length - rp, crit)) / idx.length;
+      if (!best || gain > best.gain) best = { fi, vi, gain, L, R };
+    }));
+    if (!best || best.gain <= 1e-9) return node;
+    node.split = best;
+    node.left = grow(best.L, D, depth + 1, maxD, crit, minLeaf);
+    node.right = grow(best.R, D, depth + 1, maxD, crit, minLeaf);
+    return node;
+  }
+  const predict = (node, x) => (!node.split ? node.pred : x[node.split.fi] === node.split.vi ? predict(node.left, x) : predict(node.right, x));
+  K.lab(document.getElementById("lab2"), {
+    width: 720, height: 430,
+    controls: [
+      { id: "depth", label: "最大深度（最多问几个问题）", min: 1, max: 4, step: 1, value: 2 },
+      { id: "crit", label: "衡量“混乱程度”的方法", value: "entropy", options: [["entropy", "信息熵（信息增益）"], ["gini", "基尼不纯度"]] },
+      { id: "noise", label: "数据里的噪声（规律被打乱的程度）", min: 0, max: 0.8, step: 0.05, value: 0.1, fmt: (v) => Math.round(v * 100) + "%" },
+      { id: "seed", label: "重新抽一批蘑菇", button: true },
+    ],
+    note: "浏览器里生成 300 朵模拟蘑菇训练、另 1000 朵测试。每个节点都把所有“特征 = 某值？”的问题试一遍，选让两边最“纯”（信息增益最大）的那个。红 = 判有毒，绿 = 判可食；节点里是“有毒数/总数”。特征和规律是虚构的示意，不是真实蘑菇知识。",
+    render(svg, v) {
+      const seed = 31 + v.seed * 13;
+      const tr = genData(seed, 300, v.noise), te = genData(seed + 777, 1000, v.noise);
+      const root = grow(tr.X.map((_, i) => i), tr, 0, v.depth, v.crit, 5);
+      const levels = v.depth + 1, W = 720, top = 30, dy = (330 - top) / Math.max(1, levels - 1);
+      let leaves = 0, rules = [];
+      function draw(node, depth, x0, x1, path) {
+        const x = (x0 + x1) / 2, y = top + depth * dy;
+        if (node.split) {
+          const f = FEATS[node.split.fi], q = `${f.k}=${f.v[node.split.vi]}?`;
+          const xl = (x0 + x) / 2, xr = (x + x1) / 2, yc = y + dy;
+          K.svg(svg, "line", { x1: x, y1: y + 14, x2: xl, y2: yc - 14, stroke: "var(--ink-3)" });
+          K.svg(svg, "line", { x1: x, y1: y + 14, x2: xr, y2: yc - 14, stroke: "var(--ink-3)" });
+          K.svg(svg, "text", { x: (x + xl) / 2 - 6, y: (y + yc) / 2, "font-size": 10, "text-anchor": "end", fill: "var(--accent)" }, "是");
+          K.svg(svg, "text", { x: (x + xr) / 2 + 6, y: (y + yc) / 2, "font-size": 10, fill: "var(--ink-3)" }, "否");
+          draw(node.left, depth + 1, x0, x, path.concat(`${f.k}是${f.v[node.split.vi]}`));
+          draw(node.right, depth + 1, x, x1, path.concat(`${f.k}不是${f.v[node.split.vi]}`));
+          const w = Math.min(x1 - x0 - 4, 150);
+          K.svg(svg, "rect", { x: x - w / 2, y: y - 14, width: w, height: 28, rx: 6, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+          K.svg(svg, "text", { x, y: y - 1, "text-anchor": "middle", "font-size": w < 80 ? 9 : 11, "font-weight": 700 }, q);
+          K.svg(svg, "text", { x, y: y + 10, "text-anchor": "middle", "font-size": 9, class: "muted" }, `增益 ${node.split.gain.toFixed(3)}`);
+        } else {
+          leaves++;
+          const w = Math.min(x1 - x0 - 4, 90), c = node.pred ? "var(--bad)" : "var(--good)";
+          K.svg(svg, "rect", { x: x - w / 2, y: y - 14, width: w, height: 28, rx: 6, fill: soft(c, 22), stroke: c });
+          K.svg(svg, "text", { x, y: y - 1, "text-anchor": "middle", "font-size": w < 60 ? 9 : 11, "font-weight": 700, fill: c }, node.pred ? "有毒" : "可食");
+          K.svg(svg, "text", { x, y: y + 10, "text-anchor": "middle", "font-size": 9 }, `${node.pos}/${node.n}`);
+          if (node.pred) rules.push(path.join(" 且 ") || "（全部）");
+        }
+      }
+      draw(root, 0, 0, W, []);
+      const r0 = rules.slice(0, 2).map((s) => "如果 " + s + " → 有毒");
+      r0.forEach((s, i) => K.svg(svg, "text", { x: 10, y: 380 + i * 20, "font-size": 12, fill: "var(--bad)" }, s.length > 70 ? s.slice(0, 70) + "…" : s));
+      if (!r0.length) K.svg(svg, "text", { x: 10, y: 380, "font-size": 12, class: "muted" }, "这棵树没有判“有毒”的叶子");
+      let ok = 0, FN = 0, TP = 0, FP = 0, TN = 0;
+      te.X.forEach((x, i) => { const p = predict(root, x), t = te.y[i]; if (p && t) TP++; else if (p) FP++; else if (t) FN++; else TN++; });
+      ok = TP + TN;
+      const den = Math.sqrt((TP + FP) * (TP + FN) * (TN + FP) * (TN + FN)), mcc = den ? (TP * TN - FP * FN) / den : 0;
+      return { readout: [
+        { k: "叶子数（规则条数）", v: leaves },
+        { k: "测试准确率", v: (ok / 10).toFixed(1) + "%" },
+        { k: "测试 MCC", v: mcc.toFixed(3), color: mcc < 0.3 ? "var(--bad)" : "var(--good)" },
+        { k: "漏判毒蘑菇", v: FN + " 朵", color: "var(--bad)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

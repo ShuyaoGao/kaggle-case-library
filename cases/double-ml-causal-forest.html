@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>双重机器学习</title>
+<meta name="description" content="Kaggle 案例拆解：用 EconML 的因果森林（CausalForestDML）在合成数据上估计随 x 变化的因果效应，讲清混杂、残差对残差和异质效应。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">合成数据 · 因果推断 · 异质处理效应</div>
+  <h1>双重机器学习：先把混杂“预测掉”，再看剩下的部分谁影响谁</h1>
+  <p class="en">Causality: Double ML examples using EconML and Causal Forests</p>
+  <div class="tags">
+    <span class="tag st">统计分析</span><span class="tag ml">机器学习</span>
+    <span class="tag method">双重机器学习 Double ML</span><span class="tag method">部分线性模型</span><span class="tag method">残差对残差</span>
+    <span class="tag method">因果森林 CausalForestDML</span><span class="tag method">随机森林</span><span class="tag method">EconML</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Carl McBride Ellis</b></span>
+    <span>Kaggle 点赞 <b>68</b>（2026-11 抓取）</span>
+    <span>数据集 <b>无（notebook 内生成合成数据）</b></span>
+    <span><a href="https://www.kaggle.com/code/carlmcbrideellis/causal-forests-double-ml-example-using-econml" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">作者自己造的 10000 行合成数据</div><p>30 个混杂特征 W、1 个控制变量 X、1 个处理 T、1 个结果 Y。因为是自己造的，<b>真实的因果效应是已知的</b>，可以拿来检验方法。<span data-cell="3">出处</span></p></div>
+    <div class="card panel"><h3>要回答什么</h3><div class="big">T 每增加 1，Y 会因此变多少？</div><p>而且这个效应 θ 会随 x 变化：例 1 是 e<sup>2x</sup>，例 2 是 sin(πx)。<span data-cell="5">出处</span> <span data-cell="9">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">双重机器学习 + 因果森林</div><p>两个随机森林分别从混杂里预测 Y 和 T，用两边的“残差”再拟合因果森林，得到 θ(x) 和置信区间。<span data-cell="0">出处</span> <span data-cell="7">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">估计曲线贴着真实曲线</div><p>作者的评价是“结果非常令人满意”，没有给具体误差数字。<span data-cell="12">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">这个 notebook <b>不读任何外部数据</b>，第 4 格的函数 <code>make_dataset()</code> 现场造数据。下面的数字都直接来自代码。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">行数</div><div class="v">10,000</div></div>
+        <div class="stat-tile"><div class="k">混杂特征 W</div><div class="v">30 列</div></div>
+        <div class="stat-tile"><div class="k">真正起作用的 W</div><div class="v">随机 5 列</div></div>
+        <div class="stat-tile"><div class="k">随机种子</div><div class="v">10</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">行数、列数、5 列“支撑”见第 4 格 <span data-cell="4">出处</span>；种子见第 1 格 <span data-cell="1">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>变量</th><th>怎么造的</th><th>角色</th></tr>
+        <tr><td><code>W</code></td><td>30 列标准正态随机数，其中 5 列同时进入 T 和 Y</td><td><b>混杂因素</b></td></tr>
+        <tr><td><code>X</code></td><td>0 到 1 之间均匀随机</td><td>决定效应大小的变量</td></tr>
+        <tr><td><code>T</code></td><td>那 5 列 W 的加权和 + 噪声</td><td><b>处理（原因）</b>，连续值</td></tr>
+        <tr><td><code>Y</code></td><td>θ(X)·T + 那 5 列 W 的另一组加权和 + 噪声</td><td><b>结果</b></td></tr>
+        <tr><td><code>TE</code></td><td>θ(X)，例 1 为 e<sup>2x</sup>，例 2 为 sin(πx)</td><td>真实效应（标准答案）</td></tr>
+      </table></div>
+      <p class="callout">因为 W 同时推动 T 和 Y，直接看“T 大的时候 Y 大不大”会把 W 的作用也算进去，这就是要用双重机器学习的原因。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="4">
+    <h3>实验 A · 残差对残差：去掉混杂后的效应 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labA"></div>
+  </div>
+  <div data-at="8">
+    <h3>实验 B · 效应随 x 变化：分段估计 θ(x) <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labB"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>相关不等于因果；研究因果的金标准是实验（如 A/B 测试），但很多时候做不了</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>假设没有未观测混杂；如果有，只能去补充数据</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>双重机器学习：分样本，分别用模型预测结果和处理，再用两边残差估计效应</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>两个例子（e<sup>2x</sup>、sin(πx)）的结果“非常令人满意”</td><td><span data-cell="12">第 12 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">估计曲线、99% 区间和真实曲线的对比只在运行输出的图里，作者没有写误差数字，所以这里不列分数。</p>
+      <p class="callout warn"><b>原文值得注意的地方：</b>①第 3 格公式写成 Y = Tθ + g(X)、T = m(X)，但第 4 格代码里推动 T 和 Y 的是 W，X 只决定 θ 的大小，公式里的 X 应为 W；②第 8、11 格画图时横轴标成 “Treatment (Cause)”、纵轴标成 “Outcome (Effect)”，实际上横轴是 X、纵轴是估计的效应 θ(x)；③<code>alpha=0.01</code> 画出的是 99% 区间，图上没说明；④作者说“下一篇用真实数据”，本篇只有合成数据，真实数据里无法确认“没有未观测混杂”这个假设。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能回答：</b>在不能做实验、只有观察数据时，某个连续的“处理”（价格、剂量、广告投入、学习时长）对结果的因果影响，以及这个影响对哪类人大、对哪类人小。</li>
+        <li><b>同类问题：</b>降价 1 元能多卖多少（不同城市不同）；药物剂量对血压的影响（不同年龄不同）；补课时长对成绩的影响（不同基础不同）。</li>
+        <li><b>可迁移的套路：</b>列出所有可能的混杂 → 用灵活的机器学习模型分别预测结果和处理 → 交叉拟合取残差 → 残差对残差估计效应 → 用因果森林看效应如何随特征变化 → 用置信区间说明不确定性。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>合成数据：部分线性模型 <span data-cell="3">第 3 格</span> <span data-cell="4">第 4 格</span></li>
+        <li>CausalForestDML：model_y、model_t 都是随机森林，1000 棵因果树 <span data-cell="7">第 7 格</span></li>
+        <li><code>effect</code> 估计 θ(x)、<code>effect_interval</code> 求区间 <span data-cell="8">第 8 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>为什么直接用“T 和 Y 的相关”会估错？在作者的数据里，W 是怎么同时推动 T 和 Y 的？</li>
+      <li>双重机器学习为什么要“分样本”（交叉拟合）？如果用同一批数据训练模型又在同一批数据上算残差，会出什么问题？</li>
+      <li>作者假设“没有未观测混杂”。在“补课时长 → 成绩”这个问题里，你能想到哪些很难测量的混杂？</li>
+      <li>合成数据上方法表现很好，能说明它在真实数据上也一定好吗？为什么作者要先用合成数据？</li>
+      <li>θ(x) = sin(πx) 意味着 x 在中间时效应最大。现实中有没有这种“中间最有效”的例子？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Carl McBride Ellis，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。方法来自 Chernozhukov 等人的双重机器学习、Athey 与 Wager 等人的因果森林，工具为微软 EconML。
+</footer>
+</main>
+
+<script src="nb/double-ml-causal-forest.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const fade = (els, ctx, ms) => ctx.tween(ms || 500, (t) => els.forEach((e) => (e.style.opacity = t)));
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+  function line(svg, ax, xs, ys, attrs) {
+    let d = ""; xs.forEach((x, i) => { if (ys[i] == null || isNaN(ys[i])) return; d += (d ? "L" : "M") + ax.sx(x).toFixed(1) + "," + ax.sy(ys[i]).toFixed(1); });
+    return K.svg(svg, "path", Object.assign({ d, fill: "none", stroke: "var(--c1)", "stroke-width": 2 }, attrs || {}));
+  }
+  function drawIn(p, ctx, ms) { const L = p.getTotalLength(); p.style.strokeDasharray = L; p.style.strokeDashoffset = L; return ctx.tween(ms, (t) => (p.style.strokeDashoffset = L * (1 - t))); }
+
+  /* 最小二乘（小维度） */
+  function ols(X, y) {
+    const p = X[0].length, A = Array.from({ length: p }, () => new Array(p).fill(0)), b = new Array(p).fill(0);
+    X.forEach((x, i) => { for (let a = 0; a < p; a++) { b[a] += x[a] * y[i]; for (let c = 0; c < p; c++) A[a][c] += x[a] * x[c]; } });
+    const n = p, M = A.map((r, i) => r.concat([b[i]]));
+    for (let c = 0; c < n; c++) {
+      let q = c; for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[q][c])) q = r;
+      [M[c], M[q]] = [M[q], M[c]];
+      for (let r = 0; r < n; r++) if (r !== c) { const f = M[r][c] / (M[c][c] || 1e-12); for (let k = c; k <= n; k++) M[r][k] -= f * M[c][k]; }
+    }
+    return M.map((r, i) => r[n] / (r[i] || 1e-12));
+  }
+  /* 交叉拟合的 kNN：用 F（特征）预测 target，两折，返回每个样本的折外预测 */
+  function knnCross(F, target, k) {
+    const n = F.length, pred = new Array(n), half = Math.floor(n / 2);
+    const folds = [[0, half], [half, n]];
+    folds.forEach(([a, b], f) => {
+      const [ta, tb] = folds[1 - f];
+      for (let i = a; i < b; i++) {
+        const d = [];
+        for (let j = ta; j < tb; j++) { let s = 0; for (let c = 0; c < F[i].length; c++) { const e = F[i][c] - F[j][c]; s += e * e; } d.push([s, j]); }
+        d.sort((u, v) => u[0] - v[0]);
+        let m = 0; for (let q = 0; q < k; q++) m += target[d[q][1]]; pred[i] = m / k;
+      }
+    });
+    return pred;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "预测不等于因果", kicker: "第 0 格 · 开场",
+      html: `<p>作者开篇说：Kaggle 上大部分工作是<b>预测建模</b>，假设训练数据和将来用的数据分布一样，就能预测新样本。<span data-cell="0">出处</span></p><p>可是机器学习里找相关很容易，<b>相关并不意味着因果</b>，作者还推荐了一个专门收集“荒唐相关”的网站。动画举一个例子：小学生的鞋码和阅读成绩高度相关，因为背后是<b>年龄</b>：年龄大的孩子脚大，也识字多。给孩子换大鞋，成绩不会变好。</p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 360, h: 240 }, [28, 40], [0, 100], { xticks: 3, yticks: 0, xlabel: "鞋码（示意）" });
+        const r = K.rng(4), dots = [];
+        for (let i = 0; i < 50; i++) { const age = 6 + r() * 6, shoe = 26 + age * 1.0 + K.randn(r) * 0.8, read = (age - 6) * 14 + 10 + K.randn(r) * 8; dots.push(K.svg(svg, "circle", { cx: ax.sx(shoe), cy: ax.sy(read), r: 4.5, fill: K.heat((age - 6) / 6), stroke: "var(--ink-3)", "stroke-width": 0.5 })); }
+        K.svg(svg, "text", { x: 70, y: 22, "font-size": 13, "font-weight": 700 }, "阅读成绩 ↑");
+        const age = K.node(svg, 500, 30, 170, 54, "年龄（混杂）", { fill: "color-mix(in srgb, var(--c6) 16%, var(--panel))", stroke: "var(--c6)", bold: true });
+        const s = K.node(svg, 450, 200, 110, 50, "鞋码", { bold: true }), rd = K.node(svg, 600, 200, 110, 50, "阅读成绩", { bold: true });
+        const a1 = K.arrow(svg, 560, 86, 510, 196, { color: "var(--c6)", sw: 2.5 }), a2 = K.arrow(svg, 610, 86, 650, 196, { color: "var(--c6)", sw: 2.5 });
+        const x = K.svg(svg, "text", { x: 580, y: 236, "text-anchor": "middle", "font-size": 24, fill: "var(--bad)", "font-weight": 700 }, "✗");
+        K.svg(svg, "text", { x: 70, y: 318, "font-size": 12, class: "muted" }, "点的颜色越深 = 年龄越大（示意数据）");
+        hide([...dots, age, a1, a2, x]);
+        (async () => { if (!(await ctx.tween(900, (t) => dots.forEach((d, i) => (d.style.opacity = K.clamp(t * 50 - i, 0, 1)))))) return; await ctx.wait(300); if (!(await fade([age, a1, a2], ctx, 700))) return; fade([x], ctx, 500); })();
+      },
+    },
+    {
+      at: 0, title: "做不了实验时：处理 T、结果 Y、混杂 W", kicker: "第 0 格 · 记号与假设",
+      html: `<p>研究因果的金标准是<b>实验</b>，机器学习里常见的是 A/B 测试：随机分组，一组改动、一组不改，两组其他方面一样，差别只能来自改动。可作者列了三种做不了实验的情况：①历史数据，已经不可能再收集（比如泰坦尼克号）；②经济、社会科学里根本无法做实验；③实验很贵，想先从已有数据里挑出值得试的方案。<span data-cell="0">出处</span></p><p>作者给出定义：本 notebook 研究<b>一个连续的处理</b>（某个特征）对结果的影响，同时保持其他特征（混杂 W）不变。处理记作 <b>T</b>，结果记作 <b>Y</b>。<span data-cell="0">出处</span></p><p>还做了一个关键假设：<b>没有未观测的混杂</b>，所有相关的特征都测到了。作者说，未观测混杂是因果分析的“克星”，如果有，除了去收集缺失的数据，没什么别的办法。动画里虚线的 U 就是这个“看不见的混杂”。</p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        const W = K.node(svg, 270, 30, 180, 56, "混杂 W（测到了）", { fill: "color-mix(in srgb, var(--c6) 16%, var(--panel))", stroke: "var(--c6)", bold: true });
+        const T = K.node(svg, 70, 200, 160, 56, "处理 T", { stroke: "var(--c1)", sw: 2.5, bold: true });
+        const Y = K.node(svg, 490, 200, 160, 56, "结果 Y", { stroke: "var(--c3)", sw: 2.5, bold: true });
+        const e1 = K.arrow(svg, 310, 88, 170, 196, { color: "var(--c6)", sw: 2.5 }), e2 = K.arrow(svg, 410, 88, 560, 196, { color: "var(--c6)", sw: 2.5 });
+        const e3 = K.arrow(svg, 232, 228, 486, 228, { color: "var(--accent)", sw: 3 });
+        const th = K.svg(svg, "text", { x: 360, y: 218, "text-anchor": "middle", "font-size": 15, "font-weight": 700, fill: "var(--accent)" }, "θ = 我们要估的因果效应");
+        const U = K.node(svg, 290, 280, 140, 44, "看不见的 U ?", { fill: "var(--panel)", stroke: "var(--ink-3)" });
+        const u1 = K.arrow(svg, 290, 300, 160, 260, { color: "var(--ink-3)", dash: "5 4" }), u2 = K.arrow(svg, 430, 300, 560, 260, { color: "var(--ink-3)", dash: "5 4" });
+        const all = [e1, e2, e3, th, U, u1, u2]; hide(all);
+        (async () => { for (const g of [[e1, e2], [e3, th], [U, u1, u2]]) { if (!(await fade(g, ctx, 650))) return; await ctx.wait(350); } })();
+      },
+    },
+    {
+      at: 0, title: "双重机器学习：两次预测，再拿残差对残差", kicker: "第 0 格 · 方法原理",
+      html: `<p>双重机器学习（Double ML）由 Chernozhukov 等人提出，“双重”指用了两个预测模型。作者把流程总结为：<span data-cell="0">出处</span></p><ol class="tight"><li>把数据分成两半（分样本）；</li><li>用混杂预测<b>结果 Y</b>，算出 Y 的残差 Ỹ（Y 里混杂解释不了的部分）；</li><li>用混杂预测<b>处理 T</b>，算出 T 的残差 T̃；</li><li>两个预测模型都用随机森林；</li><li>最后用 Ỹ = θ(X)·T̃ + ε 拟合出效应。</li></ol><p>EconML 的 CausalForestDML 在最后一步用的是非参数的<b>因果森林</b>，所以 θ 可以随 X 变化。</p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        const D = K.node(svg, 20, 140, 120, 56, "数据\n(W, X, T, Y)", { bold: true });
+        const my = K.node(svg, 200, 50, 170, 56, "模型 1：W,X → 预测 Y", { stroke: "var(--c3)", sw: 2 });
+        const mt = K.node(svg, 200, 230, 170, 56, "模型 2：W,X → 预测 T", { stroke: "var(--c1)", sw: 2 });
+        const ry = K.node(svg, 420, 50, 120, 56, "Ỹ = Y − 预测", { stroke: "var(--c3)" });
+        const rt = K.node(svg, 420, 230, 120, 56, "T̃ = T − 预测", { stroke: "var(--c1)" });
+        const fin = K.node(svg, 580, 135, 125, 66, "因果森林\nỸ ≈ θ(X)·T̃", { fill: "var(--accent-soft)", stroke: "var(--accent)", bold: true });
+        const ar = [K.arrow(svg, 140, 160, 198, 82), K.arrow(svg, 140, 178, 198, 256), K.arrow(svg, 370, 78, 418, 78), K.arrow(svg, 370, 258, 418, 258), K.arrow(svg, 540, 78, 600, 132), K.arrow(svg, 540, 258, 600, 204)];
+        const note = K.svg(svg, "text", { x: 20, y: 326, "font-size": 12, class: "muted" }, "残差 = 混杂“解释不了”的部分；两边残差之间的关系，才是 T 对 Y 的因果效应");
+        const seq = [[ar[0], ar[1], my, mt], [ar[2], ar[3], ry, rt], [ar[4], ar[5], fin], [note]];
+        hide(seq.flat());
+        (async () => { for (const g of seq) { if (!(await fade(g, ctx, 600))) return; await ctx.wait(300); } })();
+      },
+    },
+    {
+      title: "准备工具：NumPy 和 EconML", kicker: "第 1–2 格 · 导入",
+      html: `<p>导入 numpy、pandas、matplotlib，以及用来生成网格的 <code>itertools.product</code>，并把随机种子固定为 10，保证每次造出的数据一样。<span data-cell="1">出处</span></p><p>然后用 pip 安装微软研究院 ALICE 团队开发的 <b>EconML</b>，专门做“用机器学习估计因果效应”的工具包。<span data-cell="2">出处</span></p>`,
+      cells: [1, 2], highlight: ["np.random.seed(10)", "econml"],
+      draw(svg, ctx) {
+        const items = [["numpy", "造随机数"], ["pandas", "表格"], ["matplotlib", "画图"], ["EconML", "因果估计"]];
+        const els = items.map((d, i) => { const g = K.node(svg, 40 + i * 168, 110, 150, 80, d[0] + "\n" + d[1], { bold: i === 3, stroke: i === 3 ? "var(--accent)" : "var(--line)", sw: i === 3 ? 2.5 : 1.2 }); g.style.opacity = 0; return g; });
+        const seed = K.svg(svg, "text", { x: 360, y: 260, "text-anchor": "middle", "font-size": 15, "font-weight": 700 }, "np.random.seed(10)：固定随机种子，结果可复现");
+        seed.style.opacity = 0;
+        (async () => { for (const e of els) { if (!(await fade([e], ctx, 350))) return; } fade([seed], ctx, 500); })();
+      },
+    },
+    {
+      title: "合成数据：部分线性模型", kicker: "第 3 格 · 数据生成的设定",
+      html: `<p>作者造 30 个特征、10000 行数据，遵循<b>部分线性回归模型</b>：<span data-cell="3">出处</span></p><p class="callout">Y = T·θ + g(·) + ε<br>T = m(·) + ε</p><p>第一条是主方程：结果 = 处理 × 效应 + 混杂的影响 + 噪声。第二条描述混杂怎样影响处理，相当于“遗漏变量偏差”的来源。g、m 叫“干扰函数”，我们不关心它们长什么样，只要把它们的影响去掉。</p><p class="callout warn">原文公式里写的是 g(X)、m(X)，但看第 4 格代码，推动 T 和 Y 的其实是 W，X 只决定 θ 的大小。</p>`,
+      cells: [3],
+      draw(svg, ctx) {
+        const parts = [["Y", "var(--c3)", 60], ["=", "var(--ink)", 110], ["θ(X)", "var(--accent)", 160], ["·", "var(--ink)", 225], ["T", "var(--c1)", 255], ["+", "var(--ink)", 305], ["g(W)", "var(--c6)", 355], ["+", "var(--ink)", 425], ["ε", "var(--ink-3)", 470]];
+        const els = parts.map((p) => { const t = K.svg(svg, "text", { x: p[2], y: 90, "font-size": 34, "font-weight": 700, fill: p[1] }, p[0]); t.style.opacity = 0; return t; });
+        const parts2 = [["T", "var(--c1)", 60], ["=", "var(--ink)", 110], ["m(W)", "var(--c6)", 160], ["+", "var(--ink)", 250], ["ε", "var(--ink-3)", 295]];
+        const els2 = parts2.map((p) => { const t = K.svg(svg, "text", { x: p[2], y: 180, "font-size": 34, "font-weight": 700, fill: p[1] }, p[0]); t.style.opacity = 0; return t; });
+        const labs = [[160, 120, "我们要的：因果效应", "var(--accent)"], [355, 120, "混杂对结果的影响", "var(--c6)"], [160, 210, "混杂对处理的影响", "var(--c6)"], [470, 120, "噪声", "var(--ink-3)"]].map((l) => { const t = K.svg(svg, "text", { x: l[0], y: l[1], "font-size": 13, fill: l[3] }, l[2]); t.style.opacity = 0; return t; });
+        const m = K.svg(svg, "text", { x: 60, y: 280, "font-size": 14, "font-weight": 700 }, "W 同时出现在两条方程里 → 它就是混杂");
+        m.style.opacity = 0;
+        (async () => { for (const e of els) { if (!(await fade([e], ctx, 180))) return; } for (const e of els2) { if (!(await fade([e], ctx, 180))) return; } if (!(await fade(labs, ctx, 600))) return; fade([m], ctx, 500); })();
+      },
+    },
+    {
+      title: "造数据的代码：只有 5 列混杂真正起作用", kicker: "第 4 格 · make_dataset()",
+      html: `<p>逐行看 <code>make_dataset()</code>：<span data-cell="4">出处</span></p><ul class="tight"><li>噪声：−1 到 1 之间均匀随机；</li><li>X：0 到 1 之间均匀随机，用 <code>true_relationship</code> 算出每行的真实效应 TE；</li><li>从 30 列里随机挑 5 列作为“支撑”，再给 T 和 Y 各随机一组系数；</li><li>W：30 列标准正态；T = 这 5 列 × 系数 + 噪声；Y = TE·T + 这 5 列 × 另一组系数 + 噪声。</li></ul><p>动画里，30 列 W 中亮起的 5 列同时流向 T 和 Y：它们就是混杂。另外 25 列是“陪跑”的干扰项，模型要自己发现它们没用。</p>`,
+      cells: [4], highlight: ["support_size = 5", "coefs_T", "coefs_Y", "TE*T"],
+      draw(svg, ctx) {
+        const r = K.rng(10), sup = new Set(); while (sup.size < 5) sup.add(Math.floor(r() * 30));
+        const cols = [];
+        for (let j = 0; j < 30; j++) { const c = K.svg(svg, "rect", { x: 30 + j * 21, y: 30, width: 17, height: 120, rx: 3, fill: "var(--panel-2)", stroke: "var(--line)" }); cols.push(c); }
+        K.svg(svg, "text", { x: 30, y: 22, "font-size": 13, "font-weight": 700 }, "W：30 列 × 10000 行");
+        const T = K.node(svg, 150, 240, 140, 50, "T", { stroke: "var(--c1)", sw: 2.5, bold: true });
+        const Y = K.node(svg, 430, 240, 140, 50, "Y", { stroke: "var(--c3)", sw: 2.5, bold: true });
+        const arrows = [];
+        [...sup].forEach((j) => { const x = 38 + j * 21; arrows.push(K.arrow(svg, x, 152, 220, 236, { color: "var(--c6)", sw: 1.5 }), K.arrow(svg, x, 152, 500, 236, { color: "var(--c6)", sw: 1.5 })); });
+        const tA = K.arrow(svg, 290, 265, 428, 265, { color: "var(--accent)", sw: 3 });
+        const te = K.svg(svg, "text", { x: 360, y: 315, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--accent)" }, "TE = θ(X) 只作用在 T → Y 这根箭头上");
+        hide([...arrows, tA, te]);
+        (async () => {
+          await ctx.wait(400);
+          if (!(await ctx.tween(800, (t) => [...sup].forEach((j) => K.set(cols[j], { fill: `color-mix(in srgb, var(--c6) ${Math.round(t * 70)}%, var(--panel-2))`, stroke: "var(--c6)" }))))) return;
+          if (!(await fade(arrows, ctx, 700))) return;
+          fade([tA, te], ctx, 600);
+        })();
+      },
+    },
+    {
+      title: "例 1：效应随 x 指数增长", kicker: "第 5–6 格 · θ(x) = e^{2x}",
+      html: `<p>第一个例子把真实效应设为 θ(x) = e<sup>2x</sup>：<span data-cell="5">出处</span> x = 0 时效应是 1，x = 1 时约是 7.4，越往右增长越快。然后调用 <code>make_dataset()</code> 生成 Y、T、X、W。<span data-cell="6">出处</span></p><p>这种“效应因人而异”的情况叫<b>异质处理效应</b>。比如同样多学 1 小时，基础好的同学和基础差的同学提高的分数可能不一样。</p>`,
+      cells: [5, 6], highlight: ["np.exp(2*x[0])"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 20, w: 580, h: 250 }, [0, 1], [0, 8], { xticks: 5, yticks: 4, xlabel: "x" });
+        const xs = [], ys = []; for (let i = 0; i <= 100; i++) { xs.push(i / 100); ys.push(Math.exp(2 * i / 100)); }
+        const p = line(svg, ax, xs, ys, { stroke: "var(--ink)", "stroke-width": 3, "stroke-dasharray": null });
+        K.svg(svg, "text", { x: 90, y: 40, "font-size": 15, "font-weight": 700 }, "真实效应 θ(x) = e^(2x)");
+        const m1 = K.svg(svg, "circle", { cx: ax.sx(0), cy: ax.sy(1), r: 6, fill: "var(--c1)" }), m2 = K.svg(svg, "circle", { cx: ax.sx(1), cy: ax.sy(Math.exp(2)), r: 6, fill: "var(--c6)" });
+        const t1 = K.svg(svg, "text", { x: ax.sx(0) + 10, y: ax.sy(1) - 10, "font-size": 13 }, "x=0：T 加 1，Y 加 1");
+        const t2 = K.svg(svg, "text", { x: ax.sx(1) - 10, y: ax.sy(Math.exp(2)) + 22, "text-anchor": "end", "font-size": 13 }, "x=1：T 加 1，Y 约加 7.4");
+        hide([m1, m2, t1, t2]);
+        drawIn(p, ctx, 1500).then((ok) => ok && fade([m1, m2, t1, t2], ctx, 600));
+      },
+    },
+    {
+      title: "因果森林：按 x 把人分组，组内看效应", kicker: "第 7 格 · CausalForestDML",
+      html: `<p>作者建模型：<code>CausalForestDML</code>，预测 Y 的 <code>model_y</code> 和预测 T 的 <code>model_t</code> 都是随机森林，最后一步是 1000 棵树的因果森林。<span data-cell="7">出处</span></p><p><b>因果森林</b>和普通决策树很像，也是不断地切分，但切分的目标不是“让预测更准”，而是“让切开的两边<b>效应差别</b>尽量大”。每片叶子里的人效应相近，就在叶子里用残差对残差估一个 θ。1000 棵树投票平均，曲线就平滑了。</p>`,
+      cells: [7], highlight: ["CausalForestDML", "RandomForestRegressor", "n_estimators=1000"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 580, h: 230 }, [0, 1], [0, 8], { xticks: 5, yticks: 4, xlabel: "x" });
+        const xs = [], ys = []; for (let i = 0; i <= 100; i++) { xs.push(i / 100); ys.push(Math.exp(2 * i / 100)); }
+        line(svg, ax, xs, ys, { stroke: "var(--ink-3)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        const levels = [[0.5], [0.25, 0.75], [0.125, 0.375, 0.625, 0.875]];
+        const g = K.svg(svg, "g");
+        (async () => {
+          for (let L = 0; L < levels.length; L++) {
+            while (g.firstChild) g.removeChild(g.firstChild);
+            const cuts = [0].concat(levels.slice(0, L + 1).flat().sort((a, b) => a - b), [1]);
+            cuts.slice(1, -1).forEach((c) => K.svg(g, "line", { x1: ax.sx(c), x2: ax.sx(c), y1: 30, y2: 260, stroke: "var(--accent)", "stroke-dasharray": "4 3" }));
+            for (let i = 0; i < cuts.length - 1; i++) {
+              const a = cuts[i], b = cuts[i + 1], m = (Math.exp(2 * b) - Math.exp(2 * a)) / (2 * (b - a));
+              K.svg(g, "line", { x1: ax.sx(a), x2: ax.sx(b), y1: ax.sy(m), y2: ax.sy(m), stroke: "var(--c1)", "stroke-width": 4 });
+            }
+            K.svg(g, "text", { x: 80, y: 22, "font-size": 13, "font-weight": 700 }, `切 ${cuts.length - 2} 刀 → ${cuts.length - 1} 片叶子，每片估一个 θ（蓝线）；虚线 = 真实效应`);
+            if (!(await ctx.wait(1100))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "拟合、画曲线和置信区间", kicker: "第 8 格 · effect 与 effect_interval",
+      html: `<p>在 0 到 0.99 之间每隔 0.01 取一个 x，<code>fit</code> 之后用 <code>effect</code> 求每个 x 的效应估计，用 <code>effect_interval(alpha=0.01)</code> 求区间（alpha=0.01 即 <b>99%</b> 区间），再把真实曲线画成黑色虚线对比。<span data-cell="8">出处</span></p><p>动画是示意：估计曲线带着阴影区间贴着真实曲线。原图在运行输出里，作者没有写误差数字。</p><p class="callout warn">原图横轴标成 “Treatment (Cause)”、纵轴标成 “Outcome (Effect)”，实际上横轴是 X，纵轴是效应 θ(x)。</p>`,
+      cells: [8], highlight: ["effect(X_test)", "effect_interval", "alpha=0.01"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 20, w: 580, h: 250 }, [0, 1], [0, 8.5], { xticks: 5, yticks: 4, xlabel: "x（原图误标为 Treatment）" });
+        const r = K.rng(2), xs = [], tr = [], es = [], lo = [], hi = [];
+        let bias = 0;
+        for (let i = 0; i < 100; i++) { const x = i / 100; bias = 0.85 * bias + K.randn(r) * 0.06; xs.push(x); tr.push(Math.exp(2 * x)); es.push(Math.exp(2 * x) + bias * (1 + x)); lo.push(es[i] - 0.35 - 0.4 * x); hi.push(es[i] + 0.35 + 0.4 * x); }
+        const bd = K.svg(svg, "path", { d: "M" + xs.map((x, i) => ax.sx(x) + "," + ax.sy(hi[i])).join("L") + "L" + xs.slice().reverse().map((x, j) => ax.sx(x) + "," + ax.sy(lo[99 - j])).join("L") + "Z", fill: "var(--c1)", "fill-opacity": 0.2 });
+        bd.style.opacity = 0;
+        const e = line(svg, ax, xs, es, { stroke: "var(--c1)", "stroke-width": 2.5 });
+        const t = line(svg, ax, xs, tr, { stroke: "var(--ink)", "stroke-dasharray": "6 4", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 90, y: 40, "font-size": 13, fill: "var(--c1)", "font-weight": 700 }, "— 双重机器学习的估计 + 99% 区间（示意）");
+        K.svg(svg, "text", { x: 90, y: 60, "font-size": 13, "font-weight": 700 }, "- - 真实效应");
+        drawIn(t, ctx, 900).then((ok) => ok && drawIn(e, ctx, 1300)).then((ok) => ok && fade([bd], ctx, 600));
+      },
+    },
+    {
+      title: "例 2：先升后降的 sin(πx)", kicker: "第 9–11 格 · 换一个形状",
+      html: `<p>第二个例子把真实效应换成 θ(x) = sin(πx)：<span data-cell="9">出处</span> x 在两头时效应接近 0，x = 0.5 时最大（等于 1）。作者重新造数据 <span data-cell="10">出处</span>，用<b>同一个模型</b>重新拟合、画图。<span data-cell="11">出处</span></p><p>这一步检验的是：因果森林不用事先知道效应的形状，指数型、拱形都能跟上。这正是“非参数”的意思：不预设公式，让数据决定形状。</p>`,
+      cells: [9, 10, 11], highlight: ["np.sin(np.pi*x[0])"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 20, w: 580, h: 250 }, [0, 1], [-0.2, 1.3], { xticks: 5, yticks: 3, xlabel: "x" });
+        const xs = [], a = [], b = [];
+        for (let i = 0; i <= 100; i++) { const x = i / 100; xs.push(x); a.push(Math.min(1.3, (Math.exp(2 * x) - 1) / 6.39 * 1.2)); b.push(Math.sin(Math.PI * x)); }
+        const p = line(svg, ax, xs, a, { stroke: "var(--ink)", "stroke-width": 3 });
+        const lab = K.svg(svg, "text", { x: 90, y: 40, "font-size": 15, "font-weight": 700 }, "例 1 的形状（缩放）");
+        ctx.wait(800).then((ok) => ok && ctx.tween(1600, (t) => {
+          const e = K.ease(t);
+          p.setAttribute("d", "M" + xs.map((x, i) => ax.sx(x) + "," + ax.sy(K.lerp(a[i], b[i], e))).join("L"));
+          if (t > 0.5) lab.textContent = "例 2：θ(x) = sin(πx)，中间最大";
+        }));
+      },
+    },
+    {
+      title: "结论与延伸阅读", kicker: "第 12 格 · 总结",
+      html: `<p>作者的结论只有一句：结果“非常令人满意”，并预告下一篇会用真实数据。<span data-cell="12">出处</span> 后面是一长串参考文献：双重机器学习（Chernozhukov 等，2018）、因果森林（Athey、Imbens、Wager 等，2016–2019），以及 EconML、CausalML、DoubleML 等工具包和《为什么》一书。</p><p>要记住这份 notebook 的“幸运”之处：数据是自己造的，<b>没有未观测混杂</b>是被保证的。真实数据里，这一条只能靠领域知识去论证。</p>`,
+      cells: [12],
+      draw(svg, ctx) {
+        const items = [[2014, "Belloni 等：高维控制变量下的处理效应"], [2016, "Athey & Imbens：用递归切分找异质效应"], [2018, "Chernozhukov 等：双重机器学习"], [2018, "Wager & Athey：随机森林估计异质效应"], [2019, "Athey & Wager：因果森林应用"]];
+        K.svg(svg, "line", { x1: 80, x2: 80, y1: 30, y2: 300, stroke: "var(--ink-3)", "stroke-width": 2 });
+        const els = items.map((d, i) => { const g = K.svg(svg, "g"); const y = 50 + i * 58; K.svg(g, "circle", { cx: 80, cy: y, r: 7, fill: "var(--accent)" }); K.svg(g, "text", { x: 100, y: y + 5, "font-size": 14, "font-weight": 700 }, String(d[0])); K.svg(g, "text", { x: 160, y: y + 5, "font-size": 13 }, d[1]); g.style.opacity = 0; return g; });
+        (async () => { for (const e of els) { if (!(await fade([e], ctx, 400))) return; } })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：常数效应，三种估计 ---------- */
+  K.lab(document.getElementById("labA"), {
+    width: 660, height: 340,
+    controls: [
+      { id: "theta", label: "真实效应 θ（模拟设定）", min: -1, max: 2, step: 0.1, value: 0.5, fmt: (v) => v.toFixed(1) },
+      { id: "c", label: "混杂强度", min: 0, max: 2, step: 0.1, value: 1.2, fmt: (v) => v.toFixed(1) },
+      { id: "nl", label: "混杂的影响是不是弯的", value: "1", options: [["1", "弯的（含平方、正弦）"], ["0", "直的（线性）"]] },
+      { id: "k", label: "近邻模型的 k（代替随机森林）", min: 5, max: 60, step: 1, value: 15 },
+      { id: "seed", label: "重新造数据", button: true },
+    ],
+    note: "现场生成 1600 行：两列混杂 W1、W2 同时推动 T 和 Y。三种估计：①直接回归 Y ~ T；②线性回归 Y ~ T + W1 + W2；③双重机器学习：两折交叉拟合，用 k 近邻从 W 预测 Y 和 T，取残差，再算 Ỹ 对 T̃ 的斜率。散点画的是两边的残差。",
+    render(svg, v) {
+      const r = K.rng(31 + v.seed * 17), n = 1600, W = [], T = [], Y = [];
+      const nl = v.nl === "1";
+      for (let i = 0; i < n; i++) {
+        const w1 = r() * 4 - 2, w2 = r() * 4 - 2;
+        const m = nl ? Math.sin(2 * w1) + Math.cos(1.5 * w2) : 0.8 * w1 + 0.6 * w2;
+        const g = nl ? 1.5 * Math.sin(2 * w1) + 1.2 * Math.cos(1.5 * w2) : w1 + 0.7 * w2;
+        const t = v.c * m + K.randn(r) * 1.2;
+        W.push([w1, w2]); T.push(t); Y.push(v.theta * t + v.c * g + (r() * 2 - 1));
+      }
+      const naive = ols(T.map((t) => [1, t]), Y)[1];
+      const lin = ols(T.map((t, i) => [1, t, W[i][0], W[i][1]]), Y)[1];
+      const py = knnCross(W, Y, v.k), pt = knnCross(W, T, v.k);
+      const ry = Y.map((y, i) => y - py[i]), rt = T.map((t, i) => t - pt[i]);
+      let sxy = 0, sxx = 0; rt.forEach((t, i) => { sxy += t * ry[i]; sxx += t * t; });
+      const dml = sxy / sxx;
+      const ax = K.axes(svg, { x: 50, y: 10, w: 340, h: 268 }, [-3, 3], [-5, 5], { xticks: 4, yticks: 4, xlabel: "T 的残差 T̃" });
+      for (let i = 0; i < n; i += 2) K.svg(svg, "circle", { cx: ax.sx(K.clamp(rt[i], -3, 3)), cy: ax.sy(K.clamp(ry[i], -5, 5)), r: 2, fill: "var(--c1)", opacity: 0.35 });
+      K.svg(svg, "line", { x1: ax.sx(-3), y1: ax.sy(-3 * dml), x2: ax.sx(3), y2: ax.sy(3 * dml), stroke: "var(--good)", "stroke-width": 3 });
+      K.svg(svg, "line", { x1: ax.sx(-3), y1: ax.sy(-3 * v.theta), x2: ax.sx(3), y2: ax.sy(3 * v.theta), stroke: "var(--ink)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+      K.svg(svg, "text", { x: 58, y: 30, "font-size": 12, "font-weight": 700 }, "Ỹ（Y 的残差）");
+      // 右侧：三种估计条
+      const items = [["直接回归", naive, "var(--bad)"], ["线性回归加 W", lin, "var(--warn)"], ["双重机器学习", dml, "var(--good)"], ["真实 θ", v.theta, "var(--ink)"]];
+      const lim = Math.max(2.2, ...items.map((d) => Math.abs(d[1]))) * 1.05;
+      const bx = K.axes(svg, { x: 520, y: 14, w: 130, h: 280 }, [-lim, lim], [0, 4], { xticks: 2, yticks: 0, xfmt: (q) => q.toFixed(1) });
+      items.forEach((d, i) => {
+        const y0 = 30 + i * 66;
+        K.svg(svg, "text", { x: 510, y: y0 + 16, "text-anchor": "end", "font-size": 12, "font-weight": 700 }, d[0]);
+        K.svg(svg, "rect", { x: Math.min(bx.sx(0), bx.sx(d[1])), y: y0, width: Math.abs(bx.sx(d[1]) - bx.sx(0)) + 1, height: 24, rx: 3, fill: d[2] });
+        K.svg(svg, "text", { x: 510, y: y0 + 36, "text-anchor": "end", "font-size": 12 }, d[1].toFixed(2));
+      });
+      K.svg(svg, "line", { x1: bx.sx(0), x2: bx.sx(0), y1: 14, y2: 294, stroke: "var(--ink-3)" });
+      K.svg(svg, "text", { x: 50, y: 337, "font-size": 11, class: "muted" }, "绿线 = 残差对残差的斜率（DML 估计），黑虚线 = 真实 θ");
+      const err = (x) => Math.abs(x - v.theta).toFixed(2);
+      return { readout: [
+        { k: "直接回归的误差", v: err(naive), color: Math.abs(naive - v.theta) > 0.15 ? "var(--bad)" : "var(--good)" },
+        { k: "线性回归加 W 的误差", v: err(lin), color: Math.abs(lin - v.theta) > 0.15 ? "var(--bad)" : "var(--good)" },
+        { k: "双重机器学习的误差", v: err(dml), color: Math.abs(dml - v.theta) > 0.15 ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：异质效应，分段估计 ---------- */
+  K.lab(document.getElementById("labB"), {
+    width: 660, height: 340,
+    controls: [
+      { id: "f", label: "真实效应 θ(x) 的形状（模拟设定）", value: "exp", options: [["exp", "e^(2x)（例 1）"], ["sin", "sin(πx)（例 2）"], ["const", "常数 1"]] },
+      { id: "bins", label: "把 x 分成几段", min: 2, max: 12, step: 1, value: 8 },
+      { id: "n", label: "样本量", min: 600, max: 2400, step: 200, value: 1600 },
+      { id: "seed", label: "重新造数据", button: true },
+    ],
+    note: "现场生成数据：X ~ U(0,1)，两列混杂 W 推动 T 和 Y，Y = θ(X)·T + g(W) + 噪声。双重机器学习：两折交叉拟合，k 近邻（k=15）从 (X, W) 预测 Y 和 T，取残差；在每一段 x 里算残差对残差的斜率，误差线是约 95% 区间。对照组“直接分段回归”在每段里直接算 Y 对 T 的斜率。因果森林会自动找切分点，这里用固定等宽分段代替。",
+    render(svg, v) {
+      const r = K.rng(71 + v.seed * 19), n = v.n;
+      const th = v.f === "exp" ? (x) => Math.exp(2 * x) : v.f === "sin" ? (x) => Math.sin(Math.PI * x) : () => 1;
+      const F = [], T = [], Y = [], X = [];
+      for (let i = 0; i < n; i++) {
+        const x = r(), w1 = r() * 4 - 2, w2 = r() * 4 - 2;
+        const t = Math.sin(2 * w1) + Math.cos(1.5 * w2) + K.randn(r) * 1.2;
+        X.push(x); F.push([x, w1, w2]); T.push(t);
+        Y.push(th(x) * t + 1.5 * Math.sin(2 * w1) + 1.2 * Math.cos(1.5 * w2) + (r() * 2 - 1));
+      }
+      const py = knnCross(F, Y, 15), pt = knnCross(F, T, 15);
+      const B = v.bins, res = [];
+      for (let b = 0; b < B; b++) {
+        let sxy = 0, sxx = 0, nx = 0, ty = 0, tt = 0, mt = 0, my = 0, cnt = 0;
+        const idx = []; for (let i = 0; i < n; i++) if (X[i] >= b / B && X[i] < (b + 1) / B) idx.push(i);
+        idx.forEach((i) => { const a = T[i] - pt[i], c = Y[i] - py[i]; sxy += a * c; sxx += a * a; mt += T[i]; my += Y[i]; });
+        const est = sxy / sxx;
+        let rss = 0; idx.forEach((i) => { const a = T[i] - pt[i], c = Y[i] - py[i]; rss += (c - est * a) ** 2; });
+        const se = Math.sqrt(rss / Math.max(1, idx.length - 1) / sxx);
+        mt /= idx.length; my /= idx.length;
+        let cxy = 0, cxx = 0; idx.forEach((i) => { cxy += (T[i] - mt) * (Y[i] - my); cxx += (T[i] - mt) ** 2; });
+        res.push({ x: (b + 0.5) / B, est, se, naive: cxy / cxx, n: idx.length });
+      }
+      const all = res.map((d) => [d.est + 2 * d.se, d.est - 2 * d.se, d.naive]).flat().concat([th(0), th(1), th(0.5)]);
+      const ax = K.axes(svg, { x: 60, y: 16, w: 580, h: 260 }, [0, 1], [Math.min(...all, 0) - 0.3, Math.max(...all) + 0.3], { xticks: 5, yticks: 4, xlabel: "x" });
+      const xs = [], ys = []; for (let i = 0; i <= 100; i++) { xs.push(i / 100); ys.push(th(i / 100)); }
+      line(svg, ax, xs, ys, { stroke: "var(--ink)", "stroke-dasharray": "6 4", "stroke-width": 2 });
+      res.forEach((d) => {
+        K.svg(svg, "line", { x1: ax.sx(d.x), x2: ax.sx(d.x), y1: ax.sy(d.est - 1.96 * d.se), y2: ax.sy(d.est + 1.96 * d.se), stroke: "var(--c1)", "stroke-width": 2 });
+        K.svg(svg, "circle", { cx: ax.sx(d.x), cy: ax.sy(d.est), r: 5, fill: "var(--c1)" });
+        K.svg(svg, "rect", { x: ax.sx(d.x) + 8, y: ax.sy(d.naive) - 4, width: 8, height: 8, fill: "var(--c6)" });
+      });
+      K.svg(svg, "text", { x: 66, y: 322, "font-size": 12, fill: "var(--c1)" }, "● 双重机器学习（带 95% 误差线）");
+      K.svg(svg, "text", { x: 290, y: 322, "font-size": 12, fill: "var(--c6)" }, "■ 直接分段回归");
+      K.svg(svg, "text", { x: 420, y: 322, "font-size": 12 }, "- - 真实 θ(x)");
+      const mae = (key) => res.reduce((s, d) => s + Math.abs(d[key] - th(d.x)), 0) / res.length;
+      const cover = res.filter((d) => Math.abs(d.est - th(d.x)) <= 1.96 * d.se).length;
+      return { readout: [
+        { k: "DML 平均误差", v: mae("est").toFixed(2), color: "var(--good)" },
+        { k: "直接回归平均误差", v: mae("naive").toFixed(2), color: "var(--bad)" },
+        { k: "误差线盖住真值的段数", v: cover + " / " + res.length },
+        { k: "每段平均样本", v: Math.round(n / B) + " 行" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

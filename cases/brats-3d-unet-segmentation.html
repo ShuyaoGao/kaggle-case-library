@@ -1,0 +1,616 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>脑胶质瘤分割</title>
+<meta name="description" content="Kaggle 案例拆解：BraTS 2020 多序列脑 MRI，用 U-Net 逐像素圈出胶质瘤的坏死核心、水肿和增强区，理解 Dice 系数、IoU、敏感度与特异度。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">脑 MRI · 语义分割 · U-Net</div>
+  <h1>脑胶质瘤分割：在 MRI 上一像素一像素地圈出肿瘤</h1>
+  <p class="en">3D MRI Brain tumor segmentation || U-NET</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">U-Net</span><span class="tag method">多序列 MRI（FLAIR + T1ce）</span><span class="tag method">Dice 系数</span>
+    <span class="tag method">Mean IoU</span><span class="tag method">敏感度 / 特异度</span><span class="tag method">数据生成器</span><span class="tag method">独热掩膜</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Rastislav</b></span>
+    <span>Kaggle 点赞 <b>1,756</b>（2026-11 抓取）</span>
+    <span>数据集 <b>awsaf49/brats20-dataset-training-validation</b></span>
+    <span><a href="https://www.kaggle.com/code/rastislav/3d-mri-brain-tumor-segmentation-u-net" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">BraTS 2020：手术前的脑 MRI</div><p>每个病人有 4 种 MRI 序列（T1、T1ce、T2、FLAIR），都是 3D 体积，外加医生手工画的肿瘤分区。<span data-cell="5">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">每个像素属于哪一类</div><p>背景、坏死/非增强核心、水肿、增强肿瘤，共 4 类。这叫<b>分割</b>：不是给整张图一个答案，而是给每个像素一个答案。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">2D U-Net，输入 FLAIR + T1ce 两个序列</div><p>把 3D 体积切成一张张 128×128 的切片送进 U-Net，输出 4 通道的概率图。<span data-cell="19">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">作者报告 Mean IoU 约 81%，Dice 约 65.5%</div><p>作者第 30 格的文字。<span data-cell="30">出处</span> 两个指标差别这么大，正好说明“背景占大多数”时要看哪个指标。</p></div>
+  </div>
+  <p class="callout warn">本页只讲 notebook 的方法，不提供医疗建议。肿瘤的诊断和手术规划由神经放射科、神经外科医生决定，分割模型最多帮医生节省勾画时间。</p>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">BraTS（Brain Tumor Segmentation）是医学图像领域长期举办的脑肿瘤分割挑战赛。以下信息来自数据集说明和作者第 4、5、25 格。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">MRI 序列</div><div class="v">4 种</div></div>
+        <div class="stat-tile"><div class="k">每个体积的切片数</div><div class="v">155</div></div>
+        <div class="stat-tile"><div class="k">每张切片</div><div class="v">240×240</div></div>
+        <div class="stat-tile"><div class="k">数据来源机构</div><div class="v">19 家</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">155 张切片见第 4 格注释 <span data-cell="4">出处</span>；240×240 见第 25 格的掩膜尺寸 <span data-cell="25">出处</span>；19 家机构、1 mm³ 分辨率、已去颅骨见第 5 格和数据集说明 <span data-cell="5">出处</span>。病人数在运行输出里，这里不写。</p>
+      <h3>4 种 MRI 序列（白话）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>序列</th><th>白话</th></tr>
+        <tr><td>T1</td><td>看解剖结构，白质亮、脑脊液暗</td></tr>
+        <tr><td>T1ce（T1Gd）</td><td>打了造影剂（钆）后的 T1，血脑屏障被破坏的“活跃”肿瘤会发亮</td></tr>
+        <tr><td>T2</td><td>水多的地方亮，脑脊液、水肿都亮</td></tr>
+        <tr><td>FLAIR</td><td>T2 的变种，把脑脊液的信号压暗，水肿更突出</td></tr>
+      </table></div>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每个病人的文件、每个标签是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>文件 / 标签</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>*_flair.nii</code> 等 4 个</td><td>4 种序列的 3D 体积（NIfTI 格式，医学影像常用）</td><td>浮点数组</td></tr>
+        <tr><td><code>*_seg.nii</code></td><td><b>要预测的答案</b>：每个体素的标签</td><td>整数数组</td></tr>
+        <tr><td>标签 0</td><td>不是肿瘤</td><td></td></tr>
+        <tr><td>标签 1</td><td>坏死 / 非增强肿瘤核心（NCR/NET）：肿瘤中间已经坏死的部分</td><td></td></tr>
+        <tr><td>标签 2</td><td>瘤周水肿（ED）：肿瘤周围组织积水肿胀</td><td></td></tr>
+        <tr><td>标签 4 → 3</td><td>增强肿瘤（ET）：打造影剂后发亮的活跃肿瘤，作者改成 3</td><td></td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">比赛评估时把它们组合成三个区域：增强肿瘤 ET、肿瘤核心 TC（1+4）、全肿瘤 WT（1+2+4）。<span data-cell="0">出处</span> 页面里的脑 MRI 切片全部由代码生成，是示意图。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="17">
+    <h3>动手试试 A · Dice、IoU 和像素准确率谁更“老实” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="25">
+    <h3>动手试试 B · 只取第 22–121 张切片，会漏掉肿瘤吗 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>最好的模型：Mean IoU 约 81%，Dice 约 65.5%（作者原话是 “81% accuracy on mean IOU and 65.5% on Dice loss”）</td><td><span data-cell="30">第 30 格</span></td></tr>
+        <tr><td>数据太大放不进内存，所以用数据生成器按批次读取</td><td><span data-cell="22">第 22 格</span></td></tr>
+        <tr><td>推荐 keras-unet-collection 库，里面有现成的 U-Net、Dice 损失、Tversky 损失等</td><td><span data-cell="20">第 20 格</span></td></tr>
+        <tr><td>生存期预测在作者另一份 notebook 里</td><td><span data-cell="41">第 41 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">各类别的 Dice、测试集评估结果都在运行输出里，Kaggle 下载的源码不带输出，这里只列作者写在文字里的两个数。</p>
+      <h3>原作者的问题（如实列出，原文未改）</h3>
+      <ul class="tight">
+        <li><b>标题写 3D，实际是 2D</b>：U-Net 的输入是一张张 128×128 的切片，不是 3D 体积。<span data-cell="19">第 19 格</span></li>
+        <li><b>Dice 只作为指标，没有作为损失</b>：第 16 格标题写“Loss function: Dice”，第 19 格编译时用的损失是 <code>categorical_crossentropy</code>。<span data-cell="19">第 19 格</span></li>
+        <li><b>预测图的标题对错了</b>：第 4 列画的是水肿，标题是 NECROTIC/CORE；第 5 列画的是核心，标题是 EDEMA。<span data-cell="36">第 36 格</span></li>
+        <li><b>单类评估写反了</b>：<code>gt[gt != eval_class] = 1</code> 把“不是这一类”的像素都设成 1，应该设成 0；注释里的类别名也和 <code>SEGMENT_CLASSES</code> 对不上。<span data-cell="38">第 38 格</span></li>
+        <li><code>imageLoader</code> 函数里用了 <code>self</code>、<code>c</code>、<code>ce</code> 等未定义的变量，直接调用会报错（后面没有用到）。<span data-cell="35">第 35 格</span></li>
+        <li>训练 / 验证 / 测试切分没有设随机种子，每次运行的划分不同。<span data-cell="23">第 23 格</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>自动勾画肿瘤各分区的轮廓，算出体积，帮医生节省手工描边的时间，便于随访比较。</li>
+        <li><b>同类问题：</b>肝脏、肺结节、前列腺的器官或病灶分割；卫星图里的道路、建筑分割；工业零件的缺陷区域分割。</li>
+        <li><b>可迁移的套路：</b>多通道输入（不同序列互补）→ 标签重新编号并独热编码 → U-Net → 用 Dice 而不是像素准确率评估 → 分区域、分类别看结果。</li>
+        <li><b>边界：</b>不同医院的扫描仪、参数不同，模型可能失灵；分割错几个像素在临床上可能就是“切多了还是切少了”。模型只是辅助，不能代替医生。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>标签 4 → 3，取第 22–121 张切片 <span data-cell="4">第 4 格</span></li>
+        <li>Dice（整体和三个分区）、精确率、敏感度、特异度 <span data-cell="17">第 17 格</span></li>
+        <li>U-Net：4 次下采样 + 4 次上采样 + 跳连，输出 4 类 softmax <span data-cell="19">第 19 格</span></li>
+        <li>数据生成器：FLAIR + T1ce 两通道、128×128、按最大值归一化 <span data-cell="25">第 25 格</span></li>
+        <li>Adam + ReduceLROnPlateau <span data-cell="29">第 29 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>为什么 Mean IoU 有 81%，Dice 却只有 65.5%？背景像素占了大多数时，哪个指标更能反映“肿瘤画得准不准”？</li>
+      <li>作者只用了 FLAIR 和 T1ce 两个序列。为什么这两个最有用？丢掉 T1、T2 可能损失什么？</li>
+      <li>把 3D 体积切成 2D 切片来分割，丢掉了什么信息？3D U-Net 的代价又是什么？</li>
+      <li>只取第 22–121 张切片，如果某个病人的肿瘤在更靠上或靠下的位置，会发生什么？</li>
+      <li>手术前勾画肿瘤，“多画一圈”和“少画一圈”哪个后果更严重？敏感度和特异度该怎么取舍？</li>
+      <li>预测图的标题对错了、单类评估把 0 写成了 1。你会用什么办法在发布结果前发现这类错误？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Rastislav，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意，脑 MRI 切片由代码生成。数据集：BraTS 2020（Multimodal Brain Tumor Segmentation Challenge）。本页内容不构成医疗建议。
+</footer>
+</main>
+
+<script src="nb/brats-3d-unet-segmentation.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* 自查开关：网址带 ?fast 时动画直接跳到最后一帧（无界面截图用） */
+  if (/[?&]fast/.test(location.search)) { K.tween = (ms, fn, ctx) => { if (ctx && !ctx.alive()) return Promise.resolve(false); fn(1, 1); return Promise.resolve(true); }; K.wait = (ms, ctx) => Promise.resolve(!ctx || ctx.alive()); }
+  if (/[?&]fold/.test(location.search)) document.head.appendChild(Object.assign(document.createElement("style"), { textContent: ".walk .ch-cells > .cell, .walk .cell-note { display: none !important; }" }));
+  /* ===== 页面专用：像素图工具（用代码生成小图，在浏览器里真算卷积、模糊、池化、几何变换） ===== */
+  const PX = (function () {
+    function rgbOf(name, fb) {
+      let s = (K.css(name) || fb || "#888888").trim();
+      if (s[0] !== "#") return [128, 128, 128];
+      if (s.length === 4) s = "#" + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+      return [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
+    }
+    function grid(W, H, f) { const a = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) a[y * W + x] = f(x, y); return { W, H, a }; }
+    /* 彩色图：{W,H,rgb:[R,G,B]}，每个通道取值 0–1 */
+    function rgbGrid(W, H, f) { const R = new Float32Array(W * H), G = new Float32Array(W * H), B = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const c = f(x, y), i = y * W + x; R[i] = c[0]; G[i] = c[1]; B[i] = c[2]; } return { W, H, rgb: [R, G, B] }; }
+    const chan = (m, c) => ({ W: m.W, H: m.H, a: m.rgb[c] });
+    const fromChans = (ch) => ({ W: ch[0].W, H: ch[0].H, rgb: ch.map((c) => c.a) });
+    const gray = (m) => (m.rgb ? grid(m.W, m.H, (x, y) => { const i = y * m.W + x; return 0.299 * m.rgb[0][i] + 0.587 * m.rgb[1][i] + 0.114 * m.rgb[2][i]; }) : m);
+    function at(m, x, y) { return m.a[y * m.W + x]; }
+    function atClamp(m, x, y) { x = x < 0 ? 0 : x >= m.W ? m.W - 1 : x; y = y < 0 ? 0 : y >= m.H ? m.H - 1 : y; return m.a[y * m.W + x]; }
+    function atZero(m, x, y) { return x < 0 || y < 0 || x >= m.W || y >= m.H ? 0 : m.a[y * m.W + x]; }
+    /* padding='same'：边界外按 0 补 */
+    function conv(m, k) { const n = k.length, r = (n - 1) / 2; return grid(m.W, m.H, (x, y) => { let s = 0; for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) s += k[j][i] * atZero(m, x + i - r, y + j - r); return s; }); }
+    function map(m, f) { if (m.rgb) return { W: m.W, H: m.H, rgb: m.rgb.map((a) => { const o = new Float32Array(a.length); for (let i = 0; i < a.length; i++) o[i] = f(a[i], i); return o; }) }; const o = { W: m.W, H: m.H, a: new Float32Array(m.a.length) }; for (let i = 0; i < m.a.length; i++) o.a[i] = f(m.a[i], i); return o; }
+    const relu = (m) => map(m, (v) => (v > 0 ? v : 0));
+    function pool(m, s) { s = s || 2; const W = Math.ceil(m.W / s), H = Math.ceil(m.H / s); return grid(W, H, (x, y) => { let b = -Infinity; for (let j = 0; j < s; j++) for (let i = 0; i < s; i++) { const xx = x * s + i, yy = y * s + j; if (xx < m.W && yy < m.H) b = Math.max(b, at(m, xx, yy)); } return b; }); }
+    function range(m) { let lo = Infinity, hi = -Infinity; for (const v of m.a) { if (v < lo) lo = v; if (v > hi) hi = v; } return [lo, hi]; }
+    /* 可分离高斯模糊（边界用最近像素），彩色图逐通道做 */
+    function blur(m, sigma) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => blur(chan(m, c), sigma)));
+      if (sigma <= 0.01) return m;
+      const r = Math.max(1, Math.ceil(sigma * 3)), w = [];
+      let s = 0;
+      for (let i = -r; i <= r; i++) { const v = Math.exp((-i * i) / (2 * sigma * sigma)); w.push(v); s += v; }
+      for (let i = 0; i < w.length; i++) w[i] /= s;
+      const t = grid(m.W, m.H, (x, y) => { let a = 0; for (let i = -r; i <= r; i++) a += w[i + r] * atClamp(m, x + i, y); return a; });
+      return grid(m.W, m.H, (x, y) => { let a = 0; for (let i = -r; i <= r; i++) a += w[i + r] * atClamp(t, x, y + i); return a; });
+    }
+    function bilinear(m, x, y) {
+      const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+      return (atClamp(m, x0, y0) * (1 - fx) + atClamp(m, x0 + 1, y0) * fx) * (1 - fy) + (atClamp(m, x0, y0 + 1) * (1 - fx) + atClamp(m, x0 + 1, y0 + 1) * fx) * fy;
+    }
+    /* 绕中心旋转/缩放/平移/翻转；fill：'nearest' 用最近像素，数字表示边界外填这个值 */
+    function affine(m, p) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => affine(chan(m, c), p)));
+      const th = ((p.rot || 0) * Math.PI) / 180, c = Math.cos(th), s = Math.sin(th), z = p.zoom || 1;
+      const cx = (m.W - 1) / 2, cy = (m.H - 1) / 2, tx = (p.tx || 0) * m.W, ty = (p.ty || 0) * m.H;
+      return grid(m.W, m.H, (x, y) => {
+        let u = x - cx - tx, v = y - cy - ty;
+        if (p.flip) u = -u;
+        if (p.vflip) v = -v;
+        const a = (c * u + s * v) / z + cx, b = (-s * u + c * v) / z + cy;
+        if (p.fill != null && p.fill !== "nearest" && (a < -0.5 || b < -0.5 || a > m.W - 0.5 || b > m.H - 0.5)) return p.fill;
+        return bilinear(m, a, b);
+      });
+    }
+    function resize(m, W, H) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => resize(chan(m, c), W, H)));
+      return grid(W, H, (x, y) => bilinear(m, ((x + 0.5) * m.W) / W - 0.5, ((y + 0.5) * m.H) / H - 0.5));
+    }
+    function toURL(m, mode, lo, hi) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      if (m.rgb) {
+        for (let i = 0; i < m.W * m.H; i++) { for (let c = 0; c < 3; c++) d[i * 4 + c] = Math.max(0, Math.min(1, m.rgb[c][i])) * 255; d[i * 4 + 3] = 255; }
+      } else {
+        const P = rgbOf("--panel", "#ffffff"), A = rgbOf("--c1"), B = rgbOf("--c6");
+        if (lo == null || hi == null) { const r = range(m); if (lo == null) lo = r[0]; if (hi == null) hi = r[1]; }
+        const span = hi - lo || 1, amax = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+        for (let i = 0; i < m.a.length; i++) {
+          const v = m.a[i]; let r, gg, b;
+          if (mode === "div") { const t = Math.max(-1, Math.min(1, v / amax)), C = t >= 0 ? B : A, k = Math.abs(t); r = P[0] + (C[0] - P[0]) * k; gg = P[1] + (C[1] - P[1]) * k; b = P[2] + (C[2] - P[2]) * k; }
+          else if (mode === "heat") { const k = Math.max(0, Math.min(1, (v - lo) / span)); r = P[0] + (B[0] - P[0]) * k; gg = P[1] + (B[1] - P[1]) * k; b = P[2] + (B[2] - P[2]) * k; }
+          else { const k = Math.max(0, Math.min(1, (v - lo) / span)) * 255; r = gg = b = k; }
+          d[i * 4] = r; d[i * 4 + 1] = gg; d[i * 4 + 2] = b; d[i * 4 + 3] = 255;
+        }
+      }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    function draw(svg, x, y, w, h, m, mode, lo, hi, smooth) {
+      const e = K.svg(svg, "image", { x, y, width: w, height: h, preserveAspectRatio: "none" });
+      if (!smooth) e.style.imageRendering = "pixelated";
+      e.setAttribute("href", toURL(m, mode, lo, hi));
+      K.svg(svg, "rect", { x, y, width: w, height: h, fill: "none", stroke: "var(--line)" });
+      return e;
+    }
+    function update(e, m, mode, lo, hi) { e.setAttribute("href", toURL(m, mode, lo, hi)); }
+    function lines(svg, x, y, w, h, W, H, op) {
+      const g = K.svg(svg, "g");
+      for (let i = 0; i <= W; i++) K.svg(g, "line", { x1: x + (w * i) / W, x2: x + (w * i) / W, y1: y, y2: y + h, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      for (let j = 0; j <= H; j++) K.svg(g, "line", { y1: y + (h * j) / H, y2: y + (h * j) / H, x1: x, x2: x + w, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      return g;
+    }
+    const smooth = (e0, e1, x) => { const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+    const blob = (x, y, cx, cy, sx, sy) => Math.exp(-(((x - cx) * (x - cx)) / (2 * sx * sx) + ((y - cy) * (y - cy)) / (2 * sy * sy)));
+    /* 平滑噪声：几层不同频率的随机网格插值叠加，用来做纹理 */
+    function noise(W, H, seed, cells) {
+      const r = K.rng(seed || 1), n = cells || 6, g0 = grid(n + 1, n + 1, () => r());
+      return grid(W, H, (x, y) => bilinear(g0, (x / W) * n, (y / H) * n));
+    }
+    return { grid, rgbGrid, chan, fromChans, gray, at, atClamp, conv, map, relu, pool, range, blur, bilinear, affine, resize, toURL, draw, update, lines, smooth, blob, noise, rgbOf };
+  })();
+
+
+  /* ===== 用代码生成一张示意脑 MRI 切片 =====
+   * z：0–154 的切片位置；mod：t1 / t1ce / t2 / flair / seg；tumor：肿瘤中心与大小 */
+  const CONTRAST = {
+    t1: { wm: 0.78, gm: 0.55, csf: 0.12, ed: 0.45, ncr: 0.28, et: 0.5 },
+    t1ce: { wm: 0.78, gm: 0.55, csf: 0.12, ed: 0.45, ncr: 0.25, et: 0.98 },
+    t2: { wm: 0.35, gm: 0.5, csf: 0.95, ed: 0.82, ncr: 0.85, et: 0.6 },
+    flair: { wm: 0.38, gm: 0.48, csf: 0.08, ed: 0.95, ncr: 0.55, et: 0.75 },
+  };
+  function brain(N, z, mod, tm, seed) {
+    tm = Object.assign({ x: 0.64, y: 0.42, z: 75, r: 0.13, rz: 32 }, tm || {});
+    const zz = (z - 77) / 70, bs = Math.sqrt(Math.max(0, 1 - zz * zz));
+    const tz = (z - tm.z) / tm.rz, ts = Math.sqrt(Math.max(0, 1 - tz * tz));
+    const tex = PX.noise(N, N, (seed || 1) + Math.round(z / 6), 10);
+    const lab = new Uint8Array(N * N);
+    const img = PX.grid(N, N, (px, py) => {
+      const x = (px + 0.5) / N, y = (py + 0.5) / N, i = py * N + px;
+      const d = Math.hypot((x - 0.5) / (0.38 * bs + 0.001), (y - 0.5) / (0.45 * bs + 0.001));
+      if (d > 1) return 0;
+      const C = CONTRAST[mod] || CONTRAST.flair;
+      let v = d > 0.86 ? C.gm : C.wm;
+      const fold = Math.sin(Math.atan2(y - 0.5, x - 0.5) * 18) * 0.04;
+      if (d > 0.7 + fold && d < 0.86) v = C.gm;
+      const ven = Math.hypot((Math.abs(x - 0.5) - 0.07) / 0.035, (y - 0.47) / 0.12);
+      if (ven < 1 && bs > 0.6) v = C.csf;
+      let L = 0;
+      if (ts > 0) {
+        const dt = Math.hypot(x - tm.x, (y - tm.y) * 1.1) / (tm.r * ts) + (tex.a[i] - 0.5) * 0.25;
+        if (dt < 0.35) { v = C.ncr; L = 1; } else if (dt < 0.6) { v = C.et; L = 4; } else if (dt < 1.25) { v = C.ed; L = 2; }
+      }
+      lab[i] = L;
+      return v * (0.92 + 0.16 * tex.a[i]);
+    });
+    img.lab = lab;
+    return img;
+  }
+  const LABC = { 1: [0.85, 0.2, 0.3], 2: [0.95, 0.75, 0.2], 4: [0.3, 0.55, 0.95] };
+  function overlay(img, alpha) {
+    return PX.rgbGrid(img.W, img.H, (x, y) => {
+      const i = y * img.W + x, v = img.a[i], L = img.lab[i];
+      if (!L) return [v, v, v];
+      const c = LABC[L];
+      return c.map((q) => v * (1 - alpha) + q * alpha);
+    });
+  }
+  function maskImg(img, which) {
+    return PX.rgbGrid(img.W, img.H, (x, y) => { const L = img.lab[y * img.W + x]; if (!L || (which && L !== which)) return [0.08, 0.08, 0.1]; return LABC[L]; });
+  }
+
+  const steps = [
+    {
+      title: "三种肿瘤分区和要用的切片范围", kicker: "第 4 格 · 标签定义", at: 4,
+      html: `<p>作者先定义标签：0 不是肿瘤、1 坏死/非增强核心、2 水肿、3 增强肿瘤（原数据里是 4，后面改成 3，这样 4 类正好是 0–3）。</p><p>还定了两个常数：每个体积 155 张切片，只用<b>从第 22 张开始的 100 张</b>（<code>VOLUME_START_AT=22</code>，<code>VOLUME_SLICES=100</code>）。最上面和最下面的切片里几乎没有脑组织，跳过可以省时间。注释里写的“从第 5 张开始用 145 张”和实际取值不一致，以代码为准。</p><p>动画：一个示意肿瘤由内到外是坏死核心（红）、增强环（蓝）、水肿（黄）。</p>`,
+      cells: [4], highlight: ["VOLUME_SLICES = 100", "VOLUME_START_AT = 22", "original 4 -> converted into 3 later"],
+      draw(svg, ctx) {
+        const b = brain(96, 75, "flair", null, 3);
+        PX.draw(svg, 20, 20, 300, 300, b, null, 0, 1, true);
+        const ov = PX.draw(svg, 20, 20, 300, 300, overlay(b, 0.75), null, null, null, true);
+        ov.style.opacity = 0;
+        const L = [["1 坏死 / 非增强核心", "var(--c6)"], ["2 水肿", "var(--c5)"], ["3（原 4）增强肿瘤", "var(--c1)"], ["0 不是肿瘤", "var(--ink-3)"]];
+        L.forEach((l, i) => K.svg(svg, "text", { x: 350, y: 60 + i * 30, "font-size": 14, "font-weight": 700, fill: l[1] }, "■ " + l[0]));
+        K.svg(svg, "text", { x: 350, y: 210, "font-size": 12.5 }, "比赛评估的三个区域：");
+        K.svg(svg, "text", { x: 350, y: 232, "font-size": 12.5, class: "muted" }, "全肿瘤 WT = 1 + 2 + 4");
+        K.svg(svg, "text", { x: 350, y: 252, "font-size": 12.5, class: "muted" }, "肿瘤核心 TC = 1 + 4");
+        K.svg(svg, "text", { x: 350, y: 272, "font-size": 12.5, class: "muted" }, "增强肿瘤 ET = 4");
+        K.svg(svg, "text", { x: 20, y: 336, "font-size": 11.5, class: "muted" }, "示意 FLAIR 切片 + 医生标注（代码生成）");
+        ctx.wait(600).then((ok) => ok && ctx.tween(900, (t) => (ov.style.opacity = t)));
+      },
+    },
+    {
+      title: "同一层脑子，四种 MRI 序列", kicker: "第 5–6 格 · 多序列", at: 5,
+      html: `<p>每个病人有 4 种 MRI 序列，加上一个分割标签。作者把同一层切片的五张图并排画出来。</p><p>不同序列看到的东西不一样（动画里是代码生成的示意切片）：</p><ul class="tight"><li><b>FLAIR</b>：水肿（黄色区域）最亮，脑脊液被压暗</li><li><b>T1ce</b>：打造影剂后，活跃的增强肿瘤环特别亮</li><li><b>T2</b>：水多的地方都亮，脑室、水肿都亮</li><li><b>T1</b>：解剖结构清楚，肿瘤反而不太显眼</li></ul><p>医生看片也是几种序列对照着看。作者后面只用 FLAIR 和 T1ce 两种，正是因为它们分别把水肿和增强肿瘤显示得最清楚。</p>`,
+      cells: [6], highlight: ["test_image_flair", "test_image_t1ce", "test_mask"],
+      draw(svg, ctx) {
+        const mods = ["flair", "t1", "t1ce", "t2"];
+        const els = mods.map((m, i) => { const b = brain(80, 75, m, null, 3); const e = PX.draw(svg, 10 + i * 140, 60, 130, 130, b, null, 0, 1, true); K.svg(svg, "text", { x: 75 + i * 140, y: 210, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, m.toUpperCase()); return e; });
+        const seg = PX.draw(svg, 10 + 4 * 140, 60, 130, 130, maskImg(brain(80, 75, "flair", null, 3)), null, null, null, true);
+        K.svg(svg, "text", { x: 75 + 4 * 140, y: 210, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "标签");
+        [...els, seg].forEach((e, i) => { e.style.opacity = 0; ctx.wait(i * 300).then((ok) => ok && ctx.tween(400, (t) => (e.style.opacity = t))); });
+        K.svg(svg, "text", { x: 10, y: 40, "font-size": 13 }, "同一层切片的 4 种序列（示意，代码生成）");
+        K.svg(svg, "text", { x: 10, y: 250, "font-size": 12.5, class: "muted" }, "FLAIR 里水肿最亮；T1ce 里增强环最亮；作者只用这两种作为输入的两个通道。");
+      },
+    },
+    {
+      title: "3D 体积：一摞 155 张切片", kicker: "第 7–14 格 · 看整个体积", at: 7,
+      html: `<p>MRI 是三维的：一个体积就是一摞 155 张 240×240 的切片。作者用 <code>montage</code> 把一摞切片铺成一张大图，又用 nilearn 库从不同角度画出 FLAIR 和标签叠加，还做了一个 GIF 逐层播放。</p><p>动画里我们从下往上一层层切：脑的截面先变大后变小，肿瘤只出现在中间一段切片里。这也说明为什么作者只取中间 100 张。</p>`,
+      cells: [8, 10, 14], highlight: ["montage"],
+      draw(svg, ctx) {
+        const N = 60, zs = [];
+        for (let z = 10; z <= 145; z += 9) zs.push(z);
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 13 }, "把体积铺开：第 10 张到第 145 张，每隔 9 张取一张（示意）");
+        const els = zs.map((z, i) => {
+          const b = brain(N, z, "flair", null, 3), x = 20 + (i % 8) * 86, y = 40 + Math.floor(i / 8) * 140;
+          const e = PX.draw(svg, x, y, 80, 80, overlay(b, 0.7), null, null, null, true);
+          K.svg(svg, "text", { x: x + 40, y: y + 96, "text-anchor": "middle", "font-size": 11, class: "muted" }, "z=" + z);
+          e.style.opacity = 0;
+          return e;
+        });
+        (async () => { for (const e of els) { if (!(await ctx.tween(150, (t) => (e.style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      title: "U-Net：先压缩，再放大，中间有“桥”", kicker: "第 15 格 · 模型思路", at: 15,
+      html: `<p>作者介绍了 U-Net：2015 年为生物医学图像分割提出的网络，在多个医学图像挑战赛上夺冠。它的形状像字母 U：</p><ul class="tight"><li><b>左边（编码器）</b>：卷积 + 池化，图越来越小、通道越来越多，学到“这是什么”</li><li><b>右边（解码器）</b>：上采样，把图一步步放大回原尺寸，回答“它在哪”</li><li><b>中间的跳连</b>：把左边同一层的高清特征直接送到右边，补回压缩时丢掉的细节，让轮廓画得准</li></ul>`,
+      cells: [15],
+      draw(svg, ctx) {
+        const lv = [[128, 32], [64, 64], [32, 128], [16, 256], [8, 512]];
+        const L = lv.map((l, i) => ({ x: 30 + i * 60, y: 40 + i * 52, h: 110 - i * 18, s: l })), R = lv.slice(0, 4).map((l, i) => ({ x: 640 - i * 60, y: 40 + i * 52, h: 110 - i * 18, s: l }));
+        const bl = L.map((b, i) => { const g = K.svg(svg, "g"); K.svg(g, "rect", { x: b.x, y: b.y, width: 22, height: b.h, rx: 3, fill: i === 4 ? "var(--c4)" : "var(--c1)", opacity: 0.85 }); K.svg(g, "text", { x: b.x + 11, y: b.y - 6, "text-anchor": "middle", "font-size": 10.5 }, `${b.s[0]}²×${b.s[1]}`); g.style.opacity = 0; return g; });
+        const br = R.map((b) => { const g = K.svg(svg, "g"); K.svg(g, "rect", { x: b.x, y: b.y, width: 22, height: b.h, rx: 3, fill: "var(--c3)", opacity: 0.85 }); K.svg(g, "text", { x: b.x + 11, y: b.y - 6, "text-anchor": "middle", "font-size": 10.5 }, `${b.s[0]}²×${b.s[1]}`); g.style.opacity = 0; return g; });
+        const sk = L.slice(0, 4).map((b, i) => { const a = K.arrow(svg, b.x + 24, b.y + b.h / 2, R[i].x - 2, R[i].y + R[i].h / 2, { color: "var(--warn)", dash: "5 4" }); a.style.opacity = 0; return a; });
+        K.svg(svg, "text", { x: 30, y: 330, "font-size": 12.5, fill: "var(--c1)" }, "■ 编码器：池化缩小");
+        K.svg(svg, "text", { x: 190, y: 330, "font-size": 12.5, fill: "var(--c3)" }, "■ 解码器：上采样放大");
+        K.svg(svg, "text", { x: 370, y: 330, "font-size": 12.5, fill: "var(--warn)" }, "- - 跳连：把高清细节直接送过去");
+        K.svg(svg, "text", { x: 560, y: 300, "font-size": 11.5, class: "muted" }, "尺寸按第 19 格");
+        (async () => {
+          for (const g of bl) { if (!(await ctx.tween(220, (t) => (g.style.opacity = t)))) return; }
+          for (let i = 3; i >= 0; i--) { if (!(await ctx.tween(220, (t) => (br[i].style.opacity = t)))) return; }
+          for (const a of sk) { if (!(await ctx.tween(220, (t) => (a.style.opacity = t)))) return; }
+        })();
+      },
+    },
+    {
+      title: "Dice 系数：两块区域重叠了多少", kicker: "第 16–18 格 · 评估指标", at: 16,
+      html: `<p><b>Dice 系数</b>衡量“预测区域”和“真实区域”的重叠程度：Dice = 2 × 重叠面积 ÷（预测面积 + 真实面积），0 表示完全不重叠，1 表示完全重合。</p><p>作者分别给 4 个类别算 Dice 再平均（<code>dice_coef</code>），又单独给坏死、水肿、增强三个分区各写了一个函数。另外还有：</p><ul class="tight"><li><b>敏感度</b>：真是肿瘤的像素里，被画出来的比例（漏画多少）</li><li><b>特异度</b>：真不是肿瘤的像素里，被正确留白的比例（多画多少）</li><li><b>精确率</b>：画出来的像素里，真是肿瘤的比例</li></ul>`,
+      cells: [17], highlight: ["def dice_coef(", "intersection = K.sum(y_true_f * y_pred_f)", "def sensitivity", "def specificity"],
+      draw(svg, ctx) {
+        const cx = 200, cy = 170, R = 90;
+        K.svg(svg, "circle", { cx, cy, r: R, fill: "var(--c5)", opacity: 0.45, stroke: "var(--c5)", "stroke-width": 2 });
+        const pred = K.svg(svg, "circle", { cx: cx + 150, cy, r: R, fill: "var(--c1)", opacity: 0.4, stroke: "var(--c1)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: cx - R, y: 60, "font-size": 13, fill: "var(--c5)", "font-weight": 700 }, "真实区域");
+        K.svg(svg, "text", { x: cx + 100, y: 60, "font-size": 13, fill: "var(--c1)", "font-weight": 700 }, "预测区域");
+        const out = K.svg(svg, "text", { x: 470, y: 150, "font-size": 20, "font-weight": 700, "font-family": "var(--mono)" }, "");
+        const out2 = K.svg(svg, "text", { x: 470, y: 185, "font-size": 15, "font-family": "var(--mono)", class: "muted" }, "");
+        K.svg(svg, "text", { x: 470, y: 230, "font-size": 12.5 }, "Dice = 2|A∩B| / (|A|+|B|)");
+        K.svg(svg, "text", { x: 470, y: 252, "font-size": 12.5 }, "IoU = |A∩B| / |A∪B|");
+        const ov = (d) => { if (d >= 2 * R) return 0; const a = 2 * R * R * Math.acos(d / (2 * R)) - (d / 2) * Math.sqrt(4 * R * R - d * d); return a / (Math.PI * R * R); };
+        ctx.tween(2200, (t) => { const d = 150 * (1 - t) + 10 * t; pred.setAttribute("cx", cx + d); const o = ov(d); out.textContent = "Dice = " + o.toFixed(2); out2.textContent = "IoU  = " + (o / (2 - o)).toFixed(2); });
+      },
+    },
+    {
+      title: "搭 U-Net：输入两个序列，输出 4 类", kicker: "第 19–21 格 · 模型结构", at: 19,
+      html: `<p>作者参考一篇博客手写了 U-Net：输入 <code>128×128×2</code>（FLAIR、T1ce 两个通道），编码器每层两次 3×3 卷积，通道数 32→64→128→256→512，四次 2×2 池化；最底层加 Dropout(0.2)。解码器每层先上采样放大 2 倍，再和左边同尺寸的特征<b>拼接</b>（跳连），再做卷积。最后一个 1×1 卷积 + softmax，输出每个像素 4 个类别的概率。</p><p>编译时：损失 <code>categorical_crossentropy</code>，优化器 Adam(0.001)，指标里放了准确率、Mean IoU、Dice、精确率、敏感度、特异度和三个分区的 Dice。</p><p class="note">注意：标题写“3D”，但这是一个 2D U-Net；Dice 只是指标，不是损失。</p>`,
+      cells: [19], highlight: ["UpSampling2D", "concatenate([conv3,up7], axis = 3)", "Conv2D(4, (1,1), activation = 'softmax')", "Input((IMG_SIZE, IMG_SIZE, 2))"],
+      draw(svg, ctx) {
+        const b = brain(64, 75, "flair", null, 3), c = brain(64, 75, "t1ce", null, 3);
+        PX.draw(svg, 20, 60, 110, 110, b, null, 0, 1, true);
+        PX.draw(svg, 40, 80, 110, 110, c, null, 0, 1, true);
+        K.svg(svg, "text", { x: 20, y: 50, "font-size": 12.5 }, "输入 128×128×2");
+        K.svg(svg, "text", { x: 20, y: 215, "font-size": 11.5, class: "muted" }, "FLAIR + T1ce");
+        const box = K.node(svg, 220, 90, 160, 80, "U-Net", { bold: true, fs: 16, stroke: "var(--accent)" });
+        K.arrow(svg, 160, 130, 216, 130); K.arrow(svg, 384, 130, 430, 130);
+        const outs = [[0, "0 背景"], [1, "1 坏死核心"], [2, "2 水肿"], [4, "3 增强"]];
+        const els = outs.map((o, i) => {
+          const m = o[0] ? maskImg(b, o[0]) : PX.rgbGrid(64, 64, (x, y) => (b.lab[y * 64 + x] ? [0.08, 0.08, 0.1] : [0.6, 0.6, 0.65]));
+          const e = PX.draw(svg, 440 + (i % 2) * 135, 30 + Math.floor(i / 2) * 150, 115, 115, m, null, null, null, true);
+          K.svg(svg, "text", { x: 497 + (i % 2) * 135, y: 160 + Math.floor(i / 2) * 150, "text-anchor": "middle", "font-size": 12 }, o[1]);
+          e.style.opacity = 0;
+          return e;
+        });
+        K.svg(svg, "text", { x: 220, y: 200, "font-size": 12, class: "muted" }, "每个像素输出 4 个概率");
+        K.svg(svg, "text", { x: 220, y: 218, "font-size": 12, class: "muted" }, "（softmax，加起来 = 1）");
+        (async () => { for (const e of els) { if (!(await ctx.tween(300, (t) => (e.style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      title: "数据生成器：一次只读一个病人", kicker: "第 22–27 格 · 读取数据", at: 22,
+      html: `<p>BraTS 的数据太大，不能一次读进内存。作者先按<b>病人</b>切分：20% 当验证集，剩下的再分 15% 当测试集（没有设随机种子）。然后写了一个 <code>DataGenerator</code>：每次取一个病人，读出 FLAIR、T1ce 和标签，对第 22–121 张切片：</p><ul class="tight"><li>两种序列各缩放到 128×128，叠成 2 个通道</li><li>标签里的 4 改成 3，做<b>独热编码</b>（每个像素变成 4 个 0/1），再缩放到 128×128</li><li>整批图像除以这批里的最大值，归一化到 0–1</li></ul><p>所以一个病人就是一批 100 张切片。</p>`,
+      cells: [23, 25], highlight: ["y[y==4] = 3;", "tf.one_hot(y, 4)", "return X/np.max(X), Y", "train_test_split(train_and_test_ids,test_size=0.2)"],
+      draw(svg, ctx) {
+        K.node(svg, 20, 130, 110, 60, "一个病人\n155 张切片", { bold: true });
+        const zs = [22, 47, 72, 97, 121], els = [];
+        zs.forEach((z, i) => {
+          const b = brain(48, z, "flair", null, 3), c = brain(48, z, "t1ce", null, 3);
+          els.push(PX.draw(svg, 170 + i * 100, 50, 80, 80, b, null, 0, 1, true), PX.draw(svg, 170 + i * 100, 140, 80, 80, c, null, 0, 1, true), PX.draw(svg, 170 + i * 100, 230, 80, 80, maskImg(b), null, null, null, true));
+          K.svg(svg, "text", { x: 210 + i * 100, y: 42, "text-anchor": "middle", "font-size": 11 }, "z=" + z);
+        });
+        K.svg(svg, "text", { x: 160, y: 95, "text-anchor": "end", "font-size": 11 }, "FLAIR");
+        K.svg(svg, "text", { x: 160, y: 185, "text-anchor": "end", "font-size": 11 }, "T1ce");
+        K.svg(svg, "text", { x: 160, y: 275, "text-anchor": "end", "font-size": 11 }, "标签");
+        K.svg(svg, "text", { x: 170, y: 332, "font-size": 11.5, class: "muted" }, "第 22 到 121 张（这里只画 5 张）→ 一批 100 个样本，每个是 128×128×2 的输入 + 128×128×4 的掩膜");
+        els.forEach((e) => (e.style.opacity = 0));
+        (async () => { for (let i = 0; i < els.length; i += 3) { if (!(await ctx.tween(260, (t) => { for (let k = 0; k < 3; k++) els[i + k].style.opacity = t; }))) return; } })();
+      },
+    },
+    {
+      title: "训练设置：回调和作者的成绩", kicker: "第 28–31 格 · 训练", at: 28,
+      html: `<p>回调函数：验证损失连续 2 轮不降，学习率乘 0.2（最低 1e-6）；把每轮的指标写进 <code>training.log</code>。早停和保存最好模型的回调被注释掉了。</p><p>训练代码（35 轮，每轮走遍所有训练病人）也被注释掉了，因为作者<b>直接加载事先训练好的模型</b>。他写道：最好的模型 Mean IoU 约 81%，Dice 约 65.5%。<span data-cell="30">第 30 格</span></p><p>为什么两个数差这么多？Mean IoU 是 4 个类别（含“背景”）的 IoU 平均，背景占了绝大多数像素，很容易做到接近 1，把平均拉高了。动画演示这一点。</p>`,
+      cells: [29, 31], highlight: ["ReduceLROnPlateau(monitor='val_loss', factor=0.2"],
+      draw(svg, ctx) {
+        const N = 40, tot = N * N;
+        K.svg(svg, "text", { x: 20, y: 26, "font-size": 13 }, "一张 40×40 的示意切片：灰 = 背景，彩色 = 肿瘤三个分区");
+        const b = brain(N, 75, "flair", { r: 0.16 }, 3), cells = [];
+        let cnt = { 0: 0, 1: 0, 2: 0, 4: 0 };
+        for (let i = 0; i < tot; i++) { cnt[b.lab[i]]++; cells.push(K.svg(svg, "rect", { x: 20 + (i % N) * 7, y: 40 + Math.floor(i / N) * 7, width: 6.3, height: 6.3, fill: "var(--panel-2)" })); }
+        const col = { 0: "var(--ink-3)", 1: "var(--c6)", 2: "var(--c5)", 4: "var(--c1)" };
+        const pct = (k) => ((cnt[k] / tot) * 100).toFixed(1) + "%";
+        [["背景", 0], ["坏死核心", 1], ["水肿", 2], ["增强", 4]].forEach((d, i) => K.svg(svg, "text", { x: 330, y: 80 + i * 28, "font-size": 14, fill: col[d[1]], "font-weight": 700 }, `■ ${d[0]}：${pct(d[1])}`));
+        K.svg(svg, "text", { x: 330, y: 220, "font-size": 12.5 }, "背景类的 IoU 几乎总是接近 1，");
+        K.svg(svg, "text", { x: 330, y: 242, "font-size": 12.5 }, "4 类一平均，Mean IoU 就被抬高；");
+        K.svg(svg, "text", { x: 330, y: 264, "font-size": 12.5 }, "肿瘤分区画得好不好，要单独看各分区的 Dice。");
+        ctx.tween(1200, (t) => cells.forEach((c, i) => { if (i / tot < t) K.set(c, { fill: col[b.lab[i]], opacity: b.lab[i] ? 1 : 0.35 }); }));
+      },
+    },
+    {
+      title: "加载模型，看训练曲线", kicker: "第 32–33 格 · 训练过程", at: 32,
+      html: `<p>作者加载另一个数据集里存好的模型 <code>model_per_class.h5</code> 和训练日志，画四张曲线：准确率、损失、Dice、Mean IoU，每张都有训练和验证两条线。</p><p>加载时 <code>compile=False</code>，并把自定义的指标函数通过 <code>custom_objects</code> 传进去。动画是示意曲线：像素准确率一开始就很高（因为背景多），Dice 则从低处慢慢爬升，更能看出模型在“学会画肿瘤”。</p>`,
+      cells: [33], highlight: ["keras.models.load_model", "val_dice_coef"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [0, 35], [0, 1], { xlabel: "轮次（示意曲线）", yfmt: (v) => v.toFixed(1) });
+        const r = K.rng(4), A = [], D = [], I = [];
+        for (let e = 0; e <= 35; e++) { A.push(0.95 + 0.04 * (1 - Math.exp(-e / 3)) + (r() - 0.5) * 0.005); D.push(0.25 + 0.42 * (1 - Math.exp(-e / 8)) + (r() - 0.5) * 0.02); I.push(0.5 + 0.32 * (1 - Math.exp(-e / 6)) + (r() - 0.5) * 0.015); }
+        const sets = [[A, "var(--ink-3)", "像素准确率"], [I, "var(--c1)", "Mean IoU"], [D, "var(--c6)", "Dice"]];
+        const ps = sets.map((s, i) => { K.svg(svg, "text", { x: 480 + i * 0, y: 200 + i * 20, "font-size": 12, fill: s[1] }, "— " + s[2]); return K.svg(svg, "path", { fill: "none", stroke: s[1], "stroke-width": 2.5 }); });
+        ctx.tween(2000, (t) => ps.forEach((p, i) => p.setAttribute("d", sets[i][0].slice(0, Math.round(t * 35) + 1).map((v, e) => (e ? "L" : "M") + ax.sx(e) + "," + ax.sy(v)).join(""))));
+      },
+    },
+    {
+      title: "预测示例：和医生的标注对照", kicker: "第 34–36 格 · 看效果", at: 34,
+      html: `<p>作者写了 <code>predictByPath</code>：读一个病人的 FLAIR 和 T1ce，取 100 张切片，归一化后让模型预测。<code>showPredictsById</code> 对 7 个测试病人各画一行 6 张图：原始 FLAIR、医生标注、全部类别、以及三个分区各自的预测概率。</p><p>动画：示意的“预测”逐渐浮现在 FLAIR 上，和医生标注对比。</p><p class="callout warn">第 36 格的标题对错了：第 4 张画的是水肿，标题却是 NECROTIC/CORE；第 5 张画的是核心，标题却是 EDEMA。第 35 格的 <code>imageLoader</code> 用了未定义的变量，如果被调用会报错（后面没用到）。</p>`,
+      cells: [36], highlight: ["def predictByPath", "axarr[3].imshow(edema", "axarr[3].title.set_text(f'{SEGMENT_CLASSES[1]} predicted')"],
+      draw(svg, ctx) {
+        const b = brain(80, 70, "flair", { x: 0.36, y: 0.55, r: 0.15 }, 9);
+        const blurLab = (L) => PX.blur(PX.grid(80, 80, (x, y) => (b.lab[y * 80 + x] === L ? 1 : 0)), 1.5);
+        const P = { 2: blurLab(2), 1: blurLab(1), 4: blurLab(4) };
+        const titles = ["FLAIR", "医生标注", "预测：水肿", "预测：坏死核心", "预测：增强"];
+        const base = PX.draw(svg, 10, 50, 130, 130, b, null, 0, 1, true);
+        PX.draw(svg, 150, 50, 130, 130, overlay(b, 0.75), null, null, null, true);
+        const pe = [2, 1, 4].map((L, i) => PX.draw(svg, 290 + i * 140, 50, 130, 130, PX.map(P[L], () => 0), "heat", 0, 1, true));
+        titles.forEach((t, i) => K.svg(svg, "text", { x: 75 + i * 140 - (i > 1 ? 0 : 0), y: 200, "text-anchor": "middle", "font-size": 12.5, "font-weight": 700 }, t));
+        K.svg(svg, "text", { x: 10, y: 240, "font-size": 12, class: "muted" }, "预测图越红，模型越确定这个像素属于该分区（示意：用模糊后的标注代替模型输出）");
+        K.svg(svg, "text", { x: 10, y: 262, "font-size": 12, fill: "var(--warn)" }, "原 notebook 里第 3、4 张预测图的标题互相写反了");
+        ctx.tween(1500, (t) => [2, 1, 4].forEach((L, i) => PX.update(pe[i], PX.map(P[L], (v) => v * t), "heat", 0, 1)));
+      },
+    },
+    {
+      title: "评估：单个类别和整个测试集", kicker: "第 37–39 格 · 评估", at: 37,
+      html: `<p>作者先挑一个测试病人的一张切片，把某一类的真实标注和预测概率并排画出来；再在整个测试生成器上 <code>model.evaluate</code>，输出所有指标。</p><p>这里有一行有问题的代码：<code>gt[gt != eval_class] = 1</code>。本意是“只看这一类”，应该把不是这一类的像素设为 <b>0</b>，写成 1 之后，几乎整张图都变成了 1。动画对比了正确和错误两种写法。</p>`,
+      cells: [38, 39], highlight: ["gt[gt != eval_class] = 1", "model.evaluate(test_generator"],
+      draw(svg, ctx) {
+        const b = brain(80, 75, "flair", null, 3);
+        const ec = 2;
+        const right = PX.grid(80, 80, (x, y) => (b.lab[y * 80 + x] === ec ? 1 : 0));
+        const wrong = PX.grid(80, 80, (x, y) => (b.lab[y * 80 + x] === ec ? ec : 1));
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, "font-weight": 700, fill: "var(--good)" }, "应该：不是这一类 → 0");
+        K.svg(svg, "text", { x: 360, y: 30, "font-size": 13, "font-weight": 700, fill: "var(--bad)" }, "原代码：不是这一类 → 1");
+        const r1 = PX.draw(svg, 20, 45, 240, 240, right, null, 0, 2, true), r2 = PX.draw(svg, 360, 45, 240, 240, wrong, null, 0, 2, true);
+        r1.style.opacity = 0; r2.style.opacity = 0;
+        K.svg(svg, "text", { x: 20, y: 310, "font-size": 12, class: "muted" }, "只剩水肿区域是亮的");
+        K.svg(svg, "text", { x: 360, y: 310, "font-size": 12, class: "muted" }, "整张图都变成了“有东西”，看不出这一类的形状");
+        ctx.tween(600, (t) => (r1.style.opacity = t)).then((ok) => ok && ctx.tween(600, (t) => (r2.style.opacity = t)));
+      },
+    },
+    {
+      title: "下一步：生存期预测", kicker: "第 40–41 格 · 延伸", at: 40,
+      html: `<p>BraTS 2020 除了分割，还有一个任务：根据影像和临床信息预测病人的<b>总生存期</b>。作者说完整实现在他的另一份 notebook 里。</p><p>思路通常是：先用分割结果算出肿瘤各分区的体积、形状、位置等特征，再和年龄等临床信息一起交给表格模型。分割做得准，后面的特征才可靠。</p>`,
+      cells: [41],
+      draw(svg, ctx) {
+        const nodes = [["MRI 四种序列", 20], ["U-Net 分割", 190], ["肿瘤体积、形状\n位置等特征", 360], ["生存期预测", 540]];
+        const els = nodes.map((n, i) => { const g = K.svg(svg, "g"); K.node(g, n[1], 130, 150, 70, n[0], { bold: i === 1, stroke: i === 1 ? "var(--accent)" : "var(--line)" }); if (i) K.arrow(g, n[1] - 24, 165, n[1] - 4, 165); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 20, y: 260, "font-size": 12.5, class: "muted" }, "本 notebook 做到第二步；第三、四步在作者另一份 notebook 里（流程为示意）");
+        (async () => { for (const g of els) { if (!(await ctx.tween(350, (t) => (g.style.opacity = t)))) return; } })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：Dice / IoU / 像素准确率 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 660, height: 330,
+    controls: [
+      { id: "dx", label: "预测区域左右偏移（像素）", min: -30, max: 30, step: 1, value: 6 },
+      { id: "scale", label: "预测区域大小（相对真实）", min: 0.3, max: 2, step: 0.05, value: 1.2, fmt: (v) => "×" + v.toFixed(2) },
+      { id: "tsize", label: "真实肿瘤半径（越小越难）", min: 3, max: 30, step: 1, value: 14 },
+    ],
+    note: "浏览器里在一张 128×128 的网格上真算：黄色 = 真实肿瘤，蓝色 = 预测，绿色 = 重叠。把肿瘤半径调小，看像素准确率几乎不动，Dice 却大幅下降：背景太多时，像素准确率会“说好话”。",
+    render(svg, v) {
+      const N = 128, cx = 64, cy = 64, R = v.tsize, pr = R * v.scale;
+      let TP = 0, FP = 0, FN = 0, TN = 0;
+      const img = PX.rgbGrid(N, N, (x, y) => {
+        const t = Math.hypot(x - cx, y - cy) <= R, p = Math.hypot(x - cx - v.dx, y - cy) <= pr;
+        if (t && p) { TP++; return [0.25, 0.75, 0.45]; } if (t) { FN++; return [0.95, 0.75, 0.2]; } if (p) { FP++; return [0.35, 0.55, 0.95]; } TN++; return [0.12, 0.12, 0.14];
+      });
+      PX.draw(svg, 10, 10, 300, 300, img, null, null, null, true);
+      const dice = (2 * TP) / (2 * TP + FP + FN || 1), iou = TP / (TP + FP + FN || 1), acc = (TP + TN) / (N * N), sen = TP / (TP + FN || 1), spe = TN / (TN + FP || 1);
+      const bars = [["Dice", dice, "var(--c6)"], ["IoU", iou, "var(--c4)"], ["像素准确率", acc, "var(--ink-3)"], ["敏感度", sen, "var(--c5)"], ["特异度", spe, "var(--c3)"]];
+      bars.forEach((b, i) => {
+        const y = 30 + i * 52;
+        K.svg(svg, "text", { x: 340, y: y + 16, "font-size": 13 }, b[0]);
+        K.svg(svg, "rect", { x: 430, y, width: 180, height: 22, rx: 4, fill: "var(--panel-2)" });
+        K.svg(svg, "rect", { x: 430, y, width: 180 * b[1], height: 22, rx: 4, fill: b[2] });
+        K.svg(svg, "text", { x: 616, y: y + 16, "font-size": 12, fill: "var(--ink)" }, b[1].toFixed(3));
+      });
+      K.svg(svg, "text", { x: 340, y: 300, "font-size": 11.5, class: "muted" }, "黄=漏画  蓝=多画  绿=画对");
+      return { readout: [
+        { k: "画对（TP）", v: TP }, { k: "漏画（FN）", v: FN, color: "var(--warn)" }, { k: "多画（FP）", v: FP, color: "var(--c1)" }, { k: "背景像素", v: TN },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：切片范围 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 660, height: 330,
+    controls: [
+      { id: "tz", label: "这个病人肿瘤中心在第几张切片", min: 20, max: 135, step: 1, value: 75 },
+      { id: "start", label: "VOLUME_START_AT（起始切片）", min: 0, max: 60, step: 1, value: 22 },
+      { id: "n", label: "VOLUME_SLICES（取多少张）", min: 40, max: 155, step: 5, value: 100 },
+      { id: "z", label: "查看第几张切片", min: 0, max: 154, step: 1, value: 75 },
+    ],
+    note: "浏览器里生成一个示意 3D 体积（155 张切片），按右侧设置只取一段切片给模型。下方条带：灰色 = 被取用的切片，彩色竖线 = 含肿瘤的切片。把肿瘤中心拖到 130 附近，看有多少肿瘤切片被漏掉。",
+    render(svg, v) {
+      const tm = { z: v.tz, rz: 32 }, N = 64;
+      const sl = brain(N, v.z, "flair", tm, 3);
+      PX.draw(svg, 10, 10, 220, 220, overlay(sl, 0.7), null, null, null, true);
+      const inRange = v.z >= v.start && v.z < v.start + v.n;
+      K.svg(svg, "text", { x: 10, y: 250, "font-size": 13, "font-weight": 700, fill: inRange ? "var(--good)" : "var(--bad)" }, `第 ${v.z} 张：${inRange ? "会送进模型" : "被跳过"}`);
+      const x0 = 260, w = 380, sx = (z) => x0 + (z / 155) * w;
+      K.svg(svg, "rect", { x: x0, y: 40, width: w, height: 60, fill: "var(--panel-2)", rx: 4 });
+      K.svg(svg, "rect", { x: sx(v.start), y: 40, width: sx(Math.min(155, v.start + v.n)) - sx(v.start), height: 60, fill: "var(--ink-3)", opacity: 0.35 });
+      let tumorS = 0, covered = 0, vox = 0, voxC = 0;
+      for (let z = 0; z < 155; z++) {
+        const tz = (z - tm.z) / tm.rz;
+        if (Math.abs(tz) >= 1) continue;
+        const a = 1 - tz * tz;
+        tumorS++; vox += a;
+        const inside = z >= v.start && z < v.start + v.n;
+        if (inside) { covered++; voxC += a; }
+        K.svg(svg, "line", { x1: sx(z), x2: sx(z), y1: 46, y2: 94, stroke: inside ? "var(--c6)" : "var(--warn)", "stroke-width": 1.6 });
+      }
+      K.svg(svg, "line", { x1: sx(v.z), x2: sx(v.z), y1: 32, y2: 108, stroke: "var(--accent)", "stroke-width": 2.5 });
+      K.svg(svg, "text", { x: x0, y: 125, "font-size": 11.5, class: "muted" }, "0");
+      K.svg(svg, "text", { x: x0 + w, y: 125, "font-size": 11.5, class: "muted", "text-anchor": "end" }, "154");
+      K.svg(svg, "text", { x: x0, y: 28, "font-size": 12 }, "155 张切片（从下到上）");
+      K.svg(svg, "text", { x: x0, y: 160, "font-size": 12, fill: "var(--c6)" }, "| 被取用的肿瘤切片");
+      K.svg(svg, "text", { x: x0 + 150, y: 160, "font-size": 12, fill: "var(--warn)" }, "| 被跳过的肿瘤切片");
+      K.svg(svg, "text", { x: x0, y: 200, "font-size": 12.5, class: "muted" }, "跳过的切片不参与训练，也不参与预测；");
+      K.svg(svg, "text", { x: x0, y: 220, "font-size": 12.5, class: "muted" }, "如果肿瘤偏上或偏下，模型就“看不到”那一部分。");
+      return { readout: [
+        { k: "取用的切片", v: `${v.start} – ${Math.min(154, v.start + v.n - 1)}` },
+        { k: "含肿瘤的切片被覆盖", v: `${covered} / ${tumorS}`, color: covered < tumorS ? "var(--bad)" : "var(--good)" },
+        { k: "肿瘤体积被覆盖（示意）", v: ((voxC / (vox || 1)) * 100).toFixed(1) + "%" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

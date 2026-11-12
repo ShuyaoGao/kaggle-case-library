@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>单细胞数据探索</title>
+<meta name="description" content="Kaggle 案例拆解：NeurIPS 2022 多模态单细胞整合比赛的探索性分析——28 万个细胞、2 万多个基因，看稀疏性、数据泄漏、SVD 投影、批次效应和 Y 染色体。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">组学数据 · 探索性分析 · 数据挖掘</div>
+  <h1>单细胞数据探索：28 万个细胞里藏着哪些“坑”</h1>
+  <p class="en">MSCI EDA which makes sense</p>
+  <div class="tags">
+    <span class="tag method">数据挖掘</span><span class="tag ml">机器学习</span>
+    <span class="tag method">稀疏矩阵 CSR</span><span class="tag method">TruncatedSVD 降维</span><span class="tag method">数据泄漏检测</span>
+    <span class="tag method">批次效应</span><span class="tag method">分块读取大文件</span><span class="tag method">GroupKFold 思路</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>AmbrosM</b></span>
+    <span>Kaggle 点赞 <b>479</b>（2026-11 抓取）</span>
+    <span>数据 <b>Open Problems – Multimodal Single-Cell Integration（比赛）</b></span>
+    <span><a href="https://www.kaggle.com/code/ambrosm/msci-eda-which-makes-sense" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">28 万多个人体血液干细胞的分子测量</div><p>4 位捐献者、5 个时间点，用两种技术测量：CITEseq 测基因表达和表面蛋白，Multiome 测染色质开放程度和基因表达。<span data-cell="4">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">用一种分子测量预测另一种</div><p>CITEseq：由 22050 个基因的表达量预测 140 种表面蛋白；Multiome：由 228942 个染色质位点预测 23418 个基因的表达。<span data-cell="12">出处</span> <span data-cell="38">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">不建模，专门“挖”数据的特点</div><p>统计零值、稀疏存储、比对重复行找泄漏、TruncatedSVD 投影看分布、按天上色看批次效应、看 Y 染色体分辨捐献者性别。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一份“避坑清单”</div><p>发现了公开测试集里 7476 行与训练集完全相同的泄漏、训练和测试分布不同、天与天之间有批次效应，并据此建议按组做交叉验证。<span data-cell="25">出处</span> <span data-cell="28">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛来自 NeurIPS 2022 的 Open Problems 竞赛。研究者让人体造血干细胞在培养皿里分化若干天，在不同的天取样测量。每个细胞只测一次就被“用掉”，所以没有同一个细胞的时间序列。<span data-cell="4">出处</span></p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况（全部来自作者文字）</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">细胞总数</div><div class="v">281,528</div></div>
+        <div class="stat-tile"><div class="k">天 / 捐献者 / 细胞类型</div><div class="v" style="font-size:16px">5 / 4 / 8</div></div>
+        <div class="stat-tile"><div class="k">CITEseq 训练 × 基因</div><div class="v" style="font-size:16px">70,988 × 22,050</div></div>
+        <div class="stat-tile"><div class="k">Multiome 训练 × 位点</div><div class="v" style="font-size:16px">105,942 × 228,942</div></div>
+        <div class="stat-tile"><div class="k">CITEseq 零值占比</div><div class="v">78%</div></div>
+        <div class="stat-tile"><div class="k">Multiome 零值占比（抽样）</div><div class="v">98%</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">出处：<span data-cell="4">第 4 格</span>（总数和分组）、<span data-cell="12">第 12 格</span>（CITEseq）、<span data-cell="38">第 38 格</span>（Multiome，训练输入约 97 GB）。8 种细胞类型里有一种叫 hidden（测试集里不公开类型）。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">有哪些表</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>表</th><th>白话含义</th></tr>
+        <tr><td><code>metadata.csv</code></td><td>每个细胞的“身份证”：<code>cell_id</code>、<code>day</code> 第几天、<code>donor</code> 捐献者、<code>cell_type</code> 细胞类型、<code>technology</code> 测量技术</td></tr>
+        <tr><td>CITEseq 输入</td><td>每行一个细胞，每列一个基因的 RNA 表达量（已归一化并取 log1p）</td></tr>
+        <tr><td>CITEseq 目标</td><td><b>要预测的答案</b>：140 种细胞表面蛋白的含量</td></tr>
+        <tr><td>Multiome 输入</td><td>每列一段 DNA 区域（ATAC-seq 峰）在这个细胞里“打开”的程度，做过 TF-IDF 变换</td></tr>
+        <tr><td>Multiome 目标</td><td><b>要预测的答案</b>：23418 个基因的 RNA 表达量</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">表的说明见 <span data-cell="1">第 1 格</span> 文件列表、<span data-cell="31">第 31 格</span>、<span data-cell="49">第 49 格</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="20">
+    <h3>动手试试 A · 稀疏矩阵能省多少内存 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="29">
+    <h3>动手试试 B · SVD 投影与批次效应 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的发现</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>发现</th><th>出处</th></tr>
+        <tr><td>两种技术不共享细胞，可以当成两场独立的比赛分别建模</td><td><span data-cell="4">第 4 格</span></td></tr>
+        <tr><td>造血干细胞（HSC）从约 50% 逐渐分化，到第 7 天只剩约 20%</td><td><span data-cell="10">第 10 格</span></td></tr>
+        <tr><td>CITEseq 输入 78% 是零，特征值要么是 0、要么在 2.9 到 12 之间，远非正态</td><td><span data-cell="12">第 12 格</span> <span data-cell="16">第 16 格</span></td></tr>
+        <tr><td>测试集前 7476 行与训练集前 7476 行完全相同，是准备数据时的错误；Kaggle 已将其排除出计分</td><td><span data-cell="25">第 25 格</span></td></tr>
+        <tr><td>训练和测试的分布不同，第 7 天覆盖了训练集没见过的区域，公开排行榜看不出外推能力</td><td><span data-cell="28">第 28 格</span></td></tr>
+        <tr><td>输入里有 151 个基因的名字和要预测的 140 种蛋白对应，降维时不要把它们丢掉</td><td><span data-cell="36">第 36 格</span></td></tr>
+        <tr><td>存在批次效应，且“天”的影响大于“捐献者”，建议按天做 GroupKFold</td><td><span data-cell="44">第 44 格</span></td></tr>
+        <tr><td>从 Y 染色体看，4 位捐献者里大概是 1 位女性、3 位男性</td><td><span data-cell="48">第 48 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">这是一份探索性分析，没有训练模型，所以没有分数。上面的数字都是作者在文字里写明的数据事实。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>在动手建模前，先摸清一份超大、超稀疏的生物数据的“脾气”：内存够不够、哪里有泄漏、训练和测试像不像、该怎么切验证集。</li>
+        <li><b>同类问题：</b>基因组、蛋白质组、电商的“用户 × 商品”矩阵、文本的词袋矩阵，都是高维稀疏数据；多中心医学研究、多台机器采集的数据都有批次效应。</li>
+        <li><b>可迁移的套路：</b>先看元数据分组 → 统计零值、改用稀疏存储 → 比对训练与测试找重复 → 降到二维按组上色看分布差异 → 按组设计交叉验证。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>元数据分组计数 <span data-cell="6">第 6 格</span>、按天的细胞类型比例 <span data-cell="11">第 11 格</span></li>
+        <li><code>plt.spy</code> 看稀疏结构 <span data-cell="15">第 15 格</span>；CSR 稀疏矩阵 <span data-cell="20">第 20 格</span></li>
+        <li>逐元素比对找泄漏 <span data-cell="24">第 24 格</span></li>
+        <li><code>TruncatedSVD</code> 投影到二维 <span data-cell="27">第 27 格</span></li>
+        <li>分块读取 HDF5 大文件 <span data-cell="39">第 39 格</span>；行总和看批次效应 <span data-cell="45">第 45 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者说“每个细胞只测一次就被丢弃，没有单个细胞的时间序列”。那“第 2 天到第 7 天的变化”是怎么看出来的？这和人口普查有什么相似之处？</li>
+      <li>泄漏被发现之前，有人直接把训练集答案抄进测试集就能拿高分。作为比赛主办方，你会怎样在发布数据前检查这种错误？</li>
+      <li>为什么作者建议按“天”分组做交叉验证，而不是随机打乱？如果随机打乱，验证分数会偏高还是偏低？</li>
+      <li>第 45 格两张图的横轴标签写反了（左图画的是非零个数，标签写的是总和）。看图时你会怎样发现这种错误？</li>
+      <li>零值占 78% 甚至 98%，是“真的没有表达”还是“没测到”？这两种情况对建模有什么不同影响？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 AmbrosM，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Kaggle 比赛 Open Problems – Multimodal Single-Cell Integration（NeurIPS 2022）。
+</footer>
+</main>
+
+<script src="nb/single-cell-multiome-eda.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const DAYC = { 2: "var(--c6)", 3: "var(--c3)", 4: "var(--c1)", 7: "var(--warn)", 10: "var(--ink-3)" };
+  function fmtBytes(b) { return b >= 1e9 ? (b / 1e9).toFixed(2) + " GB" : b >= 1e6 ? (b / 1e6).toFixed(1) + " MB" : (b / 1e3).toFixed(1) + " KB"; }
+
+  const steps = [
+    {
+      at: 4, title: "元数据：28 万个细胞的“身份证”", kicker: "第 4–6 格 · 元数据",
+      html: `<p>元数据表记录每个细胞来自<b>哪一天、哪位捐献者、什么细胞类型、用哪种技术测的</b>。作者统计：281528 个细胞，5 天、4 位捐献者、8 种细胞类型（含一个 hidden）、2 种技术，没有缺失值。<span data-cell="4">第 4 格</span></p><p>两个关键洞察：每个细胞只测一次，没有“同一个细胞随时间变化”的序列；两种技术不共享细胞，等于“一场比赛里藏着两场比赛”。</p>`,
+      cells: [5, 6],
+      draw(svg, ctx) {
+        const cols = [["day 天", ["2", "3", "4", "7", "10"]], ["donor 捐献者", ["13176", "31800", "32606", "27678"]], ["technology 技术", ["citeseq", "multiome"]], ["cell_type 类型", ["HSC 造血干细胞", "类型 2", "类型 3", "类型 4", "类型 5", "类型 6", "类型 7", "hidden"]]];
+        cols.forEach(([h, vs], j) => {
+          const x = 20 + j * 175;
+          K.svg(svg, "text", { x, y: 30, "font-size": 13, "font-weight": 700 }, h);
+          vs.forEach((v, i) => {
+            const g = K.node(svg, x, 44 + i * 34, 150, 28, v, { fill: "var(--panel-2)", fs: 12 });
+            g.style.opacity = 0;
+            ctx.wait(j * 400 + i * 80).then((ok) => ok && ctx.tween(250, (t) => (g.style.opacity = t)));
+          });
+        });
+        K.svg(svg, "text", { x: 20, y: 330, "font-size": 12, class: "muted" }, "捐献者编号和天数来自作者代码；HSC 和 hidden 见作者文字，其余 6 种类型名这里省略");
+      },
+    },
+    {
+      title: "谁训练、谁预测", kicker: "第 7–9 格 · 数据划分",
+      html: `<p>每种“天 × 捐献者 × 技术”组合大约 8000 个细胞。<span data-cell="7">第 7 格</span> 比赛的划分很特别：CITEseq 用 3 位捐献者、3 天训练；公开排行榜预测<b>第 4 位捐献者</b>，私有排行榜预测<b>新的一天</b>。Multiome 类似，训练 4 天，私有榜预测第 5 天。<span data-cell="9">第 9 格</span></p><p>作者的结论：要预测的是“没见过的组”，所以交叉验证应该按组切（GroupKFold），而不是随机打乱。</p>`,
+      cells: [8],
+      draw(svg, ctx) {
+        const days = [2, 3, 4, 7], donors = ["13176", "31800", "32606", "27678"];
+        days.forEach((d, j) => K.svg(svg, "text", { x: 160 + j * 120 + 50, y: 34, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "第 " + d + " 天"));
+        const cells = [];
+        donors.forEach((dn, i) => {
+          K.svg(svg, "text", { x: 140, y: 70 + i * 60, "text-anchor": "end", "font-size": 12 }, "捐献者 " + dn);
+          days.forEach((d, j) => {
+            const type = d === 7 ? "priv" : dn === "27678" ? "pub" : "train";
+            const c = type === "train" ? "var(--warn)" : type === "pub" ? "var(--c6)" : "var(--c5)";
+            const r = K.svg(svg, "rect", { x: 160 + j * 120, y: 48 + i * 60, width: 100, height: 40, rx: 6, fill: c, opacity: 0 });
+            cells.push([r, type]);
+          });
+        });
+        [["训练", "var(--warn)"], ["公开测试：新捐献者", "var(--c6)"], ["私有测试：新的一天", "var(--c5)"]].forEach(([s, c], k) => K.svg(svg, "text", { x: 160 + k * 170, y: 320, "font-size": 12, fill: c, "font-weight": 700 }, "■ " + s));
+        K.svg(svg, "text", { x: 160, y: 300, "font-size": 12, class: "muted" }, "CITEseq 的划分（按作者第 9 格描述）");
+        (async () => { for (const kind of ["train", "pub", "priv"]) { if (!(await ctx.tween(500, (t) => cells.forEach(([r, ty]) => { if (ty === kind) r.style.opacity = 0.6 * t; })))) return; } })();
+      },
+    },
+    {
+      title: "细胞类型随天变化：干细胞在分化", kicker: "第 10–11 格 · 时间趋势",
+      html: `<p>按天统计各细胞类型的比例，作者发现<b>造血干细胞（HSC）</b>在慢慢变成别的细胞：第一天大约 50% 是 HSC，到第 7 天只剩约 20%。第 10 天的类型没有公开，但可以猜 HSC 会更少。<span data-cell="10">第 10 格</span></p><p>动画里绿线是 HSC 的比例（只画作者给出的两个端点和平滑过渡），其他颜色示意分化出的各类细胞在增加。</p>`,
+      cells: [11],
+      draw(svg, ctx) {
+        const days = [2, 3, 4, 7];
+        const ax = K.axes(svg, { x: 70, y: 30, w: 560, h: 250 }, [2, 7], [0, 0.6], { xticks: 5, yticks: 3, xlabel: "第几天", ylabel: "占比", yfmt: (v) => Math.round(v * 100) + "%" });
+        const hsc = (d) => 0.5 - ((d - 2) / 5) * 0.3;
+        let path = ""; for (let d = 2; d <= 7.001; d += 0.1) path += (path ? "L" : "M") + ax.sx(d).toFixed(1) + "," + ax.sy(hsc(d)).toFixed(1);
+        const p = K.svg(svg, "path", { d: path, fill: "none", stroke: "var(--c3)", "stroke-width": 6 });
+        const L = p.getTotalLength(); p.style.strokeDasharray = L; p.style.strokeDashoffset = L;
+        const others = [0, 1, 2].map((k) => { let q = ""; for (let d = 2; d <= 7.001; d += 0.1) q += (q ? "L" : "M") + ax.sx(d).toFixed(1) + "," + ax.sy(0.08 + k * 0.03 + ((d - 2) / 5) * (0.06 + k * 0.03)).toFixed(1); const e = K.svg(svg, "path", { d: q, fill: "none", stroke: [ "var(--c1)", "var(--c2)", "var(--c4)"][k], "stroke-width": 2.5, "stroke-dasharray": "5 4" }); e.style.opacity = 0; return e; });
+        K.svg(svg, "text", { x: ax.sx(2) + 6, y: ax.sy(0.5) - 8, "font-size": 12, fill: "var(--c3)", "font-weight": 700 }, "HSC 约 50%");
+        K.svg(svg, "text", { x: ax.sx(7) - 6, y: ax.sy(0.2) - 10, "text-anchor": "end", "font-size": 12, fill: "var(--c3)", "font-weight": 700 }, "约 20%");
+        K.svg(svg, "text", { x: 80, y: 325, "font-size": 12, class: "muted" }, "粗绿线 = HSC（端点数值来自作者文字）；虚线 = 其他类型，示意");
+        ctx.tween(1600, (t) => (p.style.strokeDashoffset = L * (1 - t))).then((ok) => ok && ctx.tween(700, (t) => others.forEach((e) => (e.style.opacity = t))));
+      },
+    },
+    {
+      title: "CITEseq 输入：2 万多个基因，78% 是零", kicker: "第 12–15 格 · 稀疏性",
+      html: `<p>CITEseq 输入：训练 70988 个细胞、测试 48663 个，22050 列基因表达，没有缺失。全部按 float32 存要 <b>10.6 GB</b> 内存。原本是计数，已经归一化并取 log1p。<span data-cell="12">第 12 格</span></p><p>最显眼的特点：<b>78% 的格子是 0</b>，有些基因在所有细胞里都是 0，应该删掉。作者用 <code>plt.spy</code> 把非零位置画成黑点：列与列差别很大，行之间看起来比较均匀。<span data-cell="14">第 14 格</span></p>`,
+      cells: [13, 15], highlight: ["(df_cite_train_x == 0).sum().sum() / df_cite_train_x.size", "plt.spy"],
+      draw(svg, ctx) {
+        const R = 40, C = 90, r = K.rng(5), cw = 7, ch = 6.5;
+        const colP = []; for (let j = 0; j < C; j++) colP.push(Math.min(0.9, Math.pow(r(), 2.2) * 0.72));
+        const avg = colP.reduce((a, b) => a + b, 0) / C;
+        const dots = [];
+        for (let i = 0; i < R; i++) for (let j = 0; j < C; j++) if (r() < colP[j]) dots.push(K.svg(svg, "rect", { x: 40 + j * cw, y: 30 + i * ch, width: cw - 1, height: ch - 1, fill: "var(--ink)", opacity: 0 }));
+        K.svg(svg, "text", { x: 40, y: 22, "font-size": 12, class: "muted" }, "示意的 spy 图：黑点 = 非零（行 = 细胞，列 = 基因）");
+        K.svg(svg, "text", { x: 40, y: 315, "font-size": 13 }, `这张示意图里约 ${Math.round((1 - avg) * 100)}% 是零；作者数据是 78%`);
+        ctx.tween(1500, (t) => dots.forEach((d, k) => (d.style.opacity = K.clamp(t * dots.length - k, 0, 1) * 0.8)));
+      },
+    },
+    {
+      title: "非零值的分布与稀疏存储", kicker: "第 16–22 格 · 分布与内存",
+      html: `<p>去掉 0 再画直方图：非零值都在 <b>2.9 到 12</b> 之间，还有一道道“锯齿”，因为原始数据是整数。<span data-cell="16">第 16 格</span> 这样的分布离正态很远，做统计检验时要小心。</p><p>既然大部分是 0，作者把表格转成 <b>CSR 稀疏矩阵</b>：只记非零值和它们的位置，省出内存再去读测试集。<span data-cell="19">第 19 格</span> <span data-cell="20">第 20 格</span></p>`,
+      cells: [17, 20], highlight: ["scipy.sparse.csr_matrix(df_cite_train_x.values)"],
+      draw(svg, ctx) {
+        const M = [[0, 0, 3.1, 0, 0], [0, 5.2, 0, 0, 0], [0, 0, 0, 0, 7.4], [4.0, 0, 0, 0, 2.9]];
+        M.forEach((row, i) => row.forEach((v, j) => {
+          K.svg(svg, "rect", { x: 30 + j * 46, y: 40 + i * 46, width: 42, height: 42, rx: 4, fill: v ? "color-mix(in srgb, var(--c1) 30%, var(--panel))" : "var(--panel-2)", stroke: "var(--line)" });
+          K.svg(svg, "text", { x: 51 + j * 46, y: 66 + i * 46, "text-anchor": "middle", "font-size": 13, fill: v ? "var(--ink)" : "var(--ink-3)" }, v || "0");
+        }));
+        K.svg(svg, "text", { x: 30, y: 28, "font-size": 13, "font-weight": 700 }, "普通表格：20 个格子全存");
+        const rows = [["data（非零值）", "3.1  5.2  7.4  4.0  2.9"], ["indices（列号）", "2    1    4    0    4"], ["indptr（每行起点）", "0  1  2  3  5"]];
+        rows.forEach(([k, v], i) => {
+          const a = K.svg(svg, "text", { x: 310, y: 70 + i * 60, "font-size": 13, "font-weight": 700 }, k);
+          const b = K.svg(svg, "text", { x: 310, y: 92 + i * 60, "font-size": 14, "font-family": "var(--mono)", fill: "var(--c1)" }, v);
+          a.style.opacity = b.style.opacity = 0;
+          ctx.wait(600 + i * 700).then((ok) => ok && ctx.tween(400, (t) => (a.style.opacity = b.style.opacity = t)));
+        });
+        K.svg(svg, "text", { x: 310, y: 28, "font-size": 13, "font-weight": 700 }, "CSR：只存 5 个非零值 + 位置");
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12, class: "muted" }, "零越多，CSR 越省；非零比例很高时反而更费（下面的实验可以算）");
+      },
+    },
+    {
+      title: "数据泄漏：7476 行一模一样", kicker: "第 23–25 格 · 泄漏检测",
+      html: `<p>讨论区有人发现、作者用一行代码验证：测试集前 7476 行（第 2 天、捐献者 27678）和训练集前 7476 行（第 2 天、捐献者 32606）<b>完全相同</b>。<span data-cell="23">第 23 格</span> <span data-cell="24">第 24 格</span></p><p>两个不同的人，7476 个细胞测出一模一样的数，只能是准备数据时出了错。这些行在公开测试集里；Kaggle 后来把它们排除出计分。在那之前，直接把训练集的答案抄过去就能拿高分。<span data-cell="25">第 25 格</span></p>`,
+      cells: [24], highlight: ["(df_cite_train_x[:7476] == df_cite_test_x[:7476]).toarray().all()"],
+      draw(svg, ctx) {
+        const r = K.rng(8), N = 10, M = 12, vals = [];
+        for (let i = 0; i < N; i++) { const row = []; for (let j = 0; j < M; j++) row.push(r() < 0.3 ? r() : 0); vals.push(row); }
+        const draw = (x0, title, same) => {
+          K.svg(svg, "text", { x: x0, y: 28, "font-size": 13, "font-weight": 700 }, title);
+          const out = [];
+          for (let i = 0; i < N; i++) for (let j = 0; j < M; j++) {
+            const v = same || i < 6 ? vals[i][j] : (r() < 0.3 ? r() : 0);
+            out.push({ i, e: K.svg(svg, "rect", { x: x0 + j * 22, y: 40 + i * 24, width: 20, height: 22, fill: v ? `color-mix(in srgb, var(--c1) ${Math.round(20 + v * 70)}%, var(--panel))` : "var(--panel-2)" }) });
+          }
+          return out;
+        };
+        draw(30, "训练集（捐献者 32606，第 2 天）", true);
+        const te = draw(380, "测试集（捐献者 27678，第 2 天）", false);
+        const bar = K.svg(svg, "rect", { x: 20, y: 38, width: 660, height: 0, fill: "none", stroke: "var(--bad)", "stroke-width": 3, rx: 4 });
+        const t = K.svg(svg, "text", { x: 30, y: 330, "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "");
+        ctx.wait(700).then((ok) => ok && ctx.tween(1200, (q) => bar.setAttribute("height", 6 * 24 * q))).then((ok) => { if (ok) t.textContent = "前 7476 行逐格相等 → Data leak: True（示意：上面 6 行代表这 7476 行）"; });
+      },
+    },
+    {
+      title: "SVD 投影：训练集和测试集像不像", kicker: "第 26–30 格 · 降维看分布",
+      html: `<p>2 万多维没法画，作者把训练加测试一起用 <b>TruncatedSVD</b> 压到 2 维（普通 PCA 太吃内存）。<span data-cell="26">第 26 格</span> 然后按“捐献者 × 天”画成 4 × 4 的小图：橙色是训练，红色是公开测试，深红是私有测试（动画里私有测试画成紫色，行从上到下依次是捐献者 13176、31800、32606、27678）。<span data-cell="29">第 29 格</span></p><p>结论：各组分布不同，第 2 天明显更“窄”；<b>第 7 天覆盖了训练集里没有的区域</b>，模型得会外推，而公开榜反映不出这一点；第 2 天下面两张图一模一样，再次印证了泄漏。<span data-cell="28">第 28 格</span></p>`,
+      cells: [27, 29], highlight: ["TruncatedSVD(n_components=2, random_state=1)"],
+      draw(svg, ctx) {
+        const r = K.rng(12), days = [2, 3, 4, 7], donors = 4;
+        const cell = (d) => ({ cx: d === 2 ? 0 : d === 3 ? 0.4 : d === 4 ? 0.6 : 1.1, sx: d === 2 ? 0.18 : 0.32, sy: d === 2 ? 0.12 : 0.25 });
+        const all = [];
+        days.forEach((d) => { const c = cell(d); for (let k = 0; k < 60; k++) all.push([c.cx + K.randn(r) * c.sx, K.randn(r) * c.sy]); });
+        for (let i = 0; i < donors; i++) days.forEach((d, j) => {
+          const x0 = 40 + j * 160, y0 = 20 + i * 76, w = 140, h = 68;
+          K.svg(svg, "rect", { x: x0, y: y0, width: w, height: h, fill: "var(--panel-2)", stroke: "var(--line)" });
+          const sx = (v) => x0 + 10 + ((v + 0.8) / 2.8) * (w - 20), sy = (v) => y0 + h / 2 - v * 50;
+          all.forEach((p) => K.svg(svg, "circle", { cx: sx(p[0]), cy: sy(p[1]), r: 1, fill: "var(--ink-3)", opacity: 0.4 }));
+          const type = d === 7 ? "var(--c4)" : i === 3 ? "var(--c6)" : "var(--warn)";
+          const c = cell(d), pts = [];
+          const rr = K.rng(d * 10 + (d === 2 && i >= 2 ? 99 : i));
+          for (let k = 0; k < 35; k++) pts.push(K.svg(svg, "circle", { cx: sx(c.cx + K.randn(rr) * c.sx), cy: sy(K.randn(rr) * c.sy), r: 1.8, fill: type, opacity: 0 }));
+          ctx.wait((i * 4 + j) * 90).then((ok) => ok && ctx.tween(300, (t) => pts.forEach((p) => (p.style.opacity = t))));
+        });
+        days.forEach((d, j) => K.svg(svg, "text", { x: 110 + j * 160, y: 334, "text-anchor": "middle", "font-size": 12 }, "第 " + d + " 天"));
+        K.svg(svg, "text", { x: 690, y: 50, "text-anchor": "end", "font-size": 11, fill: "var(--warn)" }, "");
+      },
+    },
+    {
+      title: "目标：140 种表面蛋白", kicker: "第 31–35 格 · 目标分布",
+      html: `<p>CITEseq 的答案表 70988 行、<b>140 列</b>，每列是一种细胞表面蛋白的含量（dsb 归一化）。作者挑了 20 种画直方图：有的近似正态，有的有好几个峰，有的形状奇怪，还有离群值。<span data-cell="31">第 31 格</span></p><p>这是一个<b>同时输出 140 个数</b>的多输出回归，很多单输出的常规做法（比如逐个算特征和目标的相关）用不上；目标形状差异大，“一招鲜”的方法未必最好。答案投影到二维后，各组分布同样不一样。<span data-cell="33">第 33 格</span></p>`,
+      cells: [32, 34],
+      draw(svg, ctx) {
+        const shapes = [(x) => Math.exp(-((x - 0.5) ** 2) / 0.02), (x) => Math.exp(-((x - 0.3) ** 2) / 0.006) + 0.8 * Math.exp(-((x - 0.7) ** 2) / 0.01), (x) => Math.exp(-x * 6), (x) => Math.exp(-((x - 0.4) ** 2) / 0.05) + (x > 0.9 ? 0.6 : 0)];
+        const names = ["CD86", "CD48", "CD57", "HLA-E"];
+        shapes.forEach((f, k) => {
+          const x0 = 30 + k * 170, y0 = 60, w = 150, h = 180;
+          K.svg(svg, "text", { x: x0 + w / 2, y: 44, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, names[k]);
+          const bars = [];
+          for (let i = 0; i < 25; i++) { const v = f((i + 0.5) / 25); bars.push([K.svg(svg, "rect", { x: x0 + i * 6, y: y0 + h, width: 5, height: 0, fill: K.colors[k] }), Math.min(1, v)]); }
+          ctx.wait(k * 300).then((ok) => ok && ctx.tween(700, (t) => bars.forEach(([b, v]) => { b.setAttribute("y", y0 + h - h * v * t); b.setAttribute("height", h * v * t); })));
+        });
+        K.svg(svg, "text", { x: 30, y: 290, "font-size": 12, class: "muted" }, "蛋白名取自作者第 32 格挑选的列；直方图形状是示意：单峰、双峰、偏斜、带离群值");
+      },
+    },
+    {
+      title: "名字匹配：哪个基因编码哪种蛋白", kicker: "第 36–37 格 · 领域知识",
+      html: `<p>基因负责编码蛋白，而列名里就藏着这层关系：基因列名的后缀就是它编码的蛋白名。作者把 140 个蛋白名拿去 22050 个基因名里找，找到 <b>151 个</b>能对上的基因（有的蛋白对应不止一个基因）。<span data-cell="36">第 36 格</span></p><p>洞察：这 151 个特征很可能最重要。做降维时要特意保留它们，别被压缩掉。</p>`,
+      cells: [37], highlight: ["if protein in gene"],
+      draw(svg, ctx) {
+        const genes = ["ENSG..._CD86", "ENSG..._TP53", "ENSG..._CD48", "ENSG..._GAPDH", "ENSG..._CD8A", "ENSG..._HLA-E"], prot = ["CD86", "CD48", "CD8", "HLA-E"];
+        genes.forEach((g, i) => K.node(svg, 30, 30 + i * 46, 200, 34, g, { fs: 12 }));
+        prot.forEach((p, i) => K.node(svg, 480, 50 + i * 60, 140, 34, p, { fs: 13, bold: true }));
+        const links = [[0, 0], [2, 1], [4, 2], [5, 3]];
+        (async () => {
+          for (const [g, p] of links) {
+            const l = K.svg(svg, "line", { x1: 230, y1: 47 + g * 46, x2: 230, y2: 47 + g * 46, stroke: "var(--good)", "stroke-width": 2.5 });
+            if (!(await ctx.tween(500, (t) => { l.setAttribute("x2", K.lerp(230, 478, t)); l.setAttribute("y2", K.lerp(47 + g * 46, 67 + p * 60, t)); }))) return;
+          }
+        })();
+        K.svg(svg, "text", { x: 30, y: 325, "font-size": 12, class: "muted" }, "示意：“蛋白名出现在基因名里”就连一条线（CD8 也会匹配到 CD8A 这类名字）");
+      },
+    },
+    {
+      title: "Multiome：97 GB，一口吃不下", kicker: "第 38–43 格 · 大数据处理",
+      html: `<p>Multiome 训练输入 105942 × 228942，float32 要 <b>97 GB</b>；目标 10 GB；测试输入 13 GB。Kaggle notebook 只有 16 GB 内存。<span data-cell="38">第 38 格</span></p><p>作者的办法是<b>分块读</b>：每次只读 5000 行，检查缺失、负值，累计每个细胞的总和、Y 染色体相关列的直方图，读完就丢。抽样看，98% 的值是 0。建议：降维和特征选择是关键、训练和测试别同时放进内存、特征比样本还多要选合适的算法。<span data-cell="39">第 39 格</span></p>`,
+      cells: [39, 41], highlight: ["chunksize = 5000", "pd.read_hdf(filename, start=start, stop=start+chunksize)"],
+      draw(svg, ctx) {
+        K.node(svg, 30, 60, 160, 200, "train_multi_inputs\n105942 行\n× 228942 列\n≈ 97 GB", { bold: true });
+        const mem = K.svg(svg, "rect", { x: 480, y: 80, width: 200, height: 160, rx: 8, fill: "none", stroke: "var(--ink-3)", "stroke-dasharray": "5 4" });
+        K.svg(svg, "text", { x: 580, y: 70, "text-anchor": "middle", "font-size": 13 }, "内存 16 GB");
+        const chunk = K.svg(svg, "rect", { x: 40, y: 70, width: 140, height: 18, fill: "var(--c1)", opacity: 0.8 });
+        const sum = K.svg(svg, "text", { x: 480, y: 280, "font-size": 13, "font-family": "var(--mono)" }, "");
+        K.arrow(svg, 200, 160, 470, 160);
+        (async () => {
+          for (let k = 0; k < 8; k++) {
+            chunk.setAttribute("y", 70 + k * 22);
+            if (!(await ctx.tween(400, (t) => chunk.setAttribute("x", K.lerp(40, 510, t))))) return;
+            sum.textContent = `已读 ${Math.min(105942, (k + 1) * 5000).toLocaleString()} 行，读完即丢`;
+            chunk.setAttribute("x", 40);
+          }
+        })();
+      },
+    },
+    {
+      title: "批次效应：换一天，整体就偏一截", kicker: "第 44–45 格 · 批次效应",
+      html: `<p>生物实验做几次，测量值就会有系统性的偏差，叫<b>批次效应</b>。作者把每个细胞所有位点的值加总，按天上色：第 3 天（绿）整体最高，第 7 天（黄）最低；捐献者之间也有差别，但小一些。<span data-cell="44">第 44 格</span></p><p>建议：先做归一化去掉批次效应；按“天”做 GroupKFold 验证。第 45 格两张子图的横轴标签写反了：左图画的是非零个数 <code>total_nonzero</code>，标签却是 “cell total”。</p>`,
+      cells: [45], highlight: ["axs[0].scatter(cell_summary.total_nonzero", "axs[0].set_xlabel('cell total')"],
+      notes: { 45: "axs[0] 画 total_nonzero、axs[1] 画 total，两个 xlabel 正好互换了。" },
+      draw(svg, ctx) {
+        const days = [2, 3, 4, 7, 10], mean = { 2: 0.45, 3: 0.72, 4: 0.5, 7: 0.28, 10: 0.4 };
+        const ax = K.axes(svg, { x: 70, y: 20, w: 560, h: 270 }, [0, 1], [0, 250], { xticks: 0, yticks: 0, xlabel: "每个细胞的行总和（示意）", ylabel: "细胞（按文件顺序）" });
+        const r = K.rng(3), pts = [];
+        for (let i = 0; i < 250; i++) { const d = days[Math.floor(i / 50)]; pts.push(K.svg(svg, "circle", { cx: ax.sx(K.clamp(mean[d] + K.randn(r) * 0.07, 0, 1)), cy: ax.sy(250 - i), r: 2.2, fill: DAYC[d], opacity: 0 })); }
+        days.forEach((d, k) => K.svg(svg, "text", { x: 540, y: 40 + k * 18, "font-size": 12, fill: DAYC[d], "font-weight": 700 }, "● 第 " + d + " 天"));
+        ctx.tween(1600, (t) => pts.forEach((p, i) => (p.style.opacity = K.clamp(t * 250 - i, 0, 1) * 0.85)));
+      },
+    },
+    {
+      title: "Y 染色体：捐献者是男是女", kicker: "第 46–48 格 · 生物学检查",
+      html: `<p>作者把 Y 染色体相关位点的非零值按捐献者画直方图：捐献者 13176 几乎没有 Y 染色体信号（那点零星非零值可能是测量误差），其余三位都有。推断 4 位捐献者是<b>1 位女性、3 位男性</b>。<span data-cell="48">第 48 格</span></p><p>洞察：这位女性捐献者的 Y 染色体“读数”本应全是 0，它的大小正好告诉我们测量噪声有多大；也可以新造一个“是否有 Y 染色体”的特征。</p>`,
+      cells: [47],
+      draw(svg, ctx) {
+        const donors = ["13176", "31800", "32606", "27678"];
+        donors.forEach((d, k) => {
+          const x0 = 30 + k * 170, h = 200, y0 = 60;
+          K.svg(svg, "text", { x: x0 + 70, y: 44, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "捐献者 " + d);
+          K.svg(svg, "line", { x1: x0, x2: x0 + 145, y1: y0 + h, y2: y0 + h, stroke: "var(--ink-3)" });
+          const bars = [];
+          for (let i = 0; i < 24; i++) { const v = k === 0 ? (i < 3 ? 0.04 : 0) : Math.exp(-((i - 8) ** 2) / 30); bars.push([K.svg(svg, "rect", { x: x0 + i * 6, y: y0 + h, width: 5, height: 0, fill: "var(--c3)" }), v]); }
+          ctx.wait(k * 300).then((ok) => ok && ctx.tween(700, (t) => bars.forEach(([b, v]) => { b.setAttribute("y", y0 + h - h * v * t); b.setAttribute("height", h * v * t); })));
+          K.svg(svg, "text", { x: x0 + 70, y: y0 + h + 30, "text-anchor": "middle", "font-size": 13, fill: k === 0 ? "var(--c6)" : "var(--c1)", "font-weight": 700 }, k === 0 ? "几乎无信号 → 女性" : "有信号 → 男性");
+        });
+      },
+    },
+    {
+      title: "Multiome 目标与总结", kicker: "第 49–54 格 · 收尾",
+      html: `<p>Multiome 的答案表 105942 行、23418 列基因表达，非负、无缺失。它也有自己的批次效应：这里第 7 天总量最低，而第 3 天并不突出。好消息是比赛的评分看的是<b>相关性</b>，整体平移一截不影响得分；如果用均方误差就不同了。<span data-cell="52">第 52 格</span></p><p>总结：这是一场“大数据”比赛，内存是稀缺资源；两部分可以分开做，CITEseq 更容易入门；一定要设计好交叉验证，避免最后私有榜大翻车。<span data-cell="54">第 54 格</span></p>`,
+      cells: [50, 53],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 560, h: 240 }, [0, 10], [0, 10], { xticks: 0, yticks: 0, xlabel: "真实值", ylabel: "预测值" });
+        const r = K.rng(4), P = [];
+        for (let i = 0; i < 60; i++) { const x = 1 + r() * 7; P.push([x, x + K.randn(r) * 0.5]); }
+        const dots = P.map((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 3.5, fill: "var(--c1)" }));
+        const lab = K.svg(svg, "text", { x: 80, y: 24, "font-size": 13, "font-weight": 700 }, "");
+        ctx.wait(800).then((ok) => ok && ctx.tween(1500, (t) => { dots.forEach((d, i) => d.setAttribute("cy", ax.sy(P[i][1] - 0.9 * t))); lab.textContent = "所有预测整体下移一截：均方误差变大，相关系数不变"; }));
+        K.svg(svg, "text", { x: 80, y: 320, "font-size": 12, class: "muted" }, "示意：批次效应若只是“整体平移”，相关性指标不受影响");
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：稀疏存储 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "z", label: "零值占比", min: 0, max: 99.9, step: 0.1, value: 78, fmt: (v) => v.toFixed(1) + "%" },
+      { id: "case", label: "矩阵规模", value: "cite", options: [["cite", "CITEseq 训练+测试：119651 × 22050"], ["multi", "Multiome 训练输入：105942 × 228942"], ["small", "小示意：40 × 90"]] },
+      { id: "seed", label: "重新生成示意图", button: true },
+    ],
+    note: "现场算两种存法要多少字节：普通表格每格 4 字节（float32）；CSR 每个非零值 4 字节 + 列号 4 字节，再加每行一个起点 4 字节。行列数取自作者第 12、38 格。默认 78% 零值时，CITEseq 从约 10.6 GB 降到约 4.6 GB；把零值占比拖到 50% 以下，看 CSR 反而更费。左图是同样零值比例的示意小矩阵。",
+    render(svg, v) {
+      const dims = { cite: [119651, 22050], multi: [105942, 228942], small: [40, 90] }[v.case];
+      const [R, C] = dims, nz = R * C * (1 - v.z / 100);
+      const dense = R * C * 4, csr = nz * 8 + (R + 1) * 4;
+      const r = K.rng(20 + v.seed), rows = 30, cols = 46;
+      for (let i = 0; i < rows; i++) for (let j = 0; j < cols; j++) if (r() > v.z / 100) K.svg(svg, "rect", { x: 20 + j * 7, y: 20 + i * 7, width: 6, height: 6, fill: "var(--ink)", opacity: 0.8 });
+      K.svg(svg, "rect", { x: 19, y: 19, width: cols * 7 + 1, height: rows * 7 + 1, fill: "none", stroke: "var(--line)" });
+      K.svg(svg, "text", { x: 20, y: 252, "font-size": 12, class: "muted" }, "示意 spy 图：黑点 = 非零");
+      const mx = Math.max(dense, csr);
+      [["普通表格", dense, "var(--c6)"], ["CSR 稀疏", csr, "var(--c1)"]].forEach(([k, b, c], i) => {
+        K.svg(svg, "text", { x: 370, y: 60 + i * 80, "font-size": 13, "font-weight": 700 }, k);
+        K.svg(svg, "rect", { x: 370, y: 70 + i * 80, width: Math.max(2, 250 * b / mx), height: 26, rx: 4, fill: c });
+        K.svg(svg, "text", { x: 370, y: 116 + i * 80, "font-size": 13, "font-family": "var(--mono)" }, fmtBytes(b));
+      });
+      K.svg(svg, "text", { x: 370, y: 260, "font-size": 12, class: "muted" }, "Kaggle notebook 内存约 16 GB");
+      return { readout: [
+        { k: "非零值个数", v: Math.round(nz).toLocaleString() },
+        { k: "普通表格", v: fmtBytes(dense) },
+        { k: "CSR", v: fmtBytes(csr), color: csr < dense ? "var(--good)" : "var(--bad)" },
+        { k: "CSR / 普通", v: (csr / dense * 100).toFixed(0) + "%" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：SVD 与批次效应 ---------- */
+  function svd2(X, center) {
+    const n = X.length, d = X[0].length;
+    let A = X;
+    if (center) { const m = new Array(d).fill(0); X.forEach((r) => r.forEach((v, j) => (m[j] += v / n))); A = X.map((r) => r.map((v, j) => v - m[j])); }
+    const comps = [];
+    for (let c = 0; c < 2; c++) {
+      let w = new Array(d).fill(0).map((_, j) => Math.sin(j * 1.7 + c * 3) + 1.1);
+      for (let it = 0; it < 40; it++) {
+        const s = A.map((r) => r.reduce((a, v, j) => a + v * w[j], 0));
+        const nw = new Array(d).fill(0); A.forEach((r, i) => r.forEach((v, j) => (nw[j] += v * s[i])));
+        comps.forEach((u) => { const dot = nw.reduce((a, v, j) => a + v * u[j], 0); for (let j = 0; j < d; j++) nw[j] -= dot * u[j]; });
+        const nn = Math.hypot(...nw) || 1; w = nw.map((v) => v / nn);
+      }
+      comps.push(w);
+    }
+    return A.map((r) => comps.map((w) => r.reduce((a, v, j) => a + v * w[j], 0)));
+  }
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 372,
+    controls: [
+      { id: "b", label: "批次效应强度（每天整体放大 / 缩小的程度）", min: 0, max: 1, step: 0.05, value: 0.5, fmt: (v) => v.toFixed(2) },
+      { id: "bio", label: "真实生物差异（干细胞 vs 分化细胞）", min: 0, max: 2, step: 0.1, value: 1.2, fmt: (v) => v.toFixed(1) },
+      { id: "c", label: "投影方式", value: "tsvd", options: [["tsvd", "TruncatedSVD（不减均值，作者用的）"], ["pca", "PCA（先减均值）"], ["norm", "先按细胞总量归一化，再 PCA"]] },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "模拟 4 天 × 每天 60 个细胞、30 个“基因”。每个细胞要么是干细胞、要么是分化细胞（形状为圆点 / 方块），越往后分化细胞越多；每一天还乘上一个整体的批次系数。现场用幂迭代求前两个奇异向量，把细胞投到 2 维，按天上色。批次效应强时，颜色（天）比形状（细胞类型）更能分开点群；试试第三种投影：先归一化，批次效应就被大幅削弱。",
+    render(svg, v) {
+      const r = K.rng(60 + v.seed), days = [2, 3, 4, 7], scale = { 2: 1 + 0.2 * v.b, 3: 1 + 0.9 * v.b, 4: 1, 7: 1 - 0.5 * v.b }, frac = { 2: 0.2, 3: 0.35, 4: 0.5, 7: 0.8 };
+      const X = [], meta = [];
+      days.forEach((d) => { for (let k = 0; k < 60; k++) {
+        const diff = r() < frac[d];
+        const row = [];
+        for (let j = 0; j < 30; j++) {
+          let base = 1 + 0.5 * Math.sin(j);
+          if (diff && j < 10) base += v.bio; if (!diff && j >= 20) base += v.bio;
+          row.push(Math.max(0, base * scale[d] * (1 + K.randn(r) * 0.15)));
+        }
+        X.push(row); meta.push({ d, diff });
+      } });
+      let Y = X;
+      if (v.c === "norm") Y = X.map((row) => { const s = row.reduce((a, b) => a + b, 0); return row.map((x) => (x / s) * 30); });
+      const Z = svd2(Y, v.c !== "tsvd");
+      const xs = Z.map((z) => z[0]), ys = Z.map((z) => z[1]);
+      const pad = (a) => { const lo = Math.min(...a), hi = Math.max(...a), m = (hi - lo) * 0.08 || 1; return [lo - m, hi + m]; };
+      const ax = K.axes(svg, { x: 50, y: 14, w: 560, h: 300 }, pad(xs), pad(ys), { xticks: 0, yticks: 0, xlabel: "第 1 成分", ylabel: "第 2 成分" });
+      Z.forEach((z, i) => {
+        const c = DAYC[meta[i].d];
+        if (meta[i].diff) K.svg(svg, "rect", { x: ax.sx(z[0]) - 3, y: ax.sy(z[1]) - 3, width: 6, height: 6, fill: c, opacity: 0.85 });
+        else K.svg(svg, "circle", { cx: ax.sx(z[0]), cy: ax.sy(z[1]), r: 3.2, fill: c, opacity: 0.85 });
+      });
+      days.forEach((d, k) => K.svg(svg, "text", { x: 60 + k * 80, y: 364, "font-size": 12, fill: DAYC[d], "font-weight": 700 }, "● 第 " + d + " 天"));
+      K.svg(svg, "text", { x: 400, y: 364, "font-size": 12, class: "muted" }, "● 干细胞   ■ 分化细胞");
+      /* 用“组间方差 / 总方差”衡量：按天分开的程度、按细胞类型分开的程度 */
+      const sep = (key) => { const g = {}; Z.forEach((z, i) => { const k = String(meta[i][key]); (g[k] = g[k] || []).push(z); }); const mean = (a) => [a.reduce((s, z) => s + z[0], 0) / a.length, a.reduce((s, z) => s + z[1], 0) / a.length]; const m = mean(Z); let tot = 0, bet = 0; Z.forEach((z) => (tot += (z[0] - m[0]) ** 2 + (z[1] - m[1]) ** 2)); Object.values(g).forEach((a) => { const c = mean(a); bet += a.length * ((c[0] - m[0]) ** 2 + (c[1] - m[1]) ** 2); }); return bet / tot; };
+      const sd = sep("d"), st = sep("diff");
+      return { readout: [
+        { k: "“天”能解释的散布", v: (sd * 100).toFixed(0) + "%", color: sd > st ? "var(--bad)" : null },
+        { k: "“细胞类型”能解释的散布", v: (st * 100).toFixed(0) + "%", color: st > sd ? "var(--good)" : null },
+        { k: "结论", v: sd > st ? "批次效应占上风" : "生物差异占上风" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

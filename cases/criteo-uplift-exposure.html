@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>广告增益与曝光陷阱</title>
+<meta name="description" content="Kaggle 案例拆解：Criteo 1300 万用户的广告随机实验——平均处理效应、类别变换增益模型、Qini 曲线，以及把“是否真的看到广告”当成处理时的选择偏差。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">广告随机实验 · 因果推断 · 增益建模</div>
+  <h1>广告到底多带来了几个访客：随机分组可信，“看没看到”却是个陷阱</h1>
+  <p class="en">Criteo Uplift Modelling</p>
+  <div class="tags">
+    <span class="tag st">统计分析</span><span class="tag ml">机器学习</span>
+    <span class="tag method">随机对照实验</span><span class="tag method">平均处理效应 ATE</span><span class="tag method">两比例 z 检验</span>
+    <span class="tag method">四类顾客</span><span class="tag method">随机欠采样</span><span class="tag method">类别变换 LGWUM</span>
+    <span class="tag method">XGBoost</span><span class="tag method">增益曲线 / Qini 曲线</span><span class="tag method">选择偏差</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>hughhuyton</b></span>
+    <span>Kaggle 点赞 <b>129</b>（2026-11 抓取）</span>
+    <span>数据集 <b>arashnic/uplift-modeling</b>（Criteo AI Lab）</span>
+    <span><a href="https://www.kaggle.com/code/hughhuyton/criteo-uplift-modelling" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">一次广告“增量测试”：随机挡掉一部分人</div><p>广告公司 Criteo 公开的随机实验：约 1300 万用户，12 个匿名特征，是否被分到投放组、是否真的看到广告、是否访问、是否转化。<span data-cell="3">出处</span></p></div>
+    <div class="card panel"><h3>要回答什么</h3><div class="big">广告让谁多访问了？</div><p>先算平均效果，再建增益模型，找出“投了才会来”的那类人，把预算花在他们身上。<span data-cell="2">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">z 检验 + 类别变换 + XGBoost</div><p>两比例 z 检验确认平均效果；欠采样平衡两组；把“组别 × 是否访问”变成 4 类，用 XGBoost 预测，再组合成增益分数；用 Qini 曲线评估。<span data-cell="16">出处</span> <span data-cell="40">出处</span> <span data-cell="44">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">访问率 4.9% vs 3.8%；Qini 0.01</div><p>按随机分组建的模型 Qini 只有 0.01；作者换成“是否真的看到广告”再建模，说 Qini 好了约 29 倍。<b>后者有选择偏差，不能当作广告效果</b>。<span data-cell="15">出处</span> <span data-cell="48">出处</span> <span data-cell="62">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据来自 <b>Criteo AI Lab</b> 的增量测试（incrementality test）：广告主随机挑出一部分人<b>不投广告</b>当对照组。Kaggle 用户 arashnic 转存。以下规模来自作者第 3 格的文字。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">用户（行）</div><div class="v">约 1300 万</div></div>
+        <div class="stat-tile"><div class="k">匿名特征</div><div class="v">12 列</div></div>
+        <div class="stat-tile"><div class="k">投放组 : 对照组</div><div class="v">85% : 15%</div></div>
+        <div class="stat-tile"><div class="k">投放组里真的看到广告</div><div class="v" style="color:var(--c6)">3.6%</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">规模见第 3 格 <span data-cell="3">出处</span>，分组比例见第 8 格 <span data-cell="8">出处</span>，曝光比例见第 20 格 <span data-cell="20">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>是不是随机的</th></tr>
+        <tr><td><code>f0</code> … <code>f11</code></td><td>匿名特征（可能是浏览历史等），连续数值</td><td>—</td></tr>
+        <tr><td><code>treatment</code></td><td><b>处理</b>：1 = 投放组，0 = 对照组（不投）</td><td><b>是</b>，抽签决定</td></tr>
+        <tr><td><code>exposure</code></td><td>是否真的看到了广告</td><td><b>不是</b>，取决于用户自己上网多不多</td></tr>
+        <tr><td><code>visit</code></td><td><b>结果</b>：有没有访问网站（作者建模用这个）</td><td>—</td></tr>
+        <tr><td><code>conversion</code></td><td>有没有转化（下单等）</td><td>—</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">字段说明见第 3 格 <span data-cell="3">出处</span>。</p>
+      <p class="callout"><b>本案例的关键：</b>treatment 是抽签分的，两组人天生一样，差别只能来自广告，这是<b>因果可信</b>的比较；exposure 是用户自己“碰上”的，常上网的人更容易看到广告，也本来就更容易访问，这是<b>混杂</b>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="17">
+    <h3>实验 A · 平均效果显著吗：样本量与 z 检验 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labA"></div>
+  </div>
+  <div data-at="25">
+    <h3>实验 B · 曝光不随机：41% 对 3.5% 里有多少是广告的功劳 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labB"></div>
+  </div>
+  <div data-at="47">
+    <h3>实验 C · 现场画一条 Qini 曲线 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labC"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的数字与结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>访问率：投放组 4.9%，对照组 3.8%，平均效果约 1 个百分点；转化率 0.31% vs 0.19%</td><td><span data-cell="15">第 15 格</span></td></tr>
+        <tr><td>两项差异的 z 检验 p 值都小于 0.05</td><td><span data-cell="18">第 18 格</span></td></tr>
+        <tr><td>投放组里只有 3.6%（约 28 人里 1 个）真的看到了广告</td><td><span data-cell="20">第 20 格</span></td></tr>
+        <tr><td>投放组内：看到广告的访问率 41%，没看到的 3.5%；转化 5.3% vs 0.12%</td><td><span data-cell="25">第 25 格</span></td></tr>
+        <tr><td>欠采样后训练集 3,355,100 行，两组各半</td><td><span data-cell="35">第 35 格</span></td></tr>
+        <tr><td>按随机分组：全投可多 30,000 访问，只投前 20% 可得 26,000（约 86%）；Qini 0.01</td><td><span data-cell="46">第 46</span>、<span data-cell="48">48 格</span></td></tr>
+        <tr><td>按“是否看到广告”：全投多 1,060,000，前 20% 得 620,000（约 58%）；Qini 约好 29 倍</td><td><span data-cell="60">第 60</span>、<span data-cell="62">62 格</span></td></tr>
+      </table></div>
+      <p class="callout warn"><b>这里最需要提醒的问题：</b>①exposure 不是随机分配的。对照组的人根本没机会看到广告，所以“看到 vs 没看到”实际是在比较“投放组里被广告碰上的那批人（多半是活跃用户）”和“其余所有人”，差异里混着用户本来的活跃程度。41% 对 3.5% 和“好 29 倍”都不能直接当作广告的因果效果。②第 26–28 格只看 exposure = 0 的人，说投放组访问率反而更低、“平均效果为负”。这是按一个<b>受处理影响的变量</b>筛人造成的偏差：投放组里没看到广告的，恰恰是不爱上网的那批人。正确的做法是用随机分组算整体效果，再除以曝光率（工具变量法）估计“看到广告的人”的效果。</p>
+      <p class="callout warn"><b>其他小问题：</b>第 25 格把 p &lt; 0.05 写成了 &lt;0.5；第 15 格“平均效果约 1%”指的是 1 个百分点；Qini 分数这里是曲线下面积，两个模型的处理定义、人数尺度都不同，直接说“好 29 倍”不可比；作者最后说的“58%”比第一个模型的 86% 还低，与“更好”的结论也不一致。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给每个用户一个“投放后能多带来多少访问”的分数，只对分数高的人投放，省下预算。</li>
+        <li><b>同类问题：</b>优惠券该发给谁、哪些病人吃药获益最大、竞选时该给哪些选民打电话、App 推送对谁会适得其反。</li>
+        <li><b>可迁移的套路：</b>先做随机实验 → 用随机分组算平均效果和显著性 → 建增益模型 → 用 Qini 曲线评估 → 对“依从性”（有没有真的接受处理）用工具变量等方法，而不是直接拿它当处理。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>分组对比与两比例 z 检验 <span data-cell="16">第 16 格</span></li>
+        <li>按 treatment 分层的训练 / 测试切分 <span data-cell="31">第 31 格</span>，随机欠采样 <span data-cell="32">第 32 格</span></li>
+        <li>四类目标 CN / CR / TN / TR <span data-cell="36">第 36 格</span></li>
+        <li>XGBoost 多分类 + 增益分数 <span data-cell="40">第 40 格</span></li>
+        <li>增益曲线、Qini 曲线与面积 <span data-cell="44">第 44 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>为什么说 treatment 的比较“可信”，exposure 的比较“不可信”？两者差在哪一步？</li>
+      <li>看到广告的人访问率 41%，没看到的 3.5%。除了广告本身，还有哪些原因会让“看到广告的人”更爱访问？</li>
+      <li>作者发现“没看到广告的投放组用户”比对照组访问还少，于是说平均效果为负。你同意吗？对照组里有没有“本来会看到广告”的人？</li>
+      <li>如果想知道“真正看到广告的人”被广告多带来了多少访问，可以怎样只用随机分组和曝光率来估算？</li>
+      <li>欠采样把投放组扔掉了一大半。这对增益模型有什么好处和代价？还有别的办法处理 85 : 15 吗？</li>
+      <li>“勿扰型”顾客被打扰后反而不买了。你能想到生活中哪些营销会让人反感？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 hughhuyton，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：Criteo AI Lab, Criteo Uplift Prediction Dataset，Kaggle 转存 arashnic/uplift-modeling。
+</footer>
+</main>
+
+<script src="nb/criteo-uplift-exposure.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const fade = (els, ctx, ms) => ctx.tween(ms || 500, (t) => els.forEach((e) => (e.style.opacity = t)));
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+  function erfc(x) { const t = 1 / (1 + 0.5 * x); return t * Math.exp(-x * x - 1.26551223 + t * (1.00002368 + t * (0.37409196 + t * (0.09678418 + t * (-0.18628806 + t * (0.27886807 + t * (-1.13520398 + t * (1.48851587 + t * (-0.82215223 + t * 0.17087277))))))))); }
+  const pTwo = (z) => erfc(Math.abs(z) / Math.SQRT2);
+  const binom = (r, n, p) => Math.max(0, Math.round(n * p + K.randn(r) * Math.sqrt(n * p * (1 - p)))); // 正态近似抽二项
+  function barsH(svg, items, box, fmt) {
+    const max = Math.max(...items.map((d) => Math.abs(d.v)), 1e-9);
+    items.forEach((d, i) => {
+      const y = box.y + i * (box.h / items.length);
+      K.svg(svg, "text", { x: box.x - 8, y: y + 20, "text-anchor": "end", "font-size": 13, "font-weight": 700 }, d.k);
+      const w = (box.w * d.v) / max;
+      const r = K.svg(svg, "rect", { x: box.x, y: y + 4, width: Math.max(1, w), height: 24, rx: 4, fill: d.c });
+      K.svg(svg, "text", { x: box.x + Math.max(1, w) + 6, y: y + 21, "font-size": 12 }, fmt(d.v));
+      d.el = r;
+    });
+    return items;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "增益建模：找“因为广告才来的人”", kicker: "第 0–2 格 · 导入与概念",
+      html: `<p>作者导入 statsmodels（做 z 检验）、XGBoost，读入 Criteo 数据。<span data-cell="1">出处</span> 然后介绍增益建模：它要估计的不是“谁会访问”，而是“<b>投了广告和不投相比，谁会多访问</b>”。<span data-cell="2">出处</span></p><p>按“投了买不买 × 不投买不买”可以把人分成四类：</p><ul class="tight"><li><b>可说服型</b>：投了才买，最值得投</li><li><b>勿扰型</b>：不投会买，投了反而不买</li><li><b>无望型</b>：怎样都不买</li><li><b>铁杆型</b>：怎样都买，投了也是白花钱</li></ul><p>难点：同一个人只能活在一个世界里，“投了”和“没投”的结果永远只能看到一个，另一个是<b>反事实</b>。</p>`,
+      cells: [1, 2],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 400, y: 26, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "不投广告时会访问吗？");
+        K.svg(svg, "text", { x: 250, y: 52, "text-anchor": "middle", "font-size": 13 }, "不会");
+        K.svg(svg, "text", { x: 550, y: 52, "text-anchor": "middle", "font-size": 13 }, "会");
+        K.svg(svg, "text", { x: 60, y: 130, "text-anchor": "middle", "font-size": 13 }, "会");
+        K.svg(svg, "text", { x: 60, y: 260, "text-anchor": "middle", "font-size": 13 }, "不会");
+        K.svg(svg, "text", { x: 30, y: 195, "font-size": 13, "font-weight": 700, transform: "rotate(-90 30 195)", "text-anchor": "middle" }, "投了广告会访问吗？");
+        const Q = [[100, 70, "可说服型 ✓ 投！", "var(--good)"], [400, 70, "铁杆型 · 不用投", "var(--c1)"], [100, 200, "无望型 · 不用投", "var(--ink-3)"], [400, 200, "勿扰型 ✗ 别投", "var(--bad)"]];
+        const els = Q.map((q) => { const g = K.node(svg, q[0], q[1], 290, 120, q[2], { fill: `color-mix(in srgb, ${q[3]} 18%, var(--panel))`, stroke: q[3], bold: true, fs: 15 }); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 400, y: 336, "text-anchor": "middle", "font-size": 12, class: "muted" }, "每个人只能被“投”或“不投”一次，所以永远无法直接看出他属于哪一格");
+        (async () => { for (const e of els) { if (!(await fade([e], ctx, 450))) return; } })();
+      },
+    },
+    {
+      title: "数据：1300 万用户的随机实验", kicker: "第 3–8 格 · 读数据",
+      html: `<p>增益建模最好的起点是<b>随机对照实验</b>：投放组和对照组都要有各种各样的人。<span data-cell="3">出处</span> Criteo 的数据正是这样做出来的：广告主<b>随机</b>挡住一部分人不投广告。</p><p>约 1300 万行，12 个匿名特征，一个处理标记，两个结果（访问、转化），外加一个 <code>exposure</code>（是否真的看到了广告）。作者数了一下：约 85% 在投放组，15% 在对照组，很不平衡。<span data-cell="8">出处</span></p>`,
+      cells: [3, 6, 7, 8], highlight: ["value_counts", "treatment"],
+      draw(svg, ctx) {
+        const dots = [];
+        for (let i = 0; i < 100; i++) dots.push(K.svg(svg, "circle", { cx: 360, cy: 170, r: 7, fill: "var(--ink-3)" }));
+        const t1 = K.svg(svg, "text", { x: 200, y: 30, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--c6)" }, "投放组 85%");
+        const t2 = K.svg(svg, "text", { x: 600, y: 30, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--c1)" }, "对照组 15%（不投广告）");
+        const lot = K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 13 }, "抽签分组：两组人在各方面“天生一样”，差别只能来自广告");
+        hide([t1, t2, lot]);
+        const r = K.rng(3), tgt = dots.map((_, i) => i < 85 ? [60 + (i % 13) * 22, 60 + Math.floor(i / 13) * 32] : [520 + ((i - 85) % 5) * 26, 60 + Math.floor((i - 85) / 5) * 32]);
+        ctx.wait(400).then((ok) => ok && ctx.tween(1600, (t) => {
+          const e = K.ease(t);
+          dots.forEach((d, i) => { K.set(d, { cx: K.lerp(360 + (r() - 0.5) * 2, tgt[i][0], e), cy: K.lerp(170, tgt[i][1], e), fill: t > 0.5 ? (i < 85 ? "var(--c6)" : "var(--c1)") : "var(--ink-3)" }); });
+          t1.style.opacity = t2.style.opacity = lot.style.opacity = e;
+        }));
+      },
+    },
+    {
+      title: "看一眼：访问和转化都很少", kicker: "第 9–11 格 · 探索",
+      html: `<p>作者画了所有列的相关系数热力图 <span data-cell="9">出处</span>，再算整体访问率、转化率、访问后转化率。<span data-cell="10">出处</span></p><p>结论：两个结果都非常不平衡，绝大多数人既不访问也不转化。<span data-cell="11">出处</span> 这意味着广告即使有效，带来的也只是很小的百分比变化，需要海量样本才看得出来。</p>`,
+      cells: [9, 10, 11], highlight: ["heatmap", "mean()"],
+      draw(svg, ctx) {
+        const lv = [["所有用户", 1, "var(--ink-3)"], ["访问了", 0.35, "var(--c1)"], ["转化了", 0.08, "var(--c6)"]];
+        const els = lv.map((l, i) => {
+          const w = 600 * l[1], g = K.svg(svg, "g");
+          K.svg(g, "rect", { x: 360 - w / 2, y: 50 + i * 85, width: w, height: 60, rx: 8, fill: l[2], opacity: 0.8 });
+          K.svg(g, "text", { x: 360, y: 86 + i * 85, "text-anchor": "middle", "font-size": 15, "font-weight": 700, fill: "var(--ink)" }, l[0]);
+          g.style.opacity = 0; return g;
+        });
+        K.svg(svg, "text", { x: 360, y: 318, "text-anchor": "middle", "font-size": 12, class: "muted" }, "漏斗宽度只是示意（比例被放大了，真实访问、转化比例更小，见运行输出）");
+        (async () => { for (const e of els) { if (!(await fade([e], ctx, 500))) return; } })();
+      },
+    },
+    {
+      title: "平均效果：4.9% 对 3.8%", kicker: "第 12–17 格 · ATE 与 z 检验",
+      html: `<p>按随机分组比较：投放组访问率 <b>4.9%</b>，对照组 <b>3.8%</b>，平均处理效应（ATE）约 1 个百分点；转化率 0.31% 对 0.19%。<span data-cell="15">出处</span></p><p>差得不多，作者做了两比例 z 检验，两个 p 值都小于 0.05，说明这个差别不太可能是运气。<span data-cell="16">出处</span> <span data-cell="18">出处</span></p><p class="callout">因为是<b>抽签分组</b>，这 1 个百分点可以放心地解释为“广告带来的”：这就是随机实验的力量。</p>`,
+      cells: [12, 13, 14, 15, 16, 17], highlight: ["groupby('treatment')", "proportions_ztest"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 120, y: 30, w: 480, h: 240 }, [0, 2], [0, 6], { xticks: 0, yticks: 3, yfmt: (v) => v.toFixed(0) + "%" });
+        const B = [[0.5, 3.8, "对照组", "var(--c1)"], [1.5, 4.9, "投放组", "var(--c6)"]];
+        const bars = B.map((b) => {
+          K.svg(svg, "text", { x: ax.sx(b[0]), y: 292, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, b[2]);
+          const r = K.svg(svg, "rect", { x: ax.sx(b[0]) - 60, y: ax.sy(0), width: 120, height: 0, rx: 4, fill: b[3] });
+          const t = K.svg(svg, "text", { x: ax.sx(b[0]), y: ax.sy(b[1]) - 8, "text-anchor": "middle", "font-size": 15, "font-weight": 700 }, b[1] + "%");
+          t.style.opacity = 0; return { r, t, v: b[1] };
+        });
+        const br = K.svg(svg, "path", { d: `M${ax.sx(0.5)},${ax.sy(3.8)} L${ax.sx(1.5) - 70},${ax.sy(3.8)} M${ax.sx(1.5) - 70},${ax.sy(3.8)} L${ax.sx(1.5) - 70},${ax.sy(4.9)}`, stroke: "var(--warn)", "stroke-width": 2, fill: "none", "stroke-dasharray": "4 3" });
+        const bt = K.svg(svg, "text", { x: ax.sx(1.5) - 76, y: ax.sy(4.4), "text-anchor": "end", "font-size": 14, fill: "var(--warn)", "font-weight": 700 }, "ATE ≈ 1 个百分点");
+        hide([br, bt]);
+        K.svg(svg, "text", { x: 620, y: 300, "text-anchor": "end", "font-size": 11, class: "muted" }, "数值来自第 15 格");
+        ctx.tween(1200, (t) => bars.forEach((b) => { const h = ax.sy(0) - ax.sy(b.v * t); K.set(b.r, { y: ax.sy(0) - h, height: h }); b.t.style.opacity = t; })).then((ok) => ok && fade([br, bt], ctx, 500));
+      },
+    },
+    {
+      title: "exposure：真正看到广告的只有 3.6%", kicker: "第 18–20 格 · 曝光",
+      html: `<p>数据里还有一列 <code>exposure</code>：投放组的用户<b>是否真的看到了</b>广告。作者一算，投放组里只有 <b>3.6%</b>，约 28 人中 1 人真的看到了。<span data-cell="20">出处</span></p><p>这很正常：“分到投放组”只是说允许给他投，他得恰好上网、恰好打开那些网页、广告位恰好抢到，才会真的看到。</p><p class="callout warn">关键区别：<b>分组</b>是抽签决定的；<b>看没看到</b>是由用户自己的上网习惯决定的，不是抽签。</p>`,
+      cells: [18, 19, 20], highlight: ["exposure"],
+      draw(svg, ctx) {
+        const dots = [];
+        for (let i = 0; i < 28; i++) dots.push(K.svg(svg, "circle", { cx: 70 + (i % 14) * 44, cy: 110 + Math.floor(i / 14) * 60, r: 14, fill: "var(--panel-2)", stroke: "var(--c6)", "stroke-width": 2 }));
+        K.svg(svg, "text", { x: 360, y: 60, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "投放组里的 28 个人……");
+        const eye = K.svg(svg, "text", { x: 360, y: 270, "text-anchor": "middle", "font-size": 15, "font-weight": 700, fill: "var(--c6)" }, "只有 1 个真的看到了广告（3.6%）");
+        eye.style.opacity = 0;
+        ctx.wait(800).then((ok) => ok && ctx.tween(800, (t) => { K.set(dots[17], { fill: `color-mix(in srgb, var(--c6) ${Math.round(t * 100)}%, var(--panel-2))` }); K.set(dots[17], { r: 14 + 4 * t }); eye.style.opacity = t; }));
+      },
+    },
+    {
+      title: "看到 vs 没看到：41% 对 3.5%", kicker: "第 21–25 格 · 一个诱人的比较",
+      html: `<p>作者在投放组内部比较：看到广告的人访问率 <b>41%</b>，没看到的 <b>3.5%</b>；转化率 5.3% 对 0.12%，z 检验都显著。作者据此说广告效果很强，只是看到的人太少。<span data-cell="25">出处</span></p><p class="callout warn">这个比较<b>不是随机的</b>。能看到广告的人，多半是整天上网、经常逛购物网站的活跃用户，他们<b>就算没看到广告</b>，访问率也比普通人高得多。“活跃程度”同时影响“看到广告”和“访问”，是典型的<b>混杂因素</b>。41% 和 3.5% 的差里，有多少是广告的功劳、有多少是人本来就不一样，单靠这张表分不出来。</p>`,
+      cells: [21, 22, 23, 24, 25], highlight: ["groupby('exposure')"],
+      draw(svg, ctx) {
+        const A = K.node(svg, 60, 230, 170, 56, "看到广告", { bold: true, stroke: "var(--c6)" });
+        const B = K.node(svg, 490, 230, 170, 56, "访问网站", { bold: true, stroke: "var(--c1)" });
+        const ar = K.arrow(svg, 232, 258, 488, 258, { color: "var(--accent)", sw: 3 });
+        const at = K.svg(svg, "text", { x: 360, y: 248, "text-anchor": "middle", "font-size": 13, fill: "var(--accent)", "font-weight": 700 }, "41% vs 3.5%：全是广告的功劳？");
+        const Z = K.node(svg, 275, 50, 170, 60, "用户本来就很活跃", { fill: "color-mix(in srgb, var(--warn) 20%, var(--panel))", stroke: "var(--warn)", bold: true });
+        const z1 = K.arrow(svg, 320, 112, 160, 228, { color: "var(--warn)", sw: 2.5 }), z2 = K.arrow(svg, 400, 112, 570, 228, { color: "var(--warn)", sw: 2.5 });
+        const msg = K.svg(svg, "text", { x: 360, y: 322, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--bad)" }, "活跃度是混杂因素：一部分差距本来就存在");
+        hide([Z, z1, z2, msg]);
+        (async () => { await ctx.wait(1000); if (!(await fade([Z], ctx, 500))) return; if (!(await fade([z1, z2], ctx, 500))) return; fade([msg], ctx, 500); })();
+      },
+    },
+    {
+      title: "没看到广告的人反而更少访问？", kicker: "第 26–28 格 · 按“受影响的变量”筛人",
+      html: `<p>作者又只看 <code>exposure = 0</code> 的人，比较投放组和对照组，发现投放组的访问、转化率反而更低，于是写道：没看到广告时“平均效果是负的”，现实中需要处理。<span data-cell="28">出处</span></p><p class="callout warn">这个结论站不住。对照组里<b>所有人</b>都没看到广告（根本没投），其中也包括很多活跃用户；而投放组里“没看到”的，是筛掉活跃用户之后剩下的“不爱上网的人”。两边的人群不一样，比出来的差距是<b>筛选造成的</b>，不是广告造成的。规律是：不要按一个会被处理影响的变量（exposure）去挑人再比较。</p>`,
+      cells: [26, 27, 28], highlight: ["df['exposure']==0"],
+      draw(svg, ctx) {
+        const mk = (x, lab, n, actShare, col) => {
+          K.svg(svg, "text", { x: x + 130, y: 30, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: col }, lab);
+          const els = [];
+          for (let i = 0; i < n; i++) { const act = i < n * actShare; els.push({ act, el: K.svg(svg, "circle", { cx: x + 20 + (i % 10) * 26, cy: 60 + Math.floor(i / 10) * 26, r: 9, fill: act ? "var(--warn)" : "var(--panel-2)", stroke: "var(--ink-3)" }) }); }
+          return els;
+        };
+        const T = mk(40, "投放组", 60, 0.3, "var(--c6)"), C = mk(400, "对照组", 60, 0.3, "var(--c1)");
+        const box = K.svg(svg, "rect", { x: 30, y: 44, width: 290, height: 170, rx: 8, fill: "none", stroke: "var(--bad)", "stroke-width": 2, "stroke-dasharray": "6 4", opacity: 0 });
+        const t1 = K.svg(svg, "text", { x: 360, y: 270, "text-anchor": "middle", "font-size": 13 }, "橙色 = 活跃用户（示意）。投放组里活跃用户多半“看到了广告”，被筛掉");
+        const t2 = K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--bad)" }, "剩下的投放组“没看到”的人 vs 整个对照组：人群已经不一样了");
+        hide([t2]);
+        ctx.wait(900).then((ok) => ok && ctx.tween(1000, (t) => { T.forEach((d) => { if (d.act) d.el.style.opacity = 1 - 0.85 * t; }); box.style.opacity = t; t2.style.opacity = t; }));
+      },
+    },
+    {
+      title: "欠采样：把 85 : 15 变成 50 : 50", kicker: "第 29–34 格 · 处理不平衡",
+      html: `<p>很多增益模型假设两组人数差不多，作者引用文献说：可以重新加权或重新抽样，虽然会损失一些信息，但只要模型足够好，结果仍有意义。<span data-cell="30">出处</span></p><p>先按 treatment 分层切出 20% 当测试集，<b>测试集保持真实比例</b>；只在训练集里随机扔掉多余的投放组用户，让两组一样多。<span data-cell="31">出处</span> <span data-cell="32">出处</span> 欠采样后训练集 3,355,100 行，两组各半。<span data-cell="35">出处</span></p>`,
+      cells: [29, 30, 31, 32, 33, 34], highlight: ["stratify", "random_under", "sample(len(df_0))"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 140, y: 30, w: 440, h: 230 }, [0, 2], [0, 100], { xticks: 0, yticks: 4, yfmt: (v) => v.toFixed(0) + "%" });
+        const bT = K.svg(svg, "rect", { x: ax.sx(0.5) - 60, y: ax.sy(85), width: 120, height: ax.sy(0) - ax.sy(85), rx: 4, fill: "var(--c6)" });
+        K.svg(svg, "rect", { x: ax.sx(1.5) - 60, y: ax.sy(15), width: 120, height: ax.sy(0) - ax.sy(15), rx: 4, fill: "var(--c1)" });
+        K.svg(svg, "text", { x: ax.sx(0.5), y: 286, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "投放组");
+        K.svg(svg, "text", { x: ax.sx(1.5), y: 286, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "对照组");
+        const lab = K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "训练集：85 : 15");
+        ctx.wait(800).then((ok) => ok && ctx.tween(1400, (t) => { const v = K.lerp(85, 15, K.ease(t)); K.set(bT, { y: ax.sy(v), height: ax.sy(0) - ax.sy(v) }); lab.textContent = t < 1 ? "随机扔掉投放组用户……" : "训练集：50 : 50（测试集保持原比例）"; }));
+      },
+    },
+    {
+      title: "类别变换：CN、CR、TN、TR 四类", kicker: "第 35–41 格 · 增益模型",
+      html: `<p>作者用的是 LGWUM（广义加权增益模型），属于“类别变换”法：<span data-cell="35">出处</span> 把“哪组 × 有没有访问”组合成 4 个类别：</p><ul class="tight"><li><b>CN</b> 对照组没访问 · <b>CR</b> 对照组访问了</li><li><b>TN</b> 投放组没访问 · <b>TR</b> 投放组访问了</li></ul><p>用 XGBoost 预测每个人属于这 4 类的概率（训练时<b>不给它看组别</b>），再组合成增益分数：<span data-cell="40">出处</span></p><p class="callout">增益 = P(CN)/[P(CN)+P(CR)] + P(TR)/[P(TN)+P(TR)] − P(TN)/[P(TN)+P(TR)] − P(CR)/[P(CN)+P(CR)]</p><p>直觉：一个人越像“投放组里访问的人”和“对照组里没访问的人”，就越可能是“投了才来”的可说服型。化简后它等于 2 × [P(访问 | 投放) − P(访问 | 对照)]。</p>`,
+      cells: [35, 36, 37, 38, 39, 40, 41], highlight: ["target_class", "uplift_score", "XGBClassifier"],
+      draw(svg, ctx) {
+        const cells = [[160, 60, "CN\n对照 · 没访问", "+", "var(--good)"], [400, 60, "CR\n对照 · 访问了", "−", "var(--bad)"], [160, 180, "TN\n投放 · 没访问", "−", "var(--bad)"], [400, 180, "TR\n投放 · 访问了", "+", "var(--good)"]];
+        const els = cells.map((c) => {
+          const g = K.node(svg, c[0], c[1], 220, 100, c[2], { bold: true, fill: `color-mix(in srgb, ${c[4]} 14%, var(--panel))`, stroke: c[4], fs: 14 });
+          K.svg(g, "text", { x: c[0] + 200, y: c[1] + 30, "text-anchor": "middle", "font-size": 26, "font-weight": 700, fill: c[4] }, c[3]);
+          g.style.opacity = 0; return g;
+        });
+        K.svg(svg, "text", { x: 100, y: 116, "text-anchor": "end", "font-size": 13 }, "对照组");
+        K.svg(svg, "text", { x: 100, y: 236, "text-anchor": "end", "font-size": 13 }, "投放组");
+        K.svg(svg, "text", { x: 360, y: 318, "text-anchor": "middle", "font-size": 13 }, "XGBoost 给每人 4 个概率 → “+” 两格加、“−” 两格减 → 增益分数");
+        (async () => { for (const e of els) { if (!(await fade([e], ctx, 400))) return; } })();
+      },
+    },
+    {
+      title: "增益分数的分布", kicker: "第 42–43 格 · 看结果",
+      html: `<p>在测试集上画出每个人增益分数的直方图。<span data-cell="42">出处</span> 作者说：大部分是正的，符合“广告平均有效”；也有一些是负的，可能是“勿扰型”。<span data-cell="43">出处</span></p><p>作者猜测负增益的人可能是没真正看到广告的人。但模型训练时没有用 exposure，这只是猜测；而且模型给的分数只是估计，单个人的“真实增益”永远无法直接观察。</p>`,
+      cells: [42, 43], highlight: ["hist"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 230 }, [-0.05, 0.1], [0, 1], { xticks: 3, yticks: 0, xfmt: (v) => v.toFixed(2), xlabel: "增益分数（示意分布）" });
+        const r = K.rng(8), bins = new Array(30).fill(0);
+        for (let i = 0; i < 3000; i++) { const v = 0.018 + K.randn(r) * 0.018 + (r() < 0.2 ? r() * 0.05 : 0); const b = Math.floor((v + 0.05) / 0.005); if (b >= 0 && b < 30) bins[b]++; }
+        const mx = Math.max(...bins);
+        const rs = bins.map((c, i) => K.svg(svg, "rect", { x: ax.sx(-0.05 + i * 0.005) + 1, y: ax.sy(0), width: ax.sx(0.005) - ax.sx(0) - 2, height: 0, fill: -0.05 + i * 0.005 < 0 ? "var(--bad)" : "var(--c1)" }));
+        K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(0), y1: 30, y2: 260, stroke: "var(--ink)", "stroke-dasharray": "4 3" });
+        K.svg(svg, "text", { x: ax.sx(0) - 6, y: 50, "text-anchor": "end", "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "负增益：可能是勿扰型");
+        ctx.tween(1200, (t) => rs.forEach((rc, i) => { const h = (ax.sy(0) - ax.sy(bins[i] / mx)) * t; K.set(rc, { y: ax.sy(0) - h, height: h }); }));
+      },
+    },
+    {
+      title: "Qini 曲线：Qini 只有 0.01", kicker: "第 44–48 格 · 评估",
+      html: `<p>增益模型没法像普通分类那样算准确率，因为每个人只看得到一个世界。作者用 <b>Qini 曲线</b>：按增益分数从高到低排，投放给前 x% 的人，看“投放组访问比例 − 对照组访问比例”累计能有多少增量；对角线代表随机投放。<span data-cell="43">出处</span> <span data-cell="44">出处</span></p><p>作者的读数：如果全部 2,500,000 个测试用户都投，能多带来约 30,000 次访问；只投分数最高的 20%，就能拿到约 26,000 次，约 86%。<span data-cell="46">出处</span> 但归一化后 Qini 分数只有 <b>0.01</b>，作者认为整体增量很小，和随机投放差别不大。<span data-cell="48">出处</span></p>`,
+      cells: [44, 45, 46, 47, 48], highlight: ["qini_rank", "qini_eval", "auc(gain_x, gain_y)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 24, w: 560, h: 250 }, [0, 1], [0, 1], { xticks: 5, yticks: 4, xfmt: (v) => (v * 100).toFixed(0) + "%", yfmt: (v) => (v * 100).toFixed(0) + "%", xlabel: "按分数从高到低，投放给前 x% 的人" });
+        const f = (x) => Math.min(1, 1 - Math.pow(1 - x, 6) * 0.98 - 0.02 * (1 - x));
+        const xs = []; for (let x = 0; x <= 1.0001; x += 0.01) xs.push(x);
+        K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0), x2: ax.sx(1), y2: ax.sy(1), stroke: "var(--warn)", "stroke-dasharray": "5 4", "stroke-width": 2 });
+        const p = K.svg(svg, "path", { d: "M" + xs.map((x) => ax.sx(x) + "," + ax.sy(f(x))).join("L"), fill: "none", stroke: "var(--c1)", "stroke-width": 3 });
+        const L = p.getTotalLength(); p.style.strokeDasharray = L; p.style.strokeDashoffset = L;
+        const v = K.svg(svg, "line", { x1: ax.sx(0.2), x2: ax.sx(0.2), y1: ax.sy(0), y2: ax.sy(0), stroke: "var(--good)", "stroke-width": 2 });
+        const t = K.svg(svg, "text", { x: ax.sx(0.2) + 8, y: ax.sy(0.55), "font-size": 13, fill: "var(--good)", "font-weight": 700 }, "只投前 20%：拿到约 86% 的增量（原文）");
+        K.svg(svg, "text", { x: ax.sx(0.62), y: ax.sy(0.5), "font-size": 12, fill: "var(--warn)" }, "虚线：随机投放");
+        K.svg(svg, "text", { x: 80, y: 18, "font-size": 12, class: "muted" }, "纵轴：累计增量占全投时的比例（示意曲线形状）");
+        t.style.opacity = 0;
+        ctx.tween(1500, (k) => (p.style.strokeDashoffset = L * (1 - k))).then((ok) => ok && ctx.tween(600, (k) => { K.set(v, { y2: ax.sy(f(0.2) * k) }); t.style.opacity = k; }));
+      },
+    },
+    {
+      title: "把处理换成 exposure 再来一遍", kicker: "第 49–56 格 · 第二个模型",
+      html: `<p>作者想看“真的看到广告”的影响，于是把整套流程里的 treatment 换成 exposure：看到广告的大约 32 人中 1 个 <span data-cell="50">出处</span>，同样分层切分、欠采样、做四类变换、训练 XGBoost。<span data-cell="51">出处</span> <span data-cell="54">出处</span> <span data-cell="56">出处</span></p><p class="callout warn">注意这里的“对照组”变成了“所有没看到广告的人”：既有投放组里没看到的，也有整个原对照组。“处理组”是被广告碰上的活跃用户。两组从一开始就不是抽签分的，模型学到的“增益”里混着“活跃用户本来就爱访问”这一部分。</p>`,
+      cells: [49, 50, 51, 52, 54, 56], highlight: ["'exposure'", "stratify=df['exposure']"],
+      draw(svg, ctx) {
+        const a = K.node(svg, 60, 70, 250, 80, "第一个模型\n处理 = treatment（抽签）", { bold: true, stroke: "var(--good)", fill: "color-mix(in srgb, var(--good) 14%, var(--panel))" });
+        const b = K.node(svg, 410, 70, 250, 80, "第二个模型\n处理 = exposure（自己碰上的）", { bold: true, stroke: "var(--bad)", fill: "color-mix(in srgb, var(--bad) 14%, var(--panel))" });
+        const ar = K.arrow(svg, 312, 110, 408, 110, { sw: 2.5 });
+        const t1 = K.svg(svg, "text", { x: 185, y: 190, "text-anchor": "middle", "font-size": 13 }, "两组人天生一样");
+        const t2 = K.svg(svg, "text", { x: 535, y: 190, "text-anchor": "middle", "font-size": 13 }, "处理组 = 活跃用户");
+        const t3 = K.svg(svg, "text", { x: 535, y: 212, "text-anchor": "middle", "font-size": 13 }, "对照组 = 其余所有人");
+        const s1 = K.svg(svg, "text", { x: 185, y: 260, "text-anchor": "middle", "font-size": 28, fill: "var(--good)", "font-weight": 700 }, "✓ 因果可信");
+        const s2 = K.svg(svg, "text", { x: 535, y: 260, "text-anchor": "middle", "font-size": 28, fill: "var(--bad)", "font-weight": 700 }, "✗ 混杂");
+        hide([b, ar, t2, t3, s1, s2]);
+        (async () => { await ctx.wait(400); if (!(await fade([s1], ctx, 400))) return; if (!(await fade([ar, b], ctx, 600))) return; if (!(await fade([t2, t3], ctx, 500))) return; fade([s2], ctx, 500); })();
+      },
+    },
+    {
+      title: "“好 29 倍”？结论与反思", kicker: "第 57–62 格 · 结论",
+      html: `<p>第二个模型的增益分数几乎全是正的 <span data-cell="58">出处</span>；全投能多 1,060,000 次访问，只投前 20% 可得 620,000 次，约 58% <span data-cell="60">出处</span>；作者说 Qini 分数“大约好了 29 倍”，结论是“确保用户真正看到广告，增量会大大提高”。<span data-cell="62">出处</span></p><p class="callout warn">这三点值得讨论：①增量大，很大一部分来自“看到广告的本来就是活跃用户”，不是广告的功劳；②两个模型的处理定义和人数尺度都不同，Qini 直接相比不可比；③“前 20% 拿到 58%”比第一个模型的 86% 还低，排序能力并没有更好。想估计“看到广告的人”的真实效果，应当用<b>随机分组的整体效果 ÷ 曝光率</b>（工具变量思路），见实验 B。</p>`,
+      cells: [57, 58, 59, 60, 61, 62], highlight: ["x29", "properly exposed"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 200, y: 40, w: 420, h: 200 }, [0, 30], [0, 2], { xticks: 0, yticks: 0 });
+        const b1 = K.svg(svg, "rect", { x: ax.sx(0), y: 60, width: 0, height: 50, rx: 4, fill: "var(--c1)" });
+        const b2 = K.svg(svg, "rect", { x: ax.sx(0), y: 150, width: 0, height: 50, rx: 4, fill: "var(--c6)" });
+        K.svg(svg, "text", { x: 190, y: 92, "text-anchor": "end", "font-size": 13, "font-weight": 700 }, "按 treatment");
+        K.svg(svg, "text", { x: 190, y: 182, "text-anchor": "end", "font-size": 13, "font-weight": 700 }, "按 exposure");
+        const stamp = K.node(svg, 360, 250, 300, 50, "⚠ 里面混着“用户本来就活跃”", { fill: "color-mix(in srgb, var(--bad) 20%, var(--panel))", stroke: "var(--bad)", bold: true });
+        stamp.style.opacity = 0;
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 12, class: "muted" }, "柱长按原文“约 29 倍”示意（Qini 0.01 → 约 0.29），具体数字在运行输出里");
+        ctx.tween(1400, (t) => { K.set(b1, { width: ax.sx(1) - ax.sx(0) }); K.set(b2, { width: (ax.sx(29) - ax.sx(0)) * t }); }).then((ok) => ok && fade([stamp], ctx, 600));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：ATE 与 z 检验 ---------- */
+  K.lab(document.getElementById("labA"), {
+    width: 660, height: 300,
+    controls: [
+      { id: "n", label: "实验总人数（对数刻度）", min: 3, max: 7.12, step: 0.02, value: 4, fmt: (v) => Math.round(Math.pow(10, v)).toLocaleString() },
+      { id: "p0", label: "对照组访问率", min: 1, max: 10, step: 0.1, value: 3.8, fmt: (v) => v.toFixed(1) + "%" },
+      { id: "lift", label: "广告真实带来的提升（模拟设定）", min: 0, max: 2, step: 0.05, value: 1.1, fmt: (v) => "+" + v.toFixed(2) + " 个百分点" },
+      { id: "seed", label: "重新做一次实验", button: true },
+    ],
+    note: "按原文的 85% : 15% 分组，现场抽样出每组访问人数，计算两组访问率、差值的 95% 置信区间和两比例 z 检验的 p 值（与 statsmodels 的 proportions_ztest 同一公式）。默认对照组 3.8%、提升 1.1 个百分点取自原文第 15 格。",
+    render(svg, v) {
+      const r = K.rng(11 + v.seed * 29), N = Math.round(Math.pow(10, v.n)), nT = Math.round(N * 0.85), nC = N - nT;
+      const xT = binom(r, nT, (v.p0 + v.lift) / 100), xC = binom(r, nC, v.p0 / 100);
+      const pT = xT / nT, pC = xC / nC, pp = (xT + xC) / N;
+      const se0 = Math.sqrt(pp * (1 - pp) * (1 / nT + 1 / nC)), z = se0 > 0 ? (pT - pC) / se0 : 0, p = pTwo(z);
+      const se = Math.sqrt(pT * (1 - pT) / nT + pC * (1 - pC) / nC), lo = pT - pC - 1.96 * se, hi = pT - pC + 1.96 * se;
+      const top = Math.max(pT, pC, 0.01) * 100 * 1.4;
+      const ax = K.axes(svg, { x: 70, y: 20, w: 260, h: 220 }, [0, 2], [0, top], { xticks: 0, yticks: 4, yfmt: (q) => q.toFixed(1) + "%" });
+      [[0.5, pC, "对照组", "var(--c1)", nC], [1.5, pT, "投放组", "var(--c6)", nT]].forEach((b) => {
+        K.svg(svg, "rect", { x: ax.sx(b[0]) - 40, y: ax.sy(b[1] * 100), width: 80, height: ax.sy(0) - ax.sy(b[1] * 100), rx: 4, fill: b[3] });
+        K.svg(svg, "text", { x: ax.sx(b[0]), y: ax.sy(b[1] * 100) - 6, "text-anchor": "middle", "font-size": 12 }, (b[1] * 100).toFixed(2) + "%");
+        K.svg(svg, "text", { x: ax.sx(b[0]), y: 262, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, b[2]);
+        K.svg(svg, "text", { x: ax.sx(b[0]), y: 280, "text-anchor": "middle", "font-size": 11, class: "muted" }, b[4].toLocaleString() + " 人");
+      });
+      const lim = Math.max(2.5, Math.abs(lo * 100) * 1.1, Math.abs(hi * 100) * 1.1);
+      const bx = K.axes(svg, { x: 380, y: 60, w: 250, h: 120 }, [-lim, lim], [0, 1], { xticks: 2, yticks: 0, xfmt: (q) => q.toFixed(1) + "pp", xlabel: "差值的 95% 区间" });
+      K.svg(svg, "line", { x1: bx.sx(0), x2: bx.sx(0), y1: 60, y2: 180, stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+      K.svg(svg, "line", { x1: bx.sx(lo * 100), x2: bx.sx(hi * 100), y1: 120, y2: 120, stroke: p < 0.05 ? "var(--good)" : "var(--bad)", "stroke-width": 4 });
+      K.svg(svg, "circle", { cx: bx.sx((pT - pC) * 100), cy: 120, r: 7, fill: p < 0.05 ? "var(--good)" : "var(--bad)" });
+      K.svg(svg, "line", { x1: bx.sx(v.lift), x2: bx.sx(v.lift), y1: 95, y2: 145, stroke: "var(--ink)", "stroke-width": 2 });
+      K.svg(svg, "text", { x: bx.sx(v.lift), y: 90, "text-anchor": "middle", "font-size": 11 }, "真实值");
+      return { readout: [
+        { k: "观察到的差值", v: ((pT - pC) * 100).toFixed(2) + " pp" },
+        { k: "z 值", v: z.toFixed(2) },
+        { k: "p 值", v: p < 1e-4 ? p.toExponential(1) : p.toFixed(3), color: p < 0.05 ? "var(--good)" : "var(--bad)" },
+        { k: "结论", v: p < 0.05 ? "显著" : "看不出来" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：曝光不随机 ---------- */
+  K.lab(document.getElementById("labB"), {
+    width: 660, height: 330,
+    controls: [
+      { id: "eff", label: "广告对“真的看到的人”的真实提升（模拟设定）", min: 0, max: 30, step: 1, value: 10, fmt: (v) => "+" + v + " 个百分点" },
+      { id: "sel", label: "活跃用户更容易被广告碰上的程度", min: 0, max: 2.5, step: 0.05, value: 1.6, fmt: (v) => v.toFixed(2) },
+      { id: "act", label: "活跃度对访问的影响", min: 0, max: 2.5, step: 0.05, value: 1.6, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "换一批模拟用户", button: true },
+    ],
+    note: "现场模拟 60,000 个用户，85% 抽签进投放组。每人有一个看不见的“活跃度”；投放组里活跃度越高越容易真的看到广告（约 3–4%）。广告只对看到的人有效。为了让读数稳定，访问用每人的“访问概率”求平均（相当于人数无限多）。比较四种算法和真实值。",
+    render(svg, v) {
+      const r = K.rng(77 + v.seed * 31), n = 60000;
+      let sT = 0, nT = 0, sC = 0, nC = 0, sE = 0, nE = 0, sU = 0, nU = 0, gain = 0;
+      for (let i = 0; i < n; i++) {
+        const a = K.randn(r), T = r() < 0.85;
+        const base = K.sigmoid(-3.6 + v.act * a);
+        const E = T && r() < K.sigmoid(-4.3 + v.sel * a);
+        const p = E ? Math.min(0.99, base + v.eff / 100) : base;
+        const y = p; // 用每人的访问概率代替一次抽签结果，去掉抽样噪声
+        if (T) { sT += y; nT++; if (E) { sE += y; nE++; gain += p - base; } else { sU += y; nU++; } } else { sC += y; nC++; }
+      }
+      const itt = sT / nT - sC / nC, rate = nE / nT, iv = itt / rate, naive = sE / nE - sU / nU, cell26 = sU / nU - sC / nC, truth = gain / nE;
+      const items = [
+        { k: "看到 vs 没看到（第 25 格）", v: naive, c: "var(--bad)" },
+        { k: "没看到的投放组 vs 对照（第 26 格）", v: cell26, c: "var(--warn)" },
+        { k: "整体 ÷ 曝光率（工具变量）", v: iv, c: "var(--good)" },
+        { k: "真实值（模拟设定）", v: truth, c: "var(--ink)" },
+      ];
+      const lim = Math.max(...items.map((d) => Math.abs(d.v))) * 1.15 + 0.01;
+      const ax = K.axes(svg, { x: 260, y: 14, w: 370, h: 230 }, [-lim * 0.35, lim], [0, 4], { xticks: 4, yticks: 0, xfmt: (q) => (q * 100).toFixed(0) + "pp" });
+      K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(0), y1: 14, y2: 244, stroke: "var(--ink-3)" });
+      K.svg(svg, "line", { x1: ax.sx(truth), x2: ax.sx(truth), y1: 14, y2: 244, stroke: "var(--ink)", "stroke-dasharray": "4 3" });
+      items.forEach((d, i) => {
+        const y = 22 + i * 56;
+        K.svg(svg, "text", { x: 250, y: y + 20, "text-anchor": "end", "font-size": 12, "font-weight": 700 }, d.k);
+        K.svg(svg, "rect", { x: Math.min(ax.sx(0), ax.sx(d.v)), y, width: Math.abs(ax.sx(d.v) - ax.sx(0)) + 1, height: 28, rx: 4, fill: d.c, opacity: 0.85 });
+        K.svg(svg, "text", { x: ax.sx(Math.max(d.v, 0)) + 6, y: y + 19, "font-size": 12 }, (d.v * 100).toFixed(1) + " pp");
+      });
+      K.svg(svg, "text", { x: 20, y: 290, "font-size": 12 }, `投放组访问率 ${(sT / nT * 100).toFixed(2)}%，对照组 ${(sC / nC * 100).toFixed(2)}%，整体效果 ${(itt * 100).toFixed(2)} pp；`);
+      K.svg(svg, "text", { x: 20, y: 312, "font-size": 12 }, `投放组里看到广告 ${(rate * 100).toFixed(1)}%；看到的人访问率 ${(sE / nE * 100).toFixed(1)}%，没看到的 ${(sU / nU * 100).toFixed(1)}%（模拟值）`);
+      return { readout: [
+        { k: "直接比较高估了", v: ((naive - truth) * 100).toFixed(1) + " pp", color: "var(--bad)" },
+        { k: "工具变量的误差", v: ((iv - truth) * 100).toFixed(1) + " pp", color: Math.abs(iv - truth) < 0.04 ? "var(--good)" : "var(--warn)" },
+        { k: "第 26 格的“负效果”", v: (cell26 * 100).toFixed(2) + " pp", color: "var(--warn)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：Qini 曲线 ---------- */
+  K.lab(document.getElementById("labC"), {
+    width: 660, height: 330,
+    controls: [
+      { id: "per", label: "可说服型占比", min: 0, max: 40, step: 1, value: 10, fmt: (v) => v + "%" },
+      { id: "dog", label: "勿扰型占比", min: 0, max: 20, step: 1, value: 3, fmt: (v) => v + "%" },
+      { id: "q", label: "模型的排序能力（0 = 瞎猜，1 = 完美）", min: 0, max: 1, step: 0.05, value: 0.6, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "换一批模拟顾客", button: true },
+    ],
+    note: "现场模拟 6000 位顾客（铁杆型 10%，其余为无望型），一半随机进投放组。模型分数 = 能力 × 真实增益 + (1 − 能力) × 随机噪声。按作者第 44 格的做法：从高分到低分累计“投放组访问比例 − 对照组访问比例”。",
+    render(svg, v) {
+      const r = K.rng(5 + v.seed * 13), n = 6000, rows = [];
+      for (let i = 0; i < n; i++) {
+        const u = r() * 100; let type;
+        if (u < v.per) type = "P"; else if (u < v.per + v.dog) type = "D"; else if (u < v.per + v.dog + 10) type = "S"; else type = "L";
+        const T = r() < 0.5 ? 1 : 0;
+        const y = type === "S" ? 1 : type === "L" ? 0 : type === "P" ? T : 1 - T;
+        const tu = type === "P" ? 1 : type === "D" ? -1 : 0;
+        rows.push({ T, y, s: v.q * tu + (1 - v.q) * (r() * 2 - 1) * 1.2 + r() * 0.01 });
+      }
+      rows.sort((a, b) => b.s - a.s);
+      const NT = rows.filter((d) => d.T).length, NC = n - NT;
+      let tr = 0, cr = 0; const pts = [[0, 0]];
+      rows.forEach((d, i) => { if (d.T && d.y) tr++; if (!d.T && d.y) cr++; if (i % 30 === 29 || i === n - 1) pts.push([(i + 1) / n, tr / NT - cr / NC]); });
+      const fin = pts[pts.length - 1][1];
+      let area = 0, rand = 0; for (let i = 1; i < pts.length; i++) { const dx = pts[i][0] - pts[i - 1][0]; area += dx * (pts[i][1] + pts[i - 1][1]) / 2; rand += dx * fin * (pts[i][0] + pts[i - 1][0]) / 2; }
+      const ymax = Math.max(...pts.map((p) => p[1]), fin, 0.02) * 1.15, ymin = Math.min(0, ...pts.map((p) => p[1])) * 1.15;
+      const ax = K.axes(svg, { x: 60, y: 14, w: 570, h: 260 }, [0, 1], [ymin, ymax], { xticks: 5, yticks: 4, xfmt: (q) => (q * 100).toFixed(0) + "%", yfmt: (q) => (q * 100).toFixed(0) + "%", xlabel: "按模型分数从高到低，投放给前 x% 的人" });
+      K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0), x2: ax.sx(1), y2: ax.sy(fin), stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "5 4" });
+      K.svg(svg, "path", { d: "M" + pts.map((p) => ax.sx(p[0]) + "," + ax.sy(p[1])).join("L"), fill: "none", stroke: "var(--c1)", "stroke-width": 3 });
+      K.svg(svg, "text", { x: 70, y: 324, "font-size": 12, fill: "var(--c1)", "font-weight": 700 }, "— 模型（Qini 曲线）");
+      K.svg(svg, "text", { x: 230, y: 324, "font-size": 12, fill: "var(--warn)", "font-weight": 700 }, "- - 随机投放");
+      let best = 0; pts.forEach((p) => { if (p[1] > pts[best][1]) best = pts.indexOf(p); });
+      return { readout: [
+        { k: "全投的增量（访问率差）", v: (fin * 100).toFixed(1) + " pp" },
+        { k: "曲线最高点", v: "投前 " + (pts[best][0] * 100).toFixed(0) + "% 时" },
+        { k: "曲线下面积", v: area.toFixed(3) },
+        { k: "比随机多出的面积", v: (area - rand).toFixed(3), color: area - rand > 0.005 ? "var(--good)" : "var(--ink-3)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

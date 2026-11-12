@@ -1,0 +1,650 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>重复问题识别</title>
+<meta name="description" content="Kaggle 案例拆解：判断 Quora 上两个问题是否在问同一件事：词重叠特征、自写 TF-IDF 加权、按测试分布重平衡，再用 XGBoost 输出概率。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">文本对 · 二分类 · 相似度特征 + 梯度提升</div>
+  <h1>重复问题识别：这两个问题是在问同一件事吗？</h1>
+  <p class="en">Data Analysis &amp; XGBoost Starter (0.35460 LB)</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">文本对分类</span><span class="tag method">对数损失 LogLoss</span><span class="tag method">词重叠特征</span>
+    <span class="tag method">自写 TF-IDF 权重</span><span class="tag method">AUC 评估单特征</span><span class="tag method">按测试分布重平衡</span><span class="tag method">XGBoost</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>anokas</b></span>
+    <span>Kaggle 点赞 <b>3,254</b>（2026-11 抓取）</span>
+    <span>比赛 <b>quora-question-pairs</b></span>
+    <span><a href="https://www.kaggle.com/code/anokas/data-analysis-xgboost-starter-0-35460-lb" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">Quora 上成对的问题</div><p>每行是两个问题 question1、question2 及其编号，外加人工标注的 is_duplicate。训练集约 40 万对（404,290 对，来自比赛数据说明）。<span data-cell="4">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">两个问题是否重复的概率</div><p>输出 0–1 之间的概率，按<b>对数损失</b>（LogLoss）评分，越低越好。重复的问题可以直接合并答案。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">两个手工相似度特征 + XGBoost</div><p>“去停用词后共享词比例”和“按词频倒数加权的共享比例”；把训练集重平衡到测试集的正例比例；再用 XGBoost 拟合。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">排行榜 0.55 → 0.35460</div><p>只交一个常数概率得 0.55<span data-cell="8">出处</span>；两个特征 + XGBoost 得 0.35460<span data-cell="34">出处</span>（LogLoss，越低越好）。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">Kaggle 比赛 <b>Quora Question Pairs</b> 的数据：Quora 提供的问题对，is_duplicate 由人工标注。测试集里混有大量自动生成的“凑数”问题，用来防止人工标注测试集。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">训练集问题对</div><div class="v">404,290</div></div>
+        <div class="stat-tile"><div class="k">测试集问题对</div><div class="v">约 230 万</div></div>
+        <div class="stat-tile"><div class="k">训练集重复比例</div><div class="v" style="color:var(--c3)">约 37%</div></div>
+        <div class="stat-tile"><div class="k">评分指标</div><div class="v" style="font-size:16px">LogLoss（越低越好）</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">训练集对数来自比赛数据说明；37% 见第 6 格 <span data-cell="6">出处</span>；测试集约 230 万对、多为自动生成见第 11 格 <span data-cell="11">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>id</code></td><td>问题对的行号</td><td>整数</td></tr>
+        <tr><td><code>qid1</code>、<code>qid2</code></td><td>两个问题各自的编号（同一个问题可出现在多对里）</td><td>整数</td></tr>
+        <tr><td><code>question1</code>、<code>question2</code></td><td>两个问题的原文</td><td>文本</td></tr>
+        <tr><td><code>is_duplicate</code></td><td><b>要预测的答案</b>：1 = 重复，0 = 不重复</td><td>类别</td></tr>
+      </table></div>
+      <p style="font-size:13.5px;color:var(--ink-2);margin:10px 0 4px">作者在测试集表头看到的自动生成问题（第 11 格）：</p>
+      <ul class="tight" style="font-size:13.5px"><li><code>How their can I start reading?</code></li><li><code>What foods fibre?</code></li></ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="24">
+    <h3>动手试试 A · 输入两个问题，现场算作者的两个相似度特征 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+    <details class="panel pad" style="margin-top:12px"><summary>查看实验 A 使用的 30 个示例问题</summary><div id="corpus"></div></details>
+  </div>
+  <div data-at="29">
+    <h3>动手试试 B · 常数预测的对数损失，和作者的“重平衡”代码 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的数字和结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>训练集正例（重复）约 37%</td><td><span data-cell="6">第 6 格</span></td></tr>
+        <tr><td>有一个问题出现了 160 多次（离群）</td><td><span data-cell="6">第 6 格</span></td></tr>
+        <tr><td>所有测试对都交训练集平均概率：排行榜 0.55</td><td><span data-cell="8">第 8 格</span></td></tr>
+        <tr><td>由此推算测试集正例约 16.5%，与训练集差别很大</td><td><span data-cell="8">第 8 格</span></td></tr>
+        <tr><td>测试集约 230 万对，大部分是自动生成的凑数问题，不计分</td><td><span data-cell="11">第 11 格</span></td></tr>
+        <tr><td>多数问题 15–150 个字符、约 10 个词；训练集在 150 字符处陡降</td><td><span data-cell="13">第 13 格</span> <span data-cell="15">第 15 格</span></td></tr>
+        <tr><td>共享词比例很擅长识别“明显不同”，不太擅长识别“确实重复”</td><td><span data-cell="21">第 21 格</span></td></tr>
+        <tr><td>TF-IDF 加权版的 AUC 反而更低，但作者认为它能提供额外信息</td><td><span data-cell="27">第 27 格</span></td></tr>
+        <tr><td>两个特征 + 重平衡 + XGBoost：排行榜 0.35460</td><td><span data-cell="34">第 34 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">两个特征各自的 AUC、XGBoost 的验证损失都在运行输出里，源码不带输出，这里不列。表中数字全部来自作者写的文字。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>新问题提交时，和已有问题逐一配对打分，概率高的直接提示“可能已有人问过”。</li>
+        <li><b>同类问题：</b>FAQ 匹配、客服工单去重、专利/论文查重、商品标题归一、搜索里的“查询-文档”相关性。</li>
+        <li><b>可迁移的套路：</b>文本对 → 手工相似度特征（重叠、加权重叠、长度差）→ 树模型；评估指标看概率时，训练集的类别比例要对齐测试集。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>基线：常数概率 + log_loss <span data-cell="7">第 7 格</span></li>
+        <li>EDA：字符数、词数、词云、标点与大小写比例 <span data-cell="12">第 12 格</span> <span data-cell="18">第 18 格</span></li>
+        <li>特征 1：word_match_share <span data-cell="20">第 20 格</span></li>
+        <li>特征 2：tfidf_word_match_share，权重 1/(count+eps) <span data-cell="22">第 22 格</span> <span data-cell="24">第 24 格</span></li>
+        <li>单特征评估：roc_auc_score <span data-cell="26">第 26 格</span></li>
+        <li>重平衡：复制负例，目标正例比例 0.165 <span data-cell="29">第 29 格</span></li>
+        <li>模型：XGBoost（eta 0.02、max_depth 4、早停 50 轮） <span data-cell="32">第 32 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>“How do I learn Python?” 和 “How can I learn Python quickly?” 共享词比例很高；“Is Python faster than Java?” 和 “Is Java faster than Python?” 共享词比例是 1 但意思相反。词袋类特征的盲区在哪？</li>
+      <li>作者用排行榜分数反推测试集正例比例，然后据此重平衡训练集。这在真实业务里对应什么？如果线上分布会变，该怎么办？</li>
+      <li>作者在第 22 格写了 <code>eps = 5000</code>，但 <code>get_weight</code> 用的是默认参数 eps=10000。这个变量真的生效了吗？这类 bug 怎么避免？</li>
+      <li>按第 29 格的代码逻辑算一算，最后正例比例真的是 16.5% 吗？（可用实验 B 验证）</li>
+      <li>先用重平衡后的数据再 <code>train_test_split</code> 切验证集，同一个负例的多个复制品可能同时出现在训练和验证里。这会让验证分数偏乐观还是偏悲观？</li>
+    </ol>
+  </div>
+</section>
+
+
+<footer class="foot">
+  原 notebook 作者 anokas，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Quora, Quora Question Pairs 比赛。
+</footer>
+</main>
+
+<script src="nb/quora-duplicate-xgboost.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* 调试用：地址后加 #fast 时动画瞬间完成（便于截图自查），正常访问不受影响 */
+  if (/fast/.test(location.hash + location.search)) { K.tween = (ms, fn, c) => { fn(1, 1); return Promise.resolve(!c || c.alive()); }; K.wait = (ms, c) => Promise.resolve(!c || c.alive()); }
+  if (/labsonly/.test(location.hash + location.search)) document.head.appendChild(K.el("style", null, ".hero,.topbar,section.block:not(#pipeline),.walk-top,.ch-head,.ch-body,.ch-cells>:not(.inline-lab),#pipeline>h2,#pipeline>.lead{display:none!important}.chapter{margin:0!important;padding:0!important;border:0!important}"));
+  if (/fast/.test(location.hash + location.search) && !/nofold/.test(location.hash + location.search)) setTimeout(() => { const b = document.querySelector('[data-a="fold"]'); if (b) b.click(); }, 50);
+  /* ---------- 本页文本类辅助函数（页面自带，不依赖外部库） ---------- */
+  const MONO = "font-family:var(--mono)";
+  const chipW = (t, fs) => Math.max(26, String(t).length * (fs || 13) * 0.61 + 14);
+  /* 词块：圆角矩形 + 等宽文字；返回 {g, rect, text, w} */
+  function chip(svg, x, y, t, opt) {
+    opt = opt || {};
+    const fs = opt.fs || 13, w = opt.w || chipW(t, fs), h = opt.h || 24;
+    const g = K.svg(svg, "g");
+    const color = opt.color || "var(--c1)";
+    const rect = K.svg(g, "rect", { x, y, width: w, height: h, rx: 5, fill: opt.fill || `color-mix(in srgb, ${color} 16%, var(--panel))`, stroke: opt.stroke || color, "stroke-width": 1.2 });
+    const text = K.svg(g, "text", { style: MONO, x: x + w / 2, y: y + h / 2 + fs * 0.36, "text-anchor": "middle", "font-size": fs, fill: opt.ink || "var(--ink)" }, t);
+    return { g, rect, text, w, h };
+  }
+  /* 一行词块，超宽自动换行；返回 [{...chip, x, y}] */
+  function chipRow(svg, x, y, tokens, maxW, opt) {
+    opt = opt || {};
+    const out = [], gap = opt.gap == null ? 6 : opt.gap, lh = (opt.h || 24) + 8;
+    let cx = x, cy = y;
+    tokens.forEach((t, i) => {
+      const o = typeof opt.style === "function" ? Object.assign({}, opt, opt.style(t, i)) : opt;
+      const w = chipW(t, o.fs);
+      if (cx + w > x + maxW && cx > x) { cx = x; cy += lh; }
+      const c = chip(svg, cx, cy, t, o);
+      c.x = cx; c.y = cy; out.push(c);
+      cx += w + gap;
+    });
+    return out;
+  }
+  /* 矩阵：rows×cols 的格子，vals[r][c]；返回 cells[r][c] = {rect, text} */
+  function matrix(svg, x, y, rowLab, colLab, vals, opt) {
+    opt = opt || {};
+    const cw = opt.cw || 46, ch = opt.ch || 28, lw = opt.lw || 70, fmt = opt.fmt || ((v) => String(v));
+    const max = opt.max || Math.max(1e-9, ...vals.flat().map(Math.abs));
+    colLab.forEach((c, j) => K.svg(svg, "text", { style: MONO, x: x + lw + j * cw + cw / 2, y: y - 8, "text-anchor": opt.rotate ? "start" : "middle", "font-size": opt.colFs || 12, fill: "var(--ink-2)", transform: opt.rotate ? `rotate(-40 ${x + lw + j * cw + cw / 2} ${y - 8})` : null }, c));
+    const cells = rowLab.map((r, i) => {
+      K.svg(svg, "text", { x: x + lw - 8, y: y + i * ch + ch / 2 + 4, "text-anchor": "end", "font-size": opt.rowFs || 12, fill: "var(--ink-2)" }, r);
+      return colLab.map((c, j) => {
+        const v = vals[i][j];
+        const rect = K.svg(svg, "rect", { x: x + lw + j * cw + 1, y: y + i * ch + 1, width: cw - 2, height: ch - 2, rx: 3, fill: v ? K.heat(Math.abs(v) / max * 0.85) : "var(--panel-2)", stroke: "var(--line)" });
+        const text = K.svg(svg, "text", { style: MONO, x: x + lw + j * cw + cw / 2, y: y + i * ch + ch / 2 + 4, "text-anchor": "middle", "font-size": opt.fs || 12, fill: v ? "var(--ink)" : "var(--ink-3)" }, fmt(v));
+        return { rect, text };
+      });
+    });
+    return cells;
+  }
+  /* sklearn CountVectorizer 默认分词：小写，token_pattern = \b\w\w+\b（单个字符的词被丢掉） */
+  const skTok = (s) => (String(s).toLowerCase().match(/\b\w\w+\b/g) || []);
+  /* NLTK 英文停用词表 */
+  const STOP = new Set(("i me my myself we our ours ourselves you you're you've you'll you'd your yours yourself yourselves he him his himself she she's her hers herself it it's its itself they them their theirs themselves what which who whom this that that'll these those am is are was were be been being have has had having do does did doing a an the and but if or because as until while of at by for with about against between into through during before after above below to from up down in out on off over under again further then once here there when where why how all any both each few more most other some such no nor not only own same so than too very s t can will just don don't should should've now d ll m o re ve y ain aren aren't couldn couldn't didn didn't doesn doesn't hadn hadn't hasn hasn't haven haven't isn isn't ma mightn mightn't mustn mustn't needn needn't shan shan't shouldn shouldn't wasn wasn't weren weren't won won't wouldn wouldn't").split(" "));
+  /* 在实验面板左侧插入一个文本输入框 */
+  function addTextInput(labEl, label, value, onChange, opt) {
+    opt = opt || {};
+    const ctrl = labEl.querySelector(".ctrl");
+    const wrap = K.el("div");
+    wrap.innerHTML = `<label>${K.esc(label)}</label>`;
+    const inp = K.el(opt.area ? "textarea" : "input", { type: "text", spellcheck: "false" });
+    inp.value = value;
+    inp.style.cssText = "width:100%;font:inherit;font-size:14px;padding:6px 8px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);resize:vertical;" + (opt.area ? "min-height:64px;" : "");
+    inp.addEventListener("input", () => onChange(inp.value));
+    wrap.appendChild(inp);
+    ctrl.insertBefore(wrap, ctrl.firstChild);
+    return inp;
+  }
+  const fadeIn = (els, t) => els.forEach((e) => e && (e.style.opacity = t));
+  const hide = (els) => els.forEach((e) => e && (e.style.opacity = 0));
+  /* 按 case.js 的切章规则（每章从 at 或 min(cells) 开始）自动生成 kicker 里的“第 a–b 格”，kicker 原文只保留“·”后面的阶段名 */
+  function autoKicker(steps) {
+    const N = (window.CASE_NB || { cells: [] }).cells.length;
+    const st = steps.map((s) => ({ s, a: s.at != null ? s.at : Math.min.apply(null, s.cells) })).sort((x, y) => x.a - y.a);
+    st.forEach((o, k) => {
+      const to = k + 1 < st.length ? st[k + 1].a - 1 : N - 1;
+      const stage = String(o.s.kicker || "").split("·").pop().trim();
+      o.s.kicker = (to > o.a ? `第 ${o.a}–${to} 格` : `第 ${o.a} 格`) + (stage ? " · " + stage : "");
+    });
+    return steps;
+  }
+
+  /* ---------- 示例问题（本页自编，用来统计词频权重） ---------- */
+  const QS = [
+    "How do I learn Python?", "How can I learn Python quickly?", "What is the best way to learn Python?",
+    "How do I learn machine learning?", "What is machine learning?", "Is Python faster than Java?",
+    "Is Java faster than Python?", "How can I lose weight fast?", "What is the best diet to lose weight?",
+    "How do I improve my English?", "How can I improve my English speaking?", "What is the meaning of life?",
+    "Why is the sky blue?", "Why do cats purr?", "How do I start a business?",
+    "What are good books to read?", "Which books should I read this year?", "How do I get a job at Google?",
+    "How can I get a job in data science?", "What is the best programming language to learn?", "Is it hard to learn Java?",
+    "How do I stop thinking too much?", "What should I do to sleep better?", "How can I sleep better at night?",
+    "What is the capital of Australia?", "Why is Python so popular?", "What are the benefits of learning Python?",
+    "How do I prepare for a coding interview?", "How should I prepare for a job interview?", "What is deep learning?",
+  ];
+  document.getElementById("corpus").innerHTML = `<p class="muted" style="margin:6px 0">本页自编的示例问题，只用来统计“每个词出现几次”。</p><ol class="tight">${QS.map((q) => `<li>${K.esc(q)}</li>`).join("")}</ol>`;
+  const lowSplit = (s) => String(s).toLowerCase().split(/\s+/).filter(Boolean);
+  /* 第 20 格 word_match_share：小写、按空格切（标点不去）、去停用词，取两边的“词集合” */
+  function wordSets(q1, q2) {
+    const a = [...new Set(lowSplit(q1).filter((w) => !STOP.has(w)))], b = [...new Set(lowSplit(q2).filter((w) => !STOP.has(w)))];
+    return { a, b };
+  }
+  function wordShare(q1, q2) {
+    const { a, b } = wordSets(q1, q2);
+    if (!a.length || !b.length) return 0;
+    const sa = a.filter((w) => b.includes(w)), sb = b.filter((w) => a.includes(w));
+    return (sa.length + sb.length) / (a.length + b.length);
+  }
+  /* 第 22 格 get_weight：出现少于 min_count 次的词权重为 0，否则 1 / (count + eps) */
+  const getWeight = (count, eps, minCount) => (count < minCount ? 0 : 1 / (count + eps));
+  function makeWeights(qs, eps, minCount) {
+    const c = new Map();
+    lowSplit(qs.join(" ")).forEach((w) => c.set(w, (c.get(w) || 0) + 1));
+    const W = new Map();
+    c.forEach((n, w) => W.set(w, getWeight(n, eps, minCount)));
+    return { W, c };
+  }
+  /* 第 24 格 tfidf_word_match_share */
+  function tfidfShare(q1, q2, W) {
+    const { a, b } = wordSets(q1, q2);
+    if (!a.length || !b.length) return 0;
+    const g = (w) => W.get(w) || 0;
+    const shared = a.filter((w) => b.includes(w)).map(g).concat(b.filter((w) => a.includes(w)).map(g));
+    const total = a.map(g).concat(b.map(g));
+    const T = total.reduce((s, x) => s + x, 0);
+    return T ? shared.reduce((s, x) => s + x, 0) / T : NaN;
+  }
+  const logloss = (q, p) => -(q * Math.log(p) + (1 - q) * Math.log(1 - p));
+  /* 第 29 格：复制负例直到正例比例接近 p（照搬作者的循环逻辑） */
+  function authorRebalance(posRate, p) {
+    let neg = 1 - posRate, scale = posRate / p - 1, base = neg;
+    while (scale > 1) { neg = neg * 2; scale -= 1; }
+    neg = neg + Math.floor(scale * 1e6) / 1e6 * neg;
+    return { share: posRate / (posRate + neg), factor: neg / base };
+  }
+
+  const steps = [
+    {
+      at: 0, title: "开场：任务与文件", kicker: "· 开场",
+      html: `<p>作者开头介绍比赛目标：识别 Quora 上的重复问题，可以直接复用已有答案；评价指标是对数损失。第 1 格导入库并打印输入文件的大小。第 2 格指出测试集比训练集大得多，可能含有防止人工标注的“假数据”。</p>`,
+      cells: [0],
+    },
+    {
+      at: 3,
+      title: "任务：两个问题算不算重复", kicker: "第 0–4 格 · 认识任务",
+      html: `<p>Quora 希望把“已经有人问过”的问题合并，直接复用已有答案。数据每行给出一对问题 question1、question2，各自的编号 qid1、qid2，以及人工标注的 <code>is_duplicate</code>。</p><p>注意这是<b>文本对</b>分类：模型要看的不是单句，而是两句之间的关系。作者的评价指标是对数损失，所以要输出概率而不是 0/1。示例问题是本页自编的。</p>`,
+      cells: [4],
+      async draw(svg, ctx) {
+        const pairs = [["How do I learn Python?", "How can I learn Python quickly?", 1], ["Why is the sky blue?", "Why do cats purr?", 0]];
+        for (let k = 0; k < 2; k++) {
+          const y = 40 + k * 140;
+          const g1 = K.node(svg, 30, y, 300, 46, "q1: " + pairs[k][0], { fs: 13 }), g2 = K.node(svg, 30, y + 58, 300, 46, "q2: " + pairs[k][1], { fs: 13 });
+          const a = K.arrow(svg, 335, y + 52, 430, y + 52);
+          const lab = K.node(svg, 440, y + 22, 250, 60, `is_duplicate = ${pairs[k][2]}`, { bold: true, stroke: pairs[k][2] ? "var(--c3)" : "var(--c6)", fill: `color-mix(in srgb, ${pairs[k][2] ? "var(--c3)" : "var(--c6)"} 14%, var(--panel))` });
+          hide([g1, g2, a, lab]);
+          if (!(await ctx.tween(400, (t) => fadeIn([g1, g2], t)))) return;
+          if (!(await ctx.tween(400, (t) => fadeIn([a, lab], t)))) return;
+        }
+        K.svg(svg, "text", { x: 30, y: 330, "font-size": 12, class: "muted" }, "示例问题对（自编）。真实数据约 40 万对。");
+      },
+    },
+    {
+      at: 5,
+      title: "37% 是重复，问题会反复出现", kicker: "第 5–6 格 · 训练集统计",
+      html: `<p>作者统计：训练集里约 <b>37%</b> 的问题对是重复的。把 qid1 和 qid2 合在一起数，大多数问题只出现几次，但有一个问题出现了 160 多次。</p><p>“同一个问题出现在很多对里”提示我们：问题之间其实构成一张图，后来不少高分方案正是从这张图里挖特征。动画左边是比例，右边是“一个问题连着很多对”的示意。</p>`,
+      cells: [5, 6], highlight: ["is_duplicate'].mean()", "value_counts()"],
+      async draw(svg, ctx) {
+        const cx = 150, cy = 170, R = 100;
+        K.svg(svg, "circle", { cx, cy, r: R, fill: "color-mix(in srgb, var(--c1) 30%, var(--panel))" });
+        const arc = K.svg(svg, "path", { d: "", fill: "var(--c3)" });
+        const lab = K.svg(svg, "text", { x: cx, y: cy + 135, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: cx, y: 40, "text-anchor": "middle", "font-size": 13, class: "muted" }, "训练集 is_duplicate");
+        if (!(await ctx.tween(1000, (t) => {
+          const a = 2 * Math.PI * 0.37 * t, x = cx + R * Math.sin(a), y = cy - R * Math.cos(a);
+          arc.setAttribute("d", `M${cx},${cy} L${cx},${cy - R} A${R},${R} 0 ${a > Math.PI ? 1 : 0} 1 ${x},${y} Z`);
+          lab.textContent = `重复 ${(37 * t).toFixed(0)}%  ·  不重复 ${(100 - 37 * t).toFixed(0)}%`;
+        }))) return;
+        const hx = 520, hy = 170;
+        const lineG = K.svg(svg, "g");
+        K.node(svg, hx - 70, hy - 20, 140, 40, "热门问题", { bold: true, stroke: "var(--c2)", fill: "var(--panel)" });
+        const r = K.rng(5);
+        for (let i = 0; i < 14; i++) {
+          const a = (i / 14) * 2 * Math.PI, x = hx + Math.cos(a) * 150, y = hy + Math.sin(a) * 120;
+          const l = K.svg(lineG, "line", { x1: hx, y1: hy, x2: hx, y2: hy, stroke: r() < 0.4 ? "var(--c3)" : "var(--line)", "stroke-width": 1.5 });
+          const c = K.svg(svg, "circle", { cx: x, cy: y, r: 7, fill: "var(--panel-2)", stroke: "var(--ink-3)", opacity: 0 });
+          if (!(await ctx.tween(90, (t) => { l.setAttribute("x2", K.lerp(hx, x, t)); l.setAttribute("y2", K.lerp(hy, y, t)); c.style.opacity = t; }))) return;
+        }
+        K.svg(svg, "text", { x: hx, y: 330, "text-anchor": "middle", "font-size": 12, class: "muted" }, "示意：一个问题出现在很多对里（原数据里最多 160 多次）");
+      },
+    },
+    {
+      at: 7,
+      title: "常数预测：从排行榜反推测试分布", kicker: "第 7–8 格 · 基线",
+      html: `<p>最省事的提交：所有测试对都交同一个概率 p = 训练集平均值（约 0.37）。这在排行榜上得到 <b>0.55</b>。</p><p>巧妙之处在于反推：若测试集正例比例是 q，常数 p 的对数损失为 −[q·ln p + (1−q)·ln(1−p)]。令它等于 0.55 解出 q，就得到作者引用的“测试集约 16.5% 是正例”。动画按这个公式在浏览器里真算。</p>`,
+      cells: [7, 8], highlight: ["log_loss", "np.zeros_like"],
+      async draw(svg, ctx) {
+        const p = 0.37;
+        const ax = K.axes(svg, { x: 70, y: 30, w: 360, h: 250 }, [0, 0.6], [0.4, 0.8], { xticks: 6, yticks: 4, xlabel: "测试集正例比例 q", ylabel: "常数 p=0.37 的 LogLoss", xfmt: (v) => v.toFixed(1), yfmt: (v) => v.toFixed(2) });
+        let d = "";
+        for (let q = 0; q <= 0.6001; q += 0.01) d += (d ? "L" : "M") + ax.sx(q) + "," + ax.sy(logloss(q, p));
+        const path = K.svg(svg, "path", { d, fill: "none", stroke: "var(--c1)", "stroke-width": 2.5, "stroke-dasharray": "800", "stroke-dashoffset": 800 });
+        if (!(await ctx.tween(1000, (t) => path.style.setProperty("stroke-dashoffset", 800 * (1 - t))))) return;
+        const qs = (0.55 + Math.log(1 - p)) / (Math.log(1 - p) - Math.log(p));
+        const hl = K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0.55), x2: ax.sx(0), y2: ax.sy(0.55), stroke: "var(--warn)", "stroke-dasharray": "4 3", "stroke-width": 1.5 });
+        if (!(await ctx.tween(700, (t) => hl.setAttribute("x2", K.lerp(ax.sx(0), ax.sx(qs), t))))) return;
+        const vl = K.svg(svg, "line", { x1: ax.sx(qs), y1: ax.sy(0.55), x2: ax.sx(qs), y2: ax.sy(0.55), stroke: "var(--warn)", "stroke-dasharray": "4 3", "stroke-width": 1.5 });
+        if (!(await ctx.tween(500, (t) => vl.setAttribute("y2", K.lerp(ax.sy(0.55), ax.sy(0.4), t))))) return;
+        K.svg(svg, "circle", { cx: ax.sx(qs), cy: ax.sy(0.55), r: 5, fill: "var(--warn)" });
+        K.svg(svg, "text", { x: 460, y: 80, "font-size": 13 }, "排行榜分数 0.55（第 8 格）");
+        K.svg(svg, "text", { x: 460, y: 108, "font-size": 15, "font-weight": 700, fill: "var(--warn)" }, `解出 q ≈ ${(qs * 100).toFixed(1)}%`);
+        K.svg(svg, "text", { x: 460, y: 136, "font-size": 13 }, "作者引用的结论：约 16.5%");
+        K.svg(svg, "text", { x: 460, y: 180, "font-size": 12, class: "muted" }, `若 q 与训练集同为 37%，`);
+        K.svg(svg, "text", { x: 460, y: 198, "font-size": 12, class: "muted" }, `分数应是 ${logloss(0.37, p).toFixed(3)}（公式推算）`);
+      },
+    },
+    {
+      at: 9,
+      title: "测试集里混着大量“凑数题”", kicker: "第 9–11 格 · 测试集",
+      html: `<p>测试集约 230 万对，比训练集大得多。根据比赛数据页，其中大部分是<b>自动生成的凑数问题</b>，用来防止有人手工标注测试集，它们不参与计分。作者在表头就看到了 “How their can I start reading?” 这样不通顺的句子。</p><p>所以作者决定：后面的文本分析只用训练集，避免被这些假问题干扰。</p>`,
+      cells: [11],
+      async draw(svg, ctx) {
+        const r = K.rng(9), cols = 40, rows = 14, x0 = 40, y0 = 50, s = 15;
+        K.svg(svg, "text", { x: x0, y: 34, "font-size": 13, class: "muted" }, "测试集（每格代表一批问题对，示意）");
+        const cells = [];
+        for (let i = 0; i < rows; i++) for (let j = 0; j < cols; j++) cells.push(K.svg(svg, "rect", { x: x0 + j * s, y: y0 + i * s, width: s - 2, height: s - 2, rx: 2, fill: r() < 0.18 ? "var(--c1)" : "var(--ink-3)", opacity: 0 }));
+        if (!(await ctx.tween(900, (t) => cells.forEach((c, i) => (c.style.opacity = i < t * cells.length ? (c.style.fill.includes("c1") ? 0.9 : 0.35) : 0))))) return;
+        K.svg(svg, "rect", { x: x0, y: y0 + rows * s + 16, width: 14, height: 14, fill: "var(--c1)" });
+        K.svg(svg, "text", { x: x0 + 22, y: y0 + rows * s + 28, "font-size": 13 }, "真实问题对（参与计分）");
+        K.svg(svg, "rect", { x: x0 + 230, y: y0 + rows * s + 16, width: 14, height: 14, fill: "var(--ink-3)", opacity: 0.35 });
+        K.svg(svg, "text", { x: x0 + 252, y: y0 + rows * s + 28, "font-size": 13 }, "自动生成的凑数问题（不计分）");
+        K.svg(svg, "text", { x: x0, y: y0 + rows * s + 58, "font-size": 12, class: "muted" }, "比例为示意；作者第 11 格只说“大部分”是生成的");
+      },
+    },
+    {
+      at: 12,
+      notes: {"17": "作者统计问号、[math] 标签、句号、大写、数字的比例，想看看标点能不能成为特征。", "18": "这一格只打印百分比，具体数值在运行输出里。"},
+      title: "问题有多长", kicker: "第 12–16 格 · 长度分布",
+      html: `<p>作者画了字符数和词数的归一化直方图，训练集和测试集叠在一起比较：多数问题在 15–150 个字符之间，约 10 个词；训练集在 150 字符附近突然下降（作者猜是 Quora 的长度限制），测试集则平缓下降。</p><p>训练与测试分布“相似但不完全相同”是本案例反复出现的主题。直方图形状是示意。</p>`,
+      cells: [12, 13], highlight: ["apply(len)"],
+      async draw(svg, ctx) {
+        const r = K.rng(2), tr = [], te = [];
+        for (let i = 0; i < 1500; i++) { const v = Math.exp(K.randn(r) * 0.45 + 4); tr.push(v > 150 && r() < 0.85 ? 150 * r() : v); te.push(Math.exp(K.randn(r) * 0.5 + 4.05)); }
+        const ax = K.axes(svg, { x: 60, y: 30, w: 620, h: 250 }, [0, 200], [0, 1], { yticks: 0, xlabel: "问题字符数（示意）" });
+        const hist = (a) => { const h = new Array(40).fill(0); a.forEach((v) => { const b = Math.floor(v / 5); if (b < 40) h[b]++; }); return h; };
+        const h1 = hist(tr), h2 = hist(te), mx = Math.max(...h1, ...h2);
+        const mk = (h, color) => h.map((c, i) => K.svg(svg, "rect", { x: ax.sx(i * 5) + 1, y: ax.sy(0), width: ax.sx(5) - ax.sx(0) - 2, height: 0, fill: color, "fill-opacity": 0.5 }));
+        const R1 = mk(h1, "var(--c3)"), R2 = mk(h2, "var(--c2)");
+        const grow = (R, h, t) => R.forEach((e, i) => { const H = (240 * h[i] / mx) * t; e.setAttribute("y", ax.sy(0) - H); e.setAttribute("height", H); });
+        K.svg(svg, "text", { x: 470, y: 60, "font-size": 13, fill: "var(--c3)", "font-weight": 700 }, "■ 训练集");
+        K.svg(svg, "text", { x: 470, y: 84, "font-size": 13, fill: "var(--c2)", "font-weight": 700 }, "■ 测试集");
+        if (!(await ctx.tween(900, (t) => grow(R1, h1, t)))) return;
+        if (!(await ctx.tween(900, (t) => grow(R2, h2, t)))) return;
+        K.svg(svg, "line", { x1: ax.sx(150), x2: ax.sx(150), y1: 30, y2: 280, stroke: "var(--warn)", "stroke-dasharray": "5 3" });
+        K.svg(svg, "text", { x: ax.sx(150) + 6, y: 130, "font-size": 12, fill: "var(--warn)" }, "150 字符：训练集陡降");
+      },
+    },
+    {
+      at: 19,
+      title: "共享词比例 word_match_share", kicker: "第 19–21 格 · 特征 1",
+      html: `<p>第一个特征来自官方基线：两个问题都转小写、按空格切开、去掉停用词，各自留下一个“词集合”。</p><p>word_match_share = (q1 里出现在 q2 中的词数 + q2 里出现在 q1 中的词数) / (两边词数之和)。作者画分布后发现：它很擅长识别“明显不同”的问题对，但对“确实重复”的区分没那么好。动画在示例问题对上真算。</p>`,
+      cells: [20], highlight: ["shared_words_in_q1", "stops"],
+      async draw(svg, ctx) {
+        const q1 = "How do I learn Python fast?", q2 = "What is the best way to learn Python?";
+        const draw1 = (q, y, other) => {
+          const words = lowSplit(q);
+          return chipRow(svg, 30, y, words, 660, { fs: 13, style: (w) => (STOP.has(w) ? { color: "var(--ink-3)", ink: "var(--ink-3)", fill: "var(--panel-2)" } : wordSets(q1, q2)[other].includes(w) ? { color: "var(--c3)" } : { color: "var(--c1)" }) }).map((c, i) => Object.assign(c, { w0: words[i] }));
+        };
+        K.svg(svg, "text", { x: 30, y: 36, "font-size": 13, class: "muted" }, "q1（灰 = 停用词，绿 = 两边共有）");
+        const A = draw1(q1, 46, "b");
+        K.svg(svg, "text", { x: 30, y: 196, "font-size": 13, class: "muted" }, "q2");
+        const B = draw1(q2, 206, "a");
+        hide(A.concat(B).map((c) => c.g));
+        if (!(await ctx.tween(500, (t) => fadeIn(A.concat(B).map((c) => c.g), t)))) return;
+        for (const a of A) {
+          const b = B.find((c) => c.w0 === a.w0 && !STOP.has(a.w0));
+          if (!b) continue;
+          const l = K.svg(svg, "line", { x1: a.x + a.w / 2, y1: 72, x2: a.x + a.w / 2, y2: 72, stroke: "var(--c3)", "stroke-width": 2 });
+          if (!(await ctx.tween(450, (t) => { l.setAttribute("x2", K.lerp(a.x + a.w / 2, b.x + b.w / 2, t)); l.setAttribute("y2", K.lerp(72, 204, t)); }))) return;
+        }
+        const { a, b } = wordSets(q1, q2), sa = a.filter((w) => b.includes(w)).length, sb = b.filter((w) => a.includes(w)).length;
+        K.svg(svg, "text", { x: 30, y: 290, "font-size": 15, "font-weight": 700 }, `word_match_share = (${sa} + ${sb}) / (${a.length} + ${b.length}) = ${wordShare(q1, q2).toFixed(3)}`);
+        K.svg(svg, "text", { x: 30, y: 316, "font-size": 12, fill: "var(--warn)" }, "注意 fast? 带着问号：作者只按空格切，标点没去掉，“python?” 和 “python” 不算同一个词");
+      },
+    },
+    {
+      at: 21,
+      title: "自写 TF-IDF：罕见词更重要", kicker: "第 21–24 格 · 特征 2",
+      html: `<p>作者想让“exercise”这类少见词的共享比“and”更有分量，于是自己写了权重：数出每个词在所有训练问题里的出现次数 count，权重 = 1 / (count + eps)；只出现 1 次的词（多半是错别字）权重直接为 0。</p><p>tfidf_word_match_share 就是“共享词的权重和 / 两边全部词的权重和”。细节：第 22 格虽然写了 <code>eps = 5000</code>，但调用 <code>get_weight(count)</code> 时用的是默认值 10000。曲线按默认参数真算。</p>`,
+      cells: [22, 24], highlight: ["def get_weight", "eps = 5000"],
+      async draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 80, y: 30, w: 560, h: 240 }, [0, 4], [0, 1.05], { xticks: 4, yticks: 4, xlabel: "词出现次数 count（对数刻度）", ylabel: "相对权重", xfmt: (v) => "10^" + v.toFixed(0), yfmt: (v) => v.toFixed(2) });
+        const curve = (eps, color, dash) => {
+          let d = "";
+          for (let e = 0.3; e <= 4.0001; e += 0.02) { const c = Math.pow(10, e); d += (d ? "L" : "M") + ax.sx(e) + "," + ax.sy(getWeight(c, eps, 2) * (2 + eps)); }
+          return K.svg(svg, "path", { d, fill: "none", stroke: color, "stroke-width": 2.5, "stroke-dasharray": dash || null });
+        };
+        const p1 = curve(10000, "var(--c1)"), p2 = curve(5000, "var(--c2)", "5 4");
+        hide([p1, p2]);
+        if (!(await ctx.tween(700, (t) => (p1.style.opacity = t)))) return;
+        if (!(await ctx.tween(700, (t) => (p2.style.opacity = t)))) return;
+        K.svg(svg, "rect", { x: ax.sx(0), y: ax.sy(1.05), width: ax.sx(Math.log10(2)) - ax.sx(0), height: 240, fill: "var(--bad)", "fill-opacity": 0.12 });
+        K.svg(svg, "text", { x: ax.sx(0) + 4, y: 290 + 10, "font-size": 11, fill: "var(--bad)" }, "count=1 → 权重 0");
+        K.svg(svg, "text", { x: 200, y: 190, "font-size": 13, fill: "var(--c1)" }, "— eps = 10000（实际生效的默认值）");
+        K.svg(svg, "text", { x: 200, y: 214, "font-size": 13, fill: "var(--c2)" }, "-- eps = 5000（第 22 格写了但没传进去）");
+        K.svg(svg, "text", { x: 200, y: 238, "font-size": 12, class: "muted" }, "纵轴把 count=2 的权重记为 1");
+      },
+    },
+    {
+      at: 26,
+      title: "用 AUC 检验单个特征", kicker: "第 25–27 格 · 特征评估",
+      html: `<p>建模前，作者先单独检验每个特征“有多大区分力”：把特征值直接当成打分，算 <b>AUC</b>（随机抽一对正负样本，正样本得分更高的概率）。AUC 不受特征缩放影响，适合比较单个特征。</p><p>结果出乎作者意料：TF-IDF 加权版的 AUC 反而比原版低。但他认为两个特征的信息不完全重叠，于是都交给 XGBoost。动画里的两组分布和 AUC 是示意。</p>`,
+      cells: [26, 27], highlight: ["roc_auc_score"],
+      async draw(svg, ctx) {
+        const r = K.rng(21), neg = [], pos = [];
+        for (let i = 0; i < 400; i++) neg.push(K.clamp(0.25 + K.randn(r) * 0.17, 0, 1));
+        for (let i = 0; i < 250; i++) pos.push(K.clamp(0.55 + K.randn(r) * 0.2, 0, 1));
+        const ax = K.axes(svg, { x: 50, y: 30, w: 330, h: 230 }, [0, 1], [0, 1], { yticks: 0, xlabel: "word_match_share（示意）", xfmt: (v) => v.toFixed(1) });
+        const hist = (a) => { const h = new Array(20).fill(0); a.forEach((v) => h[Math.min(19, Math.floor(v * 20))]++); return h.map((x) => x / a.length); };
+        const hn = hist(neg), hp = hist(pos), mx = Math.max(...hn, ...hp);
+        const R = hn.map((v, i) => [K.svg(svg, "rect", { x: ax.sx(i / 20), y: ax.sy(0), width: ax.sx(0.05) - ax.sx(0) - 1, height: 0, fill: "var(--c1)", "fill-opacity": 0.5 }), K.svg(svg, "rect", { x: ax.sx(i / 20), y: ax.sy(0), width: ax.sx(0.05) - ax.sx(0) - 1, height: 0, fill: "var(--c3)", "fill-opacity": 0.5 })]);
+        if (!(await ctx.tween(900, (t) => R.forEach(([a, b], i) => { const h1 = 220 * hn[i] / mx * t, h2 = 220 * hp[i] / mx * t; a.setAttribute("y", ax.sy(0) - h1); a.setAttribute("height", h1); b.setAttribute("y", ax.sy(0) - h2); b.setAttribute("height", h2); })))) return;
+        K.svg(svg, "text", { x: 60, y: 326, "font-size": 12, fill: "var(--c1)" }, "■ 不重复");
+        K.svg(svg, "text", { x: 140, y: 326, "font-size": 12, fill: "var(--c3)" }, "■ 重复");
+        // ROC
+        const ax2 = K.axes(svg, { x: 450, y: 30, w: 230, h: 230 }, [0, 1], [0, 1], { xticks: 2, yticks: 2, xlabel: "假阳性率", xfmt: (v) => v.toFixed(1), yfmt: (v) => v.toFixed(1) });
+        const roc = []; let auc = 0;
+        for (let th = 1.01; th >= -0.01; th -= 0.02) roc.push([neg.filter((v) => v >= th).length / neg.length, pos.filter((v) => v >= th).length / pos.length]);
+        for (let i = 1; i < roc.length; i++) auc += (roc[i][0] - roc[i - 1][0]) * (roc[i][1] + roc[i - 1][1]) / 2;
+        K.svg(svg, "line", { x1: ax2.sx(0), y1: ax2.sy(0), x2: ax2.sx(1), y2: ax2.sy(1), stroke: "var(--line)", "stroke-dasharray": "4 3" });
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c2)", "stroke-width": 2.5 });
+        await ctx.tween(900, (t) => { const n = Math.max(2, Math.round(t * roc.length)); path.setAttribute("d", roc.slice(0, n).map((p, i) => (i ? "L" : "M") + ax2.sx(p[0]) + "," + ax2.sy(p[1])).join("")); });
+        K.svg(svg, "text", { x: 560, y: 240, "font-size": 13, "font-weight": 700, fill: "var(--c2)" }, `示意 AUC = ${auc.toFixed(2)}`);
+      },
+    },
+    {
+      at: 28,
+      title: "按测试分布重平衡训练集", kicker: "第 27–30 格 · 对齐概率",
+      html: `<p>LogLoss 看的是概率本身，而训练集 37% 是正例、测试集只有约 16.5%。如果直接训练，模型会系统性地把“重复”的概率报得太高。作者的做法：<b>复制负例</b>，让训练集的正例比例降到 0.165，再切出 20% 当验证集。</p><p>动画按第 29 格的循环在浏览器里真算：先整倍复制，再补上零头。按这段代码的逻辑，最终比例约为 ${(authorRebalance(0.37, 0.165).share * 100).toFixed(1)}%，并不正好是 16.5%（第 29 格会打印实际值，源码不带输出）。课堂讨论第 4 题可以展开。</p>`,
+      cells: [29], highlight: ["p = 0.165", "scale -=1", "neg_train = pd.concat([neg_train, neg_train])"],
+      async draw(svg, ctx) {
+        const pos = 0.37, neg0 = 0.63, ideal = pos * (1 - 0.165) / 0.165;
+        const res = authorRebalance(pos, 0.165);
+        const W = 140;
+        const bar = (x, y, w, color, txt) => { const g = K.svg(svg, "g"); K.svg(g, "rect", { x, y, width: w, height: 40, rx: 4, fill: color, "fill-opacity": 0.75 }); if (txt) K.svg(g, "text", { x: x + 6, y: y + 25, "font-size": 12, fill: "var(--ink)" }, txt); return g; };
+        K.svg(svg, "text", { x: 20, y: 40, "font-size": 13 }, "原训练集");
+        bar(110, 20, pos * W, "var(--c3)", "正 37%");
+        bar(110 + pos * W, 20, neg0 * W, "var(--c1)", "负 63%");
+        K.svg(svg, "text", { x: 20, y: 120, "font-size": 13 }, "① 整倍复制");
+        const b1 = bar(110, 100, pos * W, "var(--c3)", "正");
+        const b2 = bar(110 + pos * W, 100, neg0 * W * 2, "var(--c1)", "负 ×2");
+        K.svg(svg, "text", { x: 20, y: 200, "font-size": 13 }, "② 补零头");
+        const b3 = bar(110, 180, pos * W, "var(--c3)", "正");
+        const b4 = bar(110 + pos * W, 180, neg0 * W * res.factor, "var(--c1)", `负 ×${res.factor.toFixed(2)}`);
+        K.svg(svg, "text", { x: 20, y: 280, "font-size": 13, class: "muted" }, "理想");
+        const b5 = bar(110, 260, pos * W, "var(--c3)", "正");
+        const b6 = bar(110 + pos * W, 260, ideal * W, "var(--c1)", `负 ×${(ideal / neg0).toFixed(2)}`);
+        hide([b1, b2, b3, b4, b5, b6]);
+        if (!(await ctx.tween(600, (t) => fadeIn([b1, b2], t)))) return;
+        if (!(await ctx.tween(600, (t) => fadeIn([b3, b4], t)))) return;
+        K.svg(svg, "text", { x: 110 + pos * W + neg0 * W * res.factor + 12, y: 205, "font-size": 13, "font-weight": 700, fill: "var(--warn)" }, `正例占 ${(res.share * 100).toFixed(1)}%`);
+        if (!(await ctx.tween(600, (t) => fadeIn([b5, b6], t)))) return;
+        K.svg(svg, "text", { x: 110 + pos * W + ideal * W + 12, y: 285, "font-size": 13, fill: "var(--c3)" }, "正例占 16.5%");
+        K.svg(svg, "text", { x: 20, y: 328, "font-size": 12, class: "muted" }, "按第 6 格的“37%”和第 29 格的代码逻辑推算（浏览器真算）");
+      },
+    },
+    {
+      at: 31,
+      title: "XGBoost：一棵棵树逐步修正", kicker: "第 31–32 格 · 建模",
+      html: `<p>两个特征 → <b>XGBoost</b>（梯度提升树）：每一轮新加一棵深度不超过 4 的小树，去拟合前面所有树还没解释掉的误差；学习率 eta = 0.02 让每棵树只修正一小步。最多 400 轮，验证集 LogLoss 连续 50 轮不降就提前停止。</p><p>动画在两个特征张成的平面上演示“越来越多的树把决策面一点点雕出来”，点和决策面都是示意。</p>`,
+      cells: [32], highlight: ["eta", "max_depth", "early_stopping_rounds=50"],
+      async draw(svg, ctx) {
+        const r = K.rng(31), pts = [];
+        for (let i = 0; i < 160; i++) { const y = r() < 0.37 ? 1 : 0; const a = K.clamp((y ? 0.6 : 0.3) + K.randn(r) * 0.17, 0, 1), b = K.clamp(a + K.randn(r) * 0.12 + (y ? 0.05 : -0.05), 0, 1); pts.push([a, b, y]); }
+        const ax = K.axes(svg, { x: 60, y: 20, w: 300, h: 280 }, [0, 1], [0, 1], { xticks: 2, yticks: 2, xlabel: "word_match", ylabel: "tfidf_word_match", xfmt: (v) => v.toFixed(1), yfmt: (v) => v.toFixed(1) });
+        const G = 14, F = Array.from({ length: G }, () => new Array(G).fill(0));
+        const cells = [];
+        for (let i = 0; i < G; i++) for (let j = 0; j < G; j++) cells.push(K.svg(svg, "rect", { x: ax.sx(i / G), y: ax.sy((j + 1) / G), width: ax.sx(1 / G) - ax.sx(0) + 0.5, height: ax.sy(0) - ax.sy(1 / G) + 0.5, fill: "var(--panel)" }));
+        pts.forEach((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 3.2, fill: p[2] ? "var(--c3)" : "var(--c1)", stroke: "var(--panel)" }));
+        const lab = K.svg(svg, "text", { x: 400, y: 60, "font-size": 15, "font-weight": 700 }, "");
+        const lossT = K.svg(svg, "text", { x: 400, y: 90, "font-size": 13 }, "");
+        const P = pts.map(() => 0);
+        const loss = () => pts.reduce((s, p, i) => s + logloss(p[2], K.clamp(K.sigmoid(P[i]), 1e-6, 1 - 1e-6)), 0) / pts.length;
+        const ys = [];
+        for (let round = 1; round <= 12; round++) {
+          // 一棵“树桩”：在某个特征上找最好的切分点，拟合负梯度
+          const g = pts.map((p, i) => p[2] - K.sigmoid(P[i]));
+          let best = null;
+          for (const f of [0, 1]) for (let th = 0.1; th < 0.95; th += 0.05) {
+            const L = [], R = []; pts.forEach((p, i) => (p[f] < th ? L : R).push(g[i]));
+            if (!L.length || !R.length) continue;
+            const mL = L.reduce((a, b) => a + b, 0) / L.length, mR = R.reduce((a, b) => a + b, 0) / R.length;
+            const gain = L.length * mL * mL + R.length * mR * mR;
+            if (!best || gain > best.gain) best = { f, th, mL, mR, gain };
+          }
+          const step = 1.6;
+          pts.forEach((p, i) => (P[i] += step * (p[best.f] < best.th ? best.mL : best.mR)));
+          for (let i = 0; i < G; i++) for (let j = 0; j < G; j++) { const v = [(i + 0.5) / G, (j + 0.5) / G][best.f]; F[i][j] += step * (v < best.th ? best.mL : best.mR); }
+          cells.forEach((c, k) => { const pr = K.sigmoid(F[Math.floor(k / G)][k % G]); c.style.fill = pr > 0.5 ? "var(--c3)" : "var(--c1)"; c.style.fillOpacity = 0.08 + Math.abs(pr - 0.5) * 0.6; });
+          lab.textContent = `第 ${round} 棵树`;
+          lossT.textContent = `训练 LogLoss（示意）= ${loss().toFixed(3)}`;
+          ys.push(loss());
+          if (!(await ctx.wait(380))) return;
+        }
+        K.svg(svg, "text", { x: 400, y: 130, "font-size": 12, class: "muted" }, "示意：为了看清变化，这里每棵树只是一个树桩，");
+        K.svg(svg, "text", { x: 400, y: 148, "font-size": 12, class: "muted" }, "步长也比作者的 eta = 0.02 大得多");
+        const ax3 = K.axes(svg, { x: 420, y: 180, w: 260, h: 110 }, [1, 12], [Math.min(...ys) - 0.02, Math.max(...ys) + 0.02], { xticks: 0, yticks: 2, yfmt: (v) => v.toFixed(2), xlabel: "轮数" });
+        K.svg(svg, "path", { d: ys.map((v, i) => (i ? "L" : "M") + ax3.sx(i + 1) + "," + ax3.sy(v)).join(""), fill: "none", stroke: "var(--c2)", "stroke-width": 2 });
+      },
+    },
+    {
+      at: 33,
+      title: "提交：0.55 → 0.35460", kicker: "第 33–34 格 · 结果",
+      html: `<p>在测试集上算出两个特征、用训练好的 XGBoost 预测概率，写成 <code>simple_xgb.csv</code> 提交。作者报告排行榜分数 <b>0.35460</b>，相比常数提交的 0.55 大幅下降（LogLoss 越低越好）。</p><p>只用了两个特征就有这样的提升，说明“问题之间的词重叠”是这个任务里最强的信号之一；后续高分方案在此基础上加了更多相似度特征和深度模型。</p>`,
+      cells: [33, 34],
+      async draw(svg, ctx) {
+        const items = [{ label: "常数概率", value: 0.55, color: "var(--ink-3)" }, { label: "2 特征 + XGBoost", value: 0.3546, color: "var(--c3)" }];
+        K.svg(svg, "text", { x: 40, y: 34, "font-size": 13, class: "muted" }, "排行榜 LogLoss（越低越好），数字来自第 8 格和第 34 格");
+        const els = K.bars(svg, { x: 40, y: 60, w: 640, h: 180 }, items, { horizontal: true, labelWidth: 150, max: 0.6, fmt: (v) => v.toFixed(v === 0.55 ? 2 : 5) });
+        els.forEach((e) => { e.full = +e.rect.getAttribute("width"); e.rect.setAttribute("width", 0); e.text.style.opacity = 0; });
+        for (const e of els) if (!(await ctx.tween(700, (t) => { e.rect.setAttribute("width", e.full * t); e.text.style.opacity = t; }))) return;
+        K.svg(svg, "text", { x: 40, y: 290, "font-size": 14 }, `相对常数基线，损失下降约 ${(((0.55 - 0.3546) / 0.55) * 100).toFixed(0)}%`);
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), autoKicker(steps));
+
+  /* ---------- 实验 A：两个相似度特征 ---------- */
+  let qa = "How can I learn Python quickly?", qb = "What is the best way to learn Python?";
+  const lab1 = K.lab(document.getElementById("lab1"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "eps", label: "eps（对数刻度）", min: 0, max: 4, step: 0.1, value: 4, fmt: (v) => Math.round(Math.pow(10, v)).toLocaleString() },
+      { id: "minc", label: "min_count（少于几次算错别字）", min: 1, max: 3, step: 1, value: 2 },
+    ],
+    note: "词频来自 30 个自编示例问题。eps 很大时所有词权重几乎相同，第二个特征会退化成第一个；把 eps 调到 1，罕见词的权重就会大很多。词表里出现次数少于 min_count 的词权重为 0。",
+    render(svg, v) {
+      const eps = Math.pow(10, v.eps), { W, c } = makeWeights(QS.concat([qa, qb]), eps, v.minc);
+      const { a, b } = wordSets(qa, qb);
+      const maxW = Math.max(1e-12, ...a.concat(b).map((w) => W.get(w) || 0));
+      const row = (words, y, other, title) => {
+        K.svg(svg, "text", { x: 10, y, "font-size": 13, class: "muted" }, title);
+        return chipRow(svg, 10, y + 10, words, 620, { fs: 12, h: 24, style: (w) => ({ color: other.includes(w) ? "var(--c3)" : "var(--c1)", fill: `color-mix(in srgb, ${other.includes(w) ? "var(--c3)" : "var(--c1)"} ${Math.round(8 + 50 * (W.get(w) || 0) / maxW)}%, var(--panel))` }) });
+      };
+      const A = row(a, 20, b, "q1 去停用词后的词集合（绿 = 两边共有；底色越深 = 权重越大）");
+      const y2 = (A.length ? A[A.length - 1].y : 30) + 56;
+      const B = row(b, y2, a, "q2 去停用词后的词集合");
+      const y3 = (B.length ? B[B.length - 1].y : y2) + 50;
+      K.svg(svg, "text", { x: 10, y: y3, "font-size": 13, class: "muted" }, "每个词：出现次数 → 权重 1/(count+eps)");
+      a.concat(b.filter((w) => !a.includes(w))).slice(0, 10).forEach((w, i) => {
+        const x = 10 + (i % 2) * 320, y = y3 + 22 + Math.floor(i / 2) * 22;
+        K.svg(svg, "text", { style: MONO, x, y, "font-size": 12 }, `${w.length > 12 ? w.slice(0, 11) + "…" : w}`);
+        K.svg(svg, "text", { style: MONO, x: x + 120, y, "font-size": 12, class: "muted" }, `×${c.get(w) || 0}`);
+        K.svg(svg, "text", { style: MONO, x: x + 170, y, "font-size": 12, fill: (W.get(w) || 0) ? "var(--ink)" : "var(--bad)" }, (W.get(w) || 0).toExponential(2));
+      });
+      const s1 = wordShare(qa, qb), s2 = tfidfShare(qa, qb, W);
+      return { readout: [
+        { k: "word_match_share", v: s1.toFixed(3) },
+        { k: "tfidf_word_match_share", v: isNaN(s2) ? "NaN" : s2.toFixed(3), color: "var(--c2)" },
+        { k: "共有词数", v: String(a.filter((w) => b.includes(w)).length) },
+      ] };
+    },
+  });
+  const i2 = addTextInput(document.getElementById("lab1"), "问题 q2", qb, (s) => { qb = s; lab1.update(); });
+  addTextInput(document.getElementById("lab1"), "问题 q1", qa, (s) => { qa = s; lab1.update(); });
+
+  /* ---------- 实验 B：常数预测的 LogLoss 与重平衡 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "q", label: "测试集真实正例比例 q", min: 0.02, max: 0.6, step: 0.005, value: 0.165, fmt: (v) => (v * 100).toFixed(1) + "%" },
+      { id: "p", label: "对所有样本都交的常数概率 p", min: 0.02, max: 0.9, step: 0.005, value: 0.37, fmt: (v) => v.toFixed(3) },
+      { id: "pos", label: "训练集正例比例（作者的重平衡代码输入）", min: 0.2, max: 0.6, step: 0.01, value: 0.37, fmt: (v) => (v * 100).toFixed(0) + "%" },
+    ],
+    note: "曲线是 LogLoss(p) = −[q·ln p + (1−q)·ln(1−p)]，最低点正好在 p = q：交的概率和真实比例一致时损失最小。这就是作者要把训练集“重平衡”到 16.5% 的原因。",
+    render(svg, v) {
+      const ax = K.axes(svg, { x: 60, y: 20, w: 540, h: 250 }, [0, 1], [0, 2], { xticks: 5, yticks: 4, xlabel: "常数概率 p", ylabel: "LogLoss", xfmt: (x) => x.toFixed(1), yfmt: (x) => x.toFixed(1) });
+      let d = "";
+      for (let p = 0.01; p <= 0.99; p += 0.005) d += (d ? "L" : "M") + ax.sx(p) + "," + ax.sy(Math.min(2, logloss(v.q, p)));
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+      const L = logloss(v.q, v.p), Lmin = logloss(v.q, v.q);
+      K.svg(svg, "circle", { cx: ax.sx(v.p), cy: ax.sy(Math.min(2, L)), r: 6, fill: "var(--c2)" });
+      K.svg(svg, "circle", { cx: ax.sx(v.q), cy: ax.sy(Lmin), r: 5, fill: "none", stroke: "var(--c3)", "stroke-width": 2 });
+      K.svg(svg, "text", { x: ax.sx(v.q) + 8, y: ax.sy(Lmin) + 18, "font-size": 12, fill: "var(--c3)" }, "最低点 p = q");
+      const rb = authorRebalance(v.pos, 0.165);
+      K.svg(svg, "text", { x: 60, y: 322, "font-size": 12 }, `作者第 29 格的循环：训练集正例 ${(v.pos * 100).toFixed(0)}% → 复制负例 ×${rb.factor.toFixed(2)} → 正例占 ${(rb.share * 100).toFixed(1)}%（目标 16.5%）`);
+      return { readout: [
+        { k: "常数 p 的 LogLoss", v: L.toFixed(3), color: "var(--c2)" },
+        { k: "最优 p = q 时", v: Lmin.toFixed(3), color: "var(--c3)" },
+        { k: "重平衡后正例占比", v: (rb.share * 100).toFixed(1) + "%", color: "var(--warn)" },
+      ] };
+    },
+  });
+
+})();
+</script>
+</body>
+</html>

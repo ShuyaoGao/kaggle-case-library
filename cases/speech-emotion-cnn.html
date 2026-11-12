@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>语音情绪识别</title>
+<meta name="description" content="Kaggle 案例拆解：合并四个情绪语音数据集，做音频增强、提取 MFCC 等特征，用一维卷积网络判断说话人的 8 种情绪。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">音频 · 多分类 · 语音情绪识别</div>
+  <h1>听声音辨情绪：从波形到 8 种情绪</h1>
+  <p class="en">Speech Emotion Recognition</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">librosa 音频处理</span><span class="tag method">语谱图 STFT</span><span class="tag method">音频数据增强</span>
+    <span class="tag method">MFCC / 梅尔频谱 / ZCR / RMS</span><span class="tag method">一维卷积网络 Conv1D</span><span class="tag method">ReduceLROnPlateau</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Shivam Burnwal</b></span>
+    <span>Kaggle 点赞 <b>5,727</b>（2026-11 抓取）</span>
+    <span>数据集 <b>RAVDESS · CREMA-D · TESS · SAVEE</b></span>
+    <span><a href="https://www.kaggle.com/code/shivamburnwal/speech-emotion-recognition" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">演员按指定情绪朗读的短句录音</div><p>作者把 4 个公开情绪语音库（RAVDESS、CREMA-D、TESS、SAVEE）合并成一张“文件路径 + 情绪”表。情绪标签藏在文件名里，要逐个解析。<span data-cell="14">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">一段语音属于哪种情绪</div><p>共 8 类：neutral 中性、calm 平静、happy 高兴、sad 悲伤、angry 生气、fear 恐惧、disgust 厌恶、surprise 惊讶。<span data-cell="7">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">增强 → 手工音频特征 → 1D CNN</div><p>每条录音做加噪、变速+变调，扩成 3 份；每份提取 ZCR、色度、MFCC、RMS、梅尔频谱并对时间取平均，得到一条特征向量；再交给 4 层一维卷积网络。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">测试集准确率约 61%</div><p>作者结论：surprise 和 angry 识别得最好，因为它们在音高、语速上和其他情绪差别大；整体 61%，“还不错但能改进”。<span data-cell="58">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">作者合并了 4 个公开的情绪语音数据库。每条数据是一段几秒钟的 .wav 录音，由演员按指定情绪朗读固定的句子；标签写在文件名里。各库规模来自数据集说明页。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">RAVDESS（语音部分）</div><div class="v">1,440 段</div></div>
+        <div class="stat-tile"><div class="k">CREMA-D</div><div class="v">7,442 段</div></div>
+        <div class="stat-tile"><div class="k">TESS</div><div class="v">2,800 段</div></div>
+        <div class="stat-tile"><div class="k">SAVEE</div><div class="v">480 段</div></div>
+        <div class="stat-tile"><div class="k">情绪类别</div><div class="v">8 类</div></div>
+        <div class="stat-tile"><div class="k">每段取用时长</div><div class="v">2.5 秒</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">各库录音条数、演员人数来自各数据集说明（RAVDESS 24 名演员、CREMA-D 91 名、TESS 2 名女性、SAVEE 4 名男性）；8 类情绪见第 7 格 <span data-cell="7">出处</span>；读入时跳过开头 0.6 秒、只取 2.5 秒，见第 39 格 <span data-cell="39">出处</span>。每段录音增强后变成 3 行，见第 40 格 <span data-cell="40">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">两张表：先是“路径表”，后是“特征表”</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>Path</code></td><td>录音文件的位置（data_path 表）</td><td>文本</td></tr>
+        <tr><td><code>Emotions</code></td><td><b>要预测的答案</b>：neutral、calm、happy、sad、angry、fear、disgust、surprise</td><td>类别</td></tr>
+        <tr><td><code>0</code> … <code>161</code></td><td>从录音里算出的 162 个数（Features 表）：过零率 1 + 色度 12 + MFCC 20 + RMS 1 + 梅尔频谱 128（按 librosa 默认参数推算）</td><td>数值</td></tr>
+        <tr><td><code>labels</code></td><td>Features 表里的情绪标签（同 Emotions）</td><td>类别</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">文件名举例（RAVDESS 官方说明，第 6 格）：<code>02-01-06-01-02-01-12</code> 表示“仅视频、说话、fearful、普通强度、第 2 句、第 1 次、12 号演员”。<span data-cell="6">出处</span></p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="25">
+    <h3>动手试试 A · 合成语音、语谱图与特征 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="51">
+    <h3>动手试试 B · 一维卷积在特征向量上滑动 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>测试集整体准确率约 61%，作者认为“还不错”，可通过更多增强和其他特征继续提升</td><td><span data-cell="58">第 58 格</span></td></tr>
+        <tr><td>surprise、angry 两类识别最准，它们在音高、语速等方面和其他情绪差别大</td><td><span data-cell="58">第 58 格</span></td></tr>
+        <tr><td>加噪是很好的增强手段，有助于防止过拟合</td><td><span data-cell="30">第 30 格</span></td></tr>
+        <tr><td>最终选用加噪、拉伸（变速）和变调三种增强</td><td><span data-cell="37">第 37 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">每类的精确率、召回率和混淆矩阵数值在运行输出里，Kaggle 下载的源码不带输出，所以这里不列。61% 这个数字来自作者的文字总结。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>输入一段 2.5 秒左右的语音，输出 8 种情绪的概率。</li>
+        <li><b>同类问题：</b>客服电话情绪质检（作者在开头提到）、车载系统判断驾驶员状态、心理健康辅助筛查、游戏/陪伴机器人的语气反馈。<span data-cell="1">出处</span></li>
+        <li><b>可迁移套路：</b>音频 → 分帧 → 频域特征（MFCC/梅尔）→ 汇总成向量或保留成“图” → 神经网络。换成机器异响检测、鸟鸣识别、咳嗽声筛查，流程几乎一样。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>数据整理：解析 4 个数据集的文件名得到情绪标签 <span data-cell="7">第 7 格</span></li>
+        <li>可视化：波形图、STFT 语谱图 <span data-cell="19">第 19 格</span></li>
+        <li>增强：加噪、拉伸、平移、变调 <span data-cell="25">第 25 格</span></li>
+        <li>特征：ZCR、Chroma、MFCC、RMS、梅尔频谱（时间平均）<span data-cell="39">第 39 格</span></li>
+        <li>预处理：One-Hot、train_test_split、StandardScaler <span data-cell="48">第 48 格</span></li>
+        <li>模型：4 层 Conv1D + MaxPooling + Dropout + Dense <span data-cell="51">第 51 格</span></li>
+        <li>训练：Adam、50 轮、ReduceLROnPlateau <span data-cell="52">第 52 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者先把每条录音扩成 3 份（原始、加噪、变速变调），<b>再</b>随机切训练/测试集。同一句话的三个版本可能分别落在训练集和测试集里，这会让 61% 偏高还是偏低？应该怎么切？</li>
+      <li>同一个演员的不同录音也可能同时出现在训练集和测试集。如果要求模型对“没见过的人”也管用，切分方式要怎么改？</li>
+      <li>特征是对整段时间取平均后的 162 维向量（按 librosa 默认参数推算）。取平均丢掉了什么信息？“先升调再降调”和“先降调再升调”还能区分吗？</li>
+      <li>calm 只出现在 RAVDESS 里，surprise 不出现在 CREMA-D 里。类别来源不均匀，模型会不会学到“这是哪个数据库的录音”而不是“这是哪种情绪”？</li>
+      <li>演员表演的情绪比真实生活中的情绪更夸张。这样训练出的模型放到真实客服电话里，你预计效果会怎样？</li>
+    </ol>
+  </div>
+</section>
+
+
+<footer class="foot">
+  原 notebook 作者 Shivam Burnwal，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：RAVDESS（Livingstone &amp; Russo）、CREMA-D、TESS（University of Toronto）、SAVEE（University of Surrey）。
+</footer>
+</main>
+
+<script src="nb/speech-emotion-cnn.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 页面自用的小型 DSP 工具 ---------- */
+  function fft(re, im) {
+    const n = re.length;
+    for (let i = 1, j = 0; i < n; i++) {
+      let bit = n >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
+    }
+    for (let len = 2; len <= n; len <<= 1) {
+      const ang = (-2 * Math.PI) / len, wr = Math.cos(ang), wi = Math.sin(ang);
+      for (let i = 0; i < n; i += len) {
+        let cr = 1, ci = 0;
+        for (let j = 0; j < len / 2; j++) {
+          const a = i + j, b = a + len / 2;
+          const xr = re[b] * cr - im[b] * ci, xi = re[b] * ci + im[b] * cr;
+          re[b] = re[a] - xr; im[b] = im[a] - xi; re[a] += xr; im[a] += xi;
+          const t = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = t;
+        }
+      }
+    }
+  }
+  /* 短时傅里叶变换：返回每帧的幅度谱（N/2 个频点） */
+  function stft(x, N, hop) {
+    const out = [];
+    for (let s = 0; s + N <= x.length; s += hop) {
+      const re = new Float64Array(N), im = new Float64Array(N);
+      for (let i = 0; i < N; i++) re[i] = x[s + i] * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1)));
+      fft(re, im);
+      const mag = new Float64Array(N / 2);
+      for (let k = 0; k < N / 2; k++) mag[k] = Math.hypot(re[k], im[k]);
+      out.push(mag);
+    }
+    return out;
+  }
+  /* 合成一段“像说话”的声音：3 个音节，基频按语调变化，带 1/k 衰减的谐波 */
+  function synth(o) {
+    const sr = o.sr || 8000, dur = (o.dur || 1) / (o.tempo || 1), n = Math.floor(sr * dur);
+    const x = new Float64Array(n), r = K.rng(o.seed || 1);
+    let ph = 0;
+    const sylls = o.sylls || 3;
+    for (let i = 0; i < n; i++) {
+      const t = i / n;
+      let f = o.f0;
+      if (o.contour === "up") f *= 1 + 0.5 * t;
+      else if (o.contour === "down") f *= 1 - 0.35 * t;
+      else if (o.contour === "shake") f *= 1 + 0.12 * Math.sin(2 * Math.PI * 6 * t * dur);
+      f *= o.pitch || 1;
+      ph += (2 * Math.PI * f) / sr;
+      let v = 0;
+      for (let k = 1; k <= (o.harm || 6); k++) if (k * f < sr / 2) v += Math.sin(k * ph) / k;
+      const u = (t * sylls) % 1, env = Math.pow(Math.sin(Math.PI * u), 2) * (0.75 + 0.25 * Math.sin(7 * Math.floor(t * sylls) + 1));
+      x[i] = v * env + 0.004 * K.randn(r);
+    }
+    let mx = 0; for (let i = 0; i < n; i++) mx = Math.max(mx, Math.abs(x[i]));
+    for (let i = 0; i < n; i++) x[i] = (x[i] / (mx || 1)) * 0.8 * (o.vol == null ? 1 : o.vol);
+    return x;
+  }
+  function addNoise(x, u, seed) { /* 与原文一致：noise_amp = 0.035 * u * max(x) */
+    const r = K.rng(seed), y = Float64Array.from(x);
+    let mx = 0; x.forEach((v) => (mx = Math.max(mx, v)));
+    const amp = 0.035 * u * mx;
+    for (let i = 0; i < y.length; i++) y[i] += amp * K.randn(r);
+    return y;
+  }
+  function roll(x, s) { const n = x.length, y = new Float64Array(n); for (let i = 0; i < n; i++) y[(i + s + n * 10) % n] = x[i]; return y; }
+  function wavePath(x, ax, n0, n1) {
+    const W = 360, step = Math.max(1, Math.floor((n1 - n0) / W));
+    let d = "";
+    for (let i = n0; i < n1; i += step) {
+      let lo = 1, hi = -1;
+      for (let j = i; j < Math.min(i + step, n1); j++) { lo = Math.min(lo, x[j]); hi = Math.max(hi, x[j]); }
+      d += (d ? "L" : "M") + ax.sx(i) + "," + ax.sy(hi) + "L" + ax.sx(i) + "," + ax.sy(lo);
+    }
+    return d;
+  }
+  function specDraw(svg, S, box, maxBin, opt) {
+    opt = opt || {};
+    const nf = S.length, group = opt.group || 2, nb = Math.floor(maxBin / group);
+    let mx = -1e9, mn = 1e9;
+    const D = S.map((m) => { const a = []; for (let b = 0; b < nb; b++) { let s = 0; for (let g = 0; g < group; g++) s += m[b * group + g]; const db = 20 * Math.log10(s / group + 1e-6); a.push(db); mx = Math.max(mx, db); } return a; });
+    mn = mx - 45;
+    const cw = box.w / nf, ch = box.h / nb, els = [];
+    D.forEach((col, i) => col.forEach((v, b) => {
+      const t = K.clamp((v - mn) / (mx - mn), 0, 1);
+      els.push(K.svg(svg, "rect", { x: box.x + i * cw, y: box.y + box.h - (b + 1) * ch, width: cw + 0.4, height: ch + 0.4, fill: K.heat(Math.pow(t, 1.3)), class: "sp" + i }));
+    }));
+    return { els, nf };
+  }
+  function features(x, sr) {
+    const N = 256, hop = 128, S = stft(x, N, hop);
+    let zcr = 0, rms = 0, cen = 0, nfr = 0;
+    for (let s = 0; s + N <= x.length; s += hop, nfr++) {
+      let z = 0, e = 0;
+      for (let i = 1; i < N; i++) if ((x[s + i] >= 0) !== (x[s + i - 1] >= 0)) z++;
+      for (let i = 0; i < N; i++) e += x[s + i] * x[s + i];
+      zcr += z / N; rms += Math.sqrt(e / N);
+    }
+    const avg = new Float64Array(N / 2);
+    S.forEach((m) => {
+      let num = 0, den = 0;
+      for (let k = 0; k < N / 2; k++) { const f = (k * sr) / N; num += f * m[k]; den += m[k]; avg[k] += m[k]; }
+      cen += den > 0 ? num / den : 0;
+    });
+    let pk = 1; for (let k = 1; k < N / 2; k++) if (avg[k] > avg[pk]) pk = k;
+    return { S, zcr: zcr / nfr, rms: rms / nfr, cen: cen / S.length, peak: (pk * sr) / N };
+  }
+
+  const EMO = ["neutral", "calm", "happy", "sad", "angry", "fear", "disgust", "surprise"];
+  const EMO_ZH = ["中性", "平静", "高兴", "悲伤", "生气", "恐惧", "厌恶", "惊讶"];
+
+  const steps = [
+    {
+      at: 0, title: "开场：为什么要让机器听出情绪", kicker: "第 0–3 格 · 目标与准备",
+      html: `<p>作者先说明什么是<b>语音情绪识别</b>（SER）：从说话的语调、音高里判断说话人的情绪，就像狗和马也能“听出”主人的情绪。用途包括客服电话按情绪分类、车载系统感知驾驶员状态。</p><p>第 3 格导入要用的库：<code>librosa</code> 处理音频，<code>sklearn</code> 做编码和切分，<code>keras</code> 搭神经网络。</p>`,
+      cells: [1, 3], highlight: ["librosa", "Conv1D"],
+      draw(svg, ctx) {
+        const emo = [["生气", "var(--c6)"], ["高兴", "var(--c5)"], ["悲伤", "var(--c1)"], ["惊讶", "var(--c2)"]];
+        emo.forEach((e, i) => {
+          const y = 30 + i * 76;
+          let d = ""; for (let k = 0; k <= 120; k++) { const x = 30 + k * 3.4, a = Math.sin(k * (0.5 + i * 0.25)) * (10 + 18 * Math.abs(Math.sin(k / (8 + i * 4)))) * (i === 2 ? 0.5 : 1); d += (d ? "L" : "M") + x + "," + (y + 30 + a); }
+          const p = K.svg(svg, "path", { d, fill: "none", stroke: e[1], "stroke-width": 1.5 }); p.style.opacity = 0;
+          const a = K.arrow(svg, 450, y + 30, 540, y + 30); a.style.opacity = 0;
+          const n = K.node(svg, 550, y + 8, 140, 44, e[0], { stroke: e[1], bold: true }); n.style.opacity = 0;
+          ctx.wait(i * 500).then((ok) => ok && ctx.tween(500, (t) => { p.style.opacity = t; a.style.opacity = t; n.style.opacity = t; }));
+        });
+        K.svg(svg, "text", { x: 30, y: 330, "font-size": 12, class: "muted" }, "示意：不同情绪的语音在音量、音高、节奏上不同（波形为手绘示意）");
+      },
+    },
+    {
+      at: 4, title: "合并四个情绪语音库", kicker: "第 5–14 格 · 数据整理",
+      html: `<p>四个数据库的命名规则各不相同，情绪标签都藏在<b>文件名</b>里：RAVDESS 用第 3 段数字（05 = angry），CREMA-D 用第 3 段缩写（ANG），TESS 用最后一个词，SAVEE 用前缀字母（a = anger）。</p><p>作者为每个库写一段解析代码，各自得到“情绪 + 路径”两列，最后 <code>pd.concat</code> 拼成一张总表 <code>data_path</code>。</p>`,
+      cells: [7, 14], highlight: ["split('-')", "int(part[2])", "pd.concat"],
+      draw(svg, ctx) {
+        const src = [
+          ["RAVDESS", "03-01-", "05", "-01-02-01-12.wav", "angry"],
+          ["CREMA-D", "1001_DFA_", "ANG", "_XX.wav", "angry"],
+          ["TESS", "OAF_back_", "sad", ".wav", "sad"],
+          ["SAVEE", "DC_", "h", "05.wav", "happy"],
+        ];
+        K.svg(svg, "text", { x: 20, y: 26, "font-size": 13, class: "muted" }, "文件名 → 解析出的情绪");
+        const rows = [];
+        src.forEach((s, i) => {
+          const y = 52 + i * 70;
+          K.svg(svg, "text", { x: 20, y: y, "font-size": 12, "font-weight": 700, fill: K.colors[i] }, s[0]);
+          const t = K.svg(svg, "text", { x: 20, y: y + 22, "font-size": 13, "font-family": "var(--mono)" });
+          K.svg(t, "tspan", {}, s[1]);
+          const hl = K.svg(t, "tspan", { "font-weight": 700, fill: "var(--ink)" }, s[2]);
+          K.svg(t, "tspan", {}, s[3]);
+          rows.push({ hl, y, lab: s[4], c: K.colors[i] });
+        });
+        K.node(svg, 470, 40, 230, 30, "Emotions   |   Path", { bold: true, fill: "var(--panel-2)" });
+        const cells = rows.map((r, i) => { const g = K.node(svg, 470, 74 + i * 34, 230, 30, `${r.lab}   |   ${src[i][0]}/…`, { stroke: r.c }); g.style.opacity = 0; return g; });
+        const arrows = rows.map((r, i) => { const a = K.arrow(svg, 330, r.y + 16, 466, 89 + i * 34, { color: r.c }); a.style.opacity = 0; return a; });
+        const tot = K.svg(svg, "text", { x: 470, y: 240, "font-size": 13, fill: "var(--accent)", "font-weight": 700 }, "pd.concat → data_path（4 库合一）");
+        tot.style.opacity = 0;
+        K.svg(svg, "text", { x: 470, y: 262, "font-size": 12, class: "muted" }, "一行 = 一个音频文件");
+        (async () => {
+          for (let i = 0; i < 4; i++) {
+            if (!(await ctx.tween(300, (t) => { rows[i].hl.style.fill = t > 0.5 ? rows[i].c : "var(--ink)"; rows[i].hl.style.fontSize = 13 + 4 * Math.sin(Math.PI * t) + "px"; }))) return;
+            if (!(await ctx.tween(380, (t) => { arrows[i].style.opacity = t; cells[i].style.opacity = t; }))) return;
+          }
+          await ctx.tween(500, (t) => (tot.style.opacity = t));
+        })();
+      },
+    },
+    {
+      at: 15, title: "看看每种情绪有多少条", kicker: "第 17 格 · 类别分布",
+      html: `<p>用 <code>sns.countplot</code> 画每类数量。从解析代码可以直接看出不均衡的原因：<b>calm</b> 只在 RAVDESS 里有，<b>surprise</b> 在 CREMA-D 里没有，所以这两类明显少于其他类。</p><p>动画里的条形高度是示意，用来说明“哪几类少”，不是原文的计数。</p>`,
+      cells: [17], highlight: ["countplot"],
+      draw(svg, ctx) {
+        const h = [0.8, 0.12, 0.92, 0.92, 0.92, 0.92, 0.92, 0.33];
+        const ax = { x: 60, y: 40, w: 620, h: 230 };
+        K.svg(svg, "line", { x1: ax.x, y1: ax.y + ax.h, x2: ax.x + ax.w, y2: ax.y + ax.h, stroke: "var(--ink-3)" });
+        const bw = 56, gap = (ax.w - bw * 8) / 7;
+        const bars = h.map((v, i) => {
+          const x = ax.x + i * (bw + gap);
+          K.svg(svg, "text", { x: x + bw / 2, y: ax.y + ax.h + 18, "text-anchor": "middle", "font-size": 12 }, EMO[i]);
+          K.svg(svg, "text", { x: x + bw / 2, y: ax.y + ax.h + 34, "text-anchor": "middle", "font-size": 11, class: "muted" }, EMO_ZH[i]);
+          return K.svg(svg, "rect", { x, y: ax.y + ax.h, width: bw, height: 0, rx: 3, fill: i === 1 || i === 7 ? "var(--warn)" : "var(--c1)" });
+        });
+        const note = K.svg(svg, "text", { x: 60, y: 26, "font-size": 13, fill: "var(--warn)", "font-weight": 700 }, "");
+        ctx.tween(1200, (t) => bars.forEach((b, i) => { const hh = h[i] * ax.h * t; b.setAttribute("y", ax.y + ax.h - hh); b.setAttribute("height", hh); }))
+          .then((ok) => { if (ok) note.textContent = "calm、surprise 偏少：它们只来自部分数据库（高度为示意）"; });
+      },
+    },
+    {
+      at: 18, title: "波形图与语谱图", kicker: "第 18–23 格 · 可视化",
+      html: `<p><b>波形图</b>是声音随时间的振幅，只能看出响不响。<b>语谱图</b>把声音切成一小段一小段（分帧），对每段做<b>短时傅里叶变换</b>（STFT，把一段波形拆成不同频率的成分），再按时间排开：横轴时间，纵轴频率，颜色表示能量。</p><p>动画：窗口沿波形滑动，每滑一格就算一次 FFT，生成语谱图的一列。横条纹就是基频和它的谐波。</p>`,
+      cells: [19], highlight: ["librosa.stft", "amplitude_to_db"],
+      draw(svg, ctx) {
+        const x = synth({ f0: 180, contour: "up", seed: 3 }), sr = 8000;
+        const axW = K.axes(svg, { x: 40, y: 18, w: 660, h: 90 }, [0, x.length], [-1, 1], { xticks: 0, yticks: 0 });
+        K.svg(svg, "path", { d: wavePath(x, axW, 0, x.length), stroke: "var(--c1)", fill: "none", "stroke-width": 1 });
+        K.svg(svg, "text", { x: 44, y: 32, "font-size": 12, class: "muted" }, "波形（示意合成）");
+        const S = stft(x, 256, 128);
+        const sp = specDraw(svg, S, { x: 40, y: 140, w: 660, h: 180 }, 128, { group: 2 });
+        sp.els.forEach((e) => (e.style.opacity = 0));
+        K.svg(svg, "text", { x: 44, y: 136, "font-size": 12, class: "muted" }, "语谱图：0–4000 Hz（越亮能量越大）");
+        const win = K.svg(svg, "rect", { x: 40, y: 18, width: (660 * 256) / x.length, height: 90, fill: "var(--warn)", "fill-opacity": 0.25, stroke: "var(--warn)" });
+        const per = sp.els.length / sp.nf;
+        ctx.tween(3200, (t, raw) => {
+          const f = Math.floor(raw * sp.nf);
+          win.setAttribute("x", 40 + (660 * f * 128) / x.length);
+          for (let i = 0; i < Math.min(sp.nf, f + 1) * per; i++) sp.els[i].style.opacity = 1;
+        });
+      },
+    },
+    {
+      at: 24, title: "数据增强：给声音“加点变化”", kicker: "第 24–37 格 · 增强",
+      html: `<p>同一句话换个环境、换个语速，情绪不会变。作者试了四种增强：<b>加噪</b>（幅度 = 0.035 × 随机数 × 最大振幅）、<b>拉伸</b>（rate=0.8，变慢）、<b>平移</b>（循环移动最多 ±5000 个采样点）、<b>变调</b>（pitch_factor=0.7）。</p><p>目的是让模型对这些扰动“不敏感”，学到情绪本身。动画依次演示四种变换（示意信号）。</p>`,
+      cells: [25], highlight: ["0.035", "time_stretch", "np.roll", "pitch_shift"],
+      draw(svg, ctx) {
+        const base = synth({ f0: 160, seed: 5, dur: 0.6 });
+        const vars = [
+          ["原始", base],
+          ["加噪 noise", addNoise(base, 1, 9).map((v, i) => v + 0.05 * Math.sin(i * 7.1))],
+          ["拉伸 stretch(0.8)：变慢、变长", synth({ f0: 160, seed: 5, dur: 0.6, tempo: 0.8 })],
+          ["平移 shift：整体循环右移", roll(base, 1200)],
+          ["变调 pitch：基频变高", synth({ f0: 160, seed: 5, dur: 0.6, pitch: Math.pow(2, 4 / 12) })],
+        ];
+        const L = 6000;
+        const ax = K.axes(svg, { x: 40, y: 60, w: 660, h: 220 }, [0, L], [-1.1, 1.1], { xticks: 0, yticks: 0 });
+        K.svg(svg, "path", { d: wavePath(base, ax, 0, base.length), stroke: "var(--ink-3)", fill: "none", opacity: 0.35 });
+        const p = K.svg(svg, "path", { d: "", stroke: "var(--c2)", fill: "none", "stroke-width": 1.2 });
+        const lab = K.svg(svg, "text", { x: 40, y: 40, "font-size": 15, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 40, y: 310, "font-size": 12, class: "muted" }, "灰线 = 原始波形，橙线 = 增强后（变调动画里放大了幅度，便于看清）");
+        (async () => {
+          for (let k = 0; k < vars.length; k++) {
+            lab.textContent = vars[k][0];
+            const v = vars[k][1];
+            p.setAttribute("d", wavePath(v, ax, 0, Math.min(v.length, L)));
+            if (!(await ctx.tween(400, (t) => (p.style.opacity = t)))) return;
+            if (!(await ctx.wait(1100))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 40, title: "每条录音变成 3 个样本", kicker: "第 39–40 格 · 扩充训练集",
+      html: `<p><code>get_features</code> 先读入录音（跳过开头 0.6 秒，只取 2.5 秒，去掉首尾静音），然后生成 3 份：<b>原始</b>、<b>加噪</b>、<b>先拉伸再变调</b>。三份各提取一次特征，标签照抄 3 遍。</p><p>注释写得很直白：“appending emotion 3 times as we have made 3 augmentation techniques”。注意这一步发生在切分训练/测试集<b>之前</b>（见课堂讨论第 1 题）。</p>`,
+      cells: [40], highlight: ["Y.append(emotion)"],
+      draw(svg, ctx) {
+        K.node(svg, 30, 130, 150, 70, "一条录音\n(angry)", { bold: true });
+        const names = ["原始", "加噪", "拉伸 + 变调"], els = [];
+        names.forEach((n, i) => {
+          const y = 40 + i * 100;
+          const a = K.arrow(svg, 180, 165, 268, y + 30);
+          const b = K.node(svg, 270, y, 150, 60, n, { stroke: K.colors[i] });
+          const a2 = K.arrow(svg, 420, y + 30, 468, y + 30);
+          const row = K.svg(svg, "g");
+          for (let j = 0; j < 12; j++) K.svg(row, "rect", { x: 470 + j * 15, y: y + 18, width: 13, height: 24, fill: K.heat(0.25 + 0.6 * Math.abs(Math.sin(j * 1.7 + i))) });
+          K.svg(row, "text", { x: 660, y: y + 36, "font-size": 13, "font-weight": 700 }, "angry");
+          [a, b, a2, row].forEach((e) => (e.style.opacity = 0));
+          els.push([a, b, a2, row]);
+        });
+        K.svg(svg, "text", { x: 470, y: 330, "font-size": 12, class: "muted" }, "特征向量（示意）+ 同一个标签");
+        (async () => {
+          for (const g of els) if (!(await ctx.tween(600, (t) => g.forEach((e) => (e.style.opacity = t))))) return;
+        })();
+      },
+    },
+    {
+      at: 38, title: "提取特征并对时间取平均", kicker: "第 38–39 格 · 特征工程",
+      html: `<p>作者提取 5 种特征，每种都是“每一帧一个值（或一组值）”，再用 <code>np.mean(... .T, axis=0)</code> <b>沿时间取平均</b>，拼成一条向量：</p><ul class="tight"><li><b>ZCR</b> 过零率：波形穿过 0 的频率，噪声/清音高</li><li><b>Chroma</b> 色度：能量落在 12 个半音上的比例</li><li><b>MFCC</b> 梅尔倒谱系数：模仿人耳的频谱包络</li><li><b>RMS</b> 均方根：响度</li><li><b>Mel</b> 梅尔频谱：按人耳刻度分组的能量</li></ul><p>按 librosa 默认参数推算，长度为 1 + 12 + 20 + 1 + 128 = 162。</p>`,
+      cells: [39], highlight: ["zero_crossing_rate", "chroma_stft", "mfcc", "rms", "melspectrogram", "np.mean"],
+      draw(svg, ctx) {
+        const groups = [["ZCR", 1, "var(--c1)"], ["Chroma", 12, "var(--c2)"], ["MFCC", 20, "var(--c3)"], ["RMS", 1, "var(--c4)"], ["Mel", 128, "var(--c5)"]];
+        const rowsH = [10, 40, 56, 10, 120], nF = 22, x0 = 110, cw = 14;
+        let y = 30;
+        const cells = [];
+        const r = K.rng(4);
+        groups.forEach((g, gi) => {
+          K.svg(svg, "text", { x: x0 - 8, y: y + rowsH[gi] / 2 + 4, "text-anchor": "end", "font-size": 12, fill: g[2], "font-weight": 700 }, `${g[0]} ×${g[1]}`);
+          for (let f = 0; f < nF; f++) cells.push({ e: K.svg(svg, "rect", { x: x0 + f * cw, y, width: cw - 1, height: rowsH[gi] - 1, fill: g[2], "fill-opacity": 0.15 + 0.7 * r() }), f, y, h: rowsH[gi] });
+          y += rowsH[gi] + 4;
+        });
+        K.svg(svg, "text", { x: x0, y: 22, "font-size": 12, class: "muted" }, "每列一帧 →（时间）");
+        K.svg(svg, "text", { x: 500, y: 22, "font-size": 12, class: "muted" }, "沿时间平均后");
+        const vec = K.svg(svg, "text", { x: 560, y: 320, "font-size": 13, "font-weight": 700, "text-anchor": "middle" }, "");
+        ctx.wait(700).then((ok) => ok && ctx.tween(1800, (t) => cells.forEach((c) => {
+          c.e.setAttribute("x", K.lerp(x0 + c.f * cw, 540, t));
+          c.e.setAttribute("width", K.lerp(cw - 1, 40, t));
+          c.e.style.fillOpacity = K.lerp(+c.e.style.fillOpacity || 0.5, 0.55, t * 0.05);
+        }))).then((ok) => { if (ok) vec.textContent = "一条 162 维向量"; });
+      },
+    },
+    {
+      at: 44, title: "编码标签、切分、标准化", kicker: "第 45–49 格 · 数据准备",
+      html: `<p>三件标准动作：</p><ul class="tight"><li><b>One-Hot</b>：把 “angry” 变成只有一个 1 的 8 维向量，配合 softmax 输出</li><li><b>train_test_split</b>：随机切分（默认 25% 作测试集）</li><li><b>StandardScaler</b>：每一维减均值、除标准差。只在训练集上 <code>fit</code>，测试集只 <code>transform</code>，防止信息泄漏</li></ul><p>最后 <code>expand_dims</code> 加一个“通道”维，形状变成 (样本数, 162, 1)，Conv1D 才能吃进去。</p>`,
+      cells: [46, 48, 49], highlight: ["OneHotEncoder", "fit_transform(x_train)", "transform(x_test)", "expand_dims"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 40, "font-size": 15, "font-weight": 700 }, "angry  →");
+        const oh = EMO.slice().sort().map((e, i) => {
+          const g = K.node(svg, 120 + i * 62, 18, 58, 34, "0", { fs: 14 });
+          K.svg(svg, "text", { x: 149 + i * 62, y: 68, "text-anchor": "middle", "font-size": 10, class: "muted" }, e);
+          return { g, hot: e === "angry" };
+        });
+        const ax = K.axes(svg, { x: 60, y: 120, w: 280, h: 170 }, [-6, 10], [0, 0.45], { yticks: 0, xlabel: "某一维特征的取值（示意）" });
+        const ax2 = K.axes(svg, { x: 400, y: 120, w: 280, h: 170 }, [-4, 4], [0, 0.45], { yticks: 0, xlabel: "标准化后：均值 0、方差 1" });
+        const pdf = (x, m, s) => Math.exp(-0.5 * ((x - m) / s) ** 2) / (s * Math.sqrt(2 * Math.PI));
+        let d1 = "", d2 = "";
+        for (let x = -6; x <= 10; x += 0.1) d1 += (d1 ? "L" : "M") + ax.sx(x) + "," + ax.sy(pdf(x, 4, 2.2));
+        for (let x = -4; x <= 4; x += 0.05) d2 += (d2 ? "L" : "M") + ax2.sx(x) + "," + ax2.sy(pdf(x, 0, 1));
+        K.svg(svg, "path", { d: d1, fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+        const p2 = K.svg(svg, "path", { d: d2, fill: "none", stroke: "var(--c3)", "stroke-width": 2 });
+        p2.style.opacity = 0;
+        K.arrow(svg, 345, 200, 395, 200);
+        ctx.wait(400).then((ok) => ok && ctx.tween(700, (t) => oh.forEach((o) => { if (o.hot) { o.g.querySelector("text").textContent = "1"; o.g.querySelector("rect").style.fill = `color-mix(in srgb, var(--accent) ${Math.round(t * 40)}%, var(--panel-2))`; } })))
+          .then((ok) => ok && ctx.tween(900, (t) => (p2.style.opacity = t)));
+      },
+    },
+    {
+      at: 50, title: "一维卷积：卷积核沿向量滑动", kicker: "第 51 格 · 模型核心",
+      html: `<p><b>Conv1D</b> 用一个长度为 5 的小窗口（卷积核）沿着 162 维特征向量滑动，每个位置做“对应相乘再求和”，得到一个新序列。256 个不同的卷积核就得到 256 条新序列（通道）。</p><p>接着 <b>MaxPooling1D</b>（窗口 5、步长 2）在每个小区间取最大值，长度大约减半。动画是 1 个卷积核的计算过程。</p>`,
+      cells: [], highlight: ["Conv1D(256, kernel_size=5", "MaxPooling1D(pool_size=5, strides = 2"],
+      draw(svg, ctx) {
+        const n = 26, r = K.rng(8), v = Array.from({ length: n }, (_, i) => Math.sin(i / 2.2) + 0.4 * K.randn(r));
+        const k = [0.2, 0.5, 1, 0.5, 0.2], cw = 24, x0 = 48;
+        K.svg(svg, "text", { x: x0, y: 30, "font-size": 12, class: "muted" }, "输入：特征向量的一段（示意，共 162 维）");
+        v.forEach((a, i) => K.svg(svg, "rect", { x: x0 + i * cw, y: 40, width: cw - 2, height: 36, fill: K.heat(0.12 + 0.88 * K.clamp((a + 1.5) / 3, 0, 1)) }));
+        const win = K.svg(svg, "rect", { x: x0 - 2, y: 36, width: cw * 5 + 2, height: 44, fill: "none", stroke: "var(--warn)", "stroke-width": 3, rx: 4 });
+        K.svg(svg, "text", { x: x0, y: 108, "font-size": 12, fill: "var(--warn)" }, "卷积核 [0.2, 0.5, 1, 0.5, 0.2]（示意权重）");
+        const out = [], outEls = [];
+        for (let i = 0; i < n; i++) { let s = 0; for (let j = 0; j < 5; j++) { const id = i + j - 2; if (id >= 0 && id < n) s += v[id] * k[j]; } out.push(Math.max(0, s)); }
+        K.svg(svg, "text", { x: x0, y: 138, "font-size": 12, class: "muted" }, "输出（padding='same'，长度不变，再过 ReLU）");
+        out.forEach((a, i) => { const e = K.svg(svg, "rect", { x: x0 + i * cw, y: 148, width: cw - 2, height: 36, fill: K.heat(0.12 + 0.88 * K.clamp(a / 3, 0, 1)) }); e.style.opacity = 0; outEls.push(e); });
+        K.svg(svg, "text", { x: x0, y: 222, "font-size": 12, class: "muted" }, "MaxPooling1D(5, 步长 2)：长度约减半");
+        const pool = [];
+        for (let i = 0; i < n; i += 2) { let m = 0; for (let j = i - 2; j <= i + 2; j++) if (j >= 0 && j < n) m = Math.max(m, out[j]); pool.push(m); }
+        const poolEls = pool.map((a, i) => { const e = K.svg(svg, "rect", { x: x0 + i * cw * 2 + cw / 2, y: 232, width: cw - 2, height: 36, fill: K.heat(0.12 + 0.88 * K.clamp(a / 3, 0, 1)) }); e.style.opacity = 0; return e; });
+        ctx.tween(3600, (t, raw) => {
+          const i = Math.min(n - 1, Math.floor(raw * n));
+          win.setAttribute("x", x0 + (i - 2) * cw - 2);
+          for (let j = 0; j <= i; j++) outEls[j].style.opacity = 1;
+        }).then((ok) => ok && ctx.tween(900, (t) => poolEls.forEach((e) => (e.style.opacity = t))));
+      },
+    },
+    {
+      at: 51, title: "完整网络：4 个卷积块 + 全连接", kicker: "第 51 格 · 网络结构",
+      html: `<p>4 个“Conv1D + MaxPooling”块，通道数 256 → 256 → 128 → 64，中间插一个 Dropout(0.2)。每个池化步长 2，序列长度按代码推算为 162 → 81 → 41 → 21 → 11。</p><p>然后 <code>Flatten</code> 拉平、<code>Dense(32)</code> + Dropout(0.3)，最后 <code>Dense(8, softmax)</code> 输出 8 种情绪的概率。损失函数是多分类交叉熵，优化器 Adam。</p>`,
+      cells: [51], highlight: ["Dense(units=8, activation='softmax')", "Flatten", "Dropout"],
+      draw(svg, ctx) {
+        const L = [["输入", "162×1", 162, 1], ["Conv+Pool", "81×256", 81, 256], ["Conv+Pool", "41×256", 41, 256], ["Conv+Pool", "21×128", 21, 128], ["Conv+Pool", "11×64", 11, 64], ["Flatten", "704", 0, 0], ["Dense", "32", 0, 0], ["softmax", "8", 0, 0]];
+        const els = L.map((l, i) => {
+          const x = 20 + i * 88, hh = l[2] ? 40 + (l[2] / 162) * 200 : i === 5 ? 220 : i === 6 ? 90 : 60, ww = l[3] ? 16 + Math.sqrt(l[3]) * 2.2 : 18;
+          const g = K.svg(svg, "g");
+          K.svg(g, "rect", { x: x + (60 - ww) / 2, y: 170 - hh / 2, width: ww, height: hh, rx: 4, fill: i === 7 ? "var(--accent-soft)" : `color-mix(in srgb, ${K.colors[i % 6]} 22%, var(--panel))`, stroke: i === 7 ? "var(--accent)" : K.colors[i % 6] });
+          K.svg(g, "text", { x: x + 30, y: 300, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, l[0]);
+          K.svg(g, "text", { x: x + 30, y: 318, "text-anchor": "middle", "font-size": 11, class: "muted" }, l[1]);
+          g.style.opacity = 0;
+          return g;
+        });
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 12, class: "muted" }, "方块高度 ∝ 序列长度，宽度 ∝ 通道数（按代码推算的形状）");
+        (async () => { for (const e of els) if (!(await ctx.tween(300, (t) => (e.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      at: 52, title: "训练 50 轮，学习率自动下调", kicker: "第 52–53 格 · 训练",
+      html: `<p>批大小 64，训练 50 轮，同时用测试集当验证集观察曲线。回调 <b>ReduceLROnPlateau</b>：训练损失连续 2 轮不下降（patience=2），学习率就乘 0.4，最小降到 1e-7。</p><p>直观理解：一开始大步走，快到谷底时换小步，避免来回震荡。动画是示意曲线。</p>`,
+      cells: [52, 53], highlight: ["ReduceLROnPlateau", "factor=0.4", "patience=2", "epochs=50"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 20, w: 300, h: 260 }, [0, 50], [0, 2.2], { xlabel: "epoch", ylabel: "loss（示意）" });
+        const ax2 = K.axes(svg, { x: 420, y: 20, w: 270, h: 260 }, [0, 50], [0, 1.05], { xlabel: "epoch", ylabel: "学习率（相对值）", yticks: 2 });
+        const r = K.rng(2), loss = [], lr = [];
+        let l = 2, cur = 1, best = 9, wait = 0;
+        for (let e = 0; e <= 50; e++) { l = l - cur * 0.09 * (l - 0.6) + 0.05 * K.randn(r) * cur; loss.push(l); if (l < best - 0.005) { best = l; wait = 0; } else if (++wait >= 2) { cur *= 0.4; wait = 0; } lr.push(cur); }
+        const p1 = K.svg(svg, "path", { fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+        const p2 = K.svg(svg, "path", { fill: "none", stroke: "var(--c2)", "stroke-width": 2 });
+        ctx.tween(2600, (t, raw) => {
+          const m = Math.floor(raw * 50);
+          let d1 = "", d2 = "";
+          for (let e = 0; e <= m; e++) { d1 += (d1 ? "L" : "M") + ax.sx(e) + "," + ax.sy(loss[e]); d2 += (d2 ? "L" : "M") + ax2.sx(e) + "," + ax2.sy(lr[e]) + (e < m ? "L" + ax2.sx(e + 1) + "," + ax2.sy(lr[e]) : ""); }
+          p1.setAttribute("d", d1); p2.setAttribute("d", d2);
+        });
+      },
+    },
+    {
+      at: 54, title: "评估：混淆矩阵与分类报告", kicker: "第 54–58 格 · 结果",
+      html: `<p>把 softmax 输出用 <code>encoder.inverse_transform</code> 变回情绪名，画混淆矩阵（行 = 真实，列 = 预测），再打印每类的精确率/召回率。</p><p>作者结论：整体约 <b>61%</b> <span data-cell="58">第 58 格</span>；<b>surprise、angry</b> 最准，因为它们的音高、语速和其他情绪差别最大。动画里的矩阵颜色是示意，只表达“对角线越亮越好”。</p>`,
+      cells: [56, 58], highlight: ["confusion_matrix"],
+      draw(svg, ctx) {
+        const n = 8, s = 30, x0 = 130, y0 = 30, r = K.rng(12), els = [];
+        for (let i = 0; i < n; i++) {
+          K.svg(svg, "text", { x: x0 - 6, y: y0 + i * s + 19, "text-anchor": "end", "font-size": 11 }, EMO[i]);
+          K.svg(svg, "text", { x: x0 + i * s + 15, y: y0 + n * s + 14, "text-anchor": "end", "font-size": 10, transform: `rotate(-40 ${x0 + i * s + 15} ${y0 + n * s + 14})` }, EMO[i]);
+          for (let j = 0; j < n; j++) {
+            const strong = i === 4 || i === 7;
+            const v = i === j ? (strong ? 0.85 : 0.5 + 0.15 * r()) : 0.05 + 0.12 * r();
+            const e = K.svg(svg, "rect", { x: x0 + j * s, y: y0 + i * s, width: s - 2, height: s - 2, fill: K.heat(v) });
+            e.style.opacity = 0; els.push(e);
+          }
+        }
+        K.svg(svg, "text", { x: x0 + 120, y: 22, "text-anchor": "middle", "font-size": 12, class: "muted" }, "预测 →（行 = 真实，示意）");
+        K.svg(svg, "text", { x: 420, y: 90, "font-size": 15, "font-weight": 700 }, "整体准确率 ≈ 61%");
+        K.svg(svg, "text", { x: 420, y: 112, "font-size": 12, class: "muted" }, "（作者在第 58 格的文字结论）");
+        K.svg(svg, "text", { x: 420, y: 160, "font-size": 13, fill: "var(--good)" }, "angry、surprise：最容易认出");
+        K.svg(svg, "text", { x: 420, y: 184, "font-size": 13 }, "音高、语速和其他情绪差别大");
+        K.svg(svg, "text", { x: 420, y: 230, "font-size": 13, fill: "var(--warn)" }, "其余情绪之间容易混淆");
+        ctx.tween(1400, (t) => els.forEach((e, i) => (e.style.opacity = K.clamp(t * 64 - i * 0.8, 0, 1))));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：合成语音 → 语谱图 → 特征 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "f0", label: "基频（音高）", min: 80, max: 400, step: 5, value: 180, fmt: (v) => v + " Hz" },
+      { id: "contour", label: "语调", value: "flat", options: [["flat", "平稳"], ["up", "上扬（像惊讶）"], ["down", "下降（像悲伤）"], ["shake", "颤动（像恐惧）"]] },
+      { id: "harm", label: "谐波个数（音色亮不亮）", min: 1, max: 12, step: 1, value: 6 },
+      { id: "aug", label: "数据增强", value: "none", options: [["none", "无"], ["noise", "加噪 noise"], ["stretch", "拉伸 stretch(0.8)"], ["shift", "平移 shift"], ["pitch", "变调 pitch（+0.7 半音）"]] },
+      { id: "u", label: "加噪强度（原文里的随机数 u）", min: 0, max: 1, step: 0.05, value: 0.6, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "采样率 8000 Hz、时长 1 秒的合成信号。分帧 256 点、帧移 128 点、汉宁窗 + FFT，全部在浏览器里现场计算。“拉伸”在这里用 0.8 倍速重新合成近似（librosa 实际用相位声码器）。变调 0.7 个半音很小，频谱只会轻微上移，这正是作者用它做增强的原因：不改变情绪。",
+    render(svg, v) {
+      const sr = 8000;
+      const o = { f0: v.f0, contour: v.contour, harm: v.harm, seed: 21, sr };
+      if (v.aug === "stretch") o.tempo = 0.8;
+      if (v.aug === "pitch") o.pitch = Math.pow(2, 0.7 / 12);
+      let x = synth(o);
+      if (v.aug === "noise") x = addNoise(x, v.u * 6, 5); /* 合成信号很干净，放大 6 倍便于看见 */
+      if (v.aug === "shift") x = roll(x, 1800);
+      const F = features(x, sr);
+      const ax = K.axes(svg, { x: 40, y: 10, w: 580, h: 80 }, [0, 10000], [-1, 1], { xticks: 0, yticks: 0 });
+      K.svg(svg, "path", { d: wavePath(x, ax, 0, x.length), stroke: "var(--c1)", fill: "none", "stroke-width": 1 });
+      K.svg(svg, "text", { x: 44, y: 24, "font-size": 11, class: "muted" }, `波形（${(x.length / sr).toFixed(2)} 秒）`);
+      specDraw(svg, F.S.slice(0, Math.min(F.S.length, 78)), { x: 40, y: 110, w: (580 * Math.min(F.S.length, 78)) / 78, h: 230 }, 128, { group: 2 });
+      K.svg(svg, "text", { x: 36, y: 344, "text-anchor": "end", "font-size": 10, class: "muted" }, "0");
+      K.svg(svg, "text", { x: 36, y: 118, "text-anchor": "end", "font-size": 10, class: "muted" }, "4k");
+      K.svg(svg, "text", { x: 40, y: 362, "font-size": 11, class: "muted" }, "语谱图：横轴时间，纵轴 0–4000 Hz，亮 = 能量高。横条纹 = 基频与谐波");
+      const yb = 340 - (F.peak / 4000) * 230;
+      K.svg(svg, "line", { x1: 40, x2: 620, y1: yb, y2: yb, stroke: "var(--warn)", "stroke-dasharray": "4 3" });
+      return { readout: [
+        { k: "过零率 ZCR（帧平均）", v: F.zcr.toFixed(3) },
+        { k: "RMS 响度（帧平均）", v: F.rms.toFixed(3) },
+        { k: "频谱质心", v: Math.round(F.cen) + " Hz" },
+        { k: "最强频率（虚线）", v: Math.round(F.peak) + " Hz", color: "var(--warn)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：Conv1D + MaxPool 在 162 维向量上 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "kern", label: "卷积核", value: "smooth", options: [["smooth", "平滑 [1,1,1,1,1]/5"], ["edge", "差分 [-1,-1,0,1,1]"], ["peak", "找尖峰 [-1,-1,4,-1,-1]"]] },
+      { id: "pool", label: "池化步长", min: 1, max: 4, step: 1, value: 2 },
+      { id: "seed", label: "换一条特征向量", button: true },
+    ],
+    note: "一条模拟的 162 维向量（前 34 维模拟 ZCR+Chroma+MFCC+RMS，后 128 维模拟梅尔频谱，带几个尖峰）。现场做 padding='same' 的一维卷积 + ReLU + MaxPooling(5)，显示每层长度。这就是原网络第一块对“一个通道”做的事。",
+    render(svg, v) {
+      const r = K.rng(31 + v.seed * 7), n = 162, x = [];
+      for (let i = 0; i < n; i++) x.push(i < 34 ? 0.6 * K.randn(r) : Math.exp(-(i - 34) / 40) * 1.5 + 0.2 * K.randn(r) + (r() < 0.04 ? 2 : 0));
+      const ks = { smooth: [0.2, 0.2, 0.2, 0.2, 0.2], edge: [-1, -1, 0, 1, 1], peak: [-1, -1, 4, -1, -1] }[v.kern];
+      const y = x.map((_, i) => { let s = 0; for (let j = 0; j < 5; j++) { const id = i + j - 2; if (id >= 0 && id < n) s += x[id] * ks[j]; } return Math.max(0, s); });
+      const p = [];
+      for (let i = 0; i < n; i += v.pool) { let m = 0; for (let j = i - 2; j <= i + 2; j++) if (j >= 0 && j < n) m = Math.max(m, y[j]); p.push(m); }
+      const row = (arr, yy, h, lab, color) => {
+        const mx = Math.max(...arr.map(Math.abs)) || 1, w = 580 / n;
+        K.svg(svg, "text", { x: 30, y: yy - 6, "font-size": 12, class: "muted" }, lab);
+        arr.forEach((a, i) => K.svg(svg, "rect", { x: 30 + i * w * (n / arr.length), y: yy + h - (Math.abs(a) / mx) * h, width: Math.max(1, w * (n / arr.length) - 0.5), height: (Math.abs(a) / mx) * h, fill: color }));
+      };
+      row(x, 24, 60, "输入向量（162 维，取绝对值画高度）", "var(--c1)");
+      row(y, 118, 60, "卷积 + ReLU 之后（162 维）", "var(--c3)");
+      row(p, 212, 60, `MaxPooling 之后（${p.length} 维）`, "var(--c2)");
+      const act = y.filter((a) => a > 1e-9).length;
+      return { readout: [
+        { k: "输入长度", v: n },
+        { k: "卷积后长度", v: y.length },
+        { k: "池化后长度", v: p.length },
+        { k: "ReLU 后非零比例", v: Math.round((act / n) * 100) + "%" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

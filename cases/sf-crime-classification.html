@@ -1,0 +1,495 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>旧金山犯罪分类</title>
+<meta name="description" content="Kaggle 案例拆解：用旧金山 12 年、87 万多条警情记录的时间和地点，预测案件属于 39 类中的哪一类；LightGBM、对数损失、置换重要性与 SHAP，以及犯罪数据里的偏见风险。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格 + 地理数据 · 39 类多分类 · 城市公共安全</div>
+  <h1>旧金山犯罪分类：只知道“何时、何地”，能猜出是哪类案件吗</h1>
+  <p class="en">SF-Crime Analysis &amp; Prediction</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">数据清洗</span><span class="tag method">时空可视化</span><span class="tag method">特征工程</span>
+    <span class="tag method">多类对数损失</span><span class="tag method">LightGBM</span><span class="tag method">贝叶斯优化</span>
+    <span class="tag method">置换重要性</span><span class="tag method">部分依赖图</span><span class="tag method">SHAP</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Yannis Pappas</b></span>
+    <span>Kaggle 点赞 <b>481</b>（2026-11 抓取）</span>
+    <span>数据 <b>Kaggle 竞赛 sf-crime</b>（San Francisco Crime Classification）</span>
+    <span><a href="https://www.kaggle.com/code/yannisp/sf-crime-analysis-prediction" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">旧金山 12 年的警情记录</div><p>2003-01-01 到 2015-05-13，每行一起报案：时间、星期、警区、街道地址、经纬度、案件类别。<span data-cell="4">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这起案件属于 39 类中的哪一类</div><p>不是只给一个答案，而是给 39 类各一个<b>概率</b>，用“多类对数损失”打分，越小越好。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">时间、地点特征 + LightGBM</div><p>先比较 6 种算法，选定 LightGBM，用贝叶斯优化调参；再用置换重要性、部分依赖图和 SHAP 解释模型。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">对数损失 2.68 → 2.26</div><p>“按各类比例瞎猜”的基准是 2.68015，最终模型 2.25697，比基准低约 16%。<span data-cell="39">出处</span> 提升有限：只靠时间和地点，本来就很难猜准。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据来自 Kaggle 的 San Francisco Crime Classification 竞赛，原始来源是旧金山市的公开警情数据（SFOpenData）。以下数字均来自作者 notebook 的文字。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">训练集记录（行）</div><div class="v">878,049</div></div>
+        <div class="stat-tile"><div class="k">原始字段</div><div class="v">9</div></div>
+        <div class="stat-tile"><div class="k">案件类别</div><div class="v">39</div></div>
+        <div class="stat-tile"><div class="k">每天案件数中位数</div><div class="v">389</div></div>
+        <div class="stat-tile"><div class="k">重复记录</div><div class="v">2,323</div></div>
+        <div class="stat-tile"><div class="k">坐标错到“北极”</div><div class="v">67</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">行数与时间范围见第 4 格 <span data-cell="4">出处</span>；类别数与占比见第 20 格 <span data-cell="20">出处</span>；每天中位数见第 16 格 <span data-cell="16">出处</span>；重复和错误坐标见第 31 格 <span data-cell="31">出处</span>。</p>
+      <p style="font-size:14px">最常见的三类：盗窃 LARCENY/THEFT <b>19.91%</b>、非刑事 NON-CRIMINAL <b>10.50%</b>、袭击 ASSAULT <b>8.77%</b>。案件最多的警区：Southern 17.87%、Mission 13.67%、Northern 12.00%。<span data-cell="22">出处</span></p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么（作者第 6 格）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>白话含义</th><th>类型</th></tr>
+        <tr><td><code>Dates</code></td><td>报案时间（年月日 时分）</td><td>时间</td></tr>
+        <tr><td><code>Category</code></td><td><b>要预测的答案</b>：案件类别，共 39 种</td><td>类别</td></tr>
+        <tr><td><code>Descript</code></td><td>案件的详细描述（只在训练集里有）</td><td>文字</td></tr>
+        <tr><td><code>DayOfWeek</code></td><td>星期几</td><td>类别</td></tr>
+        <tr><td><code>PdDistrict</code></td><td>所属警区（10 个之一）</td><td>类别</td></tr>
+        <tr><td><code>Resolution</code></td><td>处理结果，如逮捕、无（只在训练集里有）</td><td>类别</td></tr>
+        <tr><td><code>Address</code></td><td>大致街道地址（“某街 xx 号街区”或“A 街 / B 街路口”）</td><td>文字</td></tr>
+        <tr><td><code>X</code> / <code>Y</code></td><td>经度 / 纬度</td><td>数值</td></tr>
+      </table></div>
+      <p class="callout warn" style="font-size:14px">这是“报案和出警记录”，不是“真实发生的全部犯罪”。哪里巡逻多、哪里的人更愿意报警，哪里的记录就多。用它训练出的模型，学到的有一部分是<b>警务活动的模式</b>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="31">
+    <h3>动手试试 A · 对数损失：自信地猜错要付出多大代价 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="35">
+    <h3>动手试试 B · 置换重要性：把一列打乱，看损失涨多少 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的分数（多类对数损失，越小越好）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>模型 / 基准</th><th>对数损失</th><th>出处</th></tr>
+        <tr><td>SGD（默认参数）</td><td>2.86631</td><td><span data-cell="28">第 28 格</span></td></tr>
+        <tr><td>KNN（默认参数）</td><td>23.29263</td><td><span data-cell="28">第 28 格</span></td></tr>
+        <tr><td>随机森林 / AdaBoost / XGBoost / LightGBM（默认）</td><td>2.92716 / 3.58856 / 2.91656 / 2.98336</td><td><span data-cell="28">第 28 格</span></td></tr>
+        <tr><td>SGD 调参后，无法低于</td><td>2.54503</td><td><span data-cell="29">第 29 格</span></td></tr>
+        <tr><td>朴素基准：按各类在训练集中的比例给概率</td><td>2.68015</td><td><span data-cell="31">第 31 格</span></td></tr>
+        <tr><td>参照：当时最好的公开 kernel</td><td>2.29318</td><td><span data-cell="31">第 31 格</span></td></tr>
+        <tr><td>LightGBM 初始模型：交叉验证 / 测试</td><td>2.46799 / 2.49136</td><td><span data-cell="36">第 36 格</span></td></tr>
+        <tr><td>最终 LightGBM（作者写“在训练集上”）</td><td>2.25697</td><td><span data-cell="39">第 39 格</span></td></tr>
+        <tr><td>去掉 Minute 特征 / 去掉 DayOfWeek</td><td>2.53743 / 2.25900</td><td><span data-cell="39">第 39 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">作者第 39 格写最终分数 2.25697 是“on the training set”。如果真是在训练数据上算的，它和在测试集上算的基准 2.68015 不能直接比；如果是竞赛提交得分，那就是写错了措辞。源码里看不出是哪一种，课堂上可以把它当作一个“读结果要看清在哪份数据上算的”的例子。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给定时间和地点，各类警情的可能性有多大，可用于警力和社工资源的排班、报警电话的初步分流。</li>
+        <li><b>同类问题：</b>110 / 911 警情分类、城市投诉（12345）分类、交通事故类型预测、火灾风险地图。</li>
+        <li><b>可迁移的套路：</b>先算“按比例瞎猜”的基准 → 选对评价指标（概率预测用对数损失）→ 用置换重要性和 SHAP 检查模型学到的东西是否合理。</li>
+        <li><b>伦理提醒：</b>犯罪记录反映的是“哪里被报案、哪里被巡逻”。如果按模型把更多警力派到某些街区，那里记录更多，模型更认定那里“危险”，形成<b>反馈循环</b>，可能把对少数族裔社区的过度执法固化下来。时间、地点和犯罪类型“相关”，不等于这个地方的人“更会犯罪”。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>去重、按警区平均值修正错误坐标 <span data-cell="15">第 15 格</span></li>
+        <li>时间拆成年 / 月 / 日 / 时 / 分 / 星期 / 天数，地址提取“是否街区” <span data-cell="32">第 32 格</span></li>
+        <li>置换重要性 eli5 <span data-cell="35">第 35 格</span></li>
+        <li>LightGBM + 贝叶斯优化调参 <span data-cell="36">第 36 格</span> <span data-cell="38">第 38 格</span></li>
+        <li>部分依赖图 pdpbox、SHAP force plot <span data-cell="40">第 40 格</span> <span data-cell="44">第 44 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者发现“分钟 Minute”是最重要的特征之一，去掉它损失从 2.26 升到 2.54。案件发生在第几分钟，为什么会和案件类型有关？会不会是不同类型案件的“记录习惯”不同（比如有的整点、半点填写）？</li>
+      <li>作者把 Descript（案件描述）和 Resolution（处理结果）从训练数据里删掉了。为什么必须删？如果留着会怎样？</li>
+      <li>如果警察局用这个模型决定“晚上往哪个街区多派人”，可能出现什么反馈循环？怎样设计才能减少偏见？</li>
+      <li>KNN 的对数损失是 23.29，比其他模型差十倍。从对数损失的定义想一想：一个模型可能犯了什么样的错误才会得这么差的分？</li>
+      <li>作者建议把小时编码成钟面上的坐标（sin/cos）。为什么 23 点和 0 点“相差 23”是不合理的？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Yannis Pappas，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Kaggle 竞赛 San Francisco Crime Classification（源自 SF OpenData）。
+</footer>
+</main>
+
+<script src="nb/sf-crime-classification.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const T = (svg, x, y, s, o) => K.svg(svg, "text", Object.assign({ x, y, "font-size": 13 }, o || {}), s);
+  const fade = (els, ctx, ms) => { els.forEach((e) => (e.style.opacity = 0)); return ctx.tween(ms || 500, (t) => els.forEach((e) => (e.style.opacity = t))); };
+  /* 一个简化的“城市”网格：示意用 */
+  function cityPoints(seed, n, hot) {
+    const r = K.rng(seed), P = [];
+    for (let i = 0; i < n; i++) {
+      const h = hot[Math.floor(r() * hot.length)];
+      P.push([h[0] + K.randn(r) * h[2], h[1] + K.randn(r) * h[2]]);
+    }
+    return P;
+  }
+
+  const steps = [
+    {
+      title: "数据的时间范围和字段", kicker: "第 3–8 格 · 认识数据",
+      html: `<p>作者先看日期范围：2003 年 1 月 1 日到 2015 年 5 月 13 日，训练集 878,049 行、9 个字段（第 4 格）。</p><p>大部分列是文字（object），后面要变成数字。目标列 <code>Category</code> 有 39 种值。注意 <code>Descript</code> 和 <code>Resolution</code> 只在训练集里有，测试时拿不到，后面会被删掉。</p>`,
+      cells: [3, 5, 7], highlight: ["describe()['first']", "train.dtypes"],
+      draw(svg, ctx) {
+        T(svg, 40, 40, "2003-01-01", { "font-weight": 700 }); T(svg, 600, 40, "2015-05-13", { "font-weight": 700 });
+        K.svg(svg, "line", { x1: 60, y1: 60, x2: 660, y2: 60, stroke: "var(--ink-3)", "stroke-width": 2 });
+        const cnt = T(svg, 360, 110, "", { "text-anchor": "middle", "font-size": 26, "font-weight": 700, fill: "var(--accent)" });
+        T(svg, 360, 136, "条报案记录（训练集）", { "text-anchor": "middle", class: "muted" });
+        const cols = ["Dates", "Category", "Descript", "DayOfWeek", "PdDistrict", "Resolution", "Address", "X", "Y"];
+        const nodes = cols.map((c, i) => {
+          const leak = c === "Descript" || c === "Resolution", y = c === "Category";
+          const g = K.node(svg, 20 + i * 76, 190, 70, 46, c, { fs: 11, fill: y ? "color-mix(in srgb, var(--accent) 22%, var(--panel))" : leak ? "color-mix(in srgb, var(--warn) 18%, var(--panel))" : "var(--panel-2)", stroke: y ? "var(--accent)" : leak ? "var(--warn)" : "var(--line)" });
+          g.style.opacity = 0; return g;
+        });
+        T(svg, 20, 270, "蓝框 = 要预测的答案；黄框 = 测试集里没有，不能当特征", { "font-size": 12, class: "muted" });
+        const dot = K.svg(svg, "circle", { cx: 60, cy: 60, r: 7, fill: "var(--accent)" });
+        ctx.tween(1500, (t) => { dot.setAttribute("cx", 60 + 600 * t); cnt.textContent = Math.round(878049 * t).toLocaleString(); })
+          .then(async (ok) => { if (!ok) return; for (const n of nodes) { if (!(await ctx.tween(150, (t) => (n.style.opacity = t)))) return; } });
+      },
+    },
+    {
+      title: "去重，把“北极”的坐标拉回旧金山", kicker: "第 9–15 格 · 数据清洗",
+      html: `<p>两处脏数据：</p><ul class="tight"><li><b>2,323 条重复记录</b>，直接删除</li><li>有些记录的纬度 Y = 90（北极！）、经度 X = −120.5，在世界地图上一画就看出来了（第 11 格）。作者把这些坐标改成空值，再用<b>同一警区所有案件的平均坐标</b>填回去（第 15 格）</li></ul><p>按警区分组填补，比用全市平均更合理：至少点会落在它所属的区域里。</p>`,
+      cells: [9, 11, 13, 15], highlight: ["drop_duplicates", "'Y': 90.0", "SimpleImputer(strategy='mean')"],
+      draw(svg, ctx) {
+        const dist = [[220, 220, "Southern"], [330, 170, "Mission"], [450, 230, "Bayview"]];
+        dist.forEach((d, i) => { K.svg(svg, "circle", { cx: d[0], cy: d[1], r: 55, fill: `color-mix(in srgb, ${K.colors[i]} 12%, var(--panel))`, stroke: K.colors[i] }); T(svg, d[0], d[1] + 72, d[2], { "text-anchor": "middle", "font-size": 12 }); });
+        const r = K.rng(3), pts = [];
+        for (let i = 0; i < 45; i++) { const d = dist[i % 3]; pts.push(K.svg(svg, "circle", { cx: d[0] + K.randn(r) * 18, cy: d[1] + K.randn(r) * 18, r: 3.5, fill: K.colors[i % 3] })); }
+        T(svg, 600, 30, "北极 (Y=90)", { "font-size": 12, fill: "var(--bad)" });
+        const bad = [0, 1, 2].map((i) => K.svg(svg, "circle", { cx: 620 + i * 20, cy: 50, r: 6, fill: "var(--bad)" }));
+        const lab = T(svg, 20, 320, "错误坐标 → 设为空 → 用所属警区的平均坐标填回（示意）", { "font-size": 12, class: "muted" });
+        ctx.wait(700).then((ok) => ok && ctx.tween(1600, (t) => bad.forEach((b, i) => { b.setAttribute("cx", K.lerp(620 + i * 20, dist[i][0], t)); b.setAttribute("cy", K.lerp(50, dist[i][1], t)); b.setAttribute("r", 6 + 3 * Math.sin(t * Math.PI)); })))
+          .then((ok) => ok && ctx.tween(400, (t) => bad.forEach((b) => b.style.fill = "var(--good)")));
+      },
+    },
+    {
+      title: "每天多少起案件？星期几有区别吗？", kicker: "第 16–19 格 · 时间分布",
+      html: `<p>作者统计每天的案件数，中位数 389 起，标准差 48.51（第 16 格）。再按星期几统计占比，发现<b>各天差别不大</b>，所以他预计“星期几”在预测中作用不大（第 18 格）。</p><p>后面第 39 格的结果印证了这一点：去掉 DayOfWeek，损失只从 2.25697 变成 2.25900。</p>`,
+      cells: [17, 19], highlight: ["data.median()", "DayOfWeek"],
+      draw(svg, ctx) {
+        const days = ["一", "二", "三", "四", "五", "六", "日"], v = [14.0, 14.3, 14.6, 14.3, 15.3, 14.2, 13.3];
+        const bars = days.map((d, i) => {
+          T(svg, 100 + i * 80, 300, "周" + d, { "text-anchor": "middle" });
+          return K.svg(svg, "rect", { x: 72 + i * 80, y: 280, width: 56, height: 0, rx: 4, fill: "var(--c6)", opacity: 0.8 });
+        });
+        T(svg, 40, 30, "每个星期几的案件占比：差不多高（示意）", { "font-weight": 700 });
+        ctx.tween(1200, (t) => bars.forEach((b, i) => { const h = v[i] * 14 * t; b.setAttribute("height", h); b.setAttribute("y", 280 - h); }));
+      },
+    },
+    {
+      title: "39 类案件：多的多、少的少", kicker: "第 20–21 格 · 目标分布",
+      html: `<p>39 个类别非常不均衡：最多的盗窃占 19.91%，然后是非刑事 10.50%、袭击 8.77%（第 20 格），而有些类别（如作者后面删掉的 TREA，“擅入工业用地”）只有极少几条。</p><p>这意味着模型很难学好稀有类别，也意味着“按比例瞎猜”就能拿到不算太差的分，这就是后面的“朴素基准”。</p>`,
+      cells: [21], highlight: ["Category"],
+      draw(svg, ctx) {
+        const names = ["盗窃", "其他", "非刑事", "袭击", "毒品", "车辆盗窃", "破坏", "令状", "入室盗窃", "可疑", "…其余 29 类"];
+        const v = [19.91, 14, 10.5, 8.77, 6, 6, 5, 4.8, 4.2, 3.6, 17.2];
+        const els = K.bars(svg, { x: 20, y: 20, w: 680, h: 300 }, names.map((n, i) => ({ label: n, value: v[i], color: i === 0 ? "var(--c6)" : i === 10 ? "var(--ink-3)" : "var(--c1)" })), { horizontal: true, labelWidth: 100, fmt: (x) => x.toFixed(1) + "%", gap: 5 });
+        T(svg, 700, 335, "只有前 3 类和末尾合计是原文数字，其余为示意", { "text-anchor": "end", "font-size": 11, class: "muted" });
+        const W = els.map((e) => +e.rect.getAttribute("width"));
+        els.forEach((e) => e.rect.setAttribute("width", 0));
+        ctx.tween(1300, (t) => els.forEach((e, i) => e.rect.setAttribute("width", W[i] * t)));
+      },
+    },
+    {
+      title: "空间：警区和犯罪热点", kicker: "第 22–25 格 · 地图",
+      html: `<p>作者下载旧金山警区的边界文件，把每个警区每天的平均案件数画成深浅不同的红色（第 23 格）：Southern、Mission、Northern 三个警区最多。</p><p>再随机挑 9 类案件画<b>核密度图</b>（像天气预报的降雨云图，颜色越深越密集）。大部分案件集中在城市东北角，但不同类别在城市其他地方的分布不一样（第 24 格），说明<b>地点</b>对判断案件类型有用。</p>`,
+      cells: [23, 25], highlight: ["inc_per_day", "kdeplot"],
+      draw(svg, ctx) {
+        const A = cityPoints(1, 150, [[520, 90, 40], [430, 170, 50]]), B = cityPoints(2, 150, [[250, 230, 60], [520, 100, 30]]);
+        K.svg(svg, "rect", { x: 30, y: 20, width: 320, height: 300, rx: 10, fill: "var(--panel-2)", stroke: "var(--line)" });
+        K.svg(svg, "rect", { x: 370, y: 20, width: 320, height: 300, rx: 10, fill: "var(--panel-2)", stroke: "var(--line)" });
+        T(svg, 40, 42, "类别甲（示意）", { "font-weight": 700, fill: "var(--c6)" });
+        T(svg, 380, 42, "类别乙（示意）", { "font-weight": 700, fill: "var(--c1)" });
+        const pa = A.map((p) => K.svg(svg, "circle", { cx: K.clamp(p[0] - 300, 40, 340), cy: K.clamp(p[1] + 40, 50, 310), r: 0, fill: "var(--c6)", opacity: 0.4 }));
+        const pb = B.map((p) => K.svg(svg, "circle", { cx: K.clamp(p[0] + 100, 380, 680), cy: K.clamp(p[1], 50, 310), r: 0, fill: "var(--c1)", opacity: 0.4 }));
+        T(svg, 360, 336, "同一座城市，不同类别的“热点”位置不同 → 坐标是有用的特征", { "text-anchor": "middle", "font-size": 12, class: "muted" });
+        ctx.tween(1500, (t) => { pa.forEach((c, i) => c.setAttribute("r", K.clamp(t * 150 - i, 0, 1) * 5)); pb.forEach((c, i) => c.setAttribute("r", K.clamp(t * 150 - i, 0, 1) * 5)); });
+      },
+    },
+    {
+      title: "时间：不同案件的高峰时段不同", kicker: "第 26–27 格 · 时间规律",
+      html: `<p>作者画了 5 类案件每小时的平均案件数（第 27 格）。观察（第 26 格）：</p><ul class="tight"><li>卖淫类在傍晚到整夜最多</li><li>赌博类从深夜持续到早上</li><li>入室盗窃在清晨到下午最多</li></ul><p>所以<b>几点钟</b>也是判断案件类型的重要线索。动画曲线是示意形状。</p>`,
+      cells: [27], highlight: ["groupby(['Hour', 'Date', 'Category']"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 20, w: 620, h: 260 }, [0, 23], [0, 1], { xticks: 6, yticks: 0, xlabel: "小时" });
+        const f = [(h) => 0.2 + 0.7 * Math.exp(-Math.pow(((h - 22 + 24) % 24) - 2, 2) / 18), (h) => 0.15 + 0.6 * Math.exp(-Math.pow(((h + 4) % 24) - 4, 2) / 10), (h) => 0.2 + 0.6 * Math.exp(-Math.pow(h - 12, 2) / 20)];
+        const nm = ["卖淫类", "赌博类", "入室盗窃"], col = ["var(--c5)", "var(--c4)", "var(--c6)"];
+        const paths = f.map((fn, k) => { T(svg, 560, 40 + k * 20, "— " + nm[k], { fill: col[k], "font-weight": 700, "font-size": 12 }); return K.svg(svg, "path", { d: "", fill: "none", stroke: col[k], "stroke-width": 2.5 }); });
+        ctx.tween(1800, (t) => paths.forEach((p, k) => { let d = ""; for (let h = 0; h <= 23 * t; h += 0.25) d += (d ? "L" : "M") + ax.sx(h) + "," + ax.sy(f[k](h)); p.setAttribute("d", d); }));
+      },
+    },
+    {
+      title: "六种算法初试，用对数损失打分", kicker: "第 28–29 格 · 选模型",
+      html: `<p>先用默认参数试 6 种算法（第 28 格的表）：SGD 2.87、随机森林 2.93、XGBoost 2.92、LightGBM 2.98、AdaBoost 3.59，KNN 竟然是 23.29。</p><p>打分用的是<b>多类对数损失</b>：模型给真实类别的概率越高，罚得越少；如果模型非常自信地说“绝不可能是这一类”，结果偏偏是，罚分会非常大。KNN 23.29 很可能就是因为它常常给真实类别 0 概率（邻居里一个都没有这一类）。</p><p>作者最后选了 <b>LightGBM</b>：一种梯度提升树，一棵接一棵地种树，每棵新树专门修正前面的错。</p>`,
+      cells: [28, 29], highlight: ["Logloss", "23.29263", "LIghtGBM"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 20, w: 320, h: 260 }, [0, 1], [0, 6], { xlabel: "给真实类别的概率 p", ylabel: "罚分 −ln p" });
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        const dot = K.svg(svg, "circle", { cx: 0, cy: 0, r: 6, fill: "var(--accent)" });
+        const lab = T(svg, 200, 50, "", { "font-weight": 700 });
+        const algos = [["SGD", 2.86631], ["随机森林", 2.92716], ["XGBoost", 2.91656], ["LightGBM", 2.98336], ["AdaBoost", 3.58856], ["KNN", 23.29263]];
+        T(svg, 420, 30, "原文分数（越小越好）", { "font-weight": 700 });
+        const rows = algos.map((a, i) => { const g = K.svg(svg, "g"); K.svg(g, "text", { x: 420, y: 62 + i * 34, "font-size": 13 }, a[0]); K.svg(g, "rect", { x: 500, y: 48 + i * 34, width: Math.min(a[1], 6) * 30, height: 20, rx: 3, fill: a[0] === "KNN" ? "var(--bad)" : a[0] === "LightGBM" ? "var(--accent)" : "var(--c1)" }); K.svg(g, "text", { x: 505 + Math.min(a[1], 6) * 30, y: 63 + i * 34, "font-size": 12 }, a[1].toFixed(2) + (a[1] > 6 ? " ✂" : "")); g.style.opacity = 0; return g; });
+        ctx.tween(1600, (t) => {
+          let d = ""; for (let p = 0.0025; p <= Math.max(0.0025, t); p += 0.005) d += (d ? "L" : "M") + ax.sx(p) + "," + ax.sy(Math.min(6, -Math.log(p)));
+          path.setAttribute("d", d);
+          const p = 1 - 0.995 * t; dot.setAttribute("cx", ax.sx(p)); dot.setAttribute("cy", ax.sy(Math.min(6, -Math.log(p)))); lab.textContent = `p = ${p.toFixed(2)} → 罚 ${(-Math.log(p)).toFixed(2)}`;
+        }).then(async (ok) => { if (!ok) return; for (const r of rows) { if (!(await ctx.tween(200, (t) => (r.style.opacity = t)))) return; } });
+      },
+    },
+    {
+      title: "两条基准线：瞎猜得几分，最好能得几分", kicker: "第 30–31 格 · 基准",
+      html: `<p>作者设了两条参照线：</p><ul class="tight"><li><b>朴素基准</b>：不看任何特征，每起案件都按“各类在训练集里的比例”给概率（盗窃永远给 19.91%……），得分 <b>2.68015</b></li><li><b>最好水平</b>：当时最好的公开 kernel，得分 <b>2.29318</b>，作者把它当作“贝叶斯错误率”（理论上能做到的最好）的近似</li></ul><p>两者只差 0.39，作者的判断是：这是一个“提升空间很小的难题”。也说明前面几个默认模型（2.87 以上）连“瞎猜”都没打过。</p>`,
+      cells: [30, 31], highlight: ["naive_vals", "2.68015", "2.29318"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 60, w: 600, h: 60 }, [2.2, 3.0], [0, 1], { xticks: 8, yticks: 0, xlabel: "对数损失（越往左越好）" });
+        const marks = [[2.68015, "朴素基准", "var(--ink-3)"], [2.29318, "最好公开 kernel", "var(--good)"], [2.86631, "SGD 默认", "var(--c1)"], [2.54503, "SGD 调参极限", "var(--c4)"], [2.25697, "作者最终", "var(--accent)"]];
+        const els = marks.map((m, i) => {
+          const g = K.svg(svg, "g"), x = ax.sx(m[0]);
+          K.svg(g, "line", { x1: x, x2: x, y1: 60, y2: 120, stroke: m[2], "stroke-width": 3 });
+          K.svg(g, "text", { x, y: 160 + (i % 3) * 22, "text-anchor": "middle", "font-size": 12, fill: m[2], "font-weight": 700 }, `${m[1]} ${m[0]}`);
+          g.style.opacity = 0; return g;
+        });
+        T(svg, 60, 270, "瞎猜到最好之间只有 0.39 的空间：只靠时间和地点，很难精确判断是哪类案件", { "font-size": 13 });
+        (async () => { for (const e of els) { if (!(await ctx.tween(400, (t) => (e.style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      title: "特征工程：从时间和地址里挖线索", kicker: "第 32–33 格 · 特征工程",
+      html: `<p>原始字段太少，作者自己造特征（第 32 格）：</p><ul class="tight"><li>从 <code>Dates</code> 拆出：年、月、日、小时、<b>分钟</b>、星期、距第一天的天数 <code>n_days</code></li><li>从 <code>Address</code> 提取：地址里有没有“Block”（街区）。没有就是“A 街 / B 街”路口</li></ul><p>然后删掉原始日期、地址，以及测试集里没有的 <code>Descript</code>、<code>Resolution</code>（第 33 格）。后者很关键：它们几乎直接写出了答案，留着就是<b>数据泄漏</b>。</p>`,
+      cells: [32, 33], highlight: ["data['Minute']", "data['Block']", "drop(columns=['Descript','Resolution']"],
+      draw(svg, ctx) {
+        K.node(svg, 20, 60, 200, 50, "2015-05-13 23:53:00", { fs: 13, bold: true });
+        K.node(svg, 20, 200, 200, 50, "OAK ST / LAGUNA ST", { fs: 12, bold: true });
+        const outs = [["Year", "2015"], ["Month", "5"], ["Day", "13"], ["Hour", "23"], ["Minute", "53"], ["DayOfWeek", "2"], ["n_days", "4515"]];
+        const els = outs.map((o, i) => { const g = K.node(svg, 300 + (i % 4) * 100, 30 + Math.floor(i / 4) * 64, 90, 52, o[0] + "\n" + o[1], { fs: 12, fill: "color-mix(in srgb, var(--c1) 12%, var(--panel))", stroke: "var(--c1)" }); g.style.opacity = 0; return g; });
+        const blk = K.node(svg, 300, 200, 190, 52, "Block = False\n（路口，不是街区）", { fs: 12, fill: "color-mix(in srgb, var(--c2) 12%, var(--panel))", stroke: "var(--c2)" });
+        blk.style.opacity = 0;
+        const a1 = K.arrow(svg, 220, 85, 295, 85), a2 = K.arrow(svg, 220, 225, 295, 225);
+        a1.style.opacity = a2.style.opacity = 0;
+        T(svg, 20, 310, "示例记录是示意，n_days 为假设值", { "font-size": 12, class: "muted" });
+        (async () => {
+          if (!(await ctx.tween(300, (t) => (a1.style.opacity = t)))) return;
+          for (const e of els) { if (!(await ctx.tween(180, (t) => (e.style.opacity = t)))) return; }
+          if (!(await ctx.tween(300, (t) => (a2.style.opacity = t)))) return;
+          await ctx.tween(400, (t) => (blk.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "置换重要性：哪列真的有用", kicker: "第 34–35 格 · 特征选择",
+      html: `<p>最后得到 11 个特征。哪些值得保留？作者用<b>置换重要性</b>（第 34 格）：模型训练好后，把验证集里某一列的值<b>随机打乱</b>，其他列不动，看损失变差多少。变差越多，说明模型越依赖这一列。</p><p>好处是不用为每一列重新训练模型。作者的结论是：所有特征都有正面作用，一个也不删。下面的实验 B 可以亲手打乱一列试试。</p>`,
+      cells: [35], highlight: ["PermutationImportance", "LGBMClassifier"],
+      draw(svg, ctx) {
+        const cols = ["Hour", "Minute", "X", "Y", "Day"];
+        const r = K.rng(8), data = [];
+        for (let i = 0; i < 6; i++) data.push(cols.map(() => Math.floor(r() * 60)));
+        cols.forEach((c, j) => T(svg, 60 + j * 80 + 35, 40, c, { "text-anchor": "middle", "font-weight": 700 }));
+        const cells = data.map((row, i) => row.map((v, j) => { K.svg(svg, "rect", { x: 60 + j * 80, y: 52 + i * 34, width: 72, height: 28, rx: 3, fill: j === 1 ? "color-mix(in srgb, var(--warn) 18%, var(--panel))" : "var(--panel-2)", stroke: "var(--line)" }); return T(svg, 96 + j * 80, 71 + i * 34, String(v), { "text-anchor": "middle" }); }));
+        T(svg, 480, 80, "打乱 Minute 这一列", { "font-weight": 700, fill: "var(--warn)" });
+        const lossT = T(svg, 480, 130, "损失：2.26", { "font-size": 18, "font-weight": 700 });
+        T(svg, 480, 160, "（原文：去掉 Minute 损失升到 2.54）", { "font-size": 12, class: "muted" });
+        (async () => {
+          for (let k = 0; k < 8; k++) {
+            if (!(await ctx.wait(220))) return;
+            const vals = data.map((row) => row[1]).sort(() => r() - 0.5);
+            cells.forEach((row, i) => (row[1].textContent = String(vals[i])));
+            lossT.textContent = "损失：" + (2.26 + (0.28 * (k + 1)) / 8).toFixed(2);
+          }
+          lossT.style.fill = "var(--bad)";
+        })();
+      },
+    },
+    {
+      title: "LightGBM + 贝叶斯优化调参", kicker: "第 36–38 格 · 建模",
+      html: `<p>初始 LightGBM（早停 10 轮）：交叉验证 2.46799，测试集 2.49136（第 36 格）。</p><p>调参没用网格搜索，而用<b>贝叶斯优化</b>：它会记住前面试过的参数和得分，猜“下一组参数试哪里最可能更好”，比盲目地一格一格试省时间。作者调了两轮，最终参数是 <code>num_leaves=41</code>、<code>learning_rate=0.4</code>、<code>max_bin=465</code> 等，然后在全部训练数据上训练 100 轮（第 38 格）。</p><p>小瑕疵：第 38 格开头有一行 <code>lgb.Dataset(train, label=y, …)</code> 用的是旧的 y、还没做特征工程的 train，随后被覆盖，是一行无用代码。</p>`,
+      cells: [36, 38], highlight: ["Bayesian optimization", "'num_leaves': 41", "lgb.train(params, train_data, 100)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [10, 50], [2.2, 2.6], { xlabel: "num_leaves（示意）", ylabel: "验证损失" });
+        const f = (x) => 2.27 + 0.0004 * Math.pow(x - 41, 2) + 0.02 * Math.sin(x / 3);
+        let d = ""; for (let x = 10; x <= 50; x += 0.5) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(f(x));
+        K.svg(svg, "path", { d, fill: "none", stroke: "var(--line)", "stroke-width": 2, "stroke-dasharray": "4 4" });
+        const tries = [15, 45, 30, 38, 42, 40, 41];
+        (async () => {
+          for (let k = 0; k < tries.length; k++) {
+            const x = tries[k];
+            K.svg(svg, "circle", { cx: ax.sx(x), cy: ax.sy(f(x)), r: 6, fill: k === tries.length - 1 ? "var(--good)" : "var(--accent)" });
+            T(svg, ax.sx(x), ax.sy(f(x)) - 10, String(k + 1), { "text-anchor": "middle", "font-size": 11 });
+            if (!(await ctx.wait(380))) return;
+          }
+          T(svg, 360, 300, "每一次尝试都参考之前的结果，很快靠近最低点", { "text-anchor": "middle" });
+        })();
+      },
+    },
+    {
+      title: "结果与部分依赖：几点钟让哪类案件更可能", kicker: "第 39–40 格 · 评估与解释",
+      html: `<p>最终分数 2.25697，比朴素基准 2.68015 低约 16%，比参照 kernel 2.29318 好约 2%（第 39 格）。作者说这里是“在训练集上”的分数，读的时候要留个心眼（见“结果”一节）。</p><p>置换重要性显示模型最依赖<b>分钟</b>和<b>坐标</b>；去掉 Minute 损失升到 2.53743。<b>部分依赖图</b>只改一个特征（如小时），其他不变，看各类概率怎么变：夜里入室盗窃的概率上升（最多约 2%），白天扰乱秩序类下降，贿赂类几乎不受影响。</p>`,
+      cells: [39, 40], highlight: ["2.25697", "2.53743", "pdp_isolate"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [0, 23], [-0.02, 0.03], { xticks: 6, xlabel: "只改变“小时”，其余不变", ylabel: "概率变化", yfmt: (v) => (v * 100).toFixed(0) + "%" });
+        const fs = [(h) => (h < 6 || h > 21 ? 0.02 : 0.002 * Math.cos(h / 4)), (h) => (h > 8 && h < 18 ? -0.012 : 0.004), () => 0];
+        const nm = ["入室盗窃", "扰乱秩序", "贿赂"], col = ["var(--c6)", "var(--c1)", "var(--ink-3)"];
+        const ps = fs.map((f, k) => { T(svg, 520, 50 + k * 18, "— " + nm[k], { fill: col[k], "font-size": 12, "font-weight": 700 }); return K.svg(svg, "path", { d: "", fill: "none", stroke: col[k], "stroke-width": 2.5 }); });
+        T(svg, 60, 330, "曲线形状为示意，方向依据作者第 39 格的文字描述", { "font-size": 11, class: "muted" });
+        ctx.tween(1600, (t) => ps.forEach((p, k) => { let d = ""; for (let h = 0; h <= 23 * t; h += 0.25) { const hh = Math.floor(h); d += (d ? "L" : "M") + ax.sx(h) + "," + ax.sy(fs[k](hh)); } p.setAttribute("d", d); }));
+      },
+    },
+    {
+      title: "SHAP：解释一条具体记录", kicker: "第 41–46 格 · 单条解释与反思",
+      html: `<p>作者从测试集挑了一条：凌晨 3:30、发生在街区里。模型给“入室盗窃”的概率约 10%（第 45 格）。<b>SHAP</b> 把这 10% 拆开，算出每个特征把概率往上推了多少、往下拉了多少：主要是“在街区里”和“时间（小时、分钟）”把概率推高。</p><p>SHAP 来自博弈论：把一次预测当成一场团队比赛的奖金，公平地分给每个上场的“特征队员”。</p><p>作者的反思（第 46 格）：可以把小时等周期变量画到钟面上（sin/cos），让 23 点和 0 点“挨在一起”；也可以对地址做文本嵌入。</p>`,
+      cells: [42, 44, 46], highlight: ["TreeExplainer", "force_plot"],
+      draw(svg, ctx) {
+        const base = 0.05, items = [["Block = 街区", 0.03], ["Hour = 3", 0.02], ["Minute = 30", 0.01], ["X, Y 坐标", -0.008], ["Year", -0.002]];
+        const ax = K.axes(svg, { x: 60, y: 40, w: 600, h: 40 }, [0, 0.14], [0, 1], { xticks: 7, yticks: 0, xfmt: (v) => (v * 100).toFixed(0) + "%" });
+        T(svg, 60, 30, "“入室盗窃”的概率：从平均水平出发，被各特征推高或拉低（示意）", { "font-weight": 700 });
+        let cur = base;
+        const segs = items.map((it, i) => {
+          const x0 = cur, x1 = cur + it[1]; cur = x1;
+          const g = K.svg(svg, "g");
+          K.svg(g, "rect", { x: ax.sx(Math.min(x0, x1)), y: 110 + i * 38, width: Math.abs(ax.sx(x1) - ax.sx(x0)), height: 26, rx: 3, fill: it[1] > 0 ? "var(--c6)" : "var(--c1)" });
+          K.svg(g, "text", { x: ax.sx(Math.max(x0, x1)) + 8, y: 128 + i * 38, "font-size": 12 }, `${it[0]}  ${it[1] > 0 ? "+" : ""}${(it[1] * 100).toFixed(1)}%`);
+          g.style.opacity = 0; return g;
+        });
+        K.svg(svg, "line", { x1: ax.sx(base), x2: ax.sx(base), y1: 90, y2: 310, stroke: "var(--ink-3)", "stroke-dasharray": "3 3" });
+        T(svg, ax.sx(base), 326, "平均水平", { "text-anchor": "middle", "font-size": 11, class: "muted" });
+        const fin = T(svg, ax.sx(cur), 326, `最终 ≈ ${(cur * 100).toFixed(0)}%`, { "text-anchor": "middle", "font-size": 12, "font-weight": 700, fill: "var(--c6)" });
+        fin.style.opacity = 0;
+        (async () => { for (const s of segs) { if (!(await ctx.tween(350, (t) => (s.style.opacity = t)))) return; } await ctx.tween(300, (t) => (fin.style.opacity = t)); })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：对数损失 ---------- */
+  const CATS = ["盗窃", "非刑事", "袭击", "毒品", "入室盗窃", "其他"];
+  const FREQ = [0.3, 0.17, 0.15, 0.12, 0.08, 0.18];
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "skill", label: "模型真本事（0 = 只会按比例猜）", min: 0, max: 1, step: 0.05, value: 0.3, fmt: (v) => v.toFixed(2) },
+      { id: "conf", label: "模型自信程度（>1 更极端，<1 更保守）", min: 0.3, max: 6, step: 0.1, value: 1, fmt: (v) => v.toFixed(1) },
+      { id: "seed", label: "换一批案件", button: true },
+    ],
+    note: "现场生成 2000 起 6 类模拟案件。模型对每起案件给 6 个概率：真本事越大，越能把概率押到正确的类上；“自信程度”把概率变得更尖或更平。看看：本事一般时，过分自信会让对数损失暴涨（像 KNN 的 23.29），而准确率几乎不变。",
+    render(svg, v) {
+      const r = K.rng(10 + v.seed * 13), N = 2000;
+      let ll = 0, acc = 0, base = 0, ex = null;
+      for (let i = 0; i < N; i++) {
+        let u = r(), y = 0; while (u > FREQ[y] && y < 5) { u -= FREQ[y]; y++; }
+        const hint = r() < v.skill ? y : Math.floor(r() * 6);  // 模型看到的线索：有时是真的，有时是噪声
+        let p = FREQ.map((f, k) => f * (k === hint ? 1 + 6 * v.skill : 1));
+        p = p.map((x) => Math.pow(x, v.conf)); const s = p.reduce((a, b) => a + b, 0); p = p.map((x) => Math.max(1e-15, x / s));
+        ll += -Math.log(p[y]); base += -Math.log(FREQ[y]);
+        if (p.indexOf(Math.max(...p)) === y) acc++;
+        if (i === 7) ex = { p, y };
+      }
+      T(svg, 20, 24, "第 8 起案件：模型给出的 6 个概率（真实类别标红框）", { "font-weight": 700 });
+      ex.p.forEach((q, k) => {
+        const h = q * 220;
+        K.svg(svg, "rect", { x: 40 + k * 95, y: 260 - h, width: 70, height: h, rx: 4, fill: k === ex.y ? "var(--c6)" : "var(--c1)", opacity: 0.85 });
+        if (k === ex.y) K.svg(svg, "rect", { x: 36 + k * 95, y: 36, width: 78, height: 228, rx: 6, fill: "none", stroke: "var(--c6)", "stroke-width": 2 });
+        T(svg, 75 + k * 95, 282, CATS[k], { "text-anchor": "middle", "font-size": 12 });
+        T(svg, 75 + k * 95, 255 - h, (q * 100).toFixed(q < 0.01 ? 2 : 0) + "%", { "text-anchor": "middle", "font-size": 11 });
+      });
+      T(svg, 20, 315, `这起案件的罚分 = −ln(${ex.p[ex.y].toFixed(3)}) = ${(-Math.log(ex.p[ex.y])).toFixed(2)}`, { "font-size": 13 });
+      return { readout: [
+        { k: "平均对数损失", v: (ll / N).toFixed(3), color: ll / N > base / N ? "var(--bad)" : "var(--good)" },
+        { k: "按比例瞎猜的基准", v: (base / N).toFixed(3), color: "var(--ink-3)" },
+        { k: "准确率（最大概率猜对）", v: ((acc / N) * 100).toFixed(1) + "%" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：置换重要性 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "wh", label: "案件类型受“小时”影响的程度（模拟设定）", min: 0, max: 1, step: 0.05, value: 0.7, fmt: (v) => v.toFixed(2) },
+      { id: "wl", label: "案件类型受“地点”影响的程度（模拟设定）", min: 0, max: 1, step: 0.05, value: 0.4, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "重新生成并训练", button: true },
+    ],
+    note: "现场生成 4000 起 3 类模拟案件，特征有小时、地点（6 个区）、星期几（与类型无关）。在前 3000 条上训练一个朴素贝叶斯分类器（按各特征的频率表算概率），在后 1000 条上算对数损失；再把某一列打乱重算，损失上涨越多，说明越重要。",
+    render(svg, v) {
+      const r = K.rng(77 + v.seed * 19), N = 4000, D = [];
+      for (let i = 0; i < N; i++) {
+        const h = Math.floor(r() * 24), loc = Math.floor(r() * 6), dow = Math.floor(r() * 7);
+        const night = h < 6 || h >= 20 ? 1 : 0;
+        let w = [1, 1, 1];
+        w[0] += 3 * v.wh * (1 - night); w[1] += 3 * v.wh * night;
+        w[2] += 3 * v.wl * (loc < 2 ? 1 : 0); w[0] += 1.5 * v.wl * (loc >= 4 ? 1 : 0);
+        const s = w[0] + w[1] + w[2]; let u = r() * s, y = 0; while (u > w[y]) { u -= w[y]; y++; }
+        D.push([Math.floor(h / 3), loc, dow, y]);
+      }
+      const tr = D.slice(0, 3000), te = D.slice(3000);
+      const sizes = [8, 6, 7];
+      const prior = [1, 1, 1], tab = sizes.map((s) => [0, 1, 2].map(() => new Array(s).fill(1)));
+      tr.forEach((d) => { prior[d[3]]++; for (let f = 0; f < 3; f++) tab[f][d[3]][d[f]]++; });
+      const tot = [0, 1, 2].map((c) => tab[0][c].reduce((a, b) => a + b, 0));
+      const loss = (rows) => rows.reduce((s, d) => {
+        const lp = [0, 1, 2].map((c) => Math.log(prior[c]) + [0, 1, 2].reduce((a, f) => a + Math.log(tab[f][c][d[f]] / (tot[c] - 1 + sizes[f])), 0));
+        const m = Math.max(...lp), z = lp.reduce((a, b) => a + Math.exp(b - m), 0);
+        return s - (lp[d[3]] - m - Math.log(z));
+      }, 0) / rows.length;
+      const L0 = loss(te), names = ["小时", "地点", "星期几"];
+      const inc = [0, 1, 2].map((f) => {
+        const col = te.map((d) => d[f]); for (let i = col.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [col[i], col[j]] = [col[j], col[i]]; }
+        return loss(te.map((d, i) => { const e = d.slice(); e[f] = col[i]; return e; })) - L0;
+      });
+      const mx = Math.max(0.05, ...inc);
+      T(svg, 20, 30, `原始验证损失 ${L0.toFixed(3)}；把某一列打乱后，损失上涨：`, { "font-weight": 700 });
+      inc.forEach((x, i) => {
+        T(svg, 110, 92 + i * 70, names[i], { "text-anchor": "end", "font-size": 14 });
+        K.svg(svg, "rect", { x: 120, y: 70 + i * 70, width: Math.max(1, (Math.max(0, x) / mx) * 440), height: 34, rx: 4, fill: i === 2 ? "var(--ink-3)" : "var(--c1)" });
+        T(svg, 128 + (Math.max(0, x) / mx) * 440, 92 + i * 70, (x >= 0 ? "+" : "") + x.toFixed(3), { "font-size": 13 });
+      });
+      T(svg, 20, 300, "“星期几”和类型无关（模拟设定），打乱它损失几乎不变，对应原文“去掉 DayOfWeek 只从 2.25697 变成 2.25900”", { "font-size": 11, class: "muted" });
+      return { readout: [{ k: "验证集对数损失", v: L0.toFixed(3) }, { k: "最重要的特征", v: names[inc.indexOf(Math.max(...inc))] }] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

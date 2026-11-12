@@ -1,0 +1,540 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>圣诞贺卡机械臂</title>
+<meta name="description" content="Kaggle 案例拆解：Santa 2022 官方入门 notebook。一条 8 节机械臂要走遍 257×257 图片的每个像素，既要少转关节，又要让相邻两步颜色变化小。讲清构型、邻居、成本函数和构型空间，并给出一个简单可行解。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">图像像素 · 组合优化 · 机械臂路径规划</div>
+  <h1>圣诞贺卡机械臂：走遍每个像素的最省路线</h1>
+  <p class="en">Getting Started with Santa 2022（The Christmas Card Conundrum）</p>
+  <div class="tags">
+    <span class="tag opt">优化与运筹</span>
+    <span class="tag method">机械臂构型</span><span class="tag method">邻居与一步移动</span><span class="tag method">两项成本（转关节 + 变颜色）</span>
+    <span class="tag method">构型空间</span><span class="tag method">类旅行商问题</span><span class="tag method">逐节转向的可行解</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Ryan Holbrook</b></span>
+    <span>Kaggle 点赞 <b>770</b>（2026-11 抓取）</span>
+    <span>比赛 <b>santa-2022</b></span>
+    <span><a href="https://www.kaggle.com/code/ryanholbrook/getting-started-with-santa-2022" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>题目是什么</h3><div class="big">一张圣诞贺卡 + 一条机械臂</div><p>图片每个点有坐标和颜色；机械臂有 8 节，长 64、32、16、8、4、2、1、1。<span data-cell="7">出处</span></p></div>
+    <div class="card panel"><h3>要找什么</h3><div class="big">一串构型，走遍每个点</div><p>每一步可以把每节转一格，臂尖要经过图片上每个点，从规定的姿势出发，再回到它。<span data-cell="28">出处</span></p></div>
+    <div class="card panel"><h3>怎么算好坏</h3><div class="big">转关节的代价 + 颜色变化的代价</div><p>每步代价 = √(这一步转了几节) + 3 × 相邻两点颜色差。越小越好。<span data-cell="28">出处</span> <span data-cell="29">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">讲透问题 + 一个简单可行解</div><p>作者把问题换成“构型空间”里的最短路，并给出一份能交的基线；他说这个解不高效，大家能做得更好。<span data-cell="39">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>问题长什么样</h2>
+  <p class="lead">这是一道<b>路径规划类优化题</b>：没有要预测的标签。题目给一张图片和一条机械臂的规则，交的是机械臂一步一步的姿势序列。下面的数字都来自 notebook 的文字和代码。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">实例：image.csv 每一列</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th></tr>
+        <tr><td><code>x</code>、<code>y</code></td><td>点的坐标；图片中心是 (0, 0)，用直角坐标而不是数组下标 <span data-cell="2">出处</span></td></tr>
+        <tr><td><code>r</code>、<code>g</code>、<code>b</code></td><td>这个点的颜色（红、绿、蓝三个分量）<span data-cell="5">出处</span></td></tr>
+      </table></div>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr));margin-top:10px">
+        <div class="stat-tile"><div class="k">图片大小</div><div class="v">257 × 257</div></div>
+        <div class="stat-tile"><div class="k">要走遍的点</div><div class="v">66,049</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">257 = 2 × 128 + 1，128 是 8 节臂的总长 <span data-cell="21">出处</span>；66,049 = 257²，与第 52 格遍历的点数一致 <span data-cell="52">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">规则</h3>
+      <ul class="tight">
+        <li><b>构型：</b>每节臂用一个整数向量 (x, y) 表示，长 l 的那节要满足 max(|x|, |y|) = l，所以只能沿边长 2l 的正方形边走，一共 8l 个方向 <span data-cell="15">出处</span> <span data-cell="17">出处</span></li>
+        <li><b>臂尖位置：</b>所有向量加起来 <span data-cell="12">出处</span></li>
+        <li><b>一步：</b>每节可以逆时针转一格、顺时针转一格或不动 <span data-cell="23">出处</span></li>
+        <li><b>起点和终点：</b>[(64,0), (−32,0), (−16,0), (−8,0), (−4,0), (−2,0), (−1,0), (−1,0)]，臂尖在 (0, 0) <span data-cell="28">出处</span></li>
+        <li><b>成本：</b>每步 = √(转了几节) + 3 × |颜色变化| 的总和 <span data-cell="29">出处</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="26">
+    <h3>动手试试 A · 摆弄一条 3 节小臂 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labArm"></div>
+  </div>
+  <div data-at="50">
+    <h3>动手试试 B · 走遍一张小图：换个顺序省多少？ <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labTour"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的内容</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>8 节臂能到达 (2L+1)×(2L+1) 的任意点，L = 128，所以覆盖 257×257 的图片</td><td><span data-cell="21">第 21 格</span></td></tr>
+        <tr><td>“构型”通常比“位置”多得多：同一个点可以由很多种姿势到达</td><td><span data-cell="27">第 27 格</span></td></tr>
+        <tr><td>换个角度看：转关节的代价就是构型空间里的欧氏距离，问题像旅行商问题，但只需要经过对应图片点的那些格点</td><td><span data-cell="35">第 35 格</span></td></tr>
+        <tr><td>简单解每步只转一节、不管颜色，所以不高效，“你很可能做得好得多”</td><td><span data-cell="39">第 39 格</span></td></tr>
+        <tr><td>基线：按坐标顺序逐点走，最后回到起点姿势，写成 submission.csv</td><td><span data-cell="52">第 52 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">基线的总成本由第 54 格算出，在运行输出里，Kaggle 下载的源码不带输出，作者文字里也没写，这里不列。</p>
+      <h3>读代码时注意的地方</h3>
+      <ul class="tight">
+        <li><b>访问顺序是“一列一列、每列从下往上”</b> <span data-cell="52">第 52 格</span>：<code>product(range(-n, n+1), repeat=2)</code> 让 x 在外层、y 在内层，每走完一列都要从最上面回到最下面。实验 B 对比了蛇形顺序。</li>
+        <li><b>颜色代价完全没考虑</b> <span data-cell="39">第 39 格</span>：作者自己说明了；在真实贺卡上，颜色突变的地方会让成本猛增。</li>
+        <li><b>构型空间图的坐标轴标签对调了</b> <span data-cell="34">第 34 格</span>：横轴画的是第 1 节（代码里的 link 0），标签却写 Link 1。两节一样长，图是对称的，所以不影响结论。</li>
+        <li><code>reconfiguration_cost</code> 里定义了 <code>nlinks</code> 却没用到 <span data-cell="29">第 29 格</span>，不影响结果。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能解决：</b>多关节机械臂、绘图仪、激光雕刻机要扫过很多点，既要动作少、又要满足别的代价（如颜色、材料）的路径安排。</li>
+        <li><b>同类问题：</b>工业机器人焊接 / 喷涂顺序、3D 打印喷头路径、PCB 钻孔顺序、望远镜观测排程。</li>
+        <li><b>可迁移的套路：</b>先找到一个好的“状态空间”（这里是构型空间），让“代价”变成空间里的距离，问题就变成熟悉的最短路 / 旅行商问题。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>坐标 ↔ 数组下标转换 <span data-cell="5">第 5 格</span></li>
+        <li>构型、位置与画图 <span data-cell="8">第 8 格</span>、<span data-cell="13">第 13 格</span></li>
+        <li>单节旋转 <code>rotate_link</code> <span data-cell="16">第 16 格</span></li>
+        <li>邻居生成：每节 −1 / 0 / +1 的所有组合 <span data-cell="24">第 24 格</span></li>
+        <li>成本函数 <span data-cell="29">第 29 格</span></li>
+        <li>构型空间可视化 <span data-cell="34">第 34 格</span></li>
+        <li>可行解：<code>get_path_to_point</code>、<code>get_path_to_configuration</code> <span data-cell="38">第 38 格</span>、<span data-cell="44">第 44 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>转关节的代价是 √(转了几节)：一步转 4 节要 2，分 4 步各转 1 节要 4。这条规则在鼓励什么样的动作？</li>
+      <li>为什么同一个位置可以有很多种构型？这对优化是好事还是坏事？</li>
+      <li>颜色代价乘了 3。如果把它改成乘 30，最优路线会怎么变？会不会宁可多转关节也要沿着颜色相近的地方走？</li>
+      <li>作者说这道题像旅行商问题，但又“不需要经过构型空间的每个点”。这一点让它比普通旅行商问题更难还是更容易？</li>
+      <li>工厂里的喷漆机器人，除了动作和颜色，还要考虑哪些代价（时间、油漆用量、安全）？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Ryan Holbrook（Kaggle）。版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验用的是 2–4 节的小臂和代码生成的小图，贺卡原图不在本页。比赛：Santa 2022 - The Christmas Card Conundrum。
+</footer>
+</main>
+
+<script src="nb/santa-robot-arm.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const FAST = /[?&]fast/.test(location.search);
+  if (FAST) { K.tween = (ms, fn, ctx) => { fn(1); return Promise.resolve(!ctx || ctx.alive()); }; K.wait = (ms, ctx) => Promise.resolve(!ctx || ctx.alive()); }
+
+  /* ---------- 第 16、38、44 格的 JS 版本 ---------- */
+  function rotateLink(v, dir) {
+    let [x, y] = v;
+    if (dir === 1) { if (y >= x && y > -x) x -= 1; else if (y > x && y <= -x) y -= 1; else if (y <= x && y < -x) x += 1; else y += 1; }
+    else if (dir === -1) { if (y > x && y >= -x) x += 1; else if (y >= x && y < -x) y += 1; else if (y < x && y <= -x) x -= 1; else y -= 1; }
+    return [x, y];
+  }
+  const rot = (c, i, d) => { const n = c.map((v) => v.slice()); n[i] = rotateLink(n[i], d); return n; };
+  const pos = (c) => c.reduce((p, q) => [p[0] + q[0], p[1] + q[1]], [0, 0]);
+  const llen = (v) => Math.max(Math.abs(v[0]), Math.abs(v[1]));
+  const eq = (a, b) => a[0] === b[0] && a[1] === b[1];
+  function dirOf(u, v) { const cr = u[0] * v[1] - u[1] * v[0]; let d = Math.sign(cr); if (d === 0 && u[0] * v[0] + u[1] * v[1] < 0) d = 1; return d; }
+  function pathToPoint(config, pt) {
+    const path = [config];
+    for (let i = 0; i < config.length; i++) {
+      let link = config[i], base = pos(config.slice(0, i)), relbase = [pt[0] - base[0], pt[1] - base[1]], p = pos(config.slice(0, i + 1)), relpos = [pt[0] - p[0], pt[1] - p[1]], radius = config.slice(i + 1).reduce((r, l) => r + llen(l), 0);
+      if (radius === 1 && relpos[0] === 0 && relpos[1] === 0) { config = rot(config, i, 1); if (eq(pos(config), pt)) { path.push(config); break; } else continue; }
+      while (Math.max(Math.abs(relpos[0]), Math.abs(relpos[1])) > radius) {
+        config = rot(config, i, dirOf(link, relbase)); path.push(config);
+        link = config[i]; base = pos(config.slice(0, i)); relbase = [pt[0] - base[0], pt[1] - base[1]]; p = pos(config.slice(0, i + 1)); relpos = [pt[0] - p[0], pt[1] - p[1]]; radius = config.slice(i + 1).reduce((r, l) => r + llen(l), 0);
+      }
+    }
+    return path;
+  }
+  function pathToConfig(from, to) { const path = [from]; let c = from, g = 0; const key = (x) => x.join(";"); while (key(c) !== key(to) && g++ < 2000) { for (let i = 0; i < c.length; i++) c = rot(c, i, dirOf(c[i], to[i])); path.push(c); } return path; }
+  function square(l) { let v = [l, 0]; const out = [v]; for (let k = 0; k < 8 * l - 1; k++) { v = rotateLink(v, 1); out.push(v); } return out; }
+  function neighbors(c) {
+    const out = [], N = c.length;
+    for (let m = 0; m < Math.pow(3, N); m++) { let x = m, n = c; let moved = 0; for (let i = 0; i < N; i++) { const d = (x % 3) - 1; x = Math.floor(x / 3); if (d) { n = rot(n, i, d); moved++; } } if (moved) out.push({ c: n, moved }); }
+    return out;
+  }
+  const reconf = (a, b) => Math.sqrt(a.reduce((s, v, i) => s + Math.abs(v[0] - b[i][0]) + Math.abs(v[1] - b[i][1]), 0));
+  // 代码生成的小“贺卡”：颜色是坐标的平滑函数加几块色斑
+  function cardColor(x, y, L) {
+    const u = x / L, v = y / L;
+    const blob = (cx, cy, r) => Math.exp(-((u - cx) ** 2 + (v - cy) ** 2) / (r * r));
+    const red = 0.15 + 0.75 * blob(-0.4, 0.4, 0.35) + 0.3 * blob(0.5, -0.5, 0.3);
+    const green = 0.2 + 0.6 * blob(0.3, 0.3, 0.45) + 0.2 * (v + 1) / 2;
+    const blue = 0.25 + 0.5 * blob(-0.3, -0.5, 0.4);
+    return [Math.min(1, red), Math.min(1, green), Math.min(1, blue)];
+  }
+  const rgb = (c) => `rgb(${Math.round(c[0] * 255)},${Math.round(c[1] * 255)},${Math.round(c[2] * 255)})`;
+  // 画臂：config 在网格上
+  function drawArm(g, c, X, Y, color) {
+    let p = [0, 0];
+    c.forEach((v, i) => { const q = [p[0] + v[0], p[1] + v[1]]; K.svg(g, "line", { x1: X(p[0]), y1: Y(p[1]), x2: X(q[0]), y2: Y(q[1]), stroke: color || K.colors[i % 6], "stroke-width": Math.max(2, 6 - i), "stroke-linecap": "round" }); K.svg(g, "circle", { cx: X(p[0]), cy: Y(p[1]), r: 3, fill: "var(--ink)" }); p = q; });
+    K.svg(g, "circle", { cx: X(p[0]), cy: Y(p[1]), r: 5, fill: "var(--bad)" });
+    return p;
+  }
+  function grid(svg, L, box) {
+    const n = 2 * L + 1, s = Math.min(box.w, box.h) / n;
+    const X = (x) => box.x + (x + L + 0.5) * s, Y = (y) => box.y + (L - y + 0.5) * s;
+    for (let x = -L; x <= L; x++) for (let y = -L; y <= L; y++) K.svg(svg, "rect", { x: X(x) - s / 2, y: Y(y) - s / 2, width: s, height: s, fill: "var(--panel-2)", stroke: "var(--line)", "stroke-width": 0.5 });
+    return { X, Y, s };
+  }
+
+  const steps = [
+    {
+      title: "圣诞贺卡难题", kicker: "第 0–1 格 · 认识问题", cells: [0],
+      html: `<p>每年 Kaggle 都会办一场圣诞主题的优化比赛。2022 年的题目叫“圣诞贺卡难题”：一条机械臂要在一张图片上走过每个点，同时让<b>手臂的动作</b>和<b>相邻两步的颜色变化</b>都尽量小。</p><p>作者 Ryan Holbrook 在这份入门 notebook 里介绍问题、写好常用函数、换一个“构型空间”的角度看问题，最后做一份简单的基线提交。动画用一条 3 节小臂在一张代码生成的小图上示意。</p>`,
+      draw(svg, ctx) {
+        const L = 4, box = { x: 190, y: 10, w: 320, h: 320 };
+        const n = 2 * L + 1, s = box.w / n, X = (x) => box.x + (x + L + 0.5) * s, Y = (y) => box.y + (L - y + 0.5) * s;
+        for (let x = -L; x <= L; x++) for (let y = -L; y <= L; y++) K.svg(svg, "rect", { x: X(x) - s / 2, y: Y(y) - s / 2, width: s, height: s, fill: rgb(cardColor(x, y, L)) });
+        const origin = [[2, 0], [-1, 0], [-1, 0]];
+        let path = [origin];
+        for (let x = -L; x <= L; x++) for (let y = -L; y <= L; y++) path = path.concat(pathToPoint(path[path.length - 1], [x, y]).slice(1));
+        const g = K.svg(svg, "g"), trail = K.svg(svg, "path", { d: "", fill: "none", stroke: "#fff", "stroke-width": 1.5, opacity: 0.7 });
+        let d = "";
+        (async () => {
+          for (let k = 0; k < Math.min(path.length, 140); k++) {
+            g.innerHTML = ""; const p = drawArm(g, path[k], X, Y, "#fff");
+            d += (k ? "L" : "M") + X(p[0]) + "," + Y(p[1]); trail.setAttribute("d", d);
+            if (!(await ctx.wait(60))) return;
+          }
+        })();
+        K.svg(svg, "text", { x: 20, y: 40, "font-size": 12, class: "muted" }, "示意：3 节小臂");
+        K.svg(svg, "text", { x: 20, y: 58, "font-size": 12, class: "muted" }, "在 9×9 小图上");
+        K.svg(svg, "text", { x: 20, y: 76, "font-size": 12, class: "muted" }, "按作者的方法逐点走");
+      },
+    },
+    {
+      title: "图片：每个点有坐标和颜色", kicker: "第 2–4 格 · 读题", cells: [2, 3],
+      html: `<p><code>image.csv</code> 里每一行是一个点：坐标 x、y 和颜色 r、g、b。作者特别说明：这里用<b>直角坐标</b>，图片中心是 (0, 0)，而不是数组的行列下标；计分时用的也是这个文件。</p><p>动画在一张 9×9 小图上标出坐标轴，右边是几行“长什么样”的示意（数值来自这张代码生成的小图，不是真实数据）。</p>`,
+      draw(svg, ctx) {
+        const L = 4, gr = grid(svg, L, { x: 20, y: 20, w: 300, h: 300 });
+        const cells = [];
+        for (let x = -L; x <= L; x++) for (let y = -L; y <= L; y++) cells.push([K.svg(svg, "rect", { x: gr.X(x) - gr.s / 2, y: gr.Y(y) - gr.s / 2, width: gr.s, height: gr.s, fill: rgb(cardColor(x, y, L)), opacity: 0 }), x, y]);
+        K.svg(svg, "line", { x1: gr.X(-L) - gr.s / 2, x2: gr.X(L) + gr.s / 2, y1: gr.Y(0), y2: gr.Y(0), stroke: "#fff", "stroke-width": 1.5 });
+        K.svg(svg, "line", { y1: gr.Y(-L) + gr.s / 2, y2: gr.Y(L) - gr.s / 2, x1: gr.X(0), x2: gr.X(0), stroke: "#fff", "stroke-width": 1.5 });
+        K.svg(svg, "text", { x: gr.X(0) + 4, y: gr.Y(0) - 4, "font-size": 11, fill: "#fff" }, "(0,0)");
+        const rows = [[0, 0], [1, 0], [0, 1], [-4, 4]];
+        K.svg(svg, "text", { x: 360, y: 60, "font-size": 13, "font-weight": 700, "font-family": "var(--mono)" }, "   x    y     r     g     b");
+        const tx = rows.map(([x, y], i) => { const c = cardColor(x, y, L); return K.svg(svg, "text", { x: 360, y: 90 + i * 26, "font-size": 13, "font-family": "var(--mono)", opacity: 0 }, `${String(x).padStart(4)} ${String(y).padStart(4)}  ${c.map((v) => v.toFixed(2)).join("  ")}`); });
+        ctx.tween(1000, (t) => cells.forEach(([r], i) => K.set(r, { opacity: K.clamp(t * 1.5 - i / cells.length * 0.5, 0, 1) }))).then((ok) => ok && ctx.tween(800, (t) => tx.forEach((e) => K.set(e, { opacity: t }))));
+      },
+    },
+    {
+      title: "直角坐标 ↔ 数组下标", kicker: "第 5–6 格 · 工具函数", cells: [5], highlight: ["i = (n - 1) // 2 - y", "j = (n - 1) // 2 + x"],
+      html: `<p>图片在电脑里是一个数组，第 i 行第 j 列；而题目用的是以中心为原点、y 向上的直角坐标。作者写了一对互逆的转换函数：</p><p style="text-align:center;font-family:var(--mono)">i = (n−1)/2 − y，　j = (n−1)/2 + x</p><p>还写了表格和数组互相转换的函数，并用 <code>assert</code> 检查“转过去再转回来”是不是原样，这是写工具函数的好习惯。最后用 <code>matshow</code> 画出整张图。</p>`,
+      draw(svg, ctx) {
+        const L = 4, gr = grid(svg, L, { x: 30, y: 20, w: 300, h: 300 });
+        const pts = [[1, 3], [-3, -2], [4, 0]];
+        const mark = K.svg(svg, "rect", { x: 0, y: 0, width: gr.s, height: gr.s, fill: "none", stroke: "var(--bad)", "stroke-width": 3 });
+        const t1 = K.svg(svg, "text", { x: 380, y: 120, "font-size": 18, "font-family": "var(--mono)" }, "");
+        const t2 = K.svg(svg, "text", { x: 380, y: 160, "font-size": 18, "font-family": "var(--mono)", fill: "var(--accent)" }, "");
+        K.svg(svg, "text", { x: 380, y: 60, "font-size": 13, class: "muted" }, "9×9 图片，n = 9，(n−1)/2 = 4");
+        (async () => {
+          for (const [x, y] of pts) {
+            mark.setAttribute("x", gr.X(x) - gr.s / 2); mark.setAttribute("y", gr.Y(y) - gr.s / 2);
+            t1.textContent = `(x, y) = (${x}, ${y})`;
+            t2.textContent = `→ (i, j) = (${4 - y}, ${4 + x})`;
+            if (!(await ctx.wait(1400))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "8 节机械臂：64、32、16……1、1", kicker: "第 7–11 格 · 机械臂", cells: [7, 9], highlight: ["[(64, 0), (32, 0), (16, 0), (8, 0), (4, 0), (2, 0), (1, 0), (1, 0)]"],
+      html: `<p>机械臂有 8 节，长度依次是 <b>64、32、16、8、4、2、1、1</b>，一节接一节用关节连起来。全部伸直时总长 128。</p><p>每一节的长度都是下一节的两倍（最后两节一样长），这样短的几节加起来正好能“补齐”长的那节到达不了的位置。为了讲清楚，作者后面多用 3 节（2、1、1）或 4 节的小臂举例。</p>`,
+      draw(svg, ctx) {
+        const Ls = [64, 32, 16, 8, 4, 2, 1, 1], sc = 4.8;
+        let x = 40; const segs = [];
+        Ls.forEach((l, i) => { segs.push(K.svg(svg, "line", { x1: x, y1: 120, x2: x, y2: 120, stroke: K.colors[i % 6], "stroke-width": 8 - i * 0.7, "stroke-linecap": "round" })); x += l * sc; });
+        K.svg(svg, "text", { x: 40, y: 80, "font-size": 13, class: "muted" }, "全部伸直：64 + 32 + 16 + 8 + 4 + 2 + 1 + 1 = 128");
+        Ls.forEach((l, i) => { const x0 = 40 + Ls.slice(0, i).reduce((a, b) => a + b, 0) * sc; if (l >= 4) K.svg(svg, "text", { x: x0 + (l * sc) / 2, y: 150, "text-anchor": "middle", "font-size": 12 }, l); });
+        K.svg(svg, "text", { x: 40, y: 230, "font-size": 14 }, "后面几节加起来：32+16+8+4+2+1+1 = 64，正好等于第一节");
+        K.svg(svg, "text", { x: 40, y: 260, "font-size": 14 }, "所以总能“补”到第一节够不着的地方");
+        (async () => { let x0 = 40; for (let i = 0; i < Ls.length; i++) { const a = x0, b = x0 + Ls[i] * sc; if (!(await ctx.tween(250, (t) => segs[i].setAttribute("x2", K.lerp(a, b, t))))) return; x0 = b; } })();
+      },
+    },
+    {
+      title: "构型 = 一串向量，位置 = 向量之和", kicker: "第 12–14 格 · 建模", cells: [12, 13], highlight: ["config = [(4, 0), (-2, 2), (-1, 0), (-1, 1)]", "def get_position(config):"],
+      html: `<p>怎么描述机械臂的姿势？作者用每一节的<b>位移向量</b>：第一节从 (0, 0) 出发，每节都从上一节的末端出发。一串向量就叫一个<b>构型</b>（configuration）。</p><p>臂尖的<b>位置</b>就是所有向量加起来。例子：4 节臂 [(4,0), (−2,2), (−1,0), (−1,1)]，位置是 (4−2−1−1, 0+2+0+1) = (0, 3)。动画把四个箭头首尾相接画出来。</p>`,
+      draw(svg, ctx) {
+        const L = 8, gr = grid(svg, L, { x: 20, y: 5, w: 330, h: 330 });
+        const c = [[4, 0], [-2, 2], [-1, 0], [-1, 1]];
+        const g = K.svg(svg, "g");
+        const lab = K.svg(svg, "text", { x: 380, y: 80, "font-size": 15, "font-family": "var(--mono)" }, "");
+        let sum = [0, 0];
+        (async () => {
+          for (let k = 1; k <= c.length; k++) {
+            g.innerHTML = ""; const p = drawArm(g, c.slice(0, k), gr.X, gr.Y);
+            sum = p;
+            K.svg(svg, "text", { x: 380, y: 110 + k * 28, "font-size": 14, "font-family": "var(--mono)", fill: K.colors[(k - 1) % 6] }, `第 ${k} 节 (${c[k - 1].join(", ")})`);
+            lab.textContent = `位置 = (${p.join(", ")})`;
+            if (!(await ctx.wait(700))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "一节臂只能沿正方形转：8l 个方向", kicker: "第 15–21 格 · 约束", cells: [15, 16, 18], highlight: ["def rotate_link", "for _ in range(8 * link_length - 1):"],
+      html: `<p>长度为 l 的一节，向量 (x, y) 要满足 <b>max(|x|, |y|) = l</b>，而且必须是整数。所以它的端点只能落在一个边长 2l 的正方形的边上，一共 <b>8l</b> 个位置。长 2 的那节有 16 个方向。</p><p><code>rotate_link</code> 让一节沿这个正方形逆时针或顺时针挪<b>一格</b>。作者让长 2 的第 2 节转了一整圈，正好 16 步。整条 8 节臂能到达 (2L+1)×(2L+1) 的任意位置，L = 128，所以覆盖 257×257 的图片。</p>`,
+      draw(svg, ctx) {
+        const l = 2, sq = square(l), sc = 50, cx = 200, cy = 170;
+        sq.forEach(([x, y]) => K.svg(svg, "circle", { cx: cx + x * sc, cy: cy - y * sc, r: 6, fill: "var(--ink-3)" }));
+        K.svg(svg, "rect", { x: cx - l * sc, y: cy - l * sc, width: 2 * l * sc, height: 2 * l * sc, fill: "none", stroke: "var(--line)", "stroke-dasharray": "4 3" });
+        K.svg(svg, "text", { x: cx, y: cy + 4, "text-anchor": "middle", "font-size": 18, fill: "var(--accent)" }, "×");
+        const arm = K.svg(svg, "line", { x1: cx, y1: cy, x2: cx + l * sc, y2: cy, stroke: "var(--c1)", "stroke-width": 5, "stroke-linecap": "round" });
+        const lab = K.svg(svg, "text", { x: 420, y: 120, "font-size": 16, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 420, y: 80, "font-size": 14, "font-weight": 700 }, "长度 l = 2：8 × 2 = 16 个方向");
+        K.svg(svg, "text", { x: 420, y: 200, "font-size": 13, class: "muted" }, "注意：斜着的 (2, 2) 也算长度 2");
+        (async () => {
+          for (let k = 0; k <= sq.length; k++) {
+            const [x, y] = sq[k % sq.length];
+            arm.setAttribute("x2", cx + x * sc); arm.setAttribute("y2", cy - y * sc);
+            lab.textContent = `第 ${k} 步：(${x}, ${y})`;
+            if (!(await ctx.wait(260))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "一步能去哪：邻居", kicker: "第 22–27 格 · 一步移动", cells: [23, 24, 25], highlight: ["product((-1, 0, 1), repeat=len(config))", "filter(lambda c: c != config, nhbrs)"],
+      html: `<p>每一步，每节可以逆时针转一格（+1）、顺时针转一格（−1）或不动（0）。所有组合一共 3<sup>N</sup> 种，去掉“都不动”，剩下的就是<b>邻居</b>。4 节臂按代码算有 3⁴ − 1 = 80 个邻居构型。</p><p>作者提醒：邻居<b>构型</b>比邻居<b>位置</b>多得多，因为同一个点往往有很多种姿势能到。动画用第 13 格的 4 节臂，在浏览器里算出所有邻居，按“转了几节”上色。</p>`,
+      draw(svg, ctx) {
+        const c = [[4, 0], [-2, 2], [-1, 0], [-1, 1]], L = 8, gr = grid(svg, L, { x: 20, y: 5, w: 330, h: 330 });
+        const nb = neighbors(c), seen = new Map();
+        nb.forEach((o) => { const k = pos(o.c).join(","); if (!seen.has(k) || seen.get(k) > o.moved) seen.set(k, o.moved); });
+        const g = K.svg(svg, "g"); drawArm(g, c, gr.X, gr.Y);
+        const cols = ["", "var(--good)", "var(--c1)", "var(--warn)", "var(--bad)"];
+        const dots = [...seen.entries()].map(([k, m]) => { const [x, y] = k.split(",").map(Number); return K.svg(svg, "circle", { cx: gr.X(x), cy: gr.Y(y), r: 0, fill: cols[m], opacity: 0.85 }); });
+        K.svg(svg, "text", { x: 380, y: 60, "font-size": 14, "font-weight": 700 }, `邻居构型 ${nb.length} 个 → 不同位置 ${seen.size} 个`);
+        [1, 2, 3, 4].forEach((m, i) => K.svg(svg, "text", { x: 380, y: 100 + i * 26, "font-size": 13, fill: cols[m] }, `● 最少转 ${m} 节就能到，代价 √${m} = ${Math.sqrt(m).toFixed(2)}`));
+        K.svg(svg, "text", { x: 380, y: 230, "font-size": 12, class: "muted" }, "红点 = 现在臂尖的位置 (0, 3)");
+        ctx.tween(1200, (t) => dots.forEach((d, i) => d.setAttribute("r", 6 * K.clamp(t * 1.5 - i / dots.length * 0.5, 0, 1))));
+      },
+    },
+    {
+      title: "成本：转关节 + 变颜色", kicker: "第 28–30 格 · 目标函数", cells: [28, 29], highlight: ["np.sqrt(diffs.sum())", "color_scale=3.0"],
+      html: `<p>目标是一串构型，让臂尖经过图片的每一个点，而且总成本最小。起点构型规定为 [(64,0), (−32,0), (−16,0), (−8,0), (−4,0), (−2,0), (−1,0), (−1,0)]，正好在 (0, 0)。</p><ul class="tight"><li><b>转关节成本</b> = √(这一步转了几节)。一步转 4 节只要 √4 = 2，比分 4 步各转 1 节（共 4）便宜，鼓励<b>多节同时转</b>。</li><li><b>颜色成本</b> = 3 × (r、g、b 三个分量变化的绝对值之和)。从红色走到绿色很贵，颜色相近的地方走起来便宜。</li></ul>`,
+      draw(svg, ctx) {
+        const items = [1, 2, 3, 4, 5, 6, 7, 8].map((k) => ({ label: "转 " + k + " 节", value: Math.sqrt(k), color: "var(--c1)" }));
+        const bars = K.bars(svg, { x: 20, y: 40, w: 330, h: 270 }, items, { horizontal: true, labelWidth: 60, fmt: (v) => v.toFixed(2), gap: 6 });
+        const W = bars.map((b) => +b.rect.getAttribute("width")); bars.forEach((b) => b.rect.setAttribute("width", 0));
+        K.svg(svg, "text", { x: 20, y: 26, "font-size": 12, class: "muted" }, "转关节成本 = √(转了几节)");
+        const c1 = [0.9, 0.2, 0.2], c2 = [0.2, 0.75, 0.3], c3 = [0.85, 0.3, 0.25];
+        const sw = (c, x, y) => K.svg(svg, "rect", { x, y, width: 50, height: 50, rx: 6, fill: rgb(c) });
+        K.svg(svg, "text", { x: 400, y: 26, "font-size": 12, class: "muted" }, "颜色成本 = 3 × (|Δr| + |Δg| + |Δb|)");
+        sw(c1, 400, 50); sw(c2, 530, 50); K.arrow(svg, 455, 75, 525, 75);
+        sw(c1, 400, 170); sw(c3, 530, 170); K.arrow(svg, 455, 195, 525, 195);
+        const cc = (a, b) => 3 * a.reduce((s, v, i) => s + Math.abs(v - b[i]), 0);
+        K.svg(svg, "text", { x: 400, y: 130, "font-size": 14, fill: "var(--bad)", "font-weight": 700 }, "红 → 绿：" + cc(c1, c2).toFixed(2));
+        K.svg(svg, "text", { x: 400, y: 250, "font-size": 14, fill: "var(--good)", "font-weight": 700 }, "红 → 相近的红：" + cc(c1, c3).toFixed(2));
+        ctx.tween(1200, (t) => bars.forEach((b, i) => b.rect.setAttribute("width", W[i] * t)));
+      },
+    },
+    {
+      title: "换个角度：构型空间", kicker: "第 31–36 格 · 关键视角", cells: [31, 34, 35], highlight: ["configurations = list(product(square, repeat=2))"],
+      html: `<p>作者给了一个更好用的视角：把每一节的所有方向排成一根坐标轴，N 节臂就有 N 根轴，每个构型是这个 N 维格子里的一个点，这叫<b>构型空间</b>。</p><p>2 节臂（长 1 和 1）各有 8 个方向，构型空间就是 8×8 的格子。作者造了一张 5×5 的渐变小图，把每个构型对应的颜色画在格子上（动画按第 34 格在浏览器里重算）。在这个空间里，沿边走一步代价 1、走对角线代价 √2，<b>转关节成本就是普通的欧氏距离</b>。于是问题像一个旅行商问题，只是不需要经过每个格点，只要覆盖图片上的每个位置。</p>`,
+      draw(svg, ctx) {
+        // 第 32 格的测试图：5×5，红色沿列递增，绿色沿行递增
+        const side = 5, img = (i, j) => [j / (side - 1), i / (side - 1), 0];
+        let sq = [[1, 0]]; for (let k = 0; k < 7; k++) sq.push(rotateLink(sq[sq.length - 1], -1));
+        const s = 34, x0 = 150, y0 = 30;
+        const dots = [];
+        sq.forEach((a, i) => sq.forEach((b, j) => { const p = pos([a, b]); const ii = 2 - p[1], jj = 2 + p[0]; dots.push(K.svg(svg, "circle", { cx: x0 + i * s, cy: y0 + (7 - j) * s, r: 0, fill: rgb(img(ii, jj)) })); }));
+        sq.forEach((a, i) => { K.svg(svg, "text", { x: x0 + i * s, y: y0 + 8 * s + 4, "text-anchor": "middle", "font-size": 9 }, a.join(",")); K.svg(svg, "text", { x: x0 - 20, y: y0 + (7 - i) * s + 4, "text-anchor": "end", "font-size": 9 }, a.join(",")); });
+        K.svg(svg, "text", { x: x0 + 3.5 * s, y: y0 + 8 * s + 22, "text-anchor": "middle", "font-size": 12 }, "横轴：第 1 节的方向");
+        K.svg(svg, "text", { x: 20, y: y0 + 3.5 * s, "font-size": 12 }, "纵轴：第 2 节");
+        K.svg(svg, "line", { x1: x0 + 2 * s, y1: y0 + 5 * s, x2: x0 + 3 * s, y2: y0 + 5 * s, stroke: "var(--ink)", "stroke-width": 2 });
+        K.svg(svg, "line", { x1: x0 + 2 * s, y1: y0 + 5 * s, x2: x0 + 3 * s, y2: y0 + 4 * s, stroke: "var(--ink)", "stroke-width": 2, "stroke-dasharray": "3 2" });
+        K.svg(svg, "text", { x: 470, y: 120, "font-size": 13 }, "实线：只转 1 节，代价 1");
+        K.svg(svg, "text", { x: 470, y: 146, "font-size": 13 }, "虚线：同时转 2 节，代价 √2");
+        K.svg(svg, "text", { x: 470, y: 200, "font-size": 12, class: "muted" }, "64 个构型对应 5×5 = 25 个位置，");
+        K.svg(svg, "text", { x: 470, y: 218, "font-size": 12, class: "muted" }, "所以同一种颜色出现很多次");
+        ctx.tween(1400, (t) => dots.forEach((d, i) => d.setAttribute("r", 11 * K.clamp(t * 1.4 - i / dots.length * 0.4, 0, 1))));
+      },
+    },
+    {
+      title: "一个简单解：大节先转，小节补齐", kicker: "第 37–42 格 · 可行解", cells: [37, 38], highlight: ["def get_path_to_point", "while np.max(np.abs(relpos)) > radius:"],
+      html: `<p>作者写了 <code>get_path_to_point</code>：要让臂尖到达某个点，从最长的那节开始，一节一节地转，<b>转到“剩下的几节加起来够得着目标”为止</b>，再处理下一节。最后一节负责精确落到点上。</p><p>判断“够得着”用的是正方形的半径：剩下几节长度之和 ≥ max(|Δx|, |Δy|)。作者坦白：这个函数每步只转一节，也完全不管颜色，所以不高效，“你很可能做得好得多”。动画用 3 节小臂（2、1、1）从 (0,0) 走到 (−2,−2)，和第 40 格的例子一样。</p>`,
+      draw(svg, ctx) {
+        const L = 4, gr = grid(svg, L, { x: 20, y: 5, w: 330, h: 330 });
+        const start = [[2, 0], [-1, 0], [-1, 0]], target = [-2, -2];
+        const path = pathToPoint(start, target);
+        K.svg(svg, "text", { x: gr.X(target[0]), y: gr.Y(target[1]) + 6, "text-anchor": "middle", "font-size": 22, fill: "var(--bad)" }, "×");
+        const g = K.svg(svg, "g");
+        const lab = K.svg(svg, "text", { x: 380, y: 80, "font-size": 15, "font-weight": 700 }, "");
+        const lab2 = K.svg(svg, "text", { x: 380, y: 110, "font-size": 13, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 380, y: 300, "font-size": 12, class: "muted" }, "红 × = 目标 (−2, −2)；本页按第 38 格移植的代码现场算");
+        (async () => {
+          for (let k = 0; k < path.length; k++) {
+            g.innerHTML = ""; const p = drawArm(g, path[k], gr.X, gr.Y);
+            lab.textContent = `第 ${k} 步，臂尖 (${p.join(", ")})`;
+            lab2.textContent = path[k].map((v) => "(" + v.join(",") + ")").join(" ");
+            if (!(await ctx.wait(700))) return;
+          }
+          lab.textContent = `到了！共 ${path.length - 1} 步，每步只转 1 节`; K.set(lab, { fill: "var(--good)" });
+        })();
+      },
+    },
+    {
+      title: "走遍小图，再回到起点", kicker: "第 43–50 格 · 完整路线", cells: [44, 46, 50], highlight: ["def get_path_to_configuration", "points = list(product(range(-n, n + 1), repeat=2))", "def total_cost"],
+      html: `<p>再写一个 <code>get_path_to_configuration</code>：每一步让每节都朝目标方向转一格，直到变成目标构型，用来最后<b>回到起点姿势</b>。</p><p>有了这两个函数，完整路线就是：按 <code>product(range(-n, n+1), repeat=2)</code> 的顺序（x 在外层，y 在内层）逐个点走过去，最后回到起点。作者先在 2 节臂、5×5 测试图上演示，再用 <code>total_cost</code> 把每一步的成本加起来。动画是本页移植代码算出的这条路线，按代码共 53 个构型。</p>`,
+      draw(svg, ctx) {
+        const L = 2, gr = grid(svg, L, { x: 20, y: 5, w: 330, h: 330 });
+        const side = 5, img = (x, y) => { const i = 2 - y, j = 2 + x; return [j / (side - 1), i / (side - 1), 0]; };
+        for (let x = -L; x <= L; x++) for (let y = -L; y <= L; y++) K.svg(svg, "rect", { x: gr.X(x) - gr.s / 2 + 2, y: gr.Y(y) - gr.s / 2 + 2, width: gr.s - 4, height: gr.s - 4, rx: 4, fill: rgb(img(x, y)), opacity: 0.6 });
+        const origin = [[1, 0], [-1, 0]];
+        let path = [origin];
+        for (let x = -L; x <= L; x++) for (let y = -L; y <= L; y++) path = path.concat(pathToPoint(path[path.length - 1], [x, y]).slice(1));
+        path = path.concat(pathToConfig(path[path.length - 1], origin).slice(1));
+        let cost = 0;
+        const trail = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--ink)", "stroke-width": 2, opacity: 0.6 });
+        const g = K.svg(svg, "g");
+        const lab = K.svg(svg, "text", { x: 380, y: 80, "font-size": 15, "font-weight": 700 }, "");
+        const lab2 = K.svg(svg, "text", { x: 380, y: 110, "font-size": 13 }, "");
+        K.svg(svg, "text", { x: 380, y: 300, "font-size": 12, class: "muted" }, "底图 = 第 32 格的 5×5 渐变测试图");
+        let d = "";
+        (async () => {
+          for (let k = 0; k < path.length; k++) {
+            if (k) { const a = pos(path[k - 1]), b = pos(path[k]); cost += reconf(path[k - 1], path[k]) + 3 * img(...a).reduce((s, v, i) => s + Math.abs(v - img(...b)[i]), 0); }
+            g.innerHTML = ""; const p = drawArm(g, path[k], gr.X, gr.Y);
+            d += (k ? "L" : "M") + gr.X(p[0]) + "," + gr.Y(p[1]); trail.setAttribute("d", d);
+            lab.textContent = `构型 ${k + 1} / ${path.length}`;
+            lab2.textContent = `累计成本（本页按第 29 格公式算）${cost.toFixed(2)}`;
+            if (!(await ctx.wait(140))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "全尺寸：8 节臂、66,049 个点，写出提交", kicker: "第 51–58 格 · 提交", cells: [52, 56], highlight: ["n = origin[0][0] * 2", "def config_to_string"],
+      html: `<p>最后对真正的 8 节臂做同样的事：n = 64 × 2 = 128，逐个走过 257 × 257 = 66,049 个点，再回到起点，用 <code>total_cost</code> 算总成本。</p><p>提交格式是一列 <code>configuration</code>，每行一个构型，写成 <code>64 0;-32 0;-16 0;…</code>：节与节之间用分号、x 和 y 之间用空格。作者最后说欢迎复制代码，期待大家做出更好的解。</p>`,
+      draw(svg, ctx) {
+        const lines = ["configuration", "64 0;-32 0;-16 0;-8 0;-4 0;-2 0;-1 0;-1 0", "64 1;-32 0;-16 0;-8 0;-4 0;-2 0;-1 0;-1 0", "64 2;-32 0;-16 0;-8 0;-4 0;-2 0;-1 0;-1 0", "……", "（至少 66,049 行，每行一个构型）"];
+        const els = lines.map((l, i) => K.svg(svg, "text", { x: 30, y: 60 + i * 30, "font-size": 14, "font-family": "var(--mono)", opacity: 0, fill: i === 0 ? "var(--accent)" : "var(--ink)" }, l));
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 12, class: "muted" }, "submission.csv 的样子（第 2 行是规定的起点；后两行是示意）");
+        K.svg(svg, "text", { x: 30, y: 270, "font-size": 15, "font-weight": 700 }, "257 × 257 = 66,049 个点都要经过");
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 13, class: "muted" }, "代码按 x 外层、y 内层的顺序走：每列从下到上，走完一列再回到底部");
+        (async () => { for (const e of els) if (!(await ctx.tween(300, (t) => K.set(e, { opacity: t })))) return; })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+  if (FAST) document.querySelectorAll("#pipe .ch-cells > .cell, #pipe .cell-note").forEach((e) => (e.style.display = "none"));
+
+  /* ---------- 实验 A：3 节小臂 ---------- */
+  const SQ = [square(2), square(1), square(1)];
+  K.lab(document.getElementById("labArm"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "a", label: "第 1 节（长 2）方向", min: 0, max: 15, step: 1, value: 2 },
+      { id: "b", label: "第 2 节（长 1）方向", min: 0, max: 7, step: 1, value: 3 },
+      { id: "c", label: "第 3 节（长 1）方向", min: 0, max: 7, step: 1, value: 6 },
+      { id: "nb", label: "显示一步能到的位置", value: "y", options: [["y", "显示"], ["n", "不显示"]] },
+    ],
+    note: "每个滑块挑一节臂在它的正方形上的方向（第 16 格的 rotate_link 一格一格转出来的顺序）。圆点颜色 = 到那个位置最少要转几节，代价是 √节数。",
+    render(svg, v) {
+      const c = [SQ[0][v.a], SQ[1][v.b], SQ[2][v.c]], L = 4;
+      const gr = grid(svg, L, { x: 10, y: 10, w: 340, h: 340 });
+      let nb = [], seen = new Map();
+      if (v.nb === "y") {
+        nb = neighbors(c);
+        nb.forEach((o) => { const k = pos(o.c).join(","); if (!seen.has(k) || seen.get(k) > o.moved) seen.set(k, o.moved); });
+        const cols = ["", "var(--good)", "var(--c1)", "var(--warn)"];
+        seen.forEach((m, k) => { const [x, y] = k.split(",").map(Number); K.svg(svg, "circle", { cx: gr.X(x), cy: gr.Y(y), r: 7, fill: cols[m], opacity: 0.8 }); });
+      }
+      const p = drawArm(svg, c, gr.X, gr.Y);
+      K.svg(svg, "text", { x: 380, y: 40, "font-size": 14, "font-family": "var(--mono)" }, "构型：" + c.map((q) => "(" + q.join(",") + ")").join(" "));
+      K.svg(svg, "text", { x: 380, y: 70, "font-size": 14, "font-family": "var(--mono)" }, "位置：(" + p.join(", ") + ")");
+      if (v.nb === "y") { ["", "转 1 节 · 代价 1", "转 2 节 · 代价 1.41", "转 3 节 · 代价 1.73"].forEach((t, m) => { if (m) K.svg(svg, "text", { x: 380, y: 110 + m * 24, "font-size": 13, fill: ["", "var(--good)", "var(--c1)", "var(--warn)"][m] }, "● " + t); }); }
+      // 同一位置有几种构型
+      let same = 0;
+      for (const a of SQ[0]) for (const b of SQ[1]) for (const d of SQ[2]) if (eq(pos([a, b, d]), p)) same++;
+      return { readout: [
+        { k: "臂尖位置", v: "(" + p.join(", ") + ")" },
+        { k: "邻居构型数", v: v.nb === "y" ? String(nb.length) : "—" },
+        { k: "一步能到的不同位置", v: v.nb === "y" ? String(seen.size) : "—" },
+        { k: "到达这个位置的构型共有", v: same + " 种" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：走遍小图 ---------- */
+  K.lab(document.getElementById("labTour"), {
+    width: 640, height: 400,
+    controls: [
+      { id: "ord", label: "访问顺序", value: "col", options: [["col", "按列，每列从下往上（第 52 格的顺序）"], ["snake", "蛇形：一列向上、下一列向下"], ["color", "蛇形，但每列按颜色深浅排（延伸）"]] },
+      { id: "cs", label: "颜色成本系数（原代码 3）", min: 0, max: 30, step: 1, value: 3 },
+    ],
+    note: "4 节小臂（4、2、1、1），起点 [(4,0),(−2,0),(−1,0),(−1,0)]，在一张代码生成的 17×17 小“贺卡”上走遍 289 个点再回到起点。路线由第 38、44 格移植的代码现场生成，成本按第 29 格计算。",
+    render(svg, v) {
+      const L = 8, origin = [[4, 0], [-2, 0], [-1, 0], [-1, 0]];
+      const col = (x, y) => cardColor(x, y, L);
+      const pts = [];
+      for (let x = -L; x <= L; x++) {
+        let ys = []; for (let y = -L; y <= L; y++) ys.push(y);
+        if (v.ord !== "col" && (x + L) % 2 === 1) ys.reverse();
+        if (v.ord === "color") { const br = (y) => col(x, y).reduce((a, b) => a + b, 0); ys.sort((a, b) => ((x + L) % 2 ? -1 : 1) * (br(a) - br(b))); }
+        ys.forEach((y) => pts.push([x, y]));
+      }
+      const t0 = performance.now();
+      let path = [origin];
+      for (const p of pts) path = path.concat(pathToPoint(path[path.length - 1], p).slice(1));
+      path = path.concat(pathToConfig(path[path.length - 1], origin).slice(1));
+      let rc = 0, cc = 0;
+      for (let k = 1; k < path.length; k++) { rc += reconf(path[k - 1], path[k]); const a = col(...pos(path[k - 1])), b = col(...pos(path[k])); cc += a.reduce((s, x, i) => s + Math.abs(x - b[i]), 0); }
+      const ms = performance.now() - t0;
+      const n = 2 * L + 1, s = 380 / n, X = (x) => 10 + (x + L + 0.5) * s, Y = (y) => 10 + (L - y + 0.5) * s;
+      for (let x = -L; x <= L; x++) for (let y = -L; y <= L; y++) K.svg(svg, "rect", { x: X(x) - s / 2, y: Y(y) - s / 2, width: s, height: s, fill: rgb(col(x, y)) });
+      let d = ""; path.forEach((c, k) => { const p = pos(c); d += (k ? "L" : "M") + X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1); });
+      K.svg(svg, "path", { d, fill: "none", stroke: "#fff", "stroke-width": 1.2, opacity: 0.85 });
+      const total = rc + v.cs * cc;
+      K.svg(svg, "text", { x: 410, y: 40, "font-size": 13, class: "muted" }, "成本构成（浏览器内计算）");
+      K.bars(svg, { x: 410, y: 55, w: 230, h: 90 }, [{ label: "转关节", value: rc, color: "var(--c1)" }, { label: "颜色 ×" + v.cs, value: v.cs * cc, color: "var(--warn)" }], { horizontal: true, labelWidth: 60, fmt: (x) => x.toFixed(0), max: Math.max(rc, v.cs * cc, 1) });
+      K.svg(svg, "text", { x: 410, y: 190, "font-size": 12, class: "muted" }, "白线 = 臂尖走过的路线");
+      return { readout: [
+        { k: "构型（步数 + 1）", v: String(path.length) },
+        { k: "转关节成本", v: rc.toFixed(1) },
+        { k: "颜色成本", v: (v.cs * cc).toFixed(1) },
+        { k: "总成本", v: total.toFixed(1), color: "var(--accent)" },
+        { k: "计算用时", v: ms.toFixed(0) + " ms" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

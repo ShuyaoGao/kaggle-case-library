@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>小鼠社交行为识别</title>
+<meta name="description" content="Kaggle 案例拆解：从视频追踪出的小鼠身体关键点坐标，识别它们在做什么（如直立、攻击、爬跨）。作者把比赛拆成五个难题：老鼠数量不定、标签缺失、坐标要换成距离、内存装不下、各实验室追踪的部位不同。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">姿态关键点序列 · 逐帧多类别行为识别 · 行为神经科学</div>
+  <h1>小鼠在干什么？用身体关键点识别社交行为</h1>
+  <p class="en">MABe Nearest Neighbors: The Original（MABe Challenge — Social Action Recognition in Mice）</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">姿态关键点</span><span class="tag method">距离特征（平移旋转不变）</span><span class="tag method">一类一个二分类器</span>
+    <span class="tag method">LightGBM</span><span class="tag method">按视频分组交叉验证</span><span class="tag method">降采样</span><span class="tag method">阈值 + 取最大</span><span class="tag method">压力测试</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>AmbrosM</b></span>
+    <span>Kaggle 点赞 <b>383</b>（2026-11 抓取）</span>
+    <span>比赛 <b>MABe-mouse-behavior-detection</b></span>
+    <span><a href="https://www.kaggle.com/code/ambrosm/mabe-nearest-neighbors-the-original" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">视频里每只小鼠身体关键点的坐标</div><p>多个实验室拍的视频，每帧记录 2–4 只小鼠的鼻子、耳朵、身体中心、尾根等位置。<span data-cell="11">出处</span> <span data-cell="12">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">每一帧，谁对谁在做什么</div><p>单只小鼠的行为（如直立 <code>rear</code>），或一只对另一只的行为（如攻击、爬跨），预测每段行为的起止帧。<span data-cell="13">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">拆成五个难题逐个解决</div><p>按小鼠 / 小鼠对切数据；坐标换成身体部位之间的距离；每种行为训练一个 LightGBM 二分类器；按身体部位组合分别建模；最后修正提交格式。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">分数在运行输出里</div><p>作者用比赛官方的 F 分数在折外预测上打分（第 25 格），但文字里没写具体数值，源码不带输出，这里不列分数。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛 <b>MABe Challenge — Social Action Recognition in Mice</b>：神经科学研究里，科学家要统计小鼠的社交行为（比如攻击多不多），以前靠人看录像逐帧标注，又慢又累。比赛希望让电脑自动识别。下面的信息来自作者 notebook 的文字和代码。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者写明的几点</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">每个视频的小鼠数</div><div class="v">2–4 只</div></div>
+        <div class="stat-tile"><div class="k">视频帧率</div><div class="v">30 帧/秒</div></div>
+        <div class="stat-tile"><div class="k">作者总结的难题</div><div class="v">5 个</div></div>
+        <div class="stat-tile"><div class="k">判定阈值</div><div class="v">0.27</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">小鼠数见第 11 格 <span data-cell="11">出处</span>；30 帧/秒见第 19 格 <span data-cell="19">出处</span>；五个难题见第 0 格 <span data-cell="0">出处</span>；阈值见第 18 格 <span data-cell="18">出处</span>。视频总数、行为种类总数在运行输出里，这里不写。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">代码里用到的数据</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>文件 / 列</th><th>白话含义</th></tr>
+        <tr><td><code>train.csv</code>：<code>lab_id</code>、<code>video_id</code></td><td>哪个实验室、哪段视频</td></tr>
+        <tr><td><code>mouse1_strain</code>…<code>mouse4_strain</code></td><td>每只小鼠的品系；空着就说明没有这只鼠（用来数有几只）</td></tr>
+        <tr><td><code>body_parts_tracked</code></td><td>这个实验室追踪了哪些身体部位（各家不一样）</td></tr>
+        <tr><td><code>behaviors_labeled</code></td><td>这段视频标注了哪些“谁-对谁-做什么”</td></tr>
+        <tr><td><code>pix_per_cm_approx</code></td><td>每厘米多少像素，用来把坐标换成厘米</td></tr>
+        <tr><td><code>train_tracking/*.parquet</code></td><td>每帧每只鼠每个部位的 x、y 坐标</td></tr>
+        <tr><td><code>train_annotation/*.parquet</code></td><td><b>答案</b>：行为、发起者、对象、起始帧、结束帧</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="14">
+    <h3>动手试试 A · 从“每种行为一个概率”到“这一段在做什么” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="16">
+    <h3>动手试试 B · 为什么要把坐标换成距离？ <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者的评估方式</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>评估</th><th>出处</th></tr>
+        <tr><td>每种行为的二分类 F1，和“全部判为有”的基线比较，打印 &gt; / = / &lt;</td><td><span data-cell="18">第 18 格</span></td></tr>
+        <tr><td>把折外预测转成提交格式，用比赛官方 F 分数打分</td><td><span data-cell="25">第 25 格</span></td></tr>
+        <tr><td>所有二分类 F1 的平均</td><td><span data-cell="25">第 25 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">分数都打印在运行输出里，Kaggle 下载的源码不带输出，作者文字里也没有写具体数值，所以这里不列分数。</p>
+      <p class="callout">读代码时注意到的几点：① 第 18 格的基线 <code>p / (1 + p)</code>：如果所有帧都判为“有”，F1 应为 <code>2p / (1 + p)</code>，代码里的基线只有它的一半，比较时偏宽松。② 第 24 格注释写 “Ensure that start_frame &gt;= stop_frame”，代码实际保留的是 <code>start &lt; stop</code>，注释写反了。③ 第 12 格用 <code>.loc[start:stop]</code> 打标签会包含结束帧，而打分函数用 <code>range(start, stop)</code> 不包含，差一帧。④ 第 16 格名为 <code>speed_left2</code> 的特征其实是“左耳到 10 帧前尾根”的距离，不是速度。⑤ 标题写“最近邻”，当前版本实际用的是 LightGBM（作者在第 0 格说明了）。作者自己在第 23 格也写道“上面的代码可能有 bug”。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一段小鼠视频的关键点轨迹，自动标出每段攻击、直立、爬跨等行为的起止帧，替代人工逐帧标注。</li>
+        <li><b>同类问题：</b>体育动作识别、老人跌倒检测、课堂举手检测、手语识别、宠物行为监测：凡是“姿态关键点 → 行为”。</li>
+        <li><b>可迁移的套路：</b>坐标转成平移旋转都不变的距离；标签缺失时每类单独训练二分类器；按视频分组交叉验证；数据冗余时降采样；提交前做压力测试和格式修正。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>每 n 个样本取一个再训练 <code>TrainOnSubsetClassifier</code> <span data-cell="3">第 3 格</span></li>
+        <li>按单只鼠 / 鼠对生成数据批次 <span data-cell="12">第 12 格</span></li>
+        <li>二分类概率 → 阈值 → 取最大 → 起止帧 <span data-cell="14">第 14 格</span></li>
+        <li>两两部位的平方距离 + 10 帧位移 <span data-cell="16">第 16 格</span></li>
+        <li><code>GroupKFold</code> 按视频分组 <span data-cell="18">第 18 格</span></li>
+        <li>缺失值填补 + LightGBM（100 棵树，学习率 0.03）<span data-cell="22">第 22 格</span></li>
+        <li><code>robustify</code> 修正提交 <span data-cell="24">第 24 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>为什么交叉验证要按视频分组，而不是随机把帧打散？同一段视频相邻的两帧有多像？</li>
+      <li>坐标换成距离后，就不受小鼠在笼子里哪个位置、朝哪个方向的影响了。会不会也丢掉了什么有用的信息？</li>
+      <li>阈值 0.27 是怎么来的？如果调高到 0.5，预测出来的行为段会变多还是变少？</li>
+      <li>每秒 30 帧，作者说可以大胆降采样。降采样会不会漏掉很短的行为（比如一次很快的攻击）？</li>
+      <li>不同实验室追踪的身体部位不同，作者就各建各的模型。还有什么别的办法能把它们合在一起用？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 AmbrosM，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。比赛数据：MABe Challenge — Social Action Recognition in Mice（Kaggle）。
+</footer>
+</main>
+
+<script src="nb/mabe-mouse-behavior.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* 自查开关：网址带 ?fast 时动画直接跳到最后一帧（无界面截图用） */
+  if (/[?&]fast/.test(location.search)) { K.tween = (ms, fn, c) => { fn(1, 1); return Promise.resolve(!c || c.alive()); }; K.wait = (ms, c) => Promise.resolve(!c || c.alive()); }
+  const fade = (els, ctx, ms) => ctx.tween(ms || 500, (t) => els.forEach((e) => (e.style.opacity = t)));
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+  const PARTS = ["鼻", "左耳", "右耳", "身体中心", "尾根"];
+  /* 一只鼠的关键点（局部坐标，朝 +x） */
+  const LOCAL = [[24, 0], [12, -8], [12, 8], [0, 0], [-22, 0]];
+  function posePts(cx, cy, ang, s) { s = s || 1; const c = Math.cos(ang), si = Math.sin(ang); return LOCAL.map(([x, y]) => [cx + s * (x * c - y * si), cy + s * (x * si + y * c)]); }
+  function drawMouse(svg, pts, col, opt) {
+    opt = opt || {};
+    const g = K.svg(svg, "g", {});
+    const [n, el, er, b, t] = pts;
+    K.svg(g, "ellipse", { cx: (n[0] + t[0]) / 2, cy: (n[1] + t[1]) / 2, rx: Math.hypot(n[0] - t[0], n[1] - t[1]) / 2 + 4, ry: 11 * (opt.s || 1), fill: col, "fill-opacity": 0.16, transform: `rotate(${Math.atan2(n[1] - t[1], n[0] - t[0]) * 180 / Math.PI} ${(n[0] + t[0]) / 2} ${(n[1] + t[1]) / 2})` });
+    [[0, 1], [0, 2], [1, 3], [2, 3], [3, 4]].forEach(([a, c]) => K.svg(g, "line", { x1: pts[a][0], y1: pts[a][1], x2: pts[c][0], y2: pts[c][1], stroke: col, "stroke-width": 1.5 }));
+    pts.forEach((p, i) => K.svg(g, "circle", { cx: p[0], cy: p[1], r: i === 0 ? 4 : 3, fill: col }));
+    K.svg(g, "path", { d: `M${t[0]},${t[1]} q${(t[0] - b[0]) * 0.8},${(t[1] - b[1]) * 0.8 + 10} ${(t[0] - b[0]) * 1.6},${(t[1] - b[1]) * 1.6}`, fill: "none", stroke: col, "stroke-width": 1.2, opacity: 0.6 });
+    return g;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "小鼠社交行为识别：五个难题", kicker: "第 0–1 格 · 任务与运行模式",
+      html: `<p>神经科学家常用小鼠研究社交、攻击、焦虑等行为。以前要人盯着录像逐帧记“这只在攻击那只”，非常耗时。这个比赛给出用软件从视频里追踪出的<b>身体关键点坐标</b>，让电脑自动识别行为。</p><p>作者开篇列出他要解决的五个难题：小鼠数量不固定；标签有缺失的多分类；坐标要换成不受位置和朝向影响的表示；数据大到内存装不下；各实验室追踪的身体部位不同。</p><p>第 1 格是运行模式开关：<code>validate</code>（在训练集上交叉验证打分）、<code>submit</code>（生成提交）、<code>stresstest</code>（用怪数据测试会不会崩）。</p>`,
+      cells: [0, 1], highlight: ["validate_or_submit"],
+      draw(svg, ctx) {
+        K.svg(svg, "rect", { x: 20, y: 20, width: 330, height: 300, rx: 12, fill: "var(--panel-2)", stroke: "var(--line)" });
+        K.svg(svg, "text", { x: 30, y: 40, "font-size": 12, class: "muted" }, "俯视的笼子（示意）");
+        const g1 = K.svg(svg, "g", {}), g2 = K.svg(svg, "g", {});
+        const lab = K.svg(svg, "text", { x: 185, y: 300, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "");
+        const list = ["① 小鼠数量不固定", "② 标签有缺失", "③ 坐标 → 距离", "④ 内存装不下", "⑤ 追踪部位各不同"].map((t, i) => { const n = K.node(svg, 400, 30 + i * 58, 290, 46, t, { fill: "var(--panel-2)" }); n.style.opacity = 0; return n; });
+        (async () => {
+          if (!(await ctx.tween(2200, (t) => {
+            g1.innerHTML = ""; g2.innerHTML = "";
+            const a1 = t * 3, x1 = 120 + t * 90, y1 = 170 + Math.sin(t * 4) * 50;
+            drawMouse(g1, posePts(x1, y1, a1 * 0.4, 1.3), "var(--c1)", { s: 1.3 });
+            drawMouse(g2, posePts(x1 - 50 * Math.cos(a1 * 0.4), y1 - 50 * Math.sin(a1 * 0.4), a1 * 0.4, 1.3), "var(--c6)", { s: 1.3 });
+          }))) return;
+          lab.textContent = "红鼠在追蓝鼠：chase？attack？";
+          for (const n of list) { if (!(await ctx.tween(250, (t) => (n.style.opacity = t)))) return; }
+        })();
+      },
+    },
+    {
+      at: 2, title: "工具箱：降采样包装器和评分函数", kicker: "第 2–4 格 · 准备",
+      html: `<p>导入 pandas、LightGBM、scikit-learn 等。然后作者写了两样工具：</p><ul class="tight"><li><code>TrainOnSubsetClassifier</code>：一个“包装器”，训练前把数据每隔几行取一行，最多只用约 <code>n_samples</code> 行来训练，省时间省内存；</li><li>比赛官方的 <b>F 分数</b>评分函数：把预测的每段行为展开成帧，和真实标注逐帧比较，算精确率和召回率的综合。</li></ul>`,
+      cells: [3, 4], highlight: ["downsample = len(X) // self.n_samples", "[::downsample]"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "每隔 downsample 行取一行（示意：60 行 → 12 行）");
+        const rows = [];
+        for (let i = 0; i < 60; i++) rows.push(K.svg(svg, "rect", { x: 30 + (i % 20) * 32, y: 50 + Math.floor(i / 20) * 30, width: 26, height: 22, rx: 3, fill: "var(--c1)", opacity: 0.6 }));
+        const lab = K.svg(svg, "text", { x: 30, y: 180, "font-size": 13 }, "");
+        const box = K.node(svg, 200, 210, 320, 70, "LightGBM 只用被选中的行训练\n（相邻帧几乎一样，丢掉影响不大）", { fill: "color-mix(in srgb, var(--accent) 12%, var(--panel))", stroke: "var(--accent)" });
+        box.style.opacity = 0;
+        ctx.wait(600).then((ok) => ok && ctx.tween(900, (t) => rows.forEach((r, i) => { if (i % 5) r.style.opacity = 0.6 * (1 - t) + 0.08 * t; else K.set(r, { fill: "var(--accent)" }); }))).then((ok) => { if (!ok) return; lab.textContent = "len(X) = 60，n_samples = 12 → downsample = 5"; fade([box], ctx, 400); });
+      },
+    },
+    {
+      at: 5, title: "读元数据，整理标准答案", kicker: "第 5–8 格 · 读数据",
+      html: `<p>读入 <code>train.csv</code> 和 <code>test.csv</code>：每行是一段视频的元信息。作者用“4 减去空着的品系列个数”算出每段视频有几只鼠，列出所有不同的“追踪部位组合”。</p><p><code>create_solution_df</code> 把所有标注文件读出来，整理成评分函数需要的格式，用来给交叉验证的预测打分。名字以 <code>MABe22_</code> 开头的那批实验室数据被跳过。</p>`,
+      cells: [6, 8], highlight: ["train['n_mice'] = 4 -", "body_parts_tracked_list"],
+      draw(svg, ctx) {
+        const hdr = ["video", "mouse1", "mouse2", "mouse3", "mouse4", "n_mice"];
+        hdr.forEach((h, j) => K.svg(svg, "text", { x: 70 + j * 105, y: 40, "text-anchor": "middle", "font-size": 12, "font-weight": 700, fill: j === 5 ? "var(--accent)" : "var(--ink)" }, h));
+        const data = [["视频 A", "品系", "品系", "", ""], ["视频 B", "品系", "品系", "品系", "品系"], ["视频 C", "品系", "品系", "品系", ""]];
+        const outs = [];
+        data.forEach((r, i) => {
+          r.forEach((c, j) => K.svg(svg, "text", { x: 70 + j * 105, y: 80 + i * 40, "text-anchor": "middle", "font-size": 13, fill: c ? "var(--ink)" : "var(--ink-3)" }, c || "（空）"));
+          const n = 4 - r.slice(1).filter((c) => !c).length;
+          outs.push(K.svg(svg, "text", { x: 70 + 5 * 105, y: 80 + i * 40, "text-anchor": "middle", "font-size": 15, "font-weight": 700, fill: "var(--accent)" }, `4 − ${4 - n} = ${n}`));
+        });
+        hide(outs);
+        K.svg(svg, "text", { x: 30, y: 250, "font-size": 12, class: "muted" }, "结构示意：品系一列空着 = 没有这只鼠");
+        (async () => { for (const o of outs) { if (!(await ctx.tween(400, (t) => (o.style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      at: 9, title: "压力测试：先拿“怪数据”试一试", kicker: "第 9–10 格 · 稳健性",
+      html: `<p>提交之后，notebook 要在从没见过的测试集上运行，一旦出错很难排查。所以作者先自己造一批“刁难人”的数据：随机挖掉一些坐标变成缺失值、拼出特别长的视频等，只在 <code>stresstest</code> 模式下运行，看看程序会不会崩。</p><p>这是工程上很值得学的习惯：不只在“正常数据”上测试。</p>`,
+      cells: [10], highlight: ["stresstest"],
+      draw(svg, ctx) {
+        const prog = K.node(svg, 270, 120, 180, 90, "notebook\n程序", { fill: "var(--panel-2)", bold: true });
+        const inputs = [["正常视频", "var(--good)"], ["很多缺失值", "var(--warn)"], ["超长视频", "var(--warn)"], ["某只鼠消失", "var(--warn)"]];
+        const ns = inputs.map((d, i) => { const n = K.node(svg, 20, 30 + i * 72, 160, 50, d[0], { stroke: d[1] }); n.style.opacity = 0; return n; });
+        const ar = inputs.map((d, i) => { const a = K.arrow(svg, 182, 55 + i * 72, 266, 165, { color: d[1] }); a.style.opacity = 0; return a; });
+        const ok = K.svg(svg, "text", { x: 480, y: 172, "font-size": 18, "font-weight": 700, fill: "var(--good)" }, "");
+        (async () => { for (let i = 0; i < 4; i++) { if (!(await fade([ns[i], ar[i]], ctx, 300))) return; } if (!(await ctx.wait(400))) return; ok.textContent = "不崩 ✓ 再提交"; })();
+      },
+    },
+    {
+      at: 11, title: "难题 1：老鼠数量不固定", kicker: "第 11–12 格 · 切分数据批次",
+      html: `<p>一段视频里可能有 2、3 或 4 只鼠，而行为分两种：单只鼠自己做的（如直立），和一只对另一只做的（如攻击）。作者的 <code>generate_mouse_data</code> 把数据切成两种“批次”：</p><ul class="tight"><li><b>单鼠批次</b>：只含一只鼠的坐标，用来判断它自己的行为；</li><li><b>鼠对批次</b>：恰好两只鼠，一只是发起者 A、一只是对象 B。</li></ul><p>所以有两只鼠的一帧，会进入 4 个批次：鼠 1 单独、鼠 2 单独、鼠 1 对鼠 2、鼠 2 对鼠 1。这样不管几只鼠，喂给模型的表格列数都固定。坐标还会除以每厘米像素数，换算成厘米。</p>`,
+      cells: [12], highlight: ["pvid /= row.pix_per_cm_approx", "yield 'single'"],
+      draw(svg, ctx) {
+        const A = posePts(150, 150, 0.2, 1.5), B = posePts(250, 190, 2.8, 1.5);
+        K.svg(svg, "rect", { x: 30, y: 60, width: 300, height: 220, rx: 10, fill: "var(--panel-2)", stroke: "var(--line)" });
+        K.svg(svg, "text", { x: 40, y: 50, "font-size": 12, "font-weight": 700 }, "一帧：两只鼠");
+        drawMouse(svg, A, "var(--c1)", { s: 1.5 }); drawMouse(svg, B, "var(--c6)", { s: 1.5 });
+        const items = [["单鼠：鼠 1", "var(--c1)"], ["单鼠：鼠 2", "var(--c6)"], ["鼠对：1 → 2", "var(--accent)"], ["鼠对：2 → 1", "var(--accent)"]];
+        const ns = items.map((d, i) => { const n = K.node(svg, 420, 50 + i * 66, 260, 50, d[0], { stroke: d[1] }); n.style.opacity = 0; return n; });
+        const ar = items.map((d, i) => { const a = K.arrow(svg, 334, 170, 416, 75 + i * 66, { color: d[1] }); a.style.opacity = 0; return a; });
+        (async () => { for (let i = 0; i < 4; i++) { if (!(await fade([ar[i], ns[i]], ctx, 350))) return; } })();
+      },
+    },
+    {
+      at: 13, title: "难题 2：标签缺失的多分类", kicker: "第 13–14 格 · 二分类拼成多分类",
+      html: `<p>每个“发起者-对象”组合，每一帧最多只做一种行为，或者什么都不做，这是多分类。但麻烦在于：不同视频<b>标注的行为种类不一样</b>，某视频没标“攻击”，不代表没发生攻击，只是“不知道”。</p><p>作者的办法：每种行为单独训练一个<b>二分类器</b>（有 / 没有），只用标注过这种行为的帧。预测时每种行为各给一个概率，取最高的那个；如果最高的也低于阈值 0.27，就判为“无行为”。最后只记录行为变化的帧，得到每段行为的起始帧和结束帧。</p>`,
+      cells: [14], highlight: ["np.argmax(pred, axis=1)", "pred.max(axis=1) >= threshold", "changes_mask"],
+      draw(svg, ctx) {
+        const acts = ["rear", "attack", "mount"], cols = ["var(--c1)", "var(--c6)", "var(--c3)"];
+        const T = 60, r = K.rng(4);
+        const P = acts.map((a, k) => Array.from({ length: T }, (_, t) => K.clamp((k === 1 ? Math.exp(-Math.pow((t - 20) / 6, 2)) * 0.8 : k === 0 ? Math.exp(-Math.pow((t - 45) / 5, 2)) * 0.6 : 0.1) + (r() - 0.5) * 0.12, 0, 1)));
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 180 }, [0, T], [0, 1], { xticks: 6, yticks: 2, xlabel: "帧" });
+        const lines = P.map((p, k) => { let d = ""; p.forEach((v, t) => (d += (t ? "L" : "M") + ax.sx(t) + "," + ax.sy(v))); const l = K.svg(svg, "path", { d, fill: "none", stroke: cols[k], "stroke-width": 2 }); l.style.opacity = 0; return l; });
+        acts.forEach((a, k) => K.svg(svg, "text", { x: 600, y: 46 + k * 16, "font-size": 11, fill: cols[k], "font-weight": 700 }, "— " + a));
+        const th = K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(T), y1: ax.sy(0.27), y2: ax.sy(0.27), stroke: "var(--ink)", "stroke-dasharray": "6 4" });
+        K.svg(svg, "text", { x: ax.sx(T) - 4, y: ax.sy(0.27) - 4, "text-anchor": "end", "font-size": 11 }, "阈值 0.27");
+        const cells = [];
+        for (let t = 0; t < T; t++) { let best = -1, bv = 0; P.forEach((p, k) => { if (p[t] > bv) { bv = p[t]; best = k; } }); cells.push(K.svg(svg, "rect", { x: ax.sx(t), y: 260, width: ax.sx(1) - ax.sx(0) + 0.5, height: 24, fill: bv >= 0.27 ? cols[best] : "var(--panel-2)", opacity: 0 })); }
+        K.svg(svg, "text", { x: 56, y: 277, "text-anchor": "end", "font-size": 11 }, "结果");
+        K.svg(svg, "text", { x: 60, y: 310, "font-size": 11, class: "muted" }, "每帧：取概率最高的行为，低于阈值记为“无”（灰）；颜色连续的一段 = 一次行为（模拟数据）");
+        (async () => { for (const l of lines) { if (!(await fade([l], ctx, 350))) return; } ctx.tween(1000, (t) => cells.forEach((c, i) => (c.style.opacity = K.clamp(t * T * 1.1 - i, 0, 1)))); })();
+      },
+    },
+    {
+      at: 15, title: "难题 3：用距离代替坐标", kicker: "第 15–16 格 · 特征工程",
+      html: `<p>原始数据是 x、y 坐标。可同一个“直立”动作，发生在笼子左边还是右边、鼠头朝东还是朝西，坐标完全不同，模型就要学很多遍。</p><p>作者把坐标换成<b>身体部位两两之间的距离</b>：距离不随平移和旋转改变。单只鼠：鼻子到尾根多远、两耳之间多远……能看出头和身体有没有扭转；一对鼠：A 的鼻子离 B 的哪个部位最近。另外还加了耳朵 10 帧前后的位移，代表动得多快。</p><p>注意代码算的是<b>距离的平方</b>（没开根号），对树模型来说效果一样。</p>`,
+      cells: [16], highlight: ["itertools.combinations(body_parts_tracked, 2)", "itertools.product(body_parts_tracked, repeat=2)", "shift(10)"],
+      draw(svg, ctx) {
+        const g = K.svg(svg, "g", {});
+        const ds = K.svg(svg, "text", { x: 470, y: 60, "font-size": 13, "font-weight": 700 }, "鼻—尾根距离：");
+        const xs = K.svg(svg, "text", { x: 470, y: 120, "font-size": 13 }, "");
+        const ys = K.svg(svg, "text", { x: 470, y: 150, "font-size": 13 }, "");
+        const note = K.svg(svg, "text", { x: 470, y: 210, "font-size": 13, fill: "var(--good)" }, "坐标一直在变，距离不变");
+        K.svg(svg, "rect", { x: 20, y: 20, width: 420, height: 300, rx: 10, fill: "var(--panel-2)", stroke: "var(--line)" });
+        ctx.tween(2600, (t) => {
+          g.innerHTML = "";
+          const cx = 110 + t * 220, cy = 220 - t * 90, ang = t * 2.4;
+          const P = posePts(cx, cy, ang, 3.2);
+          drawMouse(g, P, "var(--c1)", { s: 3.2 });
+          K.svg(g, "line", { x1: P[0][0], y1: P[0][1], x2: P[4][0], y2: P[4][1], stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "4 3" });
+          ds.textContent = "鼻—尾根距离：" + Math.hypot(P[0][0] - P[4][0], P[0][1] - P[4][1]).toFixed(1);
+          xs.textContent = `鼻子坐标 x = ${P[0][0].toFixed(0)}`;
+          ys.textContent = `鼻子坐标 y = ${P[0][1].toFixed(0)}`;
+        });
+        svg.appendChild(g);
+      },
+    },
+    {
+      at: 17, title: "交叉验证：按视频分组", kicker: "第 17–18 格 · 评估",
+      html: `<p><code>cross_validate_classifier</code> 对每种行为：只取标注过它的帧，用 <code>GroupKFold</code> 按<b>视频</b>分组做交叉验证，得到折外预测概率；按阈值 0.27 算二分类 F1，再和一个基线比较，打印 “&gt;、=、&lt;”。最后把各行为的概率交给上一章的多分类函数。</p><p>为什么按视频分组？同一段视频相邻帧几乎一模一样，如果随机打散，验证集里的帧在训练集里都有“双胞胎”，分数会虚高。</p><p>小问题：代码里的基线写的是 <code>p/(1+p)</code>，而“全部判为有”时的 F1 应该是 <code>2p/(1+p)</code>。</p>`,
+      cells: [18], highlight: ["threshold = 0.27", "GroupKFold()", "baseline_score = p / (1 + p)"],
+      draw(svg, ctx) {
+        const vids = ["视频 1", "视频 2", "视频 3", "视频 4", "视频 5"];
+        const r = K.rng(5), frames = [];
+        vids.forEach((v, k) => { K.svg(svg, "text", { x: 20, y: 52 + k * 44, "font-size": 12 }, v); for (let i = 0; i < 18; i++) frames.push({ k, i, el: K.svg(svg, "rect", { x: 80 + i * 22, y: 38 + k * 44, width: 18, height: 22, rx: 3, fill: K.colors[k], opacity: 0.7 }) }); });
+        const wrong = K.svg(svg, "text", { x: 500, y: 60, "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "");
+        const right = K.svg(svg, "text", { x: 500, y: 140, "font-size": 13, fill: "var(--good)", "font-weight": 700 }, "");
+        const w2 = K.svg(svg, "text", { x: 500, y: 82, "font-size": 12 }, ""), r2 = K.svg(svg, "text", { x: 500, y: 162, "font-size": 12 }, "");
+        (async () => {
+          if (!(await ctx.wait(400))) return;
+          frames.forEach((f) => { if (r() < 0.2) K.set(f.el, { stroke: "var(--ink)", "stroke-width": 2 }); });
+          wrong.textContent = "✗ 随机抽帧当验证"; w2.textContent = "相邻帧几乎一样 → 分数虚高";
+          if (!(await ctx.wait(1500))) return;
+          frames.forEach((f) => K.set(f.el, { stroke: f.k === 2 ? "var(--ink)" : "none", "stroke-width": f.k === 2 ? 2 : 0, opacity: f.k === 2 ? 1 : 0.35 }));
+          right.textContent = "✓ 整段视频 3 当验证"; r2.textContent = "模型没见过这段视频";
+        })();
+      },
+    },
+    {
+      at: 19, title: "难题 4：内存装不下", kicker: "第 19–20 格 · 大数据处理",
+      html: `<p>比赛数据全部读进内存放不下，算了大量距离特征后更是如此。作者的对策：</p><ul class="tight"><li><b>训练只用一部分</b>：视频每秒 30 帧，相邻帧差别很小，数据高度冗余，降采样损失不大；</li><li><b>测试分批处理</b>：任何时候都不必把全部测试数据放进内存（代价是要从硬盘重复读几次）；</li><li>按身体部位组合把数据分开处理（下一章），每次只需要一部分训练数据。</li></ul><p><code>submit</code> 函数：每种行为训练一个模型，然后一批一批地读测试视频、算特征、预测。</p>`,
+      cells: [20], highlight: ["model = clone(binary_classifier)", "generate_mouse_data(test_subset"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 13, "font-weight": 700 }, "1 秒 = 30 帧，相邻帧几乎一样（示意）");
+        const fr = [];
+        for (let i = 0; i < 30; i++) { const g = K.svg(svg, "g", {}); drawMouse(g, posePts(40 + i * 22, 90 + Math.sin(i / 5) * 8, i * 0.03, 0.55), "var(--c1)", { s: 0.55 }); fr.push(g); }
+        const mem = K.svg(svg, "rect", { x: 200, y: 180, width: 320, height: 60, rx: 8, fill: "none", stroke: "var(--ink-3)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 360, y: 266, "text-anchor": "middle", "font-size": 12 }, "内存");
+        const fill = K.svg(svg, "rect", { x: 202, y: 182, width: 0, height: 56, rx: 6, fill: "var(--bad)", "fill-opacity": 0.5 });
+        const t1 = K.svg(svg, "text", { x: 360, y: 216, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "");
+        (async () => {
+          if (!(await ctx.tween(800, (t) => fill.setAttribute("width", 316 * Math.min(1, t * 1.3))))) return;
+          t1.textContent = "全读进来：装不下！";
+          if (!(await ctx.wait(900))) return;
+          fr.forEach((g, i) => (g.style.opacity = i % 5 ? 0.12 : 1));
+          K.set(fill, { fill: "var(--good)" });
+          if (!(await ctx.tween(600, (t) => fill.setAttribute("width", K.lerp(316, 316 / 5, t))))) return;
+          t1.textContent = "每 5 帧取 1 帧：轻松装下";
+        })();
+      },
+    },
+    {
+      at: 21, title: "难题 5：每套身体部位单独建模", kicker: "第 21–22 格 · 分而治之",
+      html: `<p>不同实验室追踪的身体部位不一样：有的只追 5 个点，有的追了头套上的好几个点、脊柱上的点。机器学习模型要求每个样本的特征列一样，这就麻烦了。</p><p>作者的办法是<b>分而治之</b>：对每一种“追踪部位组合”分别读数据、分别训练模型。部位超过 5 个时，去掉头套、脊柱中段、尾巴中段这些点。模型是：缺失值用平均数填补 → 降采样到最多 10 万行 → LightGBM（100 棵树，学习率 0.03，每片叶子至少 40 个样本）。</p><p><b>LightGBM</b> 是一种梯度提升树：一棵接一棵地种树，每棵专门改正前面的树犯的错。</p>`,
+      cells: [22], highlight: ["for section in range(1, len(body_parts_tracked_list))", "lightgbm.LGBMClassifier", "100000"],
+      draw(svg, ctx) {
+        const groups = [["实验室甲：5 个点", 5], ["实验室乙：7 个点", 7], ["实验室丙：12 个点 → 去掉一些", 12]];
+        const items = groups.map((g, k) => {
+          const grp = K.svg(svg, "g", {}); grp.style.opacity = 0;
+          const y = 30 + k * 100;
+          K.svg(grp, "text", { x: 20, y: y + 12, "font-size": 13, "font-weight": 700 }, g[0]);
+          for (let i = 0; i < g[1]; i++) K.svg(grp, "circle", { cx: 30 + i * 20, cy: y + 40, r: 6, fill: k === 2 && i > 6 ? "var(--ink-3)" : K.colors[k], opacity: k === 2 && i > 6 ? 0.35 : 1 });
+          K.arrow(grp, 290, y + 40, 360, y + 40);
+          K.node(grp, 370, y + 15, 300, 50, `模型 ${"甲乙丙"[k]}：缺失填补 → 降采样 → LightGBM`, { fill: `color-mix(in srgb, ${K.colors[k]} 12%, var(--panel))`, stroke: K.colors[k] });
+          return grp;
+        });
+        (async () => { for (const g of items) { if (!(await ctx.tween(450, (t) => (g.style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      at: 23, title: "robustify：让提交绝不出格式错误", kicker: "第 23–24 格 · 防错",
+      html: `<p>作者很坦诚：“上面的代码可能有 bug，但我们不想让提交因为这些 bug 失败。”于是写了 <code>robustify</code>，按比赛的三条规则修正提交：</p><ul class="tight"><li>规则 1：起始帧必须小于结束帧，不满足的删掉；</li><li>规则 2：同一对“发起者-对象”的行为段不能重叠，重叠的删掉后来的；</li><li>规则 3：每段视频至少要提交点什么，漏掉的视频用一个不靠机器学习的简单方法补上。</li></ul><p>小问题：规则 1 的注释写成了 “start_frame &gt;= stop_frame”，和代码相反。</p>`,
+      cells: [24], highlight: ["submission.start_frame < submission.stop_frame", "row['start_frame'] < last_stop_frame"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 40, w: 600, h: 150 }, [0, 100], [0, 3], { xticks: 5, yticks: 0, xlabel: "帧" });
+        const segs = [[10, 30, 0, true], [25, 40, 0, false], [50, 45, 1, false], [55, 80, 1, true], [60, 70, 2, true]];
+        const lbl = ["鼠1→鼠2", "鼠2→鼠1", "鼠1 自己"];
+        lbl.forEach((l, k) => K.svg(svg, "text", { x: 56, y: 40 + 150 - (k + 0.5) * 50 + 4, "text-anchor": "end", "font-size": 11 }, l));
+        const els = segs.map((s) => { const y = 40 + 150 - (s[2] + 0.75) * 50; const x0 = ax.sx(Math.min(s[0], s[1])), w = Math.max(6, Math.abs(ax.sx(s[1]) - ax.sx(s[0]))); return { s, el: K.svg(svg, "rect", { x: x0, y, width: w, height: 24, rx: 4, fill: "var(--c1)", opacity: 0.8 }) }; });
+        const msgs = [K.svg(svg, "text", { x: 60, y: 260, "font-size": 13 }, ""), K.svg(svg, "text", { x: 60, y: 286, "font-size": 13 }, "")];
+        (async () => {
+          if (!(await ctx.wait(800))) return;
+          els.filter((e) => !e.s[3]).forEach((e) => K.set(e.el, { fill: "var(--bad)" }));
+          msgs[0].textContent = "红色：一段和前一段重叠；一段起始帧 50 > 结束帧 45";
+          if (!(await ctx.wait(1000))) return;
+          if (!(await ctx.tween(600, (t) => els.filter((e) => !e.s[3]).forEach((e) => (e.el.style.opacity = 0.8 * (1 - t)))))) return;
+          msgs[1].textContent = "robustify 删掉违规的段，提交格式就不会出错";
+        })();
+      },
+    },
+    {
+      at: 25, title: "打分与提交", kicker: "第 25–26 格 · 输出",
+      html: `<p><code>validate</code> 模式下：把所有折外预测拼起来，修正后用比赛官方的评分函数打分，并打印所有二分类 F1 的平均值。</p><p><code>submit</code> 或 <code>stresstest</code> 模式下：拼接提交、修正、写出 <code>submission.csv</code>。如果一个预测都没有，就写一行占位数据（某视频里鼠 1 的一段直立），保证文件不是空的。</p><p>具体分数打印在作者的运行输出里，源码不带输出。</p>`,
+      cells: [25, 26], highlight: ["score(solution, submission_robust, '')", "to_csv('submission.csv')"],
+      draw(svg, ctx) {
+        const hdr = ["video_id", "agent_id", "target_id", "action", "start", "stop"];
+        hdr.forEach((h, j) => K.svg(svg, "text", { x: 70 + j * 110, y: 50, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, h));
+        const rows = [["（视频）", "mouse1", "mouse2", "attack", "（帧）", "（帧）"], ["（视频）", "mouse2", "mouse1", "（行为）", "（帧）", "（帧）"], ["（视频）", "mouse1", "self", "rear", "（帧）", "（帧）"]];
+        const g = rows.map((r, i) => { const grp = K.svg(svg, "g", {}); grp.style.opacity = 0; r.forEach((c, j) => K.svg(grp, "text", { x: 70 + j * 110, y: 90 + i * 34, "text-anchor": "middle", "font-size": 12, fill: j === 3 ? "var(--accent)" : "var(--ink)" }, c)); return grp; });
+        K.svg(svg, "text", { x: 20, y: 240, "font-size": 12, class: "muted" }, "只演示格式：括号里不是真实数据；“self” 表示单只鼠自己的行为");
+        (async () => { for (const x of g) { if (!(await ctx.tween(300, (t) => (x.style.opacity = t)))) return; } })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+  if (/[?&]fold/.test(location.search)) { const st = document.createElement("style"); st.textContent = "#pipe .ch-cells > .cell, #pipe .ch-cells > .cell-note { display: none; }"; document.head.appendChild(st); }
+
+  /* ---------- 实验 A：二分类概率 → 多分类段 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "thr", label: "判定阈值（作者用 0.27）", min: 0.05, max: 0.9, step: 0.01, value: 0.27, fmt: (v) => v.toFixed(2) },
+      { id: "noise", label: "模型概率的噪声", min: 0, max: 0.4, step: 0.01, value: 0.15, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "换一段视频", button: true },
+    ],
+    note: "浏览器里模拟 300 帧：真实有两次 attack、一次 rear。三个二分类器各给一条带噪声的概率曲线；每帧取概率最高的行为，低于阈值记为“无”。下面比较真实和预测的行为段，并按帧计算 F1（只算有行为的帧）。",
+    render(svg, v) {
+      const T = 300, r = K.rng(13 + v.seed * 7), acts = ["rear", "attack", "mount"], cols = ["var(--c1)", "var(--c6)", "var(--c3)"];
+      const truth = Array(T).fill(-1);
+      [[40, 70, 1], [150, 175, 1], [220, 270, 0]].forEach(([a, b, k]) => { for (let t = a; t < b; t++) truth[t] = k; });
+      const P = acts.map((_, k) => { let prev = 0; return Array.from({ length: T }, (_, t) => { const base = truth[t] === k ? 0.55 : 0.08; prev = 0.7 * prev + 0.3 * K.randn(r); return K.clamp(base + prev * v.noise * 1.8, 0, 1); }); });
+      const pred = Array.from({ length: T }, (_, t) => { let b = -1, bv = 0; P.forEach((p, k) => { if (p[t] > bv) { bv = p[t]; b = k; } }); return bv >= v.thr ? b : -1; });
+      const ax = K.axes(svg, { x: 60, y: 20, w: 560, h: 160 }, [0, T], [0, 1], { xticks: 6, yticks: 2 });
+      P.forEach((p, k) => { let d = ""; p.forEach((z, t) => (d += (t ? "L" : "M") + ax.sx(t).toFixed(1) + "," + ax.sy(z).toFixed(1))); K.svg(svg, "path", { d, fill: "none", stroke: cols[k], "stroke-width": 1.3, opacity: 0.85 }); });
+      K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(T), y1: ax.sy(v.thr), y2: ax.sy(v.thr), stroke: "var(--ink)", "stroke-dasharray": "6 4" });
+      acts.forEach((a, k) => K.svg(svg, "text", { x: 70 + k * 80, y: 36, "font-size": 11, fill: cols[k], "font-weight": 700 }, "— " + a));
+      const row = (y, arr, label) => { K.svg(svg, "text", { x: 54, y: y + 14, "text-anchor": "end", "font-size": 11 }, label); arr.forEach((k, t) => { if (k >= 0) K.svg(svg, "rect", { x: ax.sx(t), y, width: ax.sx(1) - ax.sx(0) + 0.4, height: 20, fill: cols[k] }); }); K.svg(svg, "rect", { x: ax.sx(0), y, width: ax.sx(T) - ax.sx(0), height: 20, fill: "none", stroke: "var(--line)" }); };
+      row(210, truth, "真实");
+      row(240, pred, "预测");
+      let tp = 0, fp = 0, fn = 0;
+      for (let t = 0; t < T; t++) { if (pred[t] >= 0 && pred[t] === truth[t]) tp++; else { if (pred[t] >= 0) fp++; if (truth[t] >= 0) fn++; } }
+      const f1 = tp ? (2 * tp) / (2 * tp + fp + fn) : 0;
+      let segs = 0; for (let t = 0; t < T; t++) if (pred[t] >= 0 && (t === 0 || pred[t - 1] !== pred[t])) segs++;
+      K.svg(svg, "text", { x: 60, y: 300, "font-size": 12, class: "muted" }, "阈值太低：到处冒出零碎的假行为段；太高：真实的行为也被判成“无”");
+      return { readout: [
+        { k: "逐帧 F1", v: f1.toFixed(3), color: f1 > 0.7 ? "var(--good)" : "var(--warn)" },
+        { k: "预测出的行为段数", v: String(segs), color: segs === 3 ? "var(--good)" : "var(--warn)" },
+        { k: "真实行为段数", v: "3" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：坐标 vs 距离 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "dx", label: "把小鼠往右移动（厘米）", min: -10, max: 10, step: 0.5, value: 0, fmt: (v) => v.toFixed(1) },
+      { id: "rot", label: "把小鼠旋转（度）", min: -180, max: 180, step: 5, value: 0, fmt: (v) => v + "°" },
+      { id: "bend", label: "让小鼠扭头（度，这是真正的动作变化）", min: -60, max: 60, step: 5, value: 0, fmt: (v) => v + "°" },
+    ],
+    note: "浏览器里画一只 5 个关键点的小鼠。移动、旋转只是换了位置和朝向，坐标全变了，但两两距离一点没变；只有“扭头”这种真正的姿势变化才会改变距离。右边列出 10 个两两距离（作者代码里还会平方）。",
+    render(svg, v) {
+      const ang = (v.rot * Math.PI) / 180, b = (v.bend * Math.PI) / 180;
+      const local = LOCAL.map(([x, y], i) => { if (i <= 2) { const c = Math.cos(b), s = Math.sin(b), X = x - 6; return [6 + X * c - y * s, X * s + y * c]; } return [x, y]; });
+      const S = 3.2, cx = 170 + v.dx * 8, cy = 165;
+      const P = local.map(([x, y]) => [cx + S * (x * Math.cos(ang) - y * Math.sin(ang)), cy + S * (x * Math.sin(ang) + y * Math.cos(ang))]);
+      K.svg(svg, "rect", { x: 10, y: 10, width: 320, height: 300, rx: 10, fill: "var(--panel-2)", stroke: "var(--line)" });
+      drawMouse(svg, P, "var(--c1)", { s: S });
+      PARTS.forEach((p, i) => K.svg(svg, "text", { x: P[i][0] + 6, y: P[i][1] - 6, "font-size": 10 }, p));
+      K.svg(svg, "text", { x: 350, y: 26, "font-size": 12, "font-weight": 700 }, "鼻子坐标（会变）");
+      const base = LOCAL.map(([x, y]) => [x, y]);
+      const P0 = base.map(([x, y]) => [x / S * S, y]);
+      K.svg(svg, "text", { x: 350, y: 46, "font-size": 12, "font-family": "var(--mono)" }, `x = ${((P[0][0] - 170) / 8).toFixed(1)}  y = ${((165 - P[0][1]) / 8).toFixed(1)}`);
+      K.svg(svg, "text", { x: 350, y: 76, "font-size": 12, "font-weight": 700 }, "两两距离（厘米，示意比例）");
+      const dist = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]) / 8;
+      const ref = (i, j) => Math.hypot((LOCAL[i][0] - LOCAL[j][0]) * S, (LOCAL[i][1] - LOCAL[j][1]) * S) / 8;
+      let k = 0, changed = 0;
+      for (let i = 0; i < 5; i++) for (let j = i + 1; j < 5; j++) {
+        const d = dist(P[i], P[j]), d0 = ref(i, j), ch = Math.abs(d - d0) > 0.05;
+        if (ch) changed++;
+        K.svg(svg, "text", { x: 350 + (k % 2) * 145, y: 100 + Math.floor(k / 2) * 22, "font-size": 11, fill: ch ? "var(--warn)" : "var(--ink)" }, `${PARTS[i]}—${PARTS[j]}：${d.toFixed(2)}`);
+        k++;
+      }
+      K.svg(svg, "text", { x: 350, y: 230, "font-size": 11, class: "muted" }, "橙色 = 和“标准姿势”相比变了的距离");
+      return { readout: [
+        { k: "变化了的距离", v: `${changed} / 10`, color: changed ? "var(--warn)" : "var(--good)" },
+        { k: "说明", v: changed ? "姿势真的变了" : "只是位置/朝向变了" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

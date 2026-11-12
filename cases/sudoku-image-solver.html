@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>拍照解数独</title>
+<meta name="description" content="Kaggle 案例拆解：从一张数独照片出发，用 OpenCV 找到棋盘并透视拉正，切成 81 格，用 CNN 认出数字，最后用回溯递归解出答案。">
+<link rel="stylesheet" href="../assets/case.css">
+<style>.pixi { image-rendering: pixelated; }</style>
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">照片 · 文字识别（OCR）+ 传统视觉 + 搜索 · 端到端小项目</div>
+  <h1>拍照解数独：电脑先“看懂”题目，再一格格试出答案</h1>
+  <p class="en">Sudoku Solutions From Image: Computer Vision</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">数字分类 CNN</span><span class="tag method">直方图均衡</span><span class="tag method">数据增强</span>
+    <span class="tag method">自适应阈值</span><span class="tag method">轮廓检测</span><span class="tag method">透视变换</span>
+    <span class="tag method">切格 + 置信度门槛</span><span class="tag method">回溯递归</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Karnika Kapoor</b></span>
+    <span>Kaggle 点赞 <b>405</b>（2026-11 抓取）</span>
+    <span>数据集 <b>Chars74K 数字 · macfooty/sudoku-box-detection · karnikakapoor/su-puzzle</b></span>
+    <span><a href="https://www.kaggle.com/code/karnikakapoor/sudoku-solutions-from-image-computer-vision" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">数字图片 + 数独照片</div><p>Chars74K 的印刷体数字图片（0–9 十个文件夹）用来训练识别模型；数独照片来自 sudoku-box-detection 数据集，另有作者自己准备的一张清晰题目。<span data-cell="1">出处</span> <span data-cell="19">出处</span></p></div>
+    <div class="card panel"><h3>要做什么</h3><div class="big">照片 → 9×9 数字表 → 答案</div><p>先把照片里的棋盘找出来、拉正、切成 81 格，认出每格的数字（空格记 0），再把题目解出来。<span data-cell="1">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">CNN 认字 + OpenCV 找格 + 回溯</div><p>32×32 灰度数字 → 两组卷积 → 10 类；自适应阈值 + 最大四边形轮廓 + 透视变换；置信度低于 65% 当空格；递归试数解题。<span data-cell="10">出处</span> <span data-cell="18">出处</span> <span data-cell="25">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">打通了整条流程</div><p>作者坦言：有些数字识别概率低于 65% 会被当成空格，可能导致多解；加错数字则可能无解。准确率在运行输出里，文字中没有写。<span data-cell="29">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">这个项目用了三份数据，作用各不相同。具体图片张数作者没在文字里写（在运行输出里），这里不列。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">三份数据分别干什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>数据</th><th>内容</th><th>用途</th></tr>
+        <tr><td>Chars74K 数字（<code>Digits/0…9</code>）</td><td>印刷体数字图片，每个文件夹一类</td><td>训练数字分类 CNN <span data-cell="4">出处</span></td></tr>
+        <tr><td><code>sudoku-box-detection/aug</code></td><td>各种数独照片（有的模糊、有的已填完）</td><td>演示找棋盘、拉正 <span data-cell="14">出处</span></td></tr>
+        <tr><td><code>su-puzzle/su.jpg</code></td><td>作者准备的一张清晰数独题</td><td>完整演示识别和求解 <span data-cell="20">出处</span></td></tr>
+      </table></div>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">各环节的数据形状</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>环节</th><th>形状</th><th>说明</th></tr>
+        <tr><td>数字样本</td><td>32×32×1</td><td>缩放、转灰度、直方图均衡、除以 255 <span data-cell="7">出处</span></td></tr>
+        <tr><td>标签</td><td>10 维独热向量</td><td><b>答案</b>：0–9 哪个数字 <span data-cell="8">出处</span></td></tr>
+        <tr><td>数独照片</td><td>缩放到 450×450</td><td>拉正后每格 50×50 <span data-cell="15">出处</span></td></tr>
+        <tr><td>识别结果</td><td>9×9 整数矩阵</td><td>0 表示空格 <span data-cell="27">出处</span></td></tr>
+      </table></div>
+      <p class="callout">本页的数独照片、数字和棋盘都是代码现场画出来的示意，不是数据集中的真实图片。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="25">
+    <h3>动手试试 A · 逐格识别：噪声、门槛与“看错一个字” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="30">
+    <h3>动手试试 B · 回溯法解数独：试错次数与作者代码里的一个小 bug <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的说明</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>项目分三部分：数字分类模型、从图像读出数独、求解</td><td><span data-cell="1">第 1 格</span></td></tr>
+        <tr><td>sudoku-box-detection 里有些图模糊或已经填完，不适合演示，所以另备一张清晰题目</td><td><span data-cell="19">第 19 格</span></td></tr>
+        <tr><td>切格后先裁掉边框，避免把格线误认成数字</td><td><span data-cell="22">第 22 格</span></td></tr>
+        <tr><td>识别概率低于 65% 的格子记为空格；漏读会导致多解，读错会导致无解</td><td><span data-cell="29">第 29 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">数字分类模型的测试准确率在第 12 格的运行输出里，作者文字中没有写，源码不带输出，这里不列分数。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li><b>检查规则写错了下标</b>：第 30 格 <code>possible</code> 里，查同一行时写成 <code>row != i</code>（应比较列号），查同一列时写成 <code>col != i</code>（应比较行号）。结果是：当重复的数字恰好位于“列号 = 行号”的位置时会被漏查，可能得出不合法的“答案”。因为当前格本来就是 0，其实这两个条件可以直接去掉 <span data-cell="30">第 30 格</span>。</li>
+        <li><b>训练和识别的预处理不一致</b>：训练时做了灰度 + 直方图均衡 <span data-cell="7">第 7 格</span>，识别棋盘格时只裁边、缩放、除以 255，没有做直方图均衡 <span data-cell="25">第 25 格</span>。</li>
+        <li>模型的 10 类里包括数字 0，而数独里没有 0；空格靠“最高概率低于 65%”来判断，真遇到被认成 0 的格子也会当空格处理。</li>
+        <li>第 21 格把新题目的轮廓画在了旧图 <code>sudoku_a</code> 的副本上（变量复制粘贴遗留）；第 23 格注释说“看最后一格”，实际看的是第 58 格。<code>predict_classes</code> 在新版 Keras 中已被移除。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做到：</b>拍一张报纸上的数独，自动读出题目并给出答案；也能用来批改学生手填的数独。</li>
+        <li><b>同类问题：</b>表格 / 答题卡识别（找表格框 → 拉正 → 切格 → 认字）、发票和收据的固定栏位读取、棋盘游戏（围棋、象棋）拍照复盘、仪表盘读数。</li>
+        <li><b>可迁移的套路：</b>传统视觉负责“几何”（找框、拉正、切格），深度学习只负责最难的“认字”，规则 / 搜索负责“推理”。三者各干所长，比让一个大模型从头学到尾更省数据、更好调试。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>读数字图片：<span data-cell="4">第 4 格</span></li>
+        <li>切分、预处理、增强、独热：<span data-cell="6">第 6 格</span> <span data-cell="7">第 7 格</span> <span data-cell="8">第 8 格</span></li>
+        <li>CNN 与训练：<span data-cell="10">第 10 格</span> <span data-cell="11">第 11 格</span></li>
+        <li>自适应阈值：<span data-cell="15">第 15 格</span></li>
+        <li>轮廓、四边形、透视变换、切格：<span data-cell="17">第 17 格</span> <span data-cell="18">第 18 格</span></li>
+        <li>裁边与逐格识别：<span data-cell="24">第 24 格</span> <span data-cell="25">第 25 格</span></li>
+        <li>回溯求解：<span data-cell="30">第 30 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者用“最高概率低于 65%”来判断空格。把门槛调高或调低，分别会出现什么错误？有没有更好的判断空格的办法？</li>
+      <li>识别时漏了一个数字，题目可能出现多个解；认错一个数字，题目可能无解。两种错误哪种更糟？程序该怎么提醒用户？</li>
+      <li>训练用的是印刷体数字，如果题目是手写的、或者是在手机屏幕上拍的，会遇到什么问题？</li>
+      <li>第 30 格的检查规则写错了下标，程序不报错，照样会“填满”一个答案（动手试试 B 里经常是不合法的）。为什么这种 bug 很难被发现？你会怎么测试一个数独求解器？</li>
+      <li>回溯法在空格很多时可能要试很多次。你能想到什么办法让它少走弯路？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Karnika Kapoor，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数独照片、数字图片和识别分数均为模拟示意。数据：Chars74K 数字、macfooty/sudoku-box-detection、karnikakapoor/su-puzzle。
+</footer>
+</main>
+
+<script src="nb/sudoku-image-solver.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 数独工具 ---------- */
+  function fullGrid(seed) {
+    const r = K.rng(seed), base = (rr, c) => (3 * (rr % 3) + Math.floor(rr / 3) + c) % 9;
+    const sh = (a) => { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+    const g3 = sh([0, 1, 2]), rows = [].concat(...g3.map((g) => sh([0, 1, 2]).map((x) => g * 3 + x))), cols = [].concat(...sh([0, 1, 2]).map((g) => sh([0, 1, 2]).map((x) => g * 3 + x))), nums = sh([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    return rows.map((rr) => cols.map((c) => nums[base(rr, c)]));
+  }
+  function makePuzzle(sol, givens, seed) {
+    const r = K.rng(seed), idx = Array.from({ length: 81 }, (_, i) => i).sort(() => r() - 0.5), keep = new Set(idx.slice(0, givens));
+    return sol.map((row, i) => row.map((v, j) => (keep.has(i * 9 + j) ? v : 0)));
+  }
+  function valid(g) {
+    for (let i = 0; i < 9; i++) for (let j = 0; j < 9; j++) { const v = g[i][j]; if (!v) return false; for (let k = 0; k < 9; k++) { if (k !== j && g[i][k] === v) return false; if (k !== i && g[k][j] === v) return false; } const r0 = i - (i % 3), c0 = j - (j % 3); for (let a = r0; a < r0 + 3; a++) for (let b = c0; b < c0 + 3; b++) if ((a !== i || b !== j) && g[a][b] === v) return false; }
+    return true;
+  }
+
+  const cv = document.createElement("canvas");
+  function boardCanvas(grid, S, opt) {
+    opt = opt || {};
+    cv.width = S; cv.height = S;
+    const g = cv.getContext("2d");
+    g.fillStyle = opt.paper || "#f4f1e8"; g.fillRect(0, 0, S, S);
+    const c = S / 9;
+    g.strokeStyle = "#222";
+    for (let k = 0; k <= 9; k++) { g.lineWidth = k % 3 ? 1 : 3; g.beginPath(); g.moveTo(k * c, 0); g.lineTo(k * c, S); g.stroke(); g.beginPath(); g.moveTo(0, k * c); g.lineTo(S, k * c); g.stroke(); }
+    g.fillStyle = "#1d1d1d"; g.font = `bold ${Math.round(c * 0.62)}px Georgia, serif`; g.textAlign = "center"; g.textBaseline = "middle";
+    grid.forEach((row, i) => row.forEach((v, j) => { if (v) g.fillText(v, j * c + c / 2, i * c + c / 2 + 1); }));
+    return cv.toDataURL();
+  }
+
+  const steps = [
+    {
+      at: 0, title: "三步走：认数字、找棋盘、解题", kicker: "第 0–1 格 · 项目概览",
+      html: `<p>作者把项目分成三部分：</p><ol class="tight"><li><b>数字分类模型</b>：在 Chars74K 数字图片上训练一个神经网络，学会认 0–9；</li><li><b>从照片里读出数独</b>：用 OpenCV 找到棋盘，切成 81 格，用第一步的模型认出每格数字，得到一个数组；</li><li><b>解题</b>：把数组变成 9×9 矩阵，用递归（回溯法）解出答案。</li></ol>`,
+      cells: [1],
+      draw(svg, ctx) {
+        const sol = fullGrid(3), pz = makePuzzle(sol, 30, 4);
+        K.svg(svg, "image", { x: 20, y: 60, width: 190, height: 190, href: boardCanvas(pz, 270), transform: "rotate(-6 115 155)" });
+        K.svg(svg, "text", { x: 115, y: 40, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "① 一张数独照片");
+        const mid = K.svg(svg, "g"); mid.style.opacity = 0;
+        K.svg(mid, "text", { x: 360, y: 40, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "② 读成数字表");
+        pz.forEach((row, i) => K.svg(mid, "text", { x: 280, y: 74 + i * 20, "font-size": 13, "font-family": "var(--mono)" }, row.join(" ")));
+        const right = K.svg(svg, "g"); right.style.opacity = 0;
+        K.svg(right, "text", { x: 600, y: 40, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "③ 解出答案");
+        K.svg(right, "image", { x: 510, y: 60, width: 180, height: 180, href: boardCanvas(sol, 270) });
+        K.arrow(svg, 215, 155, 270, 155); K.arrow(svg, 450, 155, 500, 155);
+        ctx.wait(700).then((ok) => ok && ctx.tween(600, (t) => (mid.style.opacity = t))).then((ok) => ok && ctx.wait(400)).then((ok) => ok && ctx.tween(600, (t) => (right.style.opacity = t)));
+        K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 12, class: "muted" }, "CNN 认字 · OpenCV 找格 · 回溯法解题（棋盘为示意）");
+      },
+    },
+    {
+      at: 2, title: "导入工具箱", kicker: "第 2 格 · 导入",
+      html: `<p>导入的库可以分三组，正好对应三部分工作：</p><ul class="tight"><li><b>OpenCV（cv2）、PIL</b>：读图、灰度、模糊、阈值、轮廓、透视变换——传统图像处理；</li><li><b>TensorFlow / Keras</b>：搭建和训练数字分类 CNN、数据增强；</li><li><b>NumPy、scikit-learn</b>：数组运算、切分数据集、算准确率。</li></ul>`,
+      cells: [2], highlight: ["import cv2", "ImageDataGenerator", "train_test_split"],
+      draw(svg, ctx) {
+        const groups = [["OpenCV · PIL", "传统图像处理\n找格、拉正、切格", "var(--c1)"], ["TensorFlow · Keras", "深度学习\n认数字", "var(--c3)"], ["NumPy · scikit-learn", "数组与评估\n切分、准确率", "var(--c4)"]];
+        groups.forEach(([n, d, c], i) => { const x = 30 + i * 230; const a = K.node(svg, x, 60, 200, 50, n, { fs: 14, bold: true, stroke: c }); const b = K.node(svg, x, 140, 200, 70, d, { fs: 12, fill: `color-mix(in srgb, ${c} 12%, var(--panel))`, stroke: c }); a.style.opacity = b.style.opacity = 0; ctx.wait(i * 400).then((ok) => ok && ctx.tween(400, (t) => (a.style.opacity = b.style.opacity = t))); });
+        K.svg(svg, "text", { x: 360, y: 270, "text-anchor": "middle", "font-size": 13, class: "muted" }, "三类工具，各管一段");
+      },
+    },
+    {
+      at: 3, title: "读入印刷体数字图片", kicker: "第 3–4 格 · 第一部分：加载数据",
+      html: `<p><code>Digits</code> 目录下有 0–9 十个文件夹，每个文件夹里是这个数字的图片。作者逐个读入，缩放到 32×32，图片放进 <code>data_X</code>，文件夹编号就是标签放进 <code>data_y</code>，最后核对两者数量相等并打印总数。</p><p>这些是各种字体的<b>印刷体</b>数字，和报纸上印的数独数字比较像。</p>`,
+      cells: [4], highlight: ["cv2.resize(pic,(32,32))", "data_y.append(i)"],
+      draw(svg, ctx) {
+        const fonts = ["Georgia, serif", "Arial, sans-serif", "Courier New, monospace", "Times New Roman, serif", "Verdana, sans-serif", "Impact, sans-serif"];
+        const els = [];
+        for (let d = 0; d < 10; d++) {
+          K.svg(svg, "text", { x: 30, y: 46 + d * 28, "font-size": 12, class: "muted" }, d + "/");
+          fonts.forEach((f, k) => { const t = K.svg(svg, "text", { x: 70 + k * 34, y: 48 + d * 28, "font-size": 20, "font-family": f, "font-weight": k === 5 ? 400 : 700 }, d); t.style.opacity = 0; els.push(t); });
+        }
+        K.svg(svg, "text", { x: 330, y: 36, "font-size": 12, class: "muted" }, "（字体为示意）");
+        const box = K.node(svg, 420, 110, 260, 90, "data_X：每张 32×32 的图\ndata_y：文件夹编号 0–9", { fs: 13 });
+        box.style.opacity = 0;
+        ctx.tween(1600, (t) => els.forEach((e, i) => (e.style.opacity = K.clamp(t * els.length - i, 0, 1)))).then((ok) => ok && ctx.tween(500, (t) => (box.style.opacity = t)));
+      },
+    },
+    {
+      at: 5, title: "切分与预处理：灰度、均衡、归一化、增强", kicker: "第 5–8 格 · 准备训练数据",
+      html: `<p>先切出 5% 做测试集，剩下的再切 20% 做验证集。然后每张图做三步预处理（<code>Prep</code>）：</p><ul class="tight"><li><b>转灰度</b>：数字不需要颜色；</li><li><b>直方图均衡</b>：把暗淡、对比度低的图拉开亮暗差别；</li><li><b>除以 255</b>：像素缩放到 0–1。</li></ul><p>再加数据增强：随机平移 10%、缩放 20%、错切、旋转 10°，模拟照片里数字歪一点、偏一点的样子。标签做成 10 维<b>独热编码</b>（如 3 → 0001000000）。</p>`,
+      cells: [6, 7, 8], highlight: ["cv2.equalizeHist(img)", "img/255", "rotation_range=10", "to_categorical"],
+      draw(svg, ctx) {
+        const S = 32, cvs = document.createElement("canvas"); cvs.width = S; cvs.height = S;
+        const g = cvs.getContext("2d");
+        const drawDigit = (bg, fg, rot, dx) => { g.setTransform(1, 0, 0, 1, 0, 0); g.fillStyle = bg; g.fillRect(0, 0, S, S); g.translate(S / 2 + dx, S / 2); g.rotate(rot); g.fillStyle = fg; g.font = "bold 24px Georgia"; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText("7", 0, 2); g.setTransform(1, 0, 0, 1, 0, 0); return cvs.toDataURL(); };
+        const stagesT = ["原图（偏暗、对比低）", "灰度 + 直方图均衡", "增强：转一转", "增强：挪一挪"];
+        const imgs = [drawDigit("#7a6a55", "#4b3f30", 0, 0), drawDigit("#ffffff", "#000000", 0, 0), drawDigit("#ffffff", "#000000", 0.17, 0), drawDigit("#ffffff", "#000000", 0, 4)];
+        imgs.forEach((u, i) => { const e = K.svg(svg, "image", { x: 30 + i * 170, y: 50, width: 140, height: 140, href: u, class: "pixi" }); e.style.opacity = 0; const t = K.svg(svg, "text", { x: 100 + i * 170, y: 212, "text-anchor": "middle", "font-size": 12 }, stagesT[i]); t.style.opacity = 0; ctx.wait(i * 600).then((ok) => ok && (e.style.opacity = t.style.opacity = 1)); });
+        const oh = K.svg(svg, "text", { x: 30, y: 270, "font-size": 15, "font-family": "var(--mono)" }, "");
+        ctx.wait(2600).then((ok) => ok && (oh.textContent = "标签 7 → 独热 [0 0 0 0 0 0 0 1 0 0]"));
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12, class: "muted" }, "切分：测试 5% · 剩下的 80% 训练、20% 验证");
+      },
+    },
+    {
+      at: 9, title: "数字分类 CNN", kicker: "第 9–12 格 · 搭建、训练、测试",
+      html: `<p>网络结构：</p><ul class="tight"><li>两层 60 个 5×5 卷积 → 2×2 池化；</li><li>两层 30 个 3×3 卷积 → 2×2 池化 → Dropout 0.5；</li><li>摊平 → 500 个神经元 → Dropout 0.5 → 10 类 softmax。</li></ul><p>用 RMSprop 优化器、交叉熵损失，数据增强生成器喂数据，训练 30 轮、每轮 200 步，最后在测试集上打印准确率（数值在运行输出里）。</p>`,
+      cells: [10, 11, 12], highlight: ["Conv2D(60,(5,5)", "Dense(10, activation='softmax')", "epochs = 30"],
+      draw(svg, ctx) {
+        const L = [["32×32\n输入", 50], ["卷积 60×2\n5×5", 150], ["池化\n16×16", 250], ["卷积 30×2\n3×3", 350], ["池化 + Dropout\n8×8", 450], ["Dense 500", 550], ["softmax\n10 类", 640]];
+        L.forEach(([t, x], i) => { const n = K.node(svg, x - 40, 100, 80, 70, t, { fs: 11, fill: i === 6 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 6 ? "var(--accent)" : "var(--line)" }); n.style.opacity = 0; ctx.wait(i * 220).then((ok) => ok && (n.style.opacity = 1)); if (i) K.arrow(svg, x - 60, 135, x - 40, 135); });
+        const probs = [0.01, 0.02, 0.01, 0.03, 0.02, 0.01, 0.02, 0.82, 0.03, 0.03];
+        const bars = probs.map((p, d) => { K.svg(svg, "text", { x: 460 + d * 24, y: 312, "text-anchor": "middle", "font-size": 11 }, d); return K.svg(svg, "rect", { x: 450 + d * 24, y: 295, width: 20, height: 0, fill: d === 7 ? "var(--good)" : "var(--ink-3)" }); });
+        K.svg(svg, "text", { x: 60, y: 260, "font-size": 13 }, "输入一张“7”，输出 10 个概率（示意）：");
+        ctx.wait(1700).then((ok) => ok && ctx.tween(800, (t) => bars.forEach((b, d) => { const h = probs[d] * 90 * t; K.set(b, { y: 295 - h, height: h }); })));
+      },
+    },
+    {
+      at: 13, title: "读一张数独照片：自适应阈值", kicker: "第 13–15 格 · 第二部分：预处理",
+      html: `<p>第二部分开始处理照片。作者从 sudoku-box-detection 里随机挑一张，缩放到 450×450，然后三步预处理：</p><ul class="tight"><li><b>转灰度</b>；</li><li><b>高斯模糊</b>：抹掉细小噪点；</li><li><b>自适应阈值</b>：每个像素和它周围 11×11 小区域的平均亮度比，比周围暗就算“墨迹”。参数 <code>1,1</code> 表示用高斯加权、并且<b>反转</b>，所以输出是黑底白线。</li></ul><p>为什么不用一个固定阈值？照片常常一边亮一边暗，固定阈值会让暗的一边糊成一片。</p>`,
+      cells: [14, 15], highlight: ["cv2.GaussianBlur(gray, (3,3),6)", "cv2.adaptiveThreshold(blur,255,1,1,11,2)"],
+      draw(svg, ctx) {
+        const S = 120, sol = fullGrid(8), pz = makePuzzle(sol, 28, 9);
+        const src = document.createElement("canvas"); src.width = S; src.height = S;
+        const img = new Image(); img.src = boardCanvas(pz, S);
+        const go = () => {
+          const g = src.getContext("2d"); g.drawImage(img, 0, 0);
+          const d = g.getImageData(0, 0, S, S), gray = new Float32Array(S * S);
+          for (let i = 0; i < S * S; i++) { const x = i % S; const shade = 0.45 + 0.55 * (x / S); gray[i] = (d.data[i * 4] * 0.3 + d.data[i * 4 + 1] * 0.59 + d.data[i * 4 + 2] * 0.11) * shade; }
+          const put = (arr, f) => { const o = g.createImageData(S, S); for (let i = 0; i < S * S; i++) { const v = f(arr, i); o.data[i * 4] = o.data[i * 4 + 1] = o.data[i * 4 + 2] = v; o.data[i * 4 + 3] = 255; } src.getContext("2d").putImageData(o, 0, 0); return src.toDataURL(); };
+          const u1 = put(gray, (a, i) => a[i]);
+          const u2 = put(gray, (a, i) => (a[i] < 110 ? 255 : 0));
+          const integ = (i) => { const x = i % S, y = Math.floor(i / S); let s = 0, n = 0; for (let dy = -5; dy <= 5; dy++) for (let dx = -5; dx <= 5; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < S && yy < S) { s += gray[yy * S + xx]; n++; } } return s / n; };
+          const u3 = put(gray, (a, i) => (a[i] < integ(i) - 6 ? 255 : 0));
+          [[u1, "灰度（左暗右亮的照片）"], [u2, "固定阈值：暗处糊成一片"], [u3, "自适应阈值：黑底白线"]].forEach(([u, t], k) => { const e = K.svg(svg, "image", { x: 20 + k * 235, y: 40, width: 210, height: 210, href: u, class: "pixi" }); const tx = K.svg(svg, "text", { x: 125 + k * 235, y: 276, "text-anchor": "middle", "font-size": 12 }, t); e.style.opacity = tx.style.opacity = 0; ctx.wait(k * 700).then((ok) => ok && (e.style.opacity = tx.style.opacity = 1)); });
+        };
+        if (img.complete) go(); else img.onload = () => ctx.alive() && go();
+      },
+    },
+    {
+      at: 16, title: "找最大的四边形，再把它“拉正”", kicker: "第 16–18 格 · 轮廓与透视变换",
+      html: `<p><code>findContours</code> 在黑白图里找出所有外轮廓。<code>main_outline</code> 逐个检查：面积大于 50、用 <code>approxPolyDP</code> 把轮廓简化成多边形后<b>恰好 4 个角</b>、并且面积最大的那个，就是数独棋盘的外框。</p><p><code>reframe</code> 给四个角排队：x+y 最小的是左上、最大的是右下；y−x 最小的是右上、最大的是左下。然后 <code>getPerspectiveTransform</code> 算出把这四个角拉到 450×450 正方形四角的变换矩阵，<code>warpPerspective</code> 把整张图“拉正”。<code>splitcells</code> 则把拉正后的图横竖各切 9 刀。</p>`,
+      cells: [17, 18], highlight: ["len(approx) ==4", "points[np.argmin(add)]", "cv2.getPerspectiveTransform", "np.vsplit(img,9)"],
+      draw(svg, ctx) {
+        const src = [[120, 60], [330, 85], [95, 290], [345, 270]], dst = [[420, 50], [680, 50], [420, 310], [680, 310]];
+        const bil = (q, u, v) => [K.lerp(K.lerp(q[0][0], q[1][0], u), K.lerp(q[2][0], q[3][0], u), v), K.lerp(K.lerp(q[0][1], q[1][1], u), K.lerp(q[2][1], q[3][1], u), v)];
+        const lines = [];
+        for (let k = 0; k <= 9; k++) { lines.push({ k, dir: 0, e: K.svg(svg, "line", { stroke: "var(--ink)", "stroke-width": k % 3 ? 1 : 2.5 }) }); lines.push({ k, dir: 1, e: K.svg(svg, "line", { stroke: "var(--ink)", "stroke-width": k % 3 ? 1 : 2.5 }) }); }
+        const corners = src.map((p, i) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 0, fill: "var(--good)" }));
+        const labels = ["左上", "右上", "左下", "右下"].map((t) => K.svg(svg, "text", { "font-size": 12, fill: "var(--good)", "font-weight": 700 }, ""));
+        const place = (q) => { lines.forEach((l) => { const a = l.dir ? bil(q, l.k / 9, 0) : bil(q, 0, l.k / 9), b = l.dir ? bil(q, l.k / 9, 1) : bil(q, 1, l.k / 9); K.set(l.e, { x1: a[0], y1: a[1], x2: b[0], y2: b[1] }); }); q.forEach((p, i) => { K.set(corners[i], { cx: p[0], cy: p[1] }); K.set(labels[i], { x: p[0] + (i % 2 ? 8 : -36), y: p[1] + (i < 2 ? -8 : 18) }); }); };
+        place(src);
+        const cap = K.svg(svg, "text", { x: 20, y: 330, "font-size": 13 }, "");
+        (async () => {
+          if (!(await ctx.wait(500))) return;
+          cap.textContent = "① 找到面积最大、恰好 4 个角的轮廓";
+          if (!(await ctx.tween(600, (t) => corners.forEach((c) => c.setAttribute("r", 7 * t))))) return;
+          labels.forEach((l, i) => (l.textContent = ["左上", "右上", "左下", "右下"][i]));
+          cap.textContent = "② 按 x+y、y−x 给四个角排序";
+          if (!(await ctx.wait(900))) return;
+          cap.textContent = "③ 透视变换：把四个角拉到正方形的四个角";
+          await ctx.tween(1600, (t) => place(src.map((p, i) => [K.lerp(p[0], dst[i][0], t), K.lerp(p[1], dst[i][1], t)])));
+          cap.textContent = "④ 横竖各切 9 刀 → 81 个 50×50 的小格";
+        })();
+      },
+    },
+    {
+      at: 19, title: "换一张清楚的题目", kicker: "第 19–21 格 · 自备题目",
+      html: `<p>作者发现 sudoku-box-detection 本来是做“找棋盘框”的数据集，有的图很模糊、有的已经填完了，不适合演示解题。于是另外准备了一张清晰的数独照片 <code>su.jpg</code>，对它重复同样的流程：缩放 → 预处理 → 找轮廓 → 最大四边形 → 透视拉正。</p><p class="callout">第 21 格把新题目的轮廓画在了 <code>sudoku_a.copy()</code> 上，也就是前一张随机照片的副本，这是复制粘贴时没改的变量名，只影响画图，不影响结果。</p>`,
+      cells: [20, 21], highlight: ["su.jpg", "su_contour_2= sudoku_a.copy()"],
+      draw(svg, ctx) {
+        const sol = fullGrid(12);
+        const imgs = [[makePuzzle(sol, 25, 1), "模糊"], [sol, "已经填完"], [makePuzzle(sol, 30, 2), "清楚、未解 ✓"]];
+        imgs.forEach(([g, t], k) => {
+          const e = K.svg(svg, "image", { x: 30 + k * 230, y: 50, width: 200, height: 200, href: boardCanvas(g, 270), class: "pixi" });
+          if (k === 0) e.style.filter = "blur(2.5px)";
+          K.svg(svg, "text", { x: 130 + k * 230, y: 276, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: k === 2 ? "var(--good)" : "var(--bad)" }, t);
+          e.style.opacity = 0; ctx.wait(k * 500).then((ok) => ok && ctx.tween(400, (tt) => (e.style.opacity = tt)));
+        });
+        K.svg(svg, "text", { x: 360, y: 310, "text-anchor": "middle", "font-size": 12, class: "muted" }, "示意：只有第三种适合演示“识别 + 求解”");
+      },
+    },
+    {
+      at: 22, title: "切成 81 格，再裁掉边框", kicker: "第 22–24 格 · 切格",
+      html: `<p><code>splitcells</code> 把拉正后的 450×450 图切成 81 个 50×50 的小格（作者看了第 58 格，注释却写“最后一格”）。</p><p>问题是每个小格的边缘还带着一截格线，模型可能把它当成数字“1”。所以 <code>CropCell</code> 只保留中间 <code>[4:46, 6:46]</code> 的部分，裁掉四周的边框。</p>`,
+      cells: [23, 24], highlight: ["splitcells(su_imagewrap)", "img[4:46, 6:46]"],
+      draw(svg, ctx) {
+        const sol = fullGrid(14), pz = makePuzzle(sol, 32, 3);
+        K.svg(svg, "image", { x: 20, y: 30, width: 270, height: 270, href: boardCanvas(pz, 270) });
+        const hl = K.svg(svg, "rect", { x: 20 + 4 * 30, y: 30 + 6 * 30, width: 30, height: 30, fill: "none", stroke: "var(--warn)", "stroke-width": 3 });
+        const cellC = document.createElement("canvas"); cellC.width = 50; cellC.height = 50;
+        const g = cellC.getContext("2d"); g.fillStyle = "#f4f1e8"; g.fillRect(0, 0, 50, 50); g.fillStyle = "#222"; g.fillRect(0, 0, 50, 3); g.fillRect(0, 0, 2, 50); g.fillRect(48, 0, 2, 50);
+        g.font = "bold 31px Georgia"; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(pz[6][4] || sol[6][4], 25, 27);
+        K.svg(svg, "image", { x: 360, y: 60, width: 150, height: 150, href: cellC.toDataURL(), class: "pixi" });
+        K.svg(svg, "text", { x: 435, y: 232, "text-anchor": "middle", "font-size": 12 }, "50×50 小格：边缘带着格线");
+        const crop = K.svg(svg, "rect", { x: 360, y: 60, width: 150, height: 150, fill: "none", stroke: "var(--good)", "stroke-width": 3, "stroke-dasharray": "6 3" });
+        const after = K.svg(svg, "g"); after.style.opacity = 0;
+        const c2 = document.createElement("canvas"); c2.width = 40; c2.height = 42; c2.getContext("2d").drawImage(cellC, 6, 4, 40, 42, 0, 0, 40, 42);
+        K.svg(after, "image", { x: 560, y: 72, width: 120, height: 126, href: c2.toDataURL(), class: "pixi" });
+        K.svg(after, "text", { x: 620, y: 232, "text-anchor": "middle", "font-size": 12 }, "裁掉边框后");
+        ctx.wait(800).then((ok) => ok && ctx.tween(900, (t) => K.set(crop, { x: 360 + 18 * t, y: 60 + 12 * t, width: 150 - 30 * t, height: 150 - 24 * t }))).then((ok) => ok && ctx.tween(500, (t) => (after.style.opacity = t)));
+        K.svg(svg, "text", { x: 360, y: 290, "font-size": 12, class: "muted" }, "保留 [4:46, 6:46]：上下各去 4 像素，左右去 6 / 4 像素");
+      },
+    },
+    {
+      at: 25, title: "逐格识别：低于 65% 就当空格", kicker: "第 25 格 · 读出 81 个数",
+      html: `<p><code>read_cells</code> 对每个小格再各裁 4 像素、缩放到 32×32、除以 255，送进第一部分训练好的 CNN。取概率最高的那一类：如果最高概率 <b>大于 0.65</b> 就记下这个数字，否则记 0（空格）。</p><p>这里有两个隐患：</p><ul class="tight"><li>训练时图片做过<b>直方图均衡</b>，这里没有做，模型看到的图和训练时不一样；</li><li>模型的 10 类里没有“空格”这一类，空格只能靠“谁都不太像”来判断，门槛设多少很关键。</li></ul><p>下面的动手试试 A 可以亲手调这个门槛。</p>`,
+      cells: [25], highlight: ["if probabilityValue > 0.65:", "img = img / 255"],
+      draw(svg, ctx) {
+        const sol = fullGrid(16), pz = makePuzzle(sol, 30, 5), r = K.rng(4);
+        K.svg(svg, "image", { x: 20, y: 30, width: 270, height: 270, href: boardCanvas(pz, 270) });
+        const out = [];
+        for (let i = 0; i < 9; i++) for (let j = 0; j < 9; j++) out.push(K.svg(svg, "text", { x: 400 + j * 28, y: 56 + i * 28, "text-anchor": "middle", "font-size": 15, "font-family": "var(--mono)" }, ""));
+        const scan = K.svg(svg, "rect", { x: 20, y: 30, width: 30, height: 30, fill: "var(--warn)", opacity: 0.35 });
+        const pr = K.svg(svg, "text", { x: 400, y: 320, "font-size": 12 }, "");
+        ctx.tween(4000, (t) => {
+          const k = Math.min(80, Math.floor(t * 81)), i = Math.floor(k / 9), j = k % 9;
+          K.set(scan, { x: 20 + j * 30, y: 30 + i * 30 });
+          for (let q = 0; q <= k; q++) { const a = Math.floor(q / 9), b = q % 9; out[q].textContent = pz[a][b] || "0"; out[q].style.fill = pz[a][b] ? "var(--ink)" : "var(--ink-3)"; }
+          const p = pz[i][j] ? 0.8 + 0.19 * ((k * 37) % 10) / 10 : 0.2 + 0.3 * ((k * 13) % 10) / 10;
+          pr.textContent = `第 ${k + 1} 格：最高概率 ${p.toFixed(2)} → ${p > 0.65 ? "记为 " + pz[i][j] : "低于 0.65，记为 0（空格）"}`;
+        });
+      },
+    },
+    {
+      at: 26, title: "回溯法：一格格试，走不通就退回", kicker: "第 26–30 格 · 第三部分：求解",
+      html: `<p>把 81 个数变成 9×9 矩阵。作者提醒（第 29 格）：低于 65% 的数字会被当成空格，可能导致多解；如果读错一个数字，题目可能无解。</p><p>求解用<b>回溯法</b>：</p><ol class="tight"><li><code>next_box</code>：从左上往右下找第一个空格；</li><li>在这个空格里从 1 试到 9，用 <code>possible</code> 检查同一行、同一列、同一个 3×3 宫里有没有重复；</li><li>能放就放，然后递归去解下一个空格；如果后面走不通，就把这格改回 0，试下一个数；9 个数都不行就返回上一层。</li></ol><p class="callout warn"><code>possible</code> 里查行时写的是 <code>row != i</code>、查列时写的是 <code>col != i</code>，下标比较错了：重复数字恰好落在“列号 = 行号”的格子时会被漏查。动手试试 B 可以看到它的影响。</p>`,
+      cells: [27, 30], highlight: ["def next_box", "if quiz[row][i] == n and row != i:", "if quiz[i][col] == n and col != i:", "quiz[row][col]=0"],
+      draw(svg, ctx) {
+        const sol = fullGrid(21), pz = makePuzzle(sol, 45, 7), g = pz.map((r) => r.slice());
+        const cells = [];
+        const cs = 30, ox = 30, oy = 25;
+        for (let i = 0; i < 9; i++) for (let j = 0; j < 9; j++) { K.svg(svg, "rect", { x: ox + j * cs, y: oy + i * cs, width: cs, height: cs, fill: pz[i][j] ? "var(--panel-2)" : "var(--panel)", stroke: "var(--line)" }); cells.push(K.svg(svg, "text", { x: ox + j * cs + cs / 2, y: oy + i * cs + 21, "text-anchor": "middle", "font-size": 15, "font-weight": pz[i][j] ? 700 : 400, fill: pz[i][j] ? "var(--ink)" : "var(--c1)" }, pz[i][j] || "")); }
+        for (let k = 0; k <= 3; k++) { K.svg(svg, "line", { x1: ox + k * 90, y1: oy, x2: ox + k * 90, y2: oy + 270, stroke: "var(--ink)", "stroke-width": 2 }); K.svg(svg, "line", { x1: ox, y1: oy + k * 90, x2: ox + 270, y2: oy + k * 90, stroke: "var(--ink)", "stroke-width": 2 }); }
+        const log = K.svg(svg, "text", { x: 340, y: 60, "font-size": 14 }, ""), cnt = K.svg(svg, "text", { x: 340, y: 90, "font-size": 14, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 340, y: 150, "font-size": 12, fill: "var(--c1)" }, "蓝字 = 试着填的数");
+        K.svg(svg, "text", { x: 340, y: 172, "font-size": 12, fill: "var(--bad)" }, "红字 = 刚刚撤回（回溯）");
+        const ok2 = (i, j, n) => { for (let k = 0; k < 9; k++) if (g[i][k] === n || g[k][j] === n) return false; const r0 = i - (i % 3), c0 = j - (j % 3); for (let a = r0; a < r0 + 3; a++) for (let b = c0; b < c0 + 3; b++) if (g[a][b] === n) return false; return true; };
+        const ev = []; let tries = 0;
+        const solve = () => { for (let i = 0; i < 9; i++) for (let j = 0; j < 9; j++) if (!g[i][j]) { for (let n = 1; n <= 9; n++) if (ok2(i, j, n)) { g[i][j] = n; tries++; ev.push([i, j, n]); if (ev.length > 400) return true; if (solve()) return true; g[i][j] = 0; ev.push([i, j, 0]); } return false; } return true; };
+        solve();
+        (async () => {
+          let t = 0;
+          for (const [i, j, n] of ev) {
+            const c = cells[i * 9 + j]; c.textContent = n || "×"; c.style.fill = n ? "var(--c1)" : "var(--bad)"; t += n ? 1 : 0;
+            log.textContent = n ? `第 ${i + 1} 行第 ${j + 1} 列 试 ${n}` : `第 ${i + 1} 行第 ${j + 1} 列 走不通，撤回`;
+            cnt.textContent = `已经尝试 ${t} 次`;
+            if (!(await ctx.wait(n ? 70 : 140))) return;
+            if (!n) c.textContent = "";
+          }
+          log.textContent = "全部填满，解出来了";
+        })();
+      },
+    },
+    {
+      at: 31, title: "调用求解并打印答案", kicker: "第 31–33 格 · 输出",
+      html: `<p>第 31 格调用 <code>solve(grid)</code>，它会<b>直接修改</b> <code>grid</code>，把空格填满。第 32 格再次调用 <code>solve(grid)</code>：此时已经没有空格，函数立即返回 True，于是用 <code>Solved</code> 按 3×3 宫加分隔线打印出来；如果无解，就提示“模型读错了数字”。</p><p>最后作者附上了几个参考资料，包括另一个用深度学习直接“学会解数独”的 notebook。</p>`,
+      cells: [31, 32], highlight: ["if solve(grid):", "Model misread digits"],
+      draw(svg, ctx) {
+        const sol = fullGrid(25);
+        const lines = [];
+        sol.forEach((row, i) => { if (i % 3 === 0 && i) lines.push("......................"); lines.push(row.slice(0, 3).join(" ") + " | " + row.slice(3, 6).join(" ") + " | " + row.slice(6).join(" ")); });
+        lines.forEach((l, i) => { const t = K.svg(svg, "text", { x: 60, y: 40 + i * 24, "font-size": 15, "font-family": "var(--mono)" }, l); t.style.opacity = 0; ctx.wait(i * 120).then((ok) => ok && (t.style.opacity = 1)); });
+        const ok = K.svg(svg, "text", { x: 420, y: 120, "font-size": 16, "font-weight": 700, fill: "var(--good)" }, "");
+        K.svg(svg, "text", { x: 420, y: 160, "font-size": 13 }, "无解时打印：");
+        K.svg(svg, "text", { x: 420, y: 184, "font-size": 13, "font-family": "var(--mono)", fill: "var(--bad)" }, "Solution don't exist.");
+        K.svg(svg, "text", { x: 420, y: 204, "font-size": 13, "font-family": "var(--mono)", fill: "var(--bad)" }, "Model misread digits.");
+        ctx.wait(1500).then((k) => k && (ok.textContent = valid(sol) ? "✓ 每行、每列、每宫都没有重复" : ""));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：逐格识别 ---------- */
+  const T = 20, tC = document.createElement("canvas"); tC.width = T; tC.height = T;
+  function glyph(d, font, rot, dx, dy) {
+    const g = tC.getContext("2d"); g.setTransform(1, 0, 0, 1, 0, 0); g.fillStyle = "#fff"; g.fillRect(0, 0, T, T);
+    if (d) { g.translate(T / 2 + dx, T / 2 + dy); g.rotate(rot); g.fillStyle = "#000"; g.font = font; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(d, 0, 1); }
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    const p = g.getImageData(0, 0, T, T).data, a = new Float32Array(T * T);
+    for (let i = 0; i < T * T; i++) a[i] = 1 - p[i * 4] / 255;
+    return a;
+  }
+  function blur(a) { const o = new Float32Array(T * T); for (let y = 0; y < T; y++) for (let x = 0; x < T; x++) { let s = 0, n = 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < T && yy < T) { s += a[yy * T + xx]; n++; } } o[y * T + x] = s / n; } return o; }
+  let TPL = null, REF = null;
+  function templates() {
+    if (TPL) return TPL;
+    TPL = [];
+    for (let d = 1; d <= 9; d++) { const acc = new Float32Array(T * T); [[0, 0], [-1, 0], [1, 0], [0, -1], [0, 1]].forEach(([dx, dy]) => blur(glyph(d, "bold 16px Georgia", 0, dx, dy)).forEach((v, i) => (acc[i] += v / 5))); const m = acc.reduce((s, v) => s + v, 0) / acc.length; const c = acc.map((v) => v - m); const n = Math.sqrt(c.reduce((s, v) => s + v * v, 0)); TPL.push(c.map((v) => v / n)); }
+    return TPL;
+  }
+  function classify(a0) {
+    const a = blur(a0);
+    const m = a.reduce((s, v) => s + v, 0) / a.length, c = a.map((v) => v - m);
+    if (REF == null) { let t = 0; for (let d = 1; d <= 9; d++) { const g = blur(glyph(d, "bold 16px Georgia", 0, 0, 0)), mm = g.reduce((s, v) => s + v, 0) / g.length; t += Math.sqrt(g.reduce((s, v) => s + (v - mm) ** 2, 0)); } REF = t / 9; }
+    const n = Math.max(REF, Math.sqrt(c.reduce((s, v) => s + v * v, 0)));
+    const sc = templates().map((t) => t.reduce((s, v, i) => s + v * c[i], 0) / n);
+    const e = sc.map((s) => Math.exp(s * 30)), tot = e.reduce((s, v) => s + v, 0), p = e.map((v) => v / tot);
+    let k = 0; p.forEach((v, i) => { if (v > p[k]) k = i; });
+    return { d: k + 1, p: p[k] };
+  }
+  function solveCount(g0, limit) { const g = g0.map((r) => r.slice()); let sols = 0, steps = 0;
+    const ok = (i, j, n) => { for (let k = 0; k < 9; k++) if (g[i][k] === n || g[k][j] === n) return false; const r0 = i - (i % 3), c0 = j - (j % 3); for (let a = r0; a < r0 + 3; a++) for (let b = c0; b < c0 + 3; b++) if (g[a][b] === n) return false; return true; };
+    for (let i = 0; i < 9; i++) for (let j = 0; j < 9; j++) if (g[i][j]) { const v = g[i][j]; g[i][j] = 0; if (!ok(i, j, v)) return { sols: 0, conflict: true }; g[i][j] = v; }
+    const rec = () => { if (steps++ > 200000 || sols >= limit) return; for (let i = 0; i < 9; i++) for (let j = 0; j < 9; j++) if (!g[i][j]) { for (let n = 1; n <= 9; n++) if (ok(i, j, n)) { g[i][j] = n; rec(); g[i][j] = 0; if (sols >= limit) return; } return; } sols++; };
+    rec(); return { sols, conflict: false };
+  }
+  const SOLA = fullGrid(77), PZA = makePuzzle(SOLA, 30, 78);
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "noise", label: "照片质量差（噪点、模糊）", min: 0, max: 0.6, step: 0.02, value: 0.1, fmt: (v) => v.toFixed(2) },
+      { id: "thr", label: "判为数字的最低概率（作者用 0.65）", min: 0.2, max: 0.95, step: 0.05, value: 0.65, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "换一次随机噪声", button: true },
+    ],
+    note: "题目里的数字用 Georgia 衬线体画出，再随机歪一点、挪一点、加噪声；识别器把每个数字的标准写法稍微挪动几次、取平均当“模板”，与每格比较相似度（代替作者的 CNN），再换算成 9 个数字的概率。最高概率低于门槛就当空格。读完后在浏览器里真的去解这道题。",
+    render(svg, v) {
+      const r = K.rng(300 + v.seed * 11), read = [];
+      let miss = 0, wrong = 0, ghost = 0;
+      for (let i = 0; i < 9; i++) { read.push([]); for (let j = 0; j < 9; j++) {
+        const d = PZA[i][j], a = glyph(d, "bold 16px Georgia", (r() - 0.5) * 0.15, (r() - 0.5) * 1.2, (r() - 0.5) * 1.2);
+        for (let k = 0; k < a.length; k++) a[k] = K.clamp(a[k] + (r() - 0.5) * v.noise * 1.6 + (r() < v.noise * 0.08 ? 0.8 : 0), 0, 1);
+        const c = classify(a), got = c.p > v.thr ? c.d : 0;
+        read[i].push(got);
+        if (d && !got) miss++; else if (d && got !== d) wrong++; else if (!d && got) ghost++;
+      } }
+      const cs = 30;
+      K.svg(svg, "text", { x: 20, y: 18, "font-size": 12 }, "原题（示意）");
+      K.svg(svg, "image", { x: 20, y: 26, width: 270, height: 270, href: boardCanvas(PZA, 270) });
+      K.svg(svg, "text", { x: 340, y: 18, "font-size": 12 }, "识别：绿对 · 红认错 · 橙漏读 · 紫多读");
+      for (let i = 0; i < 9; i++) for (let j = 0; j < 9; j++) {
+        const d = PZA[i][j], g = read[i][j], x = 340 + j * cs, y = 26 + i * cs;
+        let fill = "var(--panel)", tx = g || "";
+        if (d && g === d) fill = "color-mix(in srgb, var(--good) 30%, var(--panel))"; else if (d && !g) { fill = "color-mix(in srgb, var(--warn) 45%, var(--panel))"; tx = "?"; } else if (d && g !== d) fill = "color-mix(in srgb, var(--bad) 45%, var(--panel))"; else if (!d && g) fill = "color-mix(in srgb, var(--c4) 45%, var(--panel))";
+        K.svg(svg, "rect", { x, y, width: cs, height: cs, fill, stroke: "var(--line)" });
+        K.svg(svg, "text", { x: x + cs / 2, y: y + 21, "text-anchor": "middle", "font-size": 15, "font-family": "var(--mono)" }, tx);
+      }
+      for (let k = 0; k <= 3; k++) { K.svg(svg, "line", { x1: 340 + k * 90, y1: 26, x2: 340 + k * 90, y2: 296, stroke: "var(--ink)", "stroke-width": 2 }); K.svg(svg, "line", { x1: 340, y1: 26 + k * 90, x2: 610, y2: 26 + k * 90, stroke: "var(--ink)", "stroke-width": 2 }); }
+      const res = solveCount(read, 2);
+      const verdict = res.conflict ? "读出的题目自相矛盾，无解" : res.sols === 0 ? "无解" : res.sols === 1 ? "唯一解（和原题答案一致吗？）" : "有多个解";
+      let same = false;
+      if (res.sols === 1) { const sres = read.map((r) => r.slice()); const g = sres; const ok = (i, j, n) => { for (let k = 0; k < 9; k++) if (g[i][k] === n || g[k][j] === n) return false; const r0 = i - (i % 3), c0 = j - (j % 3); for (let a = r0; a < r0 + 3; a++) for (let b = c0; b < c0 + 3; b++) if (g[a][b] === n) return false; return true; }; const rec = () => { for (let i = 0; i < 9; i++) for (let j = 0; j < 9; j++) if (!g[i][j]) { for (let n = 1; n <= 9; n++) if (ok(i, j, n)) { g[i][j] = n; if (rec()) return true; g[i][j] = 0; } return false; } return true; }; rec(); same = g.every((row, i) => row.every((v, j) => v === SOLA[i][j])); }
+      K.svg(svg, "text", { x: 340, y: 320, "font-size": 13, "font-weight": 700, fill: res.sols === 1 && same ? "var(--good)" : "var(--bad)" }, "求解：" + (res.sols === 1 ? (same ? "唯一解，和原答案一致 ✓" : "唯一解，但和原答案不一样 ✗") : verdict));
+      return { readout: [
+        { k: "认错", v: String(wrong), color: wrong ? "var(--bad)" : "var(--good)" },
+        { k: "漏读（当成空格）", v: String(miss), color: miss ? "var(--warn)" : "var(--good)" },
+        { k: "空格读出数字", v: String(ghost), color: ghost ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：回溯与作者的 possible ---------- */
+  function runSolver(pz, mode, order) {
+    const g = pz.map((r) => r.slice()); let steps = 0, back = 0;
+    const possible = (row, col, n) => {
+      if (mode === "author") {
+        for (let i = 0; i < 9; i++) if (g[row][i] === n && row !== i) return false;
+        for (let i = 0; i < 9; i++) if (g[i][col] === n && col !== i) return false;
+      } else { for (let i = 0; i < 9; i++) if (g[row][i] === n || g[i][col] === n) return false; }
+      const r0 = Math.floor(row / 3) * 3, c0 = Math.floor(col / 3) * 3;
+      for (let i = r0; i < r0 + 3; i++) for (let j = c0; j < c0 + 3; j++) if (g[i][j] === n && (i !== row || j !== col)) return false;
+      return true;
+    };
+    const next = () => {
+      if (order === "first") { for (let i = 0; i < 9; i++) for (let j = 0; j < 9; j++) if (!g[i][j]) return [i, j]; return null; }
+      let best = null, bc = 10;
+      for (let i = 0; i < 9; i++) for (let j = 0; j < 9; j++) if (!g[i][j]) { let c = 0; for (let n = 1; n <= 9; n++) if (possible(i, j, n)) c++; if (c < bc) { bc = c; best = [i, j]; } }
+      return best;
+    };
+    const solve = () => { if (steps > 300000) return false; const v = next(); if (!v) return true; const [r, c] = v; for (let n = 1; n <= 9; n++) if (possible(r, c, n)) { g[r][c] = n; steps++; if (solve()) return true; g[r][c] = 0; back++; } return false; };
+    const ok = solve();
+    return { ok, g, steps, back };
+  }
+  const SOLB = fullGrid(91);
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "giv", label: "题目给出的数字个数（越少越难）", min: 17, max: 60, step: 1, value: 30 },
+      { id: "mode", label: "possible 检查规则", value: "author", options: [["author", "作者原版（row != i / col != i）"], ["fixed", "修正版（不比较下标）"]] },
+      { id: "order", label: "下一个要填的格子", value: "first", options: [["first", "从左上往右下找第一个空格（作者）"], ["mrv", "先填候选最少的格子"]] },
+      { id: "seed", label: "换一道题", button: true },
+    ],
+    note: "在浏览器里真跑回溯法（上限 30 万步）。右边逐一检查解出的 81 格：红框 = 和同行 / 同列 / 同宫有重复。题目由一个完整答案随机挖空得到，给出的数少时可能不止一个解，这时“和原答案不同”不一定是错。",
+    render(svg, v) {
+      const pz = makePuzzle(SOLB, v.giv, 500 + v.seed * 3);
+      const res = runSolver(pz, v.mode, v.order);
+      const g = res.g, cs = 30;
+      const bad = new Set();
+      for (let i = 0; i < 9; i++) for (let j = 0; j < 9; j++) { const n = g[i][j]; if (!n) continue; for (let k = 0; k < 9; k++) { if (k !== j && g[i][k] === n) bad.add(i * 9 + j); if (k !== i && g[k][j] === n) bad.add(i * 9 + j); } const r0 = i - (i % 3), c0 = j - (j % 3); for (let a = r0; a < r0 + 3; a++) for (let b = c0; b < c0 + 3; b++) if ((a !== i || b !== j) && g[a][b] === n) bad.add(i * 9 + j); }
+      [[pz, 20, "题目"], [g, 340, "回溯解出的结果"]].forEach(([G, ox, t]) => {
+        K.svg(svg, "text", { x: ox, y: 16, "font-size": 12 }, t);
+        for (let i = 0; i < 9; i++) for (let j = 0; j < 9; j++) { const isBad = ox > 300 && bad.has(i * 9 + j); K.svg(svg, "rect", { x: ox + j * cs, y: 22 + i * cs, width: cs, height: cs, fill: pz[i][j] ? "var(--panel-2)" : "var(--panel)", stroke: isBad ? "var(--bad)" : "var(--line)", "stroke-width": isBad ? 2.5 : 1 }); K.svg(svg, "text", { x: ox + j * cs + cs / 2, y: 22 + i * cs + 21, "text-anchor": "middle", "font-size": 14, "font-weight": pz[i][j] ? 700 : 400, fill: pz[i][j] ? "var(--ink)" : "var(--c1)" }, G[i][j] || ""); }
+        for (let k = 0; k <= 3; k++) { K.svg(svg, "line", { x1: ox + k * 90, y1: 22, x2: ox + k * 90, y2: 292, stroke: "var(--ink)", "stroke-width": 2 }); K.svg(svg, "line", { x1: ox, y1: 22 + k * 90, x2: ox + 270, y2: 22 + k * 90, stroke: "var(--ink)", "stroke-width": 2 }); }
+      });
+      const same = res.ok && g.every((row, i) => row.every((x, j) => x === SOLB[i][j]));
+      return { readout: [
+        { k: "填数尝试次数", v: res.steps.toLocaleString(), color: res.steps > 50000 ? "var(--warn)" : "var(--ink)" },
+        { k: "撤回次数", v: res.back.toLocaleString() },
+        { k: "结果合法吗", v: !res.ok ? "没解出" : bad.size ? `不合法：${bad.size} 格冲突` : "合法 ✓", color: !res.ok || bad.size ? "var(--bad)" : "var(--good)" },
+        { k: "和原答案相同", v: res.ok ? (same ? "是" : "否") : "—" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

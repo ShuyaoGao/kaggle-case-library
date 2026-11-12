@@ -1,0 +1,621 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>有害评论识别</title>
+<meta name="description" content="Kaggle 案例拆解：用 TF-IDF、朴素贝叶斯特征比和逻辑回归（NB-SVM）给维基百科评论同时打 6 个“有害”标签。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">文本数据 · 多标签分类 · 强线性基线</div>
+  <h1>有害评论识别：一条评论同时打 6 个标签</h1>
+  <p class="en">NB-SVM strong linear baseline</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">多标签分类</span><span class="tag method">自定义分词</span><span class="tag method">TF-IDF（词 + 二元组）</span>
+    <span class="tag method">稀疏矩阵</span><span class="tag method">朴素贝叶斯对数比</span><span class="tag method">NB-SVM</span><span class="tag method">逻辑回归</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Jeremy Howard</b></span>
+    <span>Kaggle 点赞 <b>3,110</b>（2026-11 抓取）</span>
+    <span>比赛 <b>jigsaw-toxic-comment-classification-challenge</b></span>
+    <span><a href="https://www.kaggle.com/code/jhoward/nb-svm-strong-linear-baseline" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">约 16 万条维基百科讨论页评论</div><p>Jigsaw / Google 公开的比赛数据，每行一条评论原文和 6 个 0/1 标签（训练集 159,571 条，测试集 153,164 条，来自比赛数据说明）。<span data-cell="3">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">6 个“有害”标签各自的概率</div><p>toxic、severe_toxic、obscene、threat、insult、identity_hate。一条评论可以同时是“侮辱”和“威胁”，所以这是<b>多标签</b>问题，不是“六选一”。<span data-cell="12">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">NB-SVM：朴素贝叶斯 × 逻辑回归</div><p>TF-IDF 把评论变成稀疏向量；用朴素贝叶斯算出每个词“偏向有害”的对数比 r；把特征乘上 r 再训练逻辑回归。6 个标签各训一个模型。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">30 格代码的“强基线”</div><p>作者称用 TF-IDF 代替论文里的二值特征后，排行榜分数从 0.59 改进到 0.55（当时比赛的指标是越低越好的损失）。<span data-cell="18">出处</span> 这类基线常被用来检验复杂深度模型是否真的更好。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">Jigsaw / Google 的 Conversation AI 团队在 Kaggle 发布的 <b>Toxic Comment Classification Challenge</b> 数据：英文维基百科讨论页的评论，由人工标注 6 种有害类型。数据本身含有大量冒犯性内容，本页不展示原文。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">训练集评论</div><div class="v">159,571</div></div>
+        <div class="stat-tile"><div class="k">测试集评论</div><div class="v">153,164</div></div>
+        <div class="stat-tile"><div class="k">标签个数</div><div class="v">6</div></div>
+        <div class="stat-tile"><div class="k">任务类型</div><div class="v" style="font-size:16px">多标签（每个标签 0/1）</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">条数来自比赛数据说明（作者在第 13 格打印过，输出未随源码下载）；6 个标签见第 12 格 <span data-cell="12">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>id</code></td><td>评论编号</td><td>文本</td></tr>
+        <tr><td><code>comment_text</code></td><td>评论原文（长短差异很大）</td><td>文本</td></tr>
+        <tr><td><code>toxic</code> / <code>severe_toxic</code></td><td><b>要预测</b>：有害 / 严重有害</td><td>0 / 1</td></tr>
+        <tr><td><code>obscene</code> / <code>threat</code></td><td><b>要预测</b>：脏话 / 威胁</td><td>0 / 1</td></tr>
+        <tr><td><code>insult</code> / <code>identity_hate</code></td><td><b>要预测</b>：侮辱 / 针对身份群体的仇恨</td><td>0 / 1</td></tr>
+        <tr><td><code>none</code></td><td>作者派生：6 个标签全为 0 时为 1</td><td>0 / 1</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="17">
+    <h3>动手试试 A · 同一句话，三种分词方式切出来有什么不同 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="27">
+    <h3>动手试试 B · 输入一条评论，看 NB-SVM 给 3 个标签分别打多少分 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+    <details class="panel pad" style="margin-top:12px"><summary>查看本页使用的 30 条示例评论</summary><div id="corpus"></div></details>
+  </div>
+</section>
+
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>NB-SVM 来自 Wang 与 Manning 的论文；用 sklearn 的逻辑回归代替 SVM，实际效果几乎一样</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>评论长度差异很大</td><td><span data-cell="8">第 8 格</span></td></tr>
+        <tr><td>按论文建议使用 n-gram（这里是单词 + 二元组）</td><td><span data-cell="16">第 16 格</span></td></tr>
+        <tr><td>用 TF-IDF 代替二值特征做先验更好，排行榜分数从 0.59 改进到 0.55</td><td><span data-cell="18">第 18 格</span></td></tr>
+        <tr><td>得到的是一个只有少量非零元素的稀疏矩阵</td><td><span data-cell="20">第 20 格</span></td></tr>
+        <tr><td>每个标签单独拟合一个模型</td><td><span data-cell="25">第 25 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">除了第 18 格作者亲口写的 0.59 → 0.55，notebook 里没有其他分数；每个标签的验证分数没有给出（源码不带运行输出）。这里不补任何数字。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一条新评论，同时输出 6 个“有害”概率，平台据此决定隐藏、送人工审核或放行。</li>
+        <li><b>同类问题：</b>弹幕/评论审核、客服工单多标签打标、论文多主题分类、商品多属性标注。</li>
+        <li><b>可迁移的套路：</b>多标签 = 拆成多个二分类；稀疏 TF-IDF + 线性模型做基线；用朴素贝叶斯对数比给特征“加权”，常常比单独用两者都强。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>标签整理：6 个标签 + 派生的 none <span data-cell="12">第 12 格</span></li>
+        <li>分词：标点单独成词的正则 <span data-cell="17">第 17 格</span></li>
+        <li>特征：TfidfVectorizer(ngram_range=(1,2), min_df=3, max_df=0.9, sublinear_tf) <span data-cell="19">第 19 格</span></li>
+        <li>朴素贝叶斯对数比 r <span data-cell="23">第 23 格</span> <span data-cell="26">第 26 格</span></li>
+        <li>模型：LogisticRegression(C=4, dual=True)，6 个标签循环训练 <span data-cell="27">第 27 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>多标签和多分类有什么区别？如果把 6 个标签的组合当成 2⁶ = 64 个类别来做“六十四选一”，会遇到什么问题？</li>
+      <li>作者给每个标签单独训练模型，忽略了标签之间的关系（比如 severe_toxic 一定也是 toxic）。怎样利用这种关系？</li>
+      <li>为什么要把“!!!”、“?”这样的标点单独切成词？对有害评论识别来说，标点里藏着什么信号？</li>
+      <li>r 是在整个训练集上算出来的。如果用交叉验证评估这个模型，r 应该在哪一步计算才不会泄漏？</li>
+      <li>模型学到“某些身份词 → 有害”的关联，可能会误伤正常讨论这些群体的评论。如何发现和缓解这种偏差？</li>
+    </ol>
+  </div>
+</section>
+
+
+<footer class="foot">
+  原 notebook 作者 Jeremy Howard，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Jigsaw / Conversation AI, Toxic Comment Classification Challenge。方法出处：Sida Wang &amp; Christopher Manning, Baselines and Bigrams (2012)。
+</footer>
+</main>
+
+<script src="nb/toxic-comment-nbsvm.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* 调试用：地址后加 #fast 时动画瞬间完成（便于截图自查），正常访问不受影响 */
+  if (/fast/.test(location.hash + location.search)) { K.tween = (ms, fn, c) => { fn(1, 1); return Promise.resolve(!c || c.alive()); }; K.wait = (ms, c) => Promise.resolve(!c || c.alive()); }
+  if (/labsonly/.test(location.hash + location.search)) document.head.appendChild(K.el("style", null, ".hero,.topbar,section.block:not(#pipeline),.walk-top,.ch-head,.ch-body,.ch-cells>:not(.inline-lab),#pipeline>h2,#pipeline>.lead{display:none!important}.chapter{margin:0!important;padding:0!important;border:0!important}"));
+  if (/fast/.test(location.hash + location.search) && !/nofold/.test(location.hash + location.search)) setTimeout(() => { const b = document.querySelector('[data-a="fold"]'); if (b) b.click(); }, 50);
+  /* ---------- 本页文本类辅助函数（页面自带，不依赖外部库） ---------- */
+  const MONO = "font-family:var(--mono)";
+  const chipW = (t, fs) => Math.max(26, String(t).length * (fs || 13) * 0.61 + 14);
+  /* 词块：圆角矩形 + 等宽文字；返回 {g, rect, text, w} */
+  function chip(svg, x, y, t, opt) {
+    opt = opt || {};
+    const fs = opt.fs || 13, w = opt.w || chipW(t, fs), h = opt.h || 24;
+    const g = K.svg(svg, "g");
+    const color = opt.color || "var(--c1)";
+    const rect = K.svg(g, "rect", { x, y, width: w, height: h, rx: 5, fill: opt.fill || `color-mix(in srgb, ${color} 16%, var(--panel))`, stroke: opt.stroke || color, "stroke-width": 1.2 });
+    const text = K.svg(g, "text", { style: MONO, x: x + w / 2, y: y + h / 2 + fs * 0.36, "text-anchor": "middle", "font-size": fs, fill: opt.ink || "var(--ink)" }, t);
+    return { g, rect, text, w, h };
+  }
+  /* 一行词块，超宽自动换行；返回 [{...chip, x, y}] */
+  function chipRow(svg, x, y, tokens, maxW, opt) {
+    opt = opt || {};
+    const out = [], gap = opt.gap == null ? 6 : opt.gap, lh = (opt.h || 24) + 8;
+    let cx = x, cy = y;
+    tokens.forEach((t, i) => {
+      const o = typeof opt.style === "function" ? Object.assign({}, opt, opt.style(t, i)) : opt;
+      const w = chipW(t, o.fs);
+      if (cx + w > x + maxW && cx > x) { cx = x; cy += lh; }
+      const c = chip(svg, cx, cy, t, o);
+      c.x = cx; c.y = cy; out.push(c);
+      cx += w + gap;
+    });
+    return out;
+  }
+  /* 矩阵：rows×cols 的格子，vals[r][c]；返回 cells[r][c] = {rect, text} */
+  function matrix(svg, x, y, rowLab, colLab, vals, opt) {
+    opt = opt || {};
+    const cw = opt.cw || 46, ch = opt.ch || 28, lw = opt.lw || 70, fmt = opt.fmt || ((v) => String(v));
+    const max = opt.max || Math.max(1e-9, ...vals.flat().map(Math.abs));
+    colLab.forEach((c, j) => K.svg(svg, "text", { style: MONO, x: x + lw + j * cw + cw / 2, y: y - 8, "text-anchor": opt.rotate ? "start" : "middle", "font-size": opt.colFs || 12, fill: "var(--ink-2)", transform: opt.rotate ? `rotate(-40 ${x + lw + j * cw + cw / 2} ${y - 8})` : null }, c));
+    const cells = rowLab.map((r, i) => {
+      K.svg(svg, "text", { x: x + lw - 8, y: y + i * ch + ch / 2 + 4, "text-anchor": "end", "font-size": opt.rowFs || 12, fill: "var(--ink-2)" }, r);
+      return colLab.map((c, j) => {
+        const v = vals[i][j];
+        const rect = K.svg(svg, "rect", { x: x + lw + j * cw + 1, y: y + i * ch + 1, width: cw - 2, height: ch - 2, rx: 3, fill: v ? K.heat(Math.abs(v) / max * 0.85) : "var(--panel-2)", stroke: "var(--line)" });
+        const text = K.svg(svg, "text", { style: MONO, x: x + lw + j * cw + cw / 2, y: y + i * ch + ch / 2 + 4, "text-anchor": "middle", "font-size": opt.fs || 12, fill: v ? "var(--ink)" : "var(--ink-3)" }, fmt(v));
+        return { rect, text };
+      });
+    });
+    return cells;
+  }
+  /* sklearn CountVectorizer 默认分词：小写，token_pattern = \b\w\w+\b（单个字符的词被丢掉） */
+  const skTok = (s) => (String(s).toLowerCase().match(/\b\w\w+\b/g) || []);
+  /* NLTK 英文停用词表 */
+  const STOP = new Set(("i me my myself we our ours ourselves you you're you've you'll you'd your yours yourself yourselves he him his himself she she's her hers herself it it's its itself they them their theirs themselves what which who whom this that that'll these those am is are was were be been being have has had having do does did doing a an the and but if or because as until while of at by for with about against between into through during before after above below to from up down in out on off over under again further then once here there when where why how all any both each few more most other some such no nor not only own same so than too very s t can will just don don't should should've now d ll m o re ve y ain aren aren't couldn couldn't didn didn't doesn doesn't hadn hadn't hasn hasn't haven haven't isn isn't ma mightn mightn't mustn mustn't needn needn't shan shan't shouldn shouldn't wasn wasn't weren weren't won won't wouldn wouldn't").split(" "));
+  /* 在实验面板左侧插入一个文本输入框 */
+  function addTextInput(labEl, label, value, onChange, opt) {
+    opt = opt || {};
+    const ctrl = labEl.querySelector(".ctrl");
+    const wrap = K.el("div");
+    wrap.innerHTML = `<label>${K.esc(label)}</label>`;
+    const inp = K.el(opt.area ? "textarea" : "input", { type: "text", spellcheck: "false" });
+    inp.value = value;
+    inp.style.cssText = "width:100%;font:inherit;font-size:14px;padding:6px 8px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);resize:vertical;" + (opt.area ? "min-height:64px;" : "");
+    inp.addEventListener("input", () => onChange(inp.value));
+    wrap.appendChild(inp);
+    ctrl.insertBefore(wrap, ctrl.firstChild);
+    return inp;
+  }
+  const fadeIn = (els, t) => els.forEach((e) => e && (e.style.opacity = t));
+  const hide = (els) => els.forEach((e) => e && (e.style.opacity = 0));
+  /* 按 case.js 的切章规则（每章从 at 或 min(cells) 开始）自动生成 kicker 里的“第 a–b 格”，kicker 原文只保留“·”后面的阶段名 */
+  function autoKicker(steps) {
+    const N = (window.CASE_NB || { cells: [] }).cells.length;
+    const st = steps.map((s) => ({ s, a: s.at != null ? s.at : Math.min.apply(null, s.cells) })).sort((x, y) => x.a - y.a);
+    st.forEach((o, k) => {
+      const to = k + 1 < st.length ? st[k + 1].a - 1 : N - 1;
+      const stage = String(o.s.kicker || "").split("·").pop().trim();
+      o.s.kicker = (to > o.a ? `第 ${o.a}–${to} 格` : `第 ${o.a} 格`) + (stage ? " · " + stage : "");
+    });
+    return steps;
+  }
+
+  /* ---------- 示例语料（本页自编，温和措辞；标签顺序 toxic, insult, threat） ---------- */
+  const CORPUS = [
+    ["thanks for fixing the citation in this article", 0, 0, 0],
+    ["i think this section needs a better source", 0, 0, 0],
+    ["please discuss the change on the talk page first", 0, 0, 0],
+    ["great work on the history section!", 0, 0, 0],
+    ["the date in the second paragraph is wrong", 0, 0, 0],
+    ["i reverted the edit because it had no source", 0, 0, 0],
+    ["welcome to wikipedia, feel free to ask questions", 0, 0, 0],
+    ["can you add a reference for this claim?", 0, 0, 0],
+    ["this article is a stub, help expand it", 0, 0, 0],
+    ["sorry, i made a mistake in my last edit", 0, 0, 0],
+    ["you are right, i will fix the table tonight", 0, 0, 0],
+    ["could you check the spelling of the name?", 0, 0, 0],
+    ["i added two sources, please review them", 0, 0, 0],
+    ["the photo caption is missing a date", 0, 0, 0],
+    ["good point, i will move this to the talk page", 0, 0, 0],
+    ["thank you for the warm welcome!", 0, 0, 0],
+    ["you did a nice job on the references", 0, 0, 0],
+    ["you are a stupid idiot!!", 1, 1, 0],
+    ["what an idiot, stop editing", 1, 1, 0],
+    ["you are a pathetic loser", 1, 1, 0],
+    ["only a moron would write this garbage", 1, 1, 0],
+    ["shut up, you stupid fool!!!", 1, 1, 0],
+    ["your edits are garbage and you are an idiot", 1, 1, 0],
+    ["this is the dumbest article i have ever read", 1, 0, 0],
+    ["stop vandalizing this page, it is garbage!", 1, 0, 0],
+    ["what the hell is wrong with this page???", 1, 0, 0],
+    ["i will find you and hurt you", 1, 0, 1],
+    ["if you revert again i will hurt you", 1, 0, 1],
+    ["you better watch out, i will find you", 1, 0, 1],
+    ["you stupid idiot, i will hurt you", 1, 1, 1],
+  ];
+  const LABS = ["toxic", "insult", "threat"];
+  document.getElementById("corpus").innerHTML = `<p class="muted" style="margin:6px 0">本页自己编写的示例，仅用于演示计算过程。标签依次为 toxic / insult / threat。</p><ol class="tight">${CORPUS.map((d) => `<li><code>${d.slice(1).join(" ")}</code> ${K.esc(d[0])}</li>`).join("")}</ol>`;
+
+  /* 作者第 17 格的分词：标点（含各种引号）前后加空格，再按空白切；TfidfVectorizer 默认先转小写 */
+  const RE_TOK = /([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~“”¨«»®´·º½¾¿¡§£₤‘’])/g;
+  const jhTok = (s) => s.toLowerCase().replace(RE_TOK, " $1 ").split(/\s+/).filter(Boolean);
+  const isPunct = (t) => /^[^\w\s]$/.test(t);
+  const grams = (t) => t.concat(t.slice(0, -1).map((w, i) => w + " " + t[i + 1]));
+
+  /* TfidfVectorizer(ngram_range=(1,2), max_df=0.9, sublinear_tf=1, smooth_idf=1)；示例语料太小，min_df 取 1 */
+  function fitTfidf(docs, minDf) {
+    const toks = docs.map((d) => grams(jhTok(d)));
+    const n = docs.length, df = new Map();
+    toks.forEach((t) => new Set(t).forEach((w) => df.set(w, (df.get(w) || 0) + 1)));
+    const vocab = [...df.keys()].filter((w) => df.get(w) >= (minDf || 1) && df.get(w) <= 0.9 * n).sort();
+    const idx = new Map(vocab.map((w, i) => [w, i]));
+    const idf = vocab.map((w) => Math.log((1 + n) / (1 + df.get(w))) + 1);
+    const tr = (d) => {
+      const c = new Map();
+      grams(jhTok(d)).forEach((w) => { if (idx.has(w)) c.set(idx.get(w), (c.get(idx.get(w)) || 0) + 1); });
+      let s = 0;
+      c.forEach((v, j) => { const t = (1 + Math.log(v)) * idf[j]; c.set(j, t); s += t * t; });
+      s = Math.sqrt(s) || 1;
+      c.forEach((v, j) => c.set(j, v / s));
+      return c;
+    };
+    return { vocab, idx, idf, tr, X: docs.map(tr) };
+  }
+  /* 第 23 格：pr(y_i) = (该类所有文档特征之和 + 1) / (该类文档数 + 1)；第 26 格：r = log(pr(1) / pr(0)) */
+  function nbRatio(T, y) {
+    const V = T.vocab.length, s = [new Float64Array(V), new Float64Array(V)], n = [0, 0];
+    T.X.forEach((x, i) => { n[y[i]]++; x.forEach((v, j) => (s[y[i]][j] += v)); });
+    return Array.from({ length: V }, (_, j) => Math.log(((s[1][j] + 1) / (n[1] + 1)) / ((s[0][j] + 1) / (n[0] + 1))));
+  }
+  /* L2 正则逻辑回归（目标：C·Σlogloss + ½‖w‖²），批量梯度下降 */
+  function trainLR(X, y, V, C) {
+    const w = new Float64Array(V); let b = 0;
+    const lr = 0.08 / C;
+    for (let it = 0; it < 3000; it++) {
+      const g = new Float64Array(V); let gb = 0;
+      X.forEach((x, i) => { let z = b; x.forEach((v, j) => (z += w[j] * v)); const d = K.sigmoid(z) - y[i]; x.forEach((v, j) => (g[j] += C * d * v)); gb += C * d; });
+      for (let j = 0; j < V; j++) w[j] -= lr * (g[j] + w[j]);
+      b -= lr * gb;
+    }
+    return { w, b, p: (x) => { let z = b; x.forEach((v, j) => (z += w[j] * v)); return K.sigmoid(z); } };
+  }
+  const mulR = (x, r) => { const o = new Map(); x.forEach((v, j) => o.set(j, v * r[j])); return o; };
+
+  const T0 = fitTfidf(CORPUS.map((d) => d[0]), 1);
+  const R0 = nbRatio(T0, CORPUS.map((d) => d[1]));
+
+  const LABEL6 = ["toxic", "severe_toxic", "obscene", "threat", "insult", "identity_hate"];
+  const steps = [
+    {
+      at: 0, title: "开场：一个强基线", kicker: "· 开场",
+      html: `<p>作者开篇说明：NB-SVM 来自 Sida Wang 和 Christopher Manning 的论文《Baselines and Bigrams》；这里用 sklearn 的逻辑回归代替 SVM，实际效果几乎一样。第 1 格导入 pandas、numpy、LogisticRegression、TfidfVectorizer，第 2 格读入训练集、测试集和提交样例。</p>`,
+      cells: [0],
+    },
+    {
+      at: 3,
+      title: "一条评论，6 个标签", kicker: "第 3–7 格 · 认识数据",
+      html: `<p>训练集每行是一条维基百科讨论页的评论，后面跟 6 个 0/1 标签。作者打印了两条：一条有害，一条完全无害。</p><p>关键在于这是<b>多标签</b>（multi-label）问题：一条评论可以同时被标成 toxic 和 insult；而“多分类”是只能选一个。所以后面要给每个标签分别回答“是 / 否”。动画里的评论是本页自编的温和示例。</p>`,
+      cells: [3, 4],
+      async draw(svg, ctx) {
+        const ex = [["“You are a stupid idiot, stop editing!”（示例）", [1, 0, 0, 0, 1, 0]], ["“Thanks for fixing the citation.”（示例）", [0, 0, 0, 0, 0, 0]]];
+        for (let k = 0; k < 2; k++) {
+          const y0 = 30 + k * 150;
+          K.svg(svg, "rect", { x: 20, y: y0, width: 680, height: 128, rx: 10, fill: "var(--panel-2)", stroke: "var(--line)" });
+          K.svg(svg, "text", { style: MONO, x: 38, y: y0 + 32, "font-size": 14 }, ex[k][0]);
+          const pills = LABEL6.map((l, i) => { const c = chip(svg, 38 + i * 108, y0 + 62, l + " 0", { w: 102, fs: 11, color: "var(--ink-3)", ink: "var(--ink-2)" }); return c; });
+          for (let i = 0; i < 6; i++) {
+            if (!(await ctx.wait(160))) return;
+            if (ex[k][1][i]) { pills[i].rect.style.fill = "color-mix(in srgb, var(--c6) 25%, var(--panel))"; pills[i].rect.style.stroke = "var(--c6)"; pills[i].text.textContent = LABEL6[i] + " 1"; pills[i].text.style.fill = "var(--c6)"; }
+          }
+          K.svg(svg, "text", { x: 38, y: y0 + 112, "font-size": 12, fill: ex[k][1].some(Boolean) ? "var(--c6)" : "var(--c3)" }, ex[k][1].some(Boolean) ? "同时命中 toxic 和 insult：两个标签都是 1" : "6 个标签全是 0（后面会派生出 none = 1）");
+        }
+        K.svg(svg, "text", { x: 20, y: 330, "font-size": 12, class: "muted" }, "多分类：6 个里只能亮 1 个；多标签：每个标签独立亮或不亮");
+      },
+    },
+    {
+      at: 8,
+      title: "评论长短差得很远", kicker: "第 8–10 格 · 长度分布",
+      html: `<p>作者用 <code>str.len()</code> 算每条评论的字符数，看均值、标准差和最大值，再画直方图，说“评论长度差异很大”。</p><p>这对词袋模型影响不大（TF-IDF 每行会做归一化），但对后面要截断长度的深度模型就很重要。直方图是示意形状。</p>`,
+      cells: [9, 10], highlight: ["str.len()"],
+      async draw(svg, ctx) {
+        const r = K.rng(8), v = [];
+        for (let i = 0; i < 900; i++) v.push(Math.exp(K.randn(r) * 0.9 + 5.3));
+        const ax = K.axes(svg, { x: 60, y: 30, w: 620, h: 250 }, [0, 2000], [0, 1], { yticks: 0, xlabel: "评论字符数（示意）" });
+        const bins = 40, bw = 50, h = new Array(bins).fill(0);
+        v.forEach((x) => { const b = Math.floor(x / bw); if (b < bins) h[b]++; });
+        const mx = Math.max(...h);
+        const R = h.map((c, i) => K.svg(svg, "rect", { x: ax.sx(i * bw) + 1, y: ax.sy(0), width: ax.sx(bw) - ax.sx(0) - 2, height: 0, fill: "var(--c1)", "fill-opacity": 0.7 }));
+        K.svg(svg, "text", { x: 400, y: 70, "font-size": 13 }, "多数评论很短，少数特别长：长尾分布");
+        K.svg(svg, "text", { x: 400, y: 94, "font-size": 12, class: "muted" }, "均值 / 标准差 / 最大值见第 9 格的运行输出");
+        await ctx.tween(1200, (t) => R.forEach((e, i) => { const H = (250 * h[i] / mx) * t; e.setAttribute("y", ax.sy(0) - H); e.setAttribute("height", H); }));
+      },
+    },
+    {
+      at: 11,
+      title: "派生一个 none 标签", kicker: "第 11–13 格 · 标签统计",
+      html: `<p>作者新建一列 <code>none = 1 − max(6 个标签)</code>：6 个标签全是 0 的评论 none 就是 1。再用 <code>describe()</code> 看每个标签的均值，也就是正例比例。</p><p>这一步让人一眼看到：绝大多数评论是无害的，像 threat 这样的标签正例极少，是严重不平衡的二分类。表格是示意数据。</p>`,
+      cells: [12], highlight: ["1-train[label_cols].max(axis=1)"],
+      async draw(svg, ctx) {
+        const rows = [[1, 0, 0, 0, 1, 0], [0, 0, 0, 0, 0, 0], [1, 1, 1, 0, 1, 0], [0, 0, 0, 0, 0, 0], [1, 0, 0, 1, 0, 0], [0, 0, 0, 0, 0, 0]];
+        const cols = LABEL6.concat(["none"]);
+        const vals = rows.map((r) => r.concat([0]));
+        const cells = matrix(svg, 20, 70, rows.map((_, i) => "评论 " + (i + 1)), cols, vals, { cw: 84, ch: 34, lw: 70, max: 1, colFs: 11 });
+        cells.forEach((row) => { row[6].text.textContent = "?"; row[6].rect.style.stroke = "var(--accent)"; });
+        K.svg(svg, "text", { x: 20, y: 300, "font-size": 13 }, "none = 1 − max(该行 6 个标签)（示意数据）");
+        if (!(await ctx.wait(600))) return;
+        for (let i = 0; i < rows.length; i++) {
+          const nv = 1 - Math.max(...rows[i]);
+          if (!(await ctx.tween(300, (t) => { cells[i][6].rect.style.fill = nv ? K.heat(0.85 * t) : "var(--panel-2)"; }))) return;
+          cells[i][6].text.textContent = nv; cells[i][6].text.style.fill = "var(--ink)";
+        }
+      },
+    },
+    {
+      at: 14,
+      title: "空评论填成 unknown", kicker: "第 14–15 格 · 清理",
+      html: `<p>有少数评论是空值，sklearn 的向量化器遇到 NaN 会报错。作者用 <code>fillna("unknown")</code> 把它们填成一个普通单词，训练集和测试集都这样处理。</p><p>这是文本数据里最常见、也最容易忘的一步。</p>`,
+      cells: [15], highlight: ["fillna"],
+      async draw(svg, ctx) {
+        const rows = ["“please add a source”", "NaN", "“great edit, thanks”", "NaN", "“see talk page”"];
+        const els = rows.map((r, i) => {
+          K.svg(svg, "rect", { x: 160, y: 40 + i * 52, width: 400, height: 40, rx: 6, fill: "var(--panel-2)", stroke: r === "NaN" ? "var(--bad)" : "var(--line)" });
+          K.svg(svg, "text", { x: 140, y: 65 + i * 52, "text-anchor": "end", "font-size": 12, class: "muted" }, "comment_text");
+          return K.svg(svg, "text", { style: MONO, x: 180, y: 65 + i * 52, "font-size": 14, fill: r === "NaN" ? "var(--bad)" : "var(--ink)" }, r);
+        });
+        if (!(await ctx.wait(800))) return;
+        for (let i = 0; i < rows.length; i++) if (rows[i] === "NaN") {
+          if (!(await ctx.tween(400, (t) => (els[i].style.opacity = 1 - t)))) return;
+          els[i].textContent = "“unknown”"; els[i].style.fill = "var(--c3)";
+          if (!(await ctx.tween(400, (t) => (els[i].style.opacity = t)))) return;
+        }
+      },
+    },
+    {
+      at: 16,
+      title: "分词：标点也算一个词", kicker: "第 17 格 · 自定义分词",
+      html: `<p>作者没用 sklearn 默认的分词规则（它会把标点全部丢掉），而是写了一个正则：在每个标点符号（包括各种弯引号）两边插空格，再按空白切开。</p><p>这样 “!!!”、“?” 会作为独立的词保留下来。对有害评论来说，连续感叹号本身就是情绪信号。动画按作者的正则在浏览器里真切一遍。</p>`,
+      cells: [17], highlight: ["re_tok", "string.punctuation"],
+      async draw(svg, ctx) {
+        const s = "You're an idiot!!! Stop it...";
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, class: "muted" }, "示例评论（自编）");
+        K.svg(svg, "text", { style: MONO, x: 20, y: 60, "font-size": 16 }, s);
+        K.svg(svg, "text", { x: 20, y: 110, "font-size": 13, class: "muted" }, "sklearn 默认 \\b\\w\\w+\\b：标点和单字母全丢");
+        const a = chipRow(svg, 20, 122, skTok(s), 680, { color: "var(--ink-3)" });
+        K.svg(svg, "text", { x: 20, y: 200, "font-size": 13, class: "muted" }, "作者的 tokenize：标点两边加空格再切");
+        const b = chipRow(svg, 20, 212, jhTok(s), 680, { style: (t) => (isPunct(t) ? { color: "var(--warn)" } : {}) });
+        hide(a.map((c) => c.g).concat(b.map((c) => c.g)));
+        if (!(await ctx.tween(500, (t) => fadeIn(a.map((c) => c.g), t)))) return;
+        for (const c of b) if (!(await ctx.tween(160, (t) => (c.g.style.opacity = t)))) return;
+        K.svg(svg, "text", { x: 20, y: 300, "font-size": 13, fill: "var(--warn)" }, `黄色 = 被保留下来的标点：${jhTok(s).filter(isPunct).length} 个`);
+      },
+    },
+    {
+      at: 18,
+      title: "TF-IDF：单词 + 相邻两词", kicker: "第 16–19 格 · 特征",
+      html: `<p><code>TfidfVectorizer</code> 的几个参数各有用意：</p><ul class="tight"><li><code>ngram_range=(1,2)</code>：除单词外，再加相邻两词（bigram），如 “stop editing”</li><li><code>min_df=3, max_df=0.9</code>：去掉太罕见和太常见的词</li><li><code>sublinear_tf=1</code>：词频用 1 + ln(tf)，一个词出现 10 次不会比出现 1 次重 10 倍</li></ul><p>作者说用 TF-IDF 当先验比论文里的二值特征更好：分数从 0.59 改进到 0.55。</p>`,
+      cells: [18, 19], highlight: ["ngram_range=(1,2)", "sublinear_tf=1"],
+      async draw(svg, ctx) {
+        const s = "stop editing this page !";
+        const t = jhTok(s), g = grams(t);
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 13, class: "muted" }, "单词（unigram）");
+        const a = chipRow(svg, 20, 38, t, 680, { color: "var(--c1)" });
+        K.svg(svg, "text", { x: 20, y: 100, "font-size": 13, class: "muted" }, "相邻两词（bigram）");
+        const b = chipRow(svg, 20, 110, g.slice(t.length), 680, { color: "var(--c4)" });
+        hide(a.map((c) => c.g).concat(b.map((c) => c.g)));
+        if (!(await ctx.tween(400, (k) => fadeIn(a.map((c) => c.g), k)))) return;
+        for (const c of b) if (!(await ctx.tween(220, (k) => (c.g.style.opacity = k)))) return;
+        K.svg(svg, "text", { x: 20, y: 186, "font-size": 13, class: "muted" }, "sublinear_tf：原始词频 → 1 + ln(tf)");
+        const ax = K.axes(svg, { x: 70, y: 200, w: 300, h: 110 }, [0, 10], [0, 10], { xticks: 5, yticks: 2, xlabel: "词频 tf" });
+        let d1 = "", d2 = "";
+        for (let x = 1; x <= 10.001; x += 0.1) { d1 += (d1 ? "L" : "M") + ax.sx(x) + "," + ax.sy(x); d2 += (d2 ? "L" : "M") + ax.sx(x) + "," + ax.sy(1 + Math.log(x)); }
+        const p1 = K.svg(svg, "path", { d: d1, fill: "none", stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+        const p2 = K.svg(svg, "path", { d: d2, fill: "none", stroke: "var(--c2)", "stroke-width": 2.5 });
+        hide([p1, p2]);
+        await ctx.tween(600, (k) => fadeIn([p1, p2], k));
+        K.svg(svg, "text", { x: 400, y: 240, "font-size": 12, fill: "var(--ink-3)" }, "虚线：tf 原样（出现 10 次 = 10）");
+        K.svg(svg, "text", { x: 400, y: 262, "font-size": 12, fill: "var(--c2)" }, "实线：1 + ln(tf)（出现 10 次 ≈ 3.3）");
+      },
+    },
+    {
+      at: 20,
+      title: "一个巨大的稀疏矩阵", kicker: "第 20–21 格 · 稀疏表示",
+      html: `<p>约 16 万行评论 × 几十万列（单词加二元组），但每条评论只用到其中几十列。作者打印矩阵对象，看到的是“stored elements”：只存非零元素。</p><p>正因为稀疏，后面逐元素相乘（<code>x.multiply(r)</code>）和逻辑回归都能很快完成。动画里每一行只有零星几个亮点，是示意。</p>`,
+      cells: [21],
+      async draw(svg, ctx) {
+        const r = K.rng(12), nr = 24, nc = 64, cw = 10, ch = 10, x0 = 40, y0 = 30;
+        K.svg(svg, "rect", { x: x0, y: y0, width: nc * cw, height: nr * ch, fill: "var(--panel-2)", stroke: "var(--line)" });
+        K.svg(svg, "text", { x: x0, y: y0 + nr * ch + 22, "font-size": 12, class: "muted" }, "行 = 评论，列 = 词表中的词和二元组（示意，只画了一角）");
+        const dots = [];
+        for (let i = 0; i < nr; i++) { const k = 2 + Math.floor(r() * 5); for (let j = 0; j < k; j++) dots.push(K.svg(svg, "rect", { x: x0 + Math.floor(r() * nc) * cw + 1, y: y0 + i * ch + 1, width: cw - 2, height: ch - 2, fill: "var(--c1)", opacity: 0 })); }
+        const lab = K.svg(svg, "text", { x: x0, y: y0 + nr * ch + 50, "font-size": 14, "font-weight": 700 }, "");
+        await ctx.tween(1500, (t) => { const n = Math.round(t * dots.length); dots.forEach((d, i) => (d.style.opacity = i < n ? 0.9 : 0)); lab.textContent = `非零格 ${n} / ${nr * nc}（${((n / (nr * nc)) * 100).toFixed(1)}%）`; });
+      },
+    },
+    {
+      at: 22,
+      title: "朴素贝叶斯对数比 r", kicker: "第 22–26 格 · NB 特征",
+      html: `<p>对某个标签（比如 toxic），作者先算 <code>pr(1)</code> = 有害评论里每个特征的 TF-IDF 之和 +1，再除以有害评论条数 +1；<code>pr(0)</code> 同理。两者之比取对数就是 <b>r</b>：</p><p>r &gt; 0 表示这个词更常出现在有害评论里，r &lt; 0 表示更常出现在正常评论里。这就是朴素贝叶斯分类器里每个词的“投票权重”。条形是本页 30 条示例评论上真算的 r。</p>`,
+      cells: [23, 26], highlight: ["np.log(pr(1,y) / pr(0,y))", "(p+1)"],
+      async draw(svg, ctx) {
+        const words = ["idiot", "stupid", "hurt", "garbage", "!", "you", "the", "edit", "source"];
+        const items = words.filter((w) => T0.idx.has(w)).map((w) => ({ w, r: R0[T0.idx.get(w)] }));
+        const cx = 380, sx = 90;
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 13, class: "muted" }, "toxic 标签上的 r = log(pr(1) / pr(0))（30 条示例评论，浏览器真算）");
+        K.svg(svg, "line", { x1: cx, y1: 36, x2: cx, y2: 40 + items.length * 28, stroke: "var(--ink-3)" });
+        K.svg(svg, "text", { x: cx - 8, y: 52 + items.length * 28, "text-anchor": "end", "font-size": 12, fill: "var(--c1)" }, "← 偏正常");
+        K.svg(svg, "text", { x: cx + 8, y: 52 + items.length * 28, "font-size": 12, fill: "var(--c6)" }, "偏有害 →");
+        const bars = items.map((d, i) => {
+          const y = 40 + i * 28;
+          K.svg(svg, "text", { style: MONO, x: cx - 160, y: y + 15, "text-anchor": "end", "font-size": 13 }, d.w);
+          const rect = K.svg(svg, "rect", { x: cx, y: y + 2, width: 0, height: 18, rx: 3, fill: d.r > 0 ? "var(--c6)" : "var(--c1)" });
+          const tx = K.svg(svg, "text", { style: MONO, x: cx, y: y + 15, "font-size": 11, class: "muted" }, "");
+          return { d, rect, tx };
+        });
+        await ctx.tween(1300, (t) => bars.forEach(({ d, rect, tx }) => { const w = Math.abs(d.r) * sx * t; rect.setAttribute("width", w); rect.setAttribute("x", d.r > 0 ? cx : cx - w); tx.setAttribute("x", d.r > 0 ? cx + w + 5 : cx - w - 42); tx.textContent = (d.r >= 0 ? "+" : "") + (d.r * t).toFixed(2); }));
+      },
+    },
+    {
+      at: 25,
+      title: "特征乘 r，再交给逻辑回归", kicker: "第 26 格 · NB-SVM",
+      html: `<p>NB-SVM 的核心只有一行：<code>x_nb = x.multiply(r)</code>。每个特征先乘上它的对数比 r：明显偏向某一类的词被放大，两边都常见的词被压小。然后在 x_nb 上训练逻辑回归（<code>C=4, dual=True</code>）。</p><p>直觉：朴素贝叶斯给出“哪些词重要”的先验，逻辑回归再在此基础上微调权重。作者说用逻辑回归代替 SVM 效果几乎一样。动画用示例语料真算。</p>`,
+      cells: [26], highlight: ["x.multiply(r)", "LogisticRegression(C=4, dual=True)"],
+      async draw(svg, ctx) {
+        const s = "you are an idiot !";
+        const x = T0.tr(s), js = [...x.keys()].sort((a, b) => x.get(b) - x.get(a)).slice(0, 7);
+        K.svg(svg, "text", { style: MONO, x: 20, y: 26, "font-size": 14 }, `“${s}”（示例）`);
+        const head = ["特征", "x（TF-IDF）", "r", "x · r"];
+        head.forEach((h, k) => K.svg(svg, "text", { x: [20, 210, 330, 440][k], y: 58, "font-size": 12, class: "muted" }, h));
+        const rows = js.map((j, i) => {
+          const y = 70 + i * 30, xv = x.get(j), r = R0[j];
+          K.svg(svg, "text", { style: MONO, x: 20, y: y + 16, "font-size": 13 }, T0.vocab[j]);
+          K.svg(svg, "text", { style: MONO, x: 210, y: y + 16, "font-size": 13 }, xv.toFixed(2));
+          const rt = K.svg(svg, "text", { style: MONO, x: 330, y: y + 16, "font-size": 13, fill: r > 0 ? "var(--c6)" : "var(--c1)", opacity: 0 }, (r >= 0 ? "+" : "") + r.toFixed(2));
+          const bar = K.svg(svg, "rect", { x: 440, y: y + 3, width: 0, height: 18, rx: 3, fill: r > 0 ? "var(--c6)" : "var(--c1)" });
+          return { rt, bar, v: xv * r };
+        });
+        if (!(await ctx.wait(400))) return;
+        if (!(await ctx.tween(500, (t) => fadeIn(rows.map((r) => r.rt), t)))) return;
+        if (!(await ctx.tween(900, (t) => rows.forEach((r) => r.bar.setAttribute("width", Math.abs(r.v) * 160 * t))))) return;
+        const lr = trainLR(T0.X.map((xx) => mulR(xx, R0)), CORPUS.map((d) => d[1]), T0.vocab.length, 4);
+        const p = lr.p(mulR(x, R0));
+        K.node(svg, 570, 130, 140, 64, `逻辑回归\nP(toxic) = ${(p * 100).toFixed(0)}%`, { stroke: "var(--c6)", fill: "color-mix(in srgb, var(--c6) 14%, var(--panel))" });
+        K.arrow(svg, 545, 162, 568, 162);
+      },
+    },
+    {
+      at: 27,
+      title: "6 个标签各训一个，拼成提交", kicker: "第 27–29 格 · 多标签输出",
+      html: `<p>作者用一个循环：对 6 个标签依次 <code>get_mdl(train[j])</code>，每次都重新算这个标签自己的 r、训练一个逻辑回归，再对测试集输出“是这个标签”的概率，填进 <code>preds</code> 的第 i 列。</p><p>最后把 id 和 6 列概率拼成 <code>submission.csv</code>。这就是“多标签 = 多个独立二分类”的最直接做法。</p>`,
+      cells: [27, 29], highlight: ["for i, j in enumerate(label_cols)", "preds[:,i]"],
+      async draw(svg, ctx) {
+        const r = K.rng(3);
+        const nRow = 5, x0 = 330, y0 = 60, cw = 62, ch = 34;
+        LABEL6.forEach((l, i) => K.svg(svg, "text", { style: MONO, x: x0 + i * cw + cw / 2, y: y0 - 10, "text-anchor": "middle", "font-size": 10, fill: "var(--ink-2)" }, l.split("_")[0]));
+        for (let k = 0; k < nRow; k++) K.svg(svg, "text", { x: x0 - 8, y: y0 + k * ch + 22, "text-anchor": "end", "font-size": 12, class: "muted" }, "测试评论 " + (k + 1));
+        const P = Array.from({ length: nRow }, () => LABEL6.map(() => Math.pow(r(), 3)));
+        const lab = K.svg(svg, "text", { style: MONO, x: 20, y: 120, "font-size": 15 }, "");
+        const sub = K.svg(svg, "text", { x: 20, y: 146, "font-size": 12, class: "muted" }, "");
+        for (let i = 0; i < 6; i++) {
+          lab.textContent = `fit ${LABEL6[i]}`;
+          sub.textContent = "算这个标签的 r → 训练 LR → 预测一列概率";
+          const cells = P.map((row, k) => K.svg(svg, "rect", { x: x0 + i * cw + 2, y: y0 + k * ch + 2, width: cw - 4, height: ch - 4, rx: 3, fill: K.heat(row[i]), opacity: 0 }));
+          if (!(await ctx.tween(380, (t) => fadeIn(cells, t)))) return;
+        }
+        lab.textContent = "submission.csv";
+        sub.textContent = "id + 6 列概率（色块深浅为示意）";
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), autoKicker(steps));
+
+  /* ---------- 实验 A：现场训练 NB-SVM ---------- */
+  let userText = "you are an idiot, i will find you!!";
+  const cache = {};
+  function getModels(mode, C) {
+    const key = mode + "|" + C;
+    if (cache[key]) return cache[key];
+    const T = T0;
+    const ms = LABS.map((l, k) => {
+      const y = CORPUS.map((d) => d[k + 1]);
+      const r = nbRatio(T, y);
+      const X = mode === "lr" ? T.X : T.X.map((x) => mulR(x, r));
+      const lr = mode === "nb" ? null : trainLR(X, y, T.vocab.length, C);
+      const prior = Math.log(y.filter(Boolean).length / y.filter((v) => !v).length);
+      return { r, lr, prior };
+    });
+    return (cache[key] = { T, ms });
+  }
+  const lab1 = K.lab(document.getElementById("lab1"), {
+    width: 640, height: 400,
+    controls: [
+      { id: "mode", label: "模型", value: "nbsvm", options: [["nbsvm", "NB-SVM：x·r 再做逻辑回归（作者做法）"], ["lr", "只用逻辑回归（不乘 r）"], ["nb", "只用朴素贝叶斯打分（Σ x·r + 先验）"]] },
+      { id: "show", label: "下方条形显示哪个标签的 r", value: "0", options: [["0", "toxic"], ["1", "insult"], ["2", "threat"]] },
+      { id: "C", label: "逻辑回归的 C（越大正则越弱）", min: 0.25, max: 16, step: 0.25, value: 4, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "每个标签单独训练一个模型（3 个二分类）。示例语料只有 30 条，min_df 改用 1；结果只用来体会机制。黄色词块是被保留的标点，灰色虚线框是词表里没有的词。",
+    render(svg, v) {
+      const M = getModels(v.mode, v.C), T = M.T;
+      const toks = jhTok(userText);
+      K.svg(svg, "text", { x: 10, y: 18, "font-size": 13, class: "muted" }, "① 作者的分词结果");
+      const rows = chipRow(svg, 10, 28, toks, 620, { fs: 12, h: 22, style: (t) => (!T.idx.has(t) ? { color: "var(--ink-3)", ink: "var(--ink-3)", fill: "none" } : isPunct(t) ? { color: "var(--warn)" } : {}) });
+      const top = rows.length && rows[rows.length - 1].y > 40 ? 112 : 84;
+      const x = T.tr(userText);
+      const probs = M.ms.map((m) => (m.lr ? m.lr.p(m.lr === null ? x : v.mode === "lr" ? x : mulR(x, m.r)) : K.sigmoid(m.prior + [...x].reduce((s, [j, val]) => s + val * m.r[j], 0))));
+      K.svg(svg, "text", { x: 10, y: top, "font-size": 13, class: "muted" }, "② 三个标签各自的概率（三个独立的二分类器）");
+      probs.forEach((p, k) => {
+        const y = top + 12 + k * 30;
+        K.svg(svg, "text", { style: MONO, x: 80, y: y + 15, "text-anchor": "end", "font-size": 13 }, LABS[k]);
+        K.svg(svg, "rect", { x: 90, y, width: 420, height: 20, rx: 10, fill: "var(--panel-2)" });
+        K.svg(svg, "rect", { x: 90, y, width: 420 * p, height: 20, rx: 10, fill: p > 0.5 ? "var(--c6)" : "var(--c1)" });
+        K.svg(svg, "text", { style: MONO, x: 520, y: y + 15, "font-size": 13 }, (p * 100).toFixed(1) + "%");
+      });
+      const L = +v.show, r = M.ms[L].r;
+      const used = [...x.keys()].map((j) => ({ w: T.vocab[j], r: r[j], x: x.get(j) })).sort((a, b) => Math.abs(b.r) - Math.abs(a.r)).slice(0, 7);
+      const y2 = top + 120;
+      K.svg(svg, "text", { x: 10, y: y2, "font-size": 13, class: "muted" }, `③ 这句话里各特征在 ${LABS[L]} 上的 r（最多 7 个，含二元组）`);
+      const cx = 330;
+      K.svg(svg, "line", { x1: cx, y1: y2 + 8, x2: cx, y2: y2 + 10 + used.length * 24, stroke: "var(--ink-3)" });
+      used.forEach((d, i) => {
+        const y = y2 + 10 + i * 24, w = Math.min(250, Math.abs(d.r) * 70);
+        K.svg(svg, "text", { style: MONO, x: 150, y: y + 14, "text-anchor": "end", "font-size": 12 }, d.w);
+        K.svg(svg, "rect", { x: d.r > 0 ? cx : cx - w, y: y + 2, width: w, height: 16, rx: 3, fill: d.r > 0 ? "var(--c6)" : "var(--c1)" });
+        K.svg(svg, "text", { style: MONO, x: d.r > 0 ? cx + w + 4 : cx - w - 4, y: y + 14, "text-anchor": d.r > 0 ? "start" : "end", "font-size": 11, class: "muted" }, (d.r >= 0 ? "+" : "") + d.r.toFixed(2));
+      });
+      if (!used.length) K.svg(svg, "text", { x: 10, y: y2 + 30, "font-size": 13, fill: "var(--warn)" }, "没有一个词在示例词表里，模型只能靠截距（先验）判断");
+      return { readout: LABS.map((l, k) => ({ k: "P(" + l + ")", v: (probs[k] * 100).toFixed(1) + "%", color: probs[k] > 0.5 ? "var(--c6)" : "var(--c1)" })).concat([{ k: "命中词表的特征", v: String(x.size) }]) };
+    },
+  });
+  addTextInput(document.getElementById("lab1"), "输入一条英文评论", userText, (s) => { userText = s; lab1.update(); });
+
+  /* ---------- 实验 B：三种分词 ---------- */
+  let tokText = "Don't you DARE revert my edit again!!! :( #angry";
+  const lab2 = K.lab(document.getElementById("lab2"), {
+    width: 640, height: 300,
+    controls: [{ id: "bi", label: "作者的分词再加二元组？", value: "no", options: [["no", "只看单词"], ["yes", "加上相邻两词（ngram_range=(1,2)）"]] }],
+    note: "三行都是浏览器里按各自规则真切的。注意 don't、:( 和 !!! 在三种规则下的命运。",
+    render(svg, v) {
+      const rows = [["按空格切 split()", tokText.split(/\s+/).filter(Boolean), "var(--ink-3)"], ["sklearn 默认 \\b\\w\\w+\\b", skTok(tokText), "var(--c1)"], ["作者第 17 格 tokenize", v.bi === "yes" ? grams(jhTok(tokText)) : jhTok(tokText), "var(--c3)"]];
+      let y = 20; const counts = [];
+      rows.forEach(([name, t, color]) => {
+        K.svg(svg, "text", { x: 10, y, "font-size": 13, "font-weight": 700, fill: color }, `${name}（${t.length} 个）`);
+        const cs = chipRow(svg, 10, y + 10, t, 620, { fs: 11, h: 20, color, style: (w) => (isPunct(w) ? { color: "var(--warn)" } : {}) });
+        y = (cs.length ? cs[cs.length - 1].y + 20 : y + 10) + 34;
+        counts.push(t.length);
+      });
+      return { readout: [{ k: "split", v: String(counts[0]) }, { k: "sklearn 默认", v: String(counts[1]) }, { k: "作者的分词", v: String(counts[2]) }] };
+    },
+  });
+  addTextInput(document.getElementById("lab2"), "输入一句英文", tokText, (s) => { tokText = s; lab2.update(); });
+
+})();
+</script>
+</body>
+</html>

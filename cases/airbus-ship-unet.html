@@ -1,0 +1,602 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>卫星图找船</title>
+<meta name="description" content="Kaggle 案例拆解：在 768×768 的卫星图上逐像素圈出船只——游程编码 RLE、按船数分层与欠采样、同步数据增强、U-Net 与 Dice 损失。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">卫星图像 · 语义分割 · 海上交通</div>
+  <h1>从太空数船：在卫星图上逐个像素圈出每一艘船</h1>
+  <p class="en">Baseline U-Net Model (Part 1)</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">游程编码 RLE</span><span class="tag method">分层切分</span><span class="tag method">空图欠采样</span>
+    <span class="tag method">同步数据增强</span><span class="tag method">U-Net</span><span class="tag method">Dice 损失</span><span class="tag method">学习率衰减 / 早停</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>K Scott Mader</b></span>
+    <span>Kaggle 点赞 <b>1,173</b>（2026-11 抓取）</span>
+    <span>数据 <b>Airbus Ship Detection Challenge（比赛）</b></span>
+    <span><a href="https://www.kaggle.com/code/kmader/baseline-u-net-model-part-1" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">768×768 的海面卫星图</div><p>每张图配一张“答案”：哪些像素属于船。答案不是图片，而是写成一串数字的<b>游程编码（RLE）</b>，一艘船一行。<span data-cell="3">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">每个像素是不是船（分割）</div><p>不是只回答“有没有船”，而是把每一艘船的轮廓都圈出来。很多图根本没有船，有船的图里船也只占很少的像素。</p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">均衡样本 + 小型 U-Net</div><p>按船数分层切验证集；把空图大幅欠采样；图像和掩膜用同一个随机种子一起翻转旋转；训练一个通道很少的 U-Net，损失以 Dice 为主。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一个能跑通的分割基线</div><p>作者把它定位为 Part 1：只训练模型、在测试图上可视化预测；生成提交文件放在另一个 notebook（Part 2）。<span data-cell="38">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛 <b>Airbus Ship Detection Challenge</b>（空客公司发起）。训练图片在 <code>train_v2</code> 文件夹，答案在 <code>train_ship_segmentations_v2.csv</code>。下面的规模信息来自 notebook 代码。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">图片尺寸</div><div class="v">768 × 768</div></div>
+        <div class="stat-tile"><div class="k">颜色通道</div><div class="v">3（RGB）</div></div>
+        <div class="stat-tile"><div class="k">验证集占比</div><div class="v">30%</div></div>
+        <div class="stat-tile"><div class="k">验证图片张数</div><div class="v">400</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">尺寸见 <span data-cell="3">第 3 格</span>（解码函数默认 shape），切分比例见 <span data-cell="9">第 9 格</span>，验证用 400 张见 <span data-cell="2">第 2 格</span>。图片总数、带船图片的比例都在运行输出里，源码不带，这里不列。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么（答案表）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>ImageId</code></td><td>图片文件名，如 <code>00021ddc3.jpg</code>（第 6 格用到）</td><td>文本</td></tr>
+        <tr><td><code>EncodedPixels</code></td><td><b>要预测的答案</b>：一艘船占了哪些像素，写成“起点 长度 起点 长度 …”；没有船的图这里是空值</td><td>文本（RLE）</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">一张图有几艘船，表里就有几行。作者在 <span data-cell="8">第 8 格</span> 按 <code>ImageId</code> 汇总，得到每张图的船数 <code>ships</code>，并删掉小于 50KB 的损坏文件。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="6">
+    <h3>动手试试 A · 自己画一艘船，看它的 RLE 编码 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labRle"></div>
+  </div>
+  <div data-at="22">
+    <h3>动手试试 B · 图像和掩膜为什么要用同一个随机种子 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labAug"></div>
+  </div>
+  <div data-at="26">
+    <h3>动手试试 C · Dice 和像素准确率：谁更诚实 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labDice"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的信息</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>目标：提取船的分割图、做数据增强、训练一个简单网络，并把船数分布调得更均衡</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>按船数分层切分，让训练集和验证集的船数分布一致</td><td><span data-cell="7">第 7 格</span></td></tr>
+        <tr><td>空图欠采样得比有船的图更狠（只取三分之一）</td><td><span data-cell="13">第 13 格</span></td></tr>
+        <tr><td>亮度增强可能让图像和标签变得不一致，默认关掉</td><td><span data-cell="21">第 21 格</span></td></tr>
+        <tr><td>早停的耐心“可能该更大，但 Kaggle 的运行时间有限”</td><td><span data-cell="27">第 27 格</span></td></tr>
+        <tr><td>生成提交文件太费时间和内存，放在 Part 2 notebook</td><td><span data-cell="38">第 38 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">训练曲线、验证集 Dice、预测示例图都在运行输出里，Kaggle 下载的源码不带输出，作者的文字里也没写分数，所以这里不列任何分数。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一张海面卫星图，输出一张同样大小的“船概率图”，再把连在一起的像素拆成一艘艘船，就能数船、量船长、看停在哪个港口。</li>
+        <li><b>同类问题：</b>海上搜救、非法捕鱼和走私监测、港口拥堵统计、遥感里的建筑物 / 道路 / 油罐提取、工业图片里的缺陷区域分割。</li>
+        <li><b>可迁移的套路：</b>小目标分割先解决“空图太多、目标像素太少”→ 分层切分 + 欠采样 → 图像与标签同步增强 → U-Net → 用 Dice 而不是像素准确率选模型。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>RLE 编码 / 解码与互逆检查 <span data-cell="3">第 3 格</span> <span data-cell="6">第 6 格</span></li>
+        <li>按船数分层切分 <span data-cell="9">第 9 格</span>；空图欠采样 <span data-cell="13">第 13 格</span></li>
+        <li>批次生成器 <span data-cell="15">第 15 格</span>；同步增强 <span data-cell="21">第 21 格</span></li>
+        <li>U-Net（8→16→32→64→128 通道，上采样 + 跳连，高斯噪声 + BN 输入层） <span data-cell="25">第 25 格</span></li>
+        <li>损失：1e-3 × 交叉熵 − Dice <span data-cell="26">第 26 格</span></li>
+        <li>回调：ModelCheckpoint、ReduceLROnPlateau、EarlyStopping <span data-cell="27">第 27 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>一张 768×768 的图里，一艘船可能只占几百个像素。如果模型把整张图都判成“海”，像素准确率会是多少？为什么作者用 Dice？</li>
+      <li>第 13 格的抽样是在 <code>train_df</code> 上做的，而 <code>train_df</code> 的每一行是“一艘船的掩膜”而不是“一张图”。对一张有 3 艘船的图，如果只抽中其中 1 行，生成器拼出的答案图会少画两艘船；抽样有放回时，同一艘船还可能被叠加两次。这会对训练产生什么影响？应该怎么改？</li>
+      <li>为什么数据增强时图像和掩膜一定要用同一个随机种子？哪些增强（比如亮度、颜色）只该加在图像上、不该加在掩膜上？</li>
+      <li>输出层先 Cropping2D 再 ZeroPadding2D，把四周 16 像素强行设成 0。这样做的好处和代价各是什么？如果船正好停在图片边缘呢？</li>
+      <li>模型输出的是“每个像素是船的概率”，比赛却要每艘船单独一行 RLE。从概率图到“一艘艘船”，中间还需要哪些步骤？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 K Scott Mader，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。RLE 编码函数引用自 paulorzp 的 kernel。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Kaggle 比赛 Airbus Ship Detection Challenge。
+</footer>
+</main>
+
+<script src="nb/airbus-ship-unet.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const FAST = location.hash === "#fast";
+
+  /* ---- 模拟“卫星图”：海面噪声 + 若干艘细长的船 ---- */
+  function shipsOf(seed, n, G) {
+    const r = K.rng(seed), S = [];
+    for (let i = 0; i < n; i++) S.push({ x: 4 + r() * (G - 8), y: 4 + r() * (G - 8), L: 3 + r() * G * 0.12, W: 0.9 + r() * 0.8, a: r() * Math.PI });
+    return S;
+  }
+  function inShip(s, x, y) {
+    const dx = x - s.x, dy = y - s.y, c = Math.cos(s.a), si = Math.sin(s.a);
+    const u = dx * c + dy * si, v = -dx * si + dy * c;
+    return Math.abs(u) <= s.L / 2 && Math.abs(v) <= s.W / 2;
+  }
+  function maskOf(ships, G) {
+    const M = [];
+    for (let y = 0; y < G; y++) { const row = []; for (let x = 0; x < G; x++) row.push(ships.some((s) => inShip(s, x + 0.5, y + 0.5)) ? 1 : 0); M.push(row); }
+    return M;
+  }
+  function drawGrid(svg, M, x0, y0, cell, colorFn) {
+    const els = [];
+    M.forEach((row, y) => row.forEach((v, x) => els.push(K.svg(svg, "rect", { x: x0 + x * cell, y: y0 + y * cell, width: cell + 0.3, height: cell + 0.3, fill: colorFn(v, x, y) }))));
+    return els;
+  }
+  const sea = (seed) => { const r = K.rng(seed); return (v) => (v ? "var(--c2)" : `color-mix(in srgb, var(--c1) ${Math.round(28 + r() * 18)}%, var(--panel))`); };
+  /* RLE（与第 3 格一致：按列展开，1 起编号，起点 长度） */
+  function rleEncode(M) {
+    const G = M.length, flat = [0];
+    for (let x = 0; x < G; x++) for (let y = 0; y < G; y++) flat.push(M[y][x]);
+    flat.push(0);
+    const runs = [];
+    for (let i = 1; i < flat.length; i++) if (flat[i] !== flat[i - 1]) runs.push(i);
+    for (let i = 1; i < runs.length; i += 2) runs[i] -= runs[i - 1];
+    return runs;
+  }
+  function rleDecode(runs, G) {
+    const img = new Array(G * G).fill(0);
+    for (let i = 0; i < runs.length; i += 2) for (let k = runs[i] - 1; k < runs[i] - 1 + runs[i + 1]; k++) img[k] = 1;
+    const M = [];
+    for (let y = 0; y < G; y++) { const row = []; for (let x = 0; x < G; x++) row.push(img[x * G + y]); M.push(row); }
+    return M;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "开场：先把参数摆上桌面", kicker: "第 0–2 格 · 概览与参数",
+      html: `<p>作者开头说明：这份 notebook 要提取船的分割图、做数据增强、训练一个简单的网络，并把“船数”分布调得更均衡。</p><p>接着把以后可能要调的参数都放在最前面：每批 4 张图、训练 10 轮、每轮最多 200 步、验证用 400 张、输入加一点高斯噪声、上采样用最简单的方式、不缩小图片。</p>`,
+      cells: [0, 2], highlight: ["BATCH_SIZE = 4", "NB_EPOCHS = 10", "VALID_IMG_COUNT = 400", "MAX_TRAIN_STEPS = 200"],
+      draw(svg, ctx) {
+        const G = 48, ships = shipsOf(3, 5, G), M = maskOf(ships, G), cell = 6.4;
+        drawGrid(svg, M, 30, 15, cell, (v) => `color-mix(in srgb, var(--c1) ${30 + ((v * 7) % 5)}%, var(--panel))`);
+        const shipEls = [];
+        M.forEach((row, y) => row.forEach((v, x) => { if (v) shipEls.push(K.svg(svg, "rect", { x: 30 + x * cell, y: 15 + y * cell, width: cell, height: cell, fill: "var(--ink)", opacity: 0.85 })); }));
+        const outline = [];
+        M.forEach((row, y) => row.forEach((v, x) => { if (v) outline.push(K.svg(svg, "rect", { x: 30 + x * cell, y: 15 + y * cell, width: cell, height: cell, fill: "var(--c2)", opacity: 0 })); }));
+        K.svg(svg, "text", { x: 30, y: 336, "font-size": 12, class: "muted" }, "示意：一张海面卫星图（小条 = 船）");
+        K.svg(svg, "text", { x: 380, y: 60, "font-size": 15, "font-weight": 700 }, "任务：把每一艘船的像素圈出来");
+        const lines = ["图片 768 × 768 像素", "答案 = 一张同样大小的 0/1 掩膜", "大部分像素是海（0），船（1）很少", "不少图片一艘船都没有"];
+        const tx = lines.map((t, i) => { const e = K.svg(svg, "text", { x: 380, y: 110 + i * 34, "font-size": 14 }, "• " + t); e.style.opacity = 0; return e; });
+        (async () => {
+          for (let i = 0; i < tx.length; i++) if (!(await ctx.tween(350, (t) => (tx[i].style.opacity = t)))) return;
+          await ctx.tween(900, (t) => outline.forEach((o) => (o.style.opacity = t)));
+        })();
+      },
+    },
+    {
+      title: "RLE：把船的轮廓写成一串数字", kicker: "第 3 格 · 编码与解码",
+      html: `<p>答案表里每艘船的形状是一串“<b>起点 长度 起点 长度 …</b>”，叫游程编码（RLE）。像素按<b>列</b>从上到下、从左到右编号（所以代码里有 <code>img.T</code> 转置），每一段连续的“船像素”只记它从第几个开始、连续几个。</p><p><code>rle_decode</code> 把字符串还原成 768×768 的 0/1 图；<code>masks_as_image</code> 把同一张图的多艘船叠成一张总掩膜；<code>multi_rle_encode</code> 先给连在一起的像素编号，再每艘船单独编码。</p>`,
+      cells: [3], highlight: ["pixels = img.T.flatten()", "runs[1::2] -= runs[::2]", "return img.reshape(shape).T"],
+      draw(svg, ctx) {
+        const G = 10, cell = 26, M = [];
+        for (let y = 0; y < G; y++) { const row = []; for (let x = 0; x < G; x++) row.push(x >= 3 && x <= 5 && y >= 2 && y <= 6 ? 1 : 0); M.push(row); }
+        M[7][4] = 1;
+        const els = drawGrid(svg, M, 30, 30, cell, (v) => (v ? "var(--c2)" : "var(--panel-2)"));
+        els.forEach((e) => K.set(e, { stroke: "var(--line)" }));
+        K.svg(svg, "text", { x: 30, y: 22, "font-size": 12, class: "muted" }, "10×10 示意掩膜，按列编号 1、2、3…");
+        const cur = K.svg(svg, "rect", { x: 30, y: 30, width: cell, height: cell, fill: "none", stroke: "var(--warn)", "stroke-width": 3 });
+        const runs = rleEncode(M);
+        K.svg(svg, "text", { x: 330, y: 60, "font-size": 14, "font-weight": 700 }, "RLE（起点 长度）：");
+        const out = K.svg(svg, "text", { x: 330, y: 92, "font-size": 18, "font-family": "var(--mono)", fill: "var(--c2)" }, "");
+        const idx = K.svg(svg, "text", { x: 330, y: 140, "font-size": 13, class: "muted" }, "");
+        K.svg(svg, "text", { x: 330, y: 200, "font-size": 13 }, "• 一列一列往下数，所以第 4 列是 31~40 号");
+        K.svg(svg, "text", { x: 330, y: 226, "font-size": 13 }, "• 一段连续的船像素只写两个数");
+        K.svg(svg, "text", { x: 330, y: 252, "font-size": 13 }, `• 100 个格子 → ${runs.length} 个数`);
+        let shown = 0;
+        ctx.tween(FAST ? 10 : 3600, (t) => {
+          const k = Math.min(G * G - 1, Math.floor(t * G * G));
+          const x = Math.floor(k / G), y = k % G;
+          cur.setAttribute("x", 30 + x * cell); cur.setAttribute("y", 30 + y * cell);
+          idx.textContent = `扫描到第 ${k + 1} 号像素（第 ${x + 1} 列，第 ${y + 1} 行）`;
+          let n = 0;
+          for (let i = 0; i < runs.length; i += 2) if (runs[i] <= k + 1) n = i + 2;
+          if (n !== shown) { shown = n; out.textContent = runs.slice(0, n).join(" "); }
+        });
+      },
+    },
+    {
+      title: "读答案表，先验证编码解码能互相还原", kicker: "第 4–6 格 · 自检",
+      html: `<p>读入 <code>train_ship_segmentations_v2.csv</code>，打印一共多少行掩膜、多少张不同的图。</p><p>然后做一个很好的工程习惯：拿一张图 <code>00021ddc3.jpg</code>，<b>解码 → 再编码 → 再解码</b>，看两张图是不是一样，确认自己写的 RLE 函数没有写反（比如行列方向）。作者也提醒：编码回来的条数可能不同，取决于连在一起的船怎么被编号。</p>`,
+      cells: [4, 5, 6], highlight: ["multi_rle_encode(img_0)", "masks_as_image(rle_1)"],
+      draw(svg, ctx) {
+        const G = 24, ships = shipsOf(11, 3, G), M = maskOf(ships, G), cell = 7;
+        const nodes = [["RLE₀", 30], ["Image₀", 200], ["RLE₁", 370], ["Image₁", 540]];
+        nodes.forEach(([t, x], i) => {
+          if (i % 2) { drawGrid(svg, M, x, 90, cell, (v) => (v ? "var(--c2)" : "var(--panel-2)")); K.svg(svg, "text", { x: x + 84, y: 280, "text-anchor": "middle", "font-size": 13 }, t); }
+          else { K.node(svg, x, 150, 130, 50, t + "\n“起点 长度 …”", { fs: 12 }); }
+        });
+        const ar = [[160, 175, 198, 175, "解码"], [370 - 30, 175, 368, 175, "编码"], [500, 175, 538, 175, "解码"]];
+        const g = ar.map(([a, b, c, d, t]) => { const e = K.arrow(svg, a, b, c, d); e.style.opacity = 0; return e; });
+        const eq = K.svg(svg, "text", { x: 370, y: 320, "text-anchor": "middle", "font-size": 16, "font-weight": 700, fill: "var(--good)" }, "Image₀ = Image₁ ？ 一致 ✓");
+        eq.style.opacity = 0;
+        (async () => {
+          for (const e of g) if (!(await ctx.tween(400, (t) => (e.style.opacity = t)))) return;
+          await ctx.tween(500, (t) => (eq.style.opacity = t));
+        })();
+      },
+    },
+    {
+      at: 7, title: "按船数分层切出验证集", kicker: "第 7–9 格 · 切分与清洗",
+      html: `<p>先给每一行标记“有没有船”，再按图片汇总出每张图的船数 <code>ships</code>。有些文件太小或者损坏，作者只保留大于 50KB 的图片。</p><p>然后按 <code>ships</code> 分层，七三开切出训练集和验证集：保证“0 艘、1 艘、2 艘……”的图片在两边比例一样。</p>`,
+      cells: [8, 9], highlight: ["file_size_kb']>50", "stratify = unique_img_ids['ships']"],
+      draw(svg, ctx) {
+        const groups = [["0 艘", 10, "var(--ink-3)"], ["1 艘", 5, "var(--c1)"], ["2 艘", 3, "var(--c3)"], ["3+ 艘", 2, "var(--c2)"]];
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 12, class: "muted" }, "每个方块 = 一批图片（比例示意，不是真实分布）");
+        const items = [];
+        groups.forEach(([lab, n, col], gi) => {
+          K.svg(svg, "text", { x: 30, y: 72 + gi * 64, "font-size": 13 }, lab);
+          for (let i = 0; i < n; i++) items.push({ el: K.svg(svg, "rect", { x: 80 + i * 26, y: 54 + gi * 64, width: 22, height: 26, rx: 3, fill: col }), gi, i, n });
+        });
+        K.svg(svg, "text", { x: 420, y: 36, "font-size": 14, "font-weight": 700 }, "训练 70%");
+        K.svg(svg, "text", { x: 600, y: 36, "font-size": 14, "font-weight": 700, fill: "var(--c3)" }, "验证 30%");
+        K.svg(svg, "line", { x1: 585, x2: 585, y1: 44, y2: 310, stroke: "var(--line)" });
+        ctx.wait(500).then((ok) => ok && ctx.tween(FAST ? 10 : 1800, (t) => items.forEach((o) => {
+          const nv = Math.round(o.n * 0.3), toVal = o.i < nv;
+          const tx = toVal ? 600 + o.i * 26 : 420 + (o.i - nv) * 20;
+          const sx = 80 + o.i * 26;
+          o.el.setAttribute("x", K.lerp(sx, tx, t));
+          if (!toVal) o.el.setAttribute("width", K.lerp(22, 17, t));
+        })));
+      },
+    },
+    {
+      at: 10, title: "空图太多：按船数欠采样", kicker: "第 10–13 格 · 平衡样本",
+      html: `<p>看直方图会发现大多数图片一艘船也没有。作者把船数分组（<code>(ships+1)//2</code>，最多到 7 组），每组抽 1500 行，船少的组允许重复抽；<b>没有船的组只抽 500 行</b>，压得更狠。</p><p>这样训练时模型能看到更多真正有船的图。注意：这里抽样的单位是表格的“一行”，而 <code>train_df</code> 里一行是一艘船的掩膜，不是一张图（见课堂讨论第 2 题）。</p>`,
+      cells: [11, 13], highlight: ["base_rep_val//3", "replace=(in_df.shape[0]<base_rep_val)"],
+      draw(svg, ctx) {
+        const before = [9000, 2600, 1300, 700, 380, 200, 110, 60], after = [500, 1500, 1500, 1500, 1500, 1500, 1500, 1500];
+        const ax = K.axes(svg, { x: 70, y: 30, w: 610, h: 250 }, [0, 8], [0, 9000], { xticks: 0, yticks: 3 });
+        const bw = 610 / 8;
+        const bars = before.map((v, i) => {
+          K.svg(svg, "text", { x: 70 + i * bw + bw / 2, y: 298, "text-anchor": "middle", "font-size": 11 }, i === 0 ? "0 艘" : `组 ${i}`);
+          return K.svg(svg, "rect", { x: 70 + i * bw + 8, y: ax.sy(v), width: bw - 16, height: ax.sy(0) - ax.sy(v), fill: i ? "var(--c1)" : "var(--ink-3)" });
+        });
+        const lab = K.svg(svg, "text", { x: 360, y: 24, "font-size": 13, "font-weight": 700 }, "欠采样前（示意数量）");
+        K.svg(svg, "text", { x: 70, y: 330, "font-size": 12, class: "muted" }, "组号 = (船数 + 1) // 2，上限 7；数量为示意，不是原数据统计");
+        ctx.wait(900).then((ok) => ok && ctx.tween(FAST ? 10 : 1600, (t) => {
+          bars.forEach((b, i) => { const v = K.lerp(before[i], after[i], t); b.setAttribute("y", ax.sy(v)); b.setAttribute("height", ax.sy(0) - ax.sy(v)); });
+          if (t > 0.5) lab.textContent = "欠采样后：空图 500，其余各 1500";
+        }));
+      },
+    },
+    {
+      at: 14, title: "生成器：边读图边解码掩膜", kicker: "第 14–19 格 · 批次生成",
+      html: `<p>几万张 768×768 的大图不可能一次全读进内存。<code>make_image_gen</code> 是一个<b>生成器</b>：每次打乱图片顺序，读一张图、把它的所有 RLE 解码成掩膜，凑够 4 张就“吐出”一批，像素值除以 255 变成 0~1。</p><p>作者取一批画出“原图 / 分割 / 描边”三联图检查，再用同一个生成器一次取 400 张作为固定的验证集。</p>`,
+      cells: [15, 16, 19], highlight: ["yield np.stack(out_rgb, 0)/255.0", "while True:"],
+      draw(svg, ctx) {
+        const G = 20, cell = 3;
+        K.node(svg, 20, 120, 120, 70, "硬盘上的\n几万张图", { bold: true });
+        const belt = K.svg(svg, "line", { x1: 150, y1: 155, x2: 690, y2: 155, stroke: "var(--line)", "stroke-width": 6 });
+        const items = [];
+        for (let k = 0; k < 4; k++) {
+          const ships = shipsOf(30 + k, 2, G), M = maskOf(ships, G);
+          const g = K.svg(svg, "g");
+          drawGrid(g, M, 0, 0, cell, sea(k));
+          const gm = K.svg(svg, "g");
+          drawGrid(gm, M, 0, 0, cell, (v) => (v ? "var(--c2)" : "var(--panel-2)"));
+          items.push({ g, gm });
+        }
+        K.node(svg, 560, 230, 130, 60, "一批 4 张\n图 + 掩膜", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        K.svg(svg, "text", { x: 160, y: 300, "font-size": 12 }, "上：图像  下：掩膜");
+        K.svg(svg, "text", { x: 200, y: 110, "font-size": 12, class: "muted" }, "读图 + 解码 RLE → 掩膜");
+        items.forEach((it, k) => { it.g.style.opacity = it.gm.style.opacity = 0; });
+        ctx.tween(FAST ? 10 : 3000, (t) => items.forEach((it, k) => {
+          const p = K.clamp(t * 1.6 - k * 0.2, 0, 1);
+          const x = K.lerp(150, 240 + k * 76, p);
+          it.g.setAttribute("transform", `translate(${x},${K.lerp(125, 200, p)})`);
+          it.gm.setAttribute("transform", `translate(${x},${K.lerp(160, 268, p)})`);
+          it.g.style.opacity = p > 0 ? 1 : 0;
+          it.gm.style.opacity = p > 0.3 ? 1 : 0;
+        }));
+      },
+    },
+    {
+      at: 20, title: "数据增强：图像和掩膜必须同步变", kicker: "第 20–23 格 · 增强",
+      html: `<p>用 Keras 的 <code>ImageDataGenerator</code> 做随机旋转（±15°）、平移、轻微错切、缩放、水平和垂直翻转。关键是：图像和掩膜各有一个生成器，但<b>每批都用同一个随机种子</b>，所以两者做完全相同的变换，船和它的标签始终对得上。</p><p>作者把亮度增强默认关掉，理由是“它对标签的改变和对图像不一样”。顺带一提：打开亮度增强时那行代码把键名写成了 <code>' brightness_range'</code>（多了一个空格），这个开关就算打开也会出问题，只是默认关着所以没暴露。</p>`,
+      cells: [21, 22], highlight: ["seed = np.random.choice(range(9999))", "seed = seed,", "horizontal_flip = True", "vertical_flip = True"],
+      notes: { 21: "AUGMENT_BRIGHTNESS 为 True 时，dg_args[' brightness_range'] 的键名多了一个前导空格，会让 ImageDataGenerator 报参数错误；默认 False，不影响本 notebook。" },
+      draw(svg, ctx) {
+        const G = 24, cell = 8, ships = shipsOf(41, 2, G), M = maskOf(ships, G);
+        const gi = K.svg(svg, "g"), gm = K.svg(svg, "g");
+        drawGrid(gi, M, -G * cell / 2, -G * cell / 2, cell, sea(4));
+        drawGrid(gm, M, -G * cell / 2, -G * cell / 2, cell, (v) => (v ? "var(--c2)" : "var(--panel-2)"));
+        K.svg(svg, "text", { x: 180, y: 320, "text-anchor": "middle", "font-size": 13 }, "图像");
+        K.svg(svg, "text", { x: 520, y: 320, "text-anchor": "middle", "font-size": 13 }, "掩膜（同一个种子）");
+        const lab = K.svg(svg, "text", { x: 360, y: 24, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "");
+        const ops = [["水平翻转", (t) => `scale(${1 - 2 * t},1)`], ["旋转 15°", (t) => `rotate(${15 * t})`], ["放大 1.2 倍", (t) => `scale(${1 + 0.2 * t})`], ["垂直翻转", (t) => `scale(1,${1 - 2 * t})`]];
+        const place = (tr) => { gi.setAttribute("transform", `translate(180,165) ${tr}`); gm.setAttribute("transform", `translate(520,165) ${tr}`); };
+        place("");
+        (async () => {
+          for (const [name, f] of ops) {
+            lab.textContent = "随机选中：" + name;
+            if (!(await ctx.tween(FAST ? 1 : 900, (t) => place(f(t))))) return;
+            if (!(await ctx.wait(FAST ? 1 : 400))) return;
+            place("");
+          }
+          lab.textContent = "两边永远做同样的变换";
+        })();
+      },
+    },
+    {
+      at: 24, title: "U-Net：先压缩看全局，再放大画轮廓", kicker: "第 24–25 格 · 搭网络",
+      html: `<p>作者用“稍微改动过的 U-Net”。输入先加一点高斯噪声（防止死记）、做批归一化。<b>左半边（编码器）</b>四次“两层 3×3 卷积 + 2×2 最大池化”，通道 8→16→32→64→128，图越来越小、看的范围越来越大；<b>右半边（解码器）</b>四次上采样放大，每次和左边同样大小的特征图<b>拼接（跳连）</b>，把细节找回来。</p><p>最后 1×1 卷积 + sigmoid，输出每个像素是船的概率；再把四周 16 像素裁掉并补 0，忽略边缘不可靠的预测。</p>`,
+      cells: [25], highlight: ["layers.concatenate([u6, c4])", "layers.MaxPooling2D((2, 2))", "layers.Cropping2D((EDGE_CROP, EDGE_CROP))"],
+      draw(svg, ctx) {
+        const enc = [[8, 120], [16, 90], [32, 64], [64, 44], [128, 30]];
+        const xsE = [40, 110, 180, 250, 320], xsD = [600, 530, 460, 390];
+        const blocks = [];
+        enc.forEach(([c, h], i) => {
+          const y = 40 + i * 50;
+          blocks.push(K.svg(svg, "rect", { x: xsE[i], y, width: 34 + i * 4, height: h, rx: 3, fill: "color-mix(in srgb, var(--c1) 30%, var(--panel))", stroke: "var(--c1)", opacity: 0 }));
+          K.svg(svg, "text", { x: xsE[i] + 17, y: y - 4, "text-anchor": "middle", "font-size": 11 }, c);
+        });
+        enc.slice(0, 4).reverse().forEach(([c, h], j) => {
+          const i = 3 - j, y = 40 + i * 50;
+          blocks.push(K.svg(svg, "rect", { x: xsD[i], y, width: 34 + i * 4, height: h, rx: 3, fill: "color-mix(in srgb, var(--c2) 30%, var(--panel))", stroke: "var(--c2)", opacity: 0 }));
+          K.svg(svg, "text", { x: xsD[i] + 17, y: y - 4, "text-anchor": "middle", "font-size": 11 }, c);
+        });
+        const skips = [0, 1, 2, 3].map((i) => { const y = 40 + i * 50 + 12; const a = K.arrow(svg, xsE[i] + 40 + i * 4, y, xsD[i] - 2, y, { dash: "4 3", color: "var(--accent)" }); a.style.opacity = 0; return a; });
+        K.svg(svg, "text", { x: 360, y: 335, "text-anchor": "middle", "font-size": 12, class: "muted" }, "蓝 = 编码器（卷积 + 池化，缩小）  橙 = 解码器（上采样 + 卷积，放大）  虚线 = 跳连（拼接）");
+        K.node(svg, 660, 30, 56, 40, "概率\n图", { fs: 11 });
+        (async () => {
+          for (const b of blocks) if (!(await ctx.tween(FAST ? 1 : 220, (t) => (b.style.opacity = t)))) return;
+          for (const s of skips) if (!(await ctx.tween(FAST ? 1 : 250, (t) => (s.style.opacity = t)))) return;
+        })();
+      },
+    },
+    {
+      title: "损失函数：以 Dice 为主", kicker: "第 26 格 · 怎么算“画得好不好”",
+      html: `<p><b>Dice 系数</b> = 2 × 预测与真实重叠的面积 ÷（预测面积 + 真实面积），完全重合是 1，完全不重合是 0。它只关心“船”这一类像素，不会被大片的海面稀释。</p><p>作者的损失是 <code>1e-3 × 交叉熵 − Dice</code>：交叉熵只占很小的权重，主要靠“把 Dice 往大里推”。另外还记录像素准确率和船像素的召回率（true_positive_rate）。</p>`,
+      cells: [26], highlight: ["2. * intersection + smooth", "1e-3*binary_crossentropy(in_gt, in_pred) - dice_coef(in_gt, in_pred)"],
+      draw(svg, ctx) {
+        const cx1 = 200, cy = 170;
+        const A = K.svg(svg, "rect", { x: cx1 - 90, y: cy - 40, width: 160, height: 70, rx: 6, fill: "var(--c2)", "fill-opacity": 0.35, stroke: "var(--c2)" });
+        const B = K.svg(svg, "rect", { x: cx1 + 60, y: cy - 30, width: 160, height: 70, rx: 6, fill: "var(--c1)", "fill-opacity": 0.35, stroke: "var(--c1)" });
+        K.svg(svg, "text", { x: 110, y: 110, "font-size": 12, fill: "var(--c2)" }, "真实船");
+        K.svg(svg, "text", { x: 300, y: 260, "font-size": 12, fill: "var(--c1)" }, "预测");
+        const dl = K.svg(svg, "text", { x: 480, y: 150, "font-size": 20, "font-weight": 700 }, "");
+        const al = K.svg(svg, "text", { x: 480, y: 190, "font-size": 14, class: "muted" }, "");
+        K.svg(svg, "text", { x: 480, y: 110, "font-size": 13 }, "Dice = 2·重叠 /（真实 + 预测）");
+        K.svg(svg, "text", { x: 480, y: 214, "font-size": 12, class: "muted" }, "（假设放在 768×768 的图里，示意）");
+        K.svg(svg, "text", { x: 480, y: 240, "font-size": 12, class: "muted" }, "错开很多时 Dice 很低，准确率仍近 100%");
+        ctx.tween(FAST ? 10 : 2600, (t) => {
+          const off = K.lerp(150, 0, t);
+          K.set(B, { x: cx1 - 90 + off });
+          const ix = Math.max(0, 160 - off), inter = ix * Math.max(0, 70 - Math.abs(10 * (1 - t))), a = 160 * 70, b = 160 * 70;
+          const dice = (2 * inter) / (a + b);
+          dl.textContent = "Dice = " + dice.toFixed(2);
+          const total = 768 * 768, wrong = (a + b - 2 * inter) * 2;
+          al.textContent = "像素准确率 ≈ " + (100 * (1 - wrong / total)).toFixed(1) + "%";
+        });
+      },
+    },
+    {
+      title: "训练：存最好的、平台期减速、久不进步就停", kicker: "第 27–29 格 · 回调与训练",
+      html: `<p>三个“回调”盯着验证集 Dice：<b>ModelCheckpoint</b> 只在创新高时保存权重；<b>ReduceLROnPlateau</b> 连续 3 轮没进步就把学习率减半；<b>EarlyStopping</b> 连续 15 轮没进步就停（作者说“可能该更有耐心，但 Kaggle 的时间有限”）。</p><p>训练 10 轮，每轮 <code>min(200, 样本数/4)</code> 步，数据来自“欠采样后的表 → 生成器 → 同步增强”。最后画出损失、召回率、准确率、Dice 四条训练曲线。</p>`,
+      cells: [27, 28, 29], highlight: ["monitor='val_dice_coef'", "factor=0.5", "patience=15"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 400, h: 240 }, [0, 30], [0, 0.8], { xlabel: "epoch", yfmt: (v) => v.toFixed(1) });
+        K.svg(svg, "text", { x: 64, y: 22, "font-size": 12, class: "muted" }, "验证 Dice（示意曲线）");
+        const r = K.rng(8), d = [];
+        let lr = 1, stall = 0, best = 0;
+        for (let e = 0; e <= 30; e++) d.push(Math.min(0.75, 0.7 * (1 - Math.exp(-e / 5))) + K.randn(r) * 0.025);
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c3)", "stroke-width": 2 });
+        const star = K.svg(svg, "circle", { r: 0, fill: "var(--good)" });
+        const lrBar = K.svg(svg, "rect", { x: 520, y: 60, width: 40, height: 200, fill: "var(--accent)" });
+        K.svg(svg, "rect", { x: 520, y: 60, width: 40, height: 200, fill: "none", stroke: "var(--line)" });
+        K.svg(svg, "text", { x: 540, y: 50, "text-anchor": "middle", "font-size": 12 }, "学习率");
+        const info = K.svg(svg, "text", { x: 600, y: 160, "font-size": 12 }, "");
+        const info2 = K.svg(svg, "text", { x: 600, y: 180, "font-size": 12, fill: "var(--warn)" }, "");
+        ctx.tween(FAST ? 10 : 3200, (t) => {
+          const m = Math.round(30 * t);
+          let p = "", bi = 0; best = -1; lr = 1; stall = 0; let stopped = -1;
+          for (let e = 0; e <= m; e++) {
+            p += (p ? "L" : "M") + ax.sx(e) + "," + ax.sy(d[e]);
+            if (d[e] > best + 0.0001) { best = d[e]; bi = e; stall = 0; } else { stall++; if (stall % 3 === 0) lr = Math.max(0.05, lr / 2); }
+            if (stall >= 15 && stopped < 0) stopped = e;
+          }
+          path.setAttribute("d", p);
+          K.set(star, { cx: ax.sx(bi), cy: ax.sy(best), r: 6 });
+          lrBar.setAttribute("y", 60 + 200 * (1 - lr)); lrBar.setAttribute("height", 200 * lr);
+          info.textContent = `最好：第 ${bi} 轮`;
+          info2.textContent = stall ? `已 ${stall} 轮没进步` : "";
+        });
+      },
+    },
+    {
+      title: "读回最好权重，看预测概率的分布", kicker: "第 30–32 格 · 检查输出",
+      html: `<p>训练结束后读回验证 Dice 最高的那组权重，保存成 <code>seg_model.h5</code>。对 400 张验证图预测，打印概率的最小、最大、平均值，再画出所有像素概率的直方图（纵轴用对数刻度）。</p><p>好的分割模型输出应该“两头多中间少”：绝大多数像素非常接近 0（海），少数接近 1（船）。对数刻度是为了让少数的“船像素”在图上也看得见。</p>`,
+      cells: [30, 31, 32], highlight: ["ax.set_yscale('log'"],
+      draw(svg, ctx) {
+        const counts = [5e7, 4e5, 9e4, 4e4, 2.5e4, 2e4, 2.2e4, 3e4, 8e4];
+        const ax = K.axes(svg, { x: 70, y: 30, w: 600, h: 240 }, [0, 1], [3, 8], { yticks: 5, yfmt: (v) => "10^" + v.toFixed(0), xlabel: "预测概率" });
+        const bw = 600 / 9;
+        const bars = counts.map((c, i) => K.svg(svg, "rect", { x: 70 + i * bw + 4, y: ax.sy(3), width: bw - 8, height: 0, fill: i < 2 ? "var(--c1)" : i > 6 ? "var(--c2)" : "var(--ink-3)" }));
+        K.svg(svg, "text", { x: 74, y: 22, "font-size": 12, class: "muted" }, "像素个数（对数刻度，数量为示意）");
+        ctx.tween(FAST ? 10 : 1500, (t) => bars.forEach((b, i) => { const v = 3 + (Math.log10(counts[i]) - 3) * t; b.setAttribute("y", ax.sy(v)); b.setAttribute("height", ax.sy(3) - ax.sy(v)); }));
+      },
+    },
+    {
+      at: 33, title: "全分辨率模型，在测试图上看看效果", kicker: "第 33–38 格 · 推理",
+      html: `<p>如果训练时缩小过图片，就在模型前后各加一层平均池化和上采样，做成能直接吃原图的 <code>fullres_model</code>（这里 <code>IMG_SCALING=(1,1)</code>，相当于没缩放）。</p><p>然后对 20 张测试图逐张预测，左边原图、右边概率图并排画出。把概率图转成每艘船一行 RLE 的提交文件很耗时间和内存，作者放到了另一个 notebook（Part 2）。</p>`,
+      cells: [34, 37], highlight: ["fullres_model.predict(first_img)"],
+      draw(svg, ctx) {
+        const G = 36, cell = 7, ships = shipsOf(77, 4, G), M = maskOf(ships, G);
+        drawGrid(svg, M, 40, 30, cell, sea(9));
+        M.forEach((row, y) => row.forEach((v, x) => { if (v) K.svg(svg, "rect", { x: 40 + x * cell, y: 30 + y * cell, width: cell, height: cell, fill: "var(--ink)", opacity: 0.8 }); }));
+        const r = K.rng(5);
+        const P = M.map((row, y) => row.map((v, x) => { let s = 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) s += (M[y + dy] || [])[x + dx] || 0; return K.clamp(s / 9 * 1.3 + r() * 0.05, 0, 1); }));
+        const cells = [];
+        P.forEach((row, y) => row.forEach((p, x) => cells.push({ e: K.svg(svg, "rect", { x: 400 + x * cell, y: 30 + y * cell, width: cell + 0.3, height: cell + 0.3, fill: K.heat(p) }), y })));
+        K.svg(svg, "text", { x: 166, y: 300, "text-anchor": "middle", "font-size": 13 }, "测试图（示意）");
+        K.svg(svg, "text", { x: 526, y: 300, "text-anchor": "middle", "font-size": 13 }, "模型输出：每个像素是船的概率");
+        K.arrow(svg, 300, 155, 395, 155);
+        cells.forEach((c) => (c.e.style.opacity = 0));
+        ctx.tween(FAST ? 10 : 2000, (t) => cells.forEach((c) => (c.e.style.opacity = c.y < t * G ? 1 : 0)));
+      },
+    },
+  ];
+  if (FAST) steps.forEach((s) => { const d = s.draw; if (d) s.draw = (svg, ctx) => d(svg, Object.assign({}, ctx, { wait: () => Promise.resolve(ctx.alive()), tween: (ms, fn) => { fn(1, 1); return Promise.resolve(ctx.alive()); } })); });
+  K.pipeline(document.getElementById("pipe"), steps);
+  if (FAST) document.querySelectorAll('.ch-cells .cell').forEach((e) => (e.style.display = 'none'));
+
+  /* ---------- 实验 A：RLE ---------- */
+  K.lab(document.getElementById("labRle"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "x", label: "船的位置 x", min: 2, max: 13, step: 0.5, value: 6 },
+      { id: "y", label: "船的位置 y", min: 2, max: 13, step: 0.5, value: 7 },
+      { id: "L", label: "船长", min: 1, max: 12, step: 0.5, value: 7 },
+      { id: "a", label: "朝向（度）", min: 0, max: 180, step: 5, value: 30 },
+      { id: "two", label: "再加一艘船", value: "no", options: [["no", "只有一艘"], ["yes", "两艘"]] },
+    ],
+    note: "16×16 的示意掩膜。按第 3 格的规则现场编码：像素按列编号（先往下数，再往右），记下每段连续船像素的“起点 长度”。右边再把 RLE 解码回去，检查是否和原图一致（第 6 格的自检）。试试把船转成竖直（90°）和水平（0°），看哪种 RLE 更短。",
+    render(svg, v) {
+      const G = 16, cell = 17;
+      const ships = [{ x: v.x, y: v.y, L: v.L, W: 1.6, a: (v.a * Math.PI) / 180 }];
+      if (v.two === "yes") ships.push({ x: 12.5, y: 3.5, L: 5, W: 1.4, a: 0.3 });
+      const M = maskOf(ships, G), runs = rleEncode(M), D = rleDecode(runs, G);
+      const same = M.every((row, y) => row.every((q, x) => q === D[y][x]));
+      drawGrid(svg, M, 20, 20, cell, (q) => (q ? "var(--c2)" : "var(--panel-2)")).forEach((e) => K.set(e, { stroke: "var(--line)" }));
+      for (let x = 0; x < G; x += 4) K.svg(svg, "text", { x: 20 + x * cell + 2, y: 16, "font-size": 9, class: "muted" }, String(x * G + 1));
+      K.svg(svg, "text", { x: 20, y: 310, "font-size": 11, class: "muted" }, "列顶的数字 = 这一列第一个像素的编号");
+      drawGrid(svg, D, 330, 20, 8, (q) => (q ? "var(--c3)" : "var(--panel-2)"));
+      K.svg(svg, "text", { x: 330, y: 160, "font-size": 12 }, "解码回来的图");
+      const txt = runs.join(" ");
+      const lines = []; let cur = "";
+      txt.split(" ").forEach((w) => { if ((cur + " " + w).length > 34) { lines.push(cur); cur = w; } else cur = cur ? cur + " " + w : w; });
+      if (cur) lines.push(cur);
+      K.svg(svg, "text", { x: 330, y: 190, "font-size": 12, "font-weight": 700 }, "RLE：");
+      lines.slice(0, 6).forEach((l, i) => K.svg(svg, "text", { x: 330, y: 210 + i * 18, "font-size": 12, "font-family": "var(--mono)", fill: "var(--c2)" }, l));
+      if (lines.length > 6) K.svg(svg, "text", { x: 330, y: 330, "font-size": 12, class: "muted" }, "……");
+      const ones = M.flat().reduce((a, b) => a + b, 0);
+      return { readout: [
+        { k: "船像素个数", v: ones },
+        { k: "RLE 里的数字个数", v: runs.length },
+        { k: "压缩比（256 格 → ）", v: runs.length ? (256 / runs.length).toFixed(1) + " 倍" : "—" },
+        { k: "解码后一致？", v: same ? "一致 ✓" : "不一致", color: same ? "var(--good)" : "var(--bad)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：同步增强 ---------- */
+  K.lab(document.getElementById("labAug"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "sync", label: "图像和掩膜的随机种子", value: "same", options: [["same", "同一个种子（作者的做法）"], ["diff", "各用各的种子"]] },
+      { id: "seed", label: "再增强一次", button: true },
+    ],
+    note: "每次随机选翻转 / 旋转 90° / 平移的组合，分别作用在图像和掩膜上，再把掩膜叠到图像上看是否对齐。“重合度”是掩膜和图像里真实船位置的 Dice。",
+    render(svg, v) {
+      const G = 24, cell = 8, ships = shipsOf(55, 3, G), M = maskOf(ships, G);
+      const r1 = K.rng(900 + v.seed * 13), r2 = v.sync === "same" ? K.rng(900 + v.seed * 13) : K.rng(4000 + v.seed * 29);
+      const draw = (r) => ({ fh: r() < 0.5, fv: r() < 0.5, rot: Math.floor(r() * 4), sx: Math.floor(r() * 7) - 3, sy: Math.floor(r() * 7) - 3 });
+      const tr = (A, p) => {
+        let B = A.map((row) => row.slice());
+        if (p.fh) B = B.map((row) => row.slice().reverse());
+        if (p.fv) B = B.slice().reverse();
+        for (let k = 0; k < p.rot; k++) B = B[0].map((_, x) => B.map((row) => row[x]).reverse());
+        const C = B.map((row, y) => row.map((_, x) => { const yy = y - p.sy, xx = x - p.sx; return yy >= 0 && yy < G && xx >= 0 && xx < G ? B[yy][xx] : 0; }));
+        return C;
+      };
+      const p1 = draw(r1), p2 = draw(r2), I = tr(M, p1), Mk = tr(M, p2);
+      drawGrid(svg, M, 20, 30, 5, sea(1)); M.forEach((row, y) => row.forEach((q, x) => { if (q) K.svg(svg, "rect", { x: 20 + x * 5, y: 30 + y * 5, width: 5, height: 5, fill: "var(--ink)" }); }));
+      K.svg(svg, "text", { x: 20, y: 22, "font-size": 12 }, "原图");
+      drawGrid(svg, I, 180, 30, cell, sea(2)); I.forEach((row, y) => row.forEach((q, x) => { if (q) K.svg(svg, "rect", { x: 180 + x * cell, y: 30 + y * cell, width: cell, height: cell, fill: "var(--ink)" }); }));
+      Mk.forEach((row, y) => row.forEach((q, x) => { if (q) K.svg(svg, "rect", { x: 180 + x * cell + 1.5, y: 30 + y * cell + 1.5, width: cell - 3, height: cell - 3, fill: "none", stroke: "var(--c2)", "stroke-width": 2 }); }));
+      K.svg(svg, "text", { x: 180, y: 22, "font-size": 12 }, "增强后的图像（实心块 = 船）+ 增强后的掩膜（橙框）");
+      const desc = (p) => [p.fh ? "左右翻" : "", p.fv ? "上下翻" : "", p.rot ? "转 " + p.rot * 90 + "°" : "", `移(${p.sx},${p.sy})`].filter(Boolean).join("、");
+      K.svg(svg, "text", { x: 390, y: 60, "font-size": 12 }, "图像：" + desc(p1));
+      K.svg(svg, "text", { x: 390, y: 84, "font-size": 12, fill: "var(--c2)" }, "掩膜：" + desc(p2));
+      let inter = 0, a = 0, b = 0;
+      I.forEach((row, y) => row.forEach((q, x) => { inter += q && Mk[y][x] ? 1 : 0; a += q; b += Mk[y][x]; }));
+      const dice = a + b ? (2 * inter) / (a + b) : 1;
+      return { readout: [
+        { k: "掩膜与船的重合度（Dice）", v: dice.toFixed(2), color: dice > 0.9 ? "var(--good)" : "var(--bad)" },
+        { k: "结论", v: dice > 0.9 ? "标签对得上" : "标签错位了", color: dice > 0.9 ? "var(--good)" : "var(--bad)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：Dice vs 准确率 ---------- */
+  K.lab(document.getElementById("labDice"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "mode", label: "模型的预测", value: "shift", options: [["shift", "画对了形状，但位置有偏移"], ["grow", "画得太胖 / 太瘦"], ["empty", "偷懒：整张图都说“没有船”"]] },
+      { id: "amt", label: "偏移 / 胖瘦程度", min: -6, max: 6, step: 1, value: 2 },
+      { id: "nship", label: "图中船的数量", min: 1, max: 6, step: 1, value: 3 },
+    ],
+    note: "48×48 的示意图，现场按第 26 格的公式算 Dice、像素准确率和船像素召回率（true_positive_rate）。选“偷懒”看看：准确率仍然很高，Dice 却是 0。",
+    render(svg, v) {
+      const G = 48, cell = 5.6, ships = shipsOf(100 + v.nship, v.nship, G), T = maskOf(ships, G);
+      let P;
+      if (v.mode === "empty") P = T.map((row) => row.map(() => 0));
+      else if (v.mode === "shift") P = maskOf(ships.map((s) => Object.assign({}, s, { x: s.x + v.amt * 0.7, y: s.y + v.amt * 0.4 })), G);
+      else P = maskOf(ships.map((s) => Object.assign({}, s, { L: Math.max(1, s.L + v.amt), W: Math.max(0.5, s.W + v.amt * 0.35) })), G);
+      let tp = 0, fp = 0, fn = 0, tn = 0;
+      T.forEach((row, y) => row.forEach((t, x) => { const p = P[y][x]; if (t && p) tp++; else if (p) fp++; else if (t) fn++; else tn++; }));
+      drawGrid(svg, T, 20, 20, cell, (t, x, y) => { const p = P[y][x]; return t && p ? "var(--good)" : t ? "var(--c2)" : p ? "var(--c1)" : "var(--panel-2)"; });
+      const L = [["var(--good)", "预测对的船像素 TP"], ["var(--c2)", "漏掉的船像素 FN"], ["var(--c1)", "多画的像素 FP"]];
+      L.forEach(([c, t], i) => { K.svg(svg, "rect", { x: 310, y: 40 + i * 26, width: 14, height: 14, fill: c }); K.svg(svg, "text", { x: 332, y: 52 + i * 26, "font-size": 12 }, t); });
+      const smooth = 1, dice = (2 * tp + smooth) / (2 * tp + fp + fn + smooth), acc = (tp + tn) / (G * G), tpr = tp / Math.max(1, tp + fn);
+      K.svg(svg, "text", { x: 310, y: 150, "font-size": 12, class: "muted" }, "Dice =（2·TP + 1）/（2·TP + FP + FN + 1）");
+      K.svg(svg, "text", { x: 310, y: 172, "font-size": 12, class: "muted" }, "准确率 =（TP + TN）/ 全部像素");
+      return { readout: [
+        { k: "Dice", v: dice.toFixed(3), color: dice > 0.7 ? "var(--good)" : "var(--bad)" },
+        { k: "像素准确率", v: (acc * 100).toFixed(2) + "%" },
+        { k: "船像素召回率", v: (tpr * 100).toFixed(1) + "%" },
+        { k: "船像素占比", v: (((tp + fn) / (G * G)) * 100).toFixed(2) + "%", color: "var(--ink-3)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

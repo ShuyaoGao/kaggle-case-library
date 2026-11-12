@@ -1,0 +1,673 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>古文字找字</title>
+<meta name="description" content="Kaggle 案例拆解：日本古籍里的草书假名（くずし字）识别。用 CenterNet 在热力图上找出每个字的中心点，先估字号、再切块检测、NMS 合并，最后逐字分类。">
+<link rel="stylesheet" href="../assets/case.css">
+<style>.pixi { image-rendering: pixelated; }</style>
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">古籍扫描图像 · 文字检测 + 分类 · 无锚框检测器</div>
+  <h1>在古书里“点”出每一个字：CenterNet 识别日本草书</h1>
+  <p class="en">CenterNet -Keypoint Detector-</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">CenterNet（以点代框）</span><span class="tag method">中心点热力图</span><span class="tag method">焦点损失</span>
+    <span class="tag method">编码器-解码器</span><span class="tag method">字号估计 CNN</span><span class="tag method">切块检测</span>
+    <span class="tag method">NMS 非极大值抑制</span><span class="tag method">ResNet 风格分类器</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>K_mat（kmat2019）</b></span>
+    <span>Kaggle 点赞 <b>593</b>（2026-11 抓取）</span>
+    <span>比赛 <b>kuzushiji-recognition</b></span>
+    <span><a href="https://www.kaggle.com/code/kmat2019/centernet-keypoint-detector" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">日本古籍的整页扫描图</div><p>书页上是用毛笔写的“くずし字”（草书化的假名和汉字），今天大多数日本人也读不懂。训练集给出每个字的 Unicode 编码和方框位置。<span data-cell="5">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">每个字在哪里、是哪个字</div><p>比赛要求对每一页输出一串“字符编码 + 中心点 x、y”。所以既要<b>找到</b>字（检测），又要<b>认出</b>字（分类）。<span data-cell="62">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">三个模型接力</div><p>① CNN 估计这一页字有多大，决定切成几块；② CenterNet 在每块上画出“字中心热力图”，再用 NMS 合并成方框；③ 把每个框裁成 32×32 小图交给分类 CNN。<span data-cell="62">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">作者自评：“还不错”</div><p>切块后检测“分数提高了”；第一步字号模型“不太好，训练不够”；分类部分作者坦言做得很粗糙。作者没在文字里写具体分数。<span data-cell="45">出处</span> <span data-cell="21">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">Kaggle 比赛 <b>Kuzushiji Recognition</b>（くずし字认读），2019 年 10 月截止，共 293 支队伍参加（来自 Kaggle 比赛列表）。数据是日本古典籍的扫描页。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">notebook 用到的文件</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>文件 / 列</th><th>白话含义</th><th>类型</th></tr>
+        <tr><td><code>train_images/*.jpg</code></td><td>训练用的书页扫描图，一页一张</td><td>彩色图片，尺寸不一</td></tr>
+        <tr><td><code>train.csv · image_id</code></td><td>书页图片的文件名</td><td>文字</td></tr>
+        <tr><td><code>train.csv · labels</code></td><td><b>答案</b>：一长串，每 5 个一组 = 字符编码、左上角 x、左上角 y、宽、高</td><td>空格分隔的文字</td></tr>
+        <tr><td><code>unicode_translation.csv</code></td><td>Unicode 编码 → 实际的字（如假名）对照表</td><td>两列：Unicode、char</td></tr>
+        <tr><td><code>test_images/*.jpg</code> + <code>sample_submission.csv</code></td><td>要预测的书页；提交格式是“编码 x y 编码 x y ……”</td><td>图片 + 表格</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">字段格式见第 5 格注释 <span data-cell="5">出处</span> 和第 52 格 <span data-cell="52">出处</span>、第 62 格 <span data-cell="62">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">读数据时要注意的几件事</h3>
+      <ul class="tight">
+        <li>古书是<b>竖排、从右往左</b>读的，一页上可能有几百个字，大小差别很大（第 11 格的直方图）<span data-cell="11">出处</span>。</li>
+        <li>有的书页上一个字也没有，<code>labels</code> 为空。作者直接 <code>dropna</code> 去掉了它们，并在注释里说也可以用 <span data-cell="5">出处</span>。</li>
+        <li>字的类别很多，而且很不均衡，作者说明自己在分类时“没管不平衡” <span data-cell="47">出处</span>。</li>
+        <li>页数、字数、类别数作者没有在文字里写，这里不列具体数字。</li>
+      </ul>
+      <p class="callout">本页里的“古书页”和“毛笔字”都是代码随机画出的笔画，只用来示意，不是真实的くずし字。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="42">
+    <h3>动手试试 A · 从热力图到方框：阈值、噪声与去重 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="44">
+    <h3>动手试试 B · 字太小、挤太密：为什么要先切块 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>每页的平均字号差别很大，最好把图切成几块再检测</td><td><span data-cell="11">第 11 格</span></td></tr>
+        <tr><td>字号估计模型“不太好，训练不够”，但先凑合用</td><td><span data-cell="21">第 21 格</span></td></tr>
+        <tr><td>输出热力图 128×128 时，一张图大约最多检测 25×25 个字</td><td><span data-cell="23">第 23 格</span></td></tr>
+        <tr><td>热力图上字的中心“颜色更深”，能找到字</td><td><span data-cell="39">第 39 格</span></td></tr>
+        <tr><td>不切块时字相对热力图太小；切块后再 NMS，分数提高了</td><td><span data-cell="43">第 43 格</span> <span data-cell="45">第 45 格</span></td></tr>
+        <tr><td>分类部分很粗糙：不做前后处理，不管类别不平衡，只训练 10 轮</td><td><span data-cell="47">第 47 格</span> <span data-cell="56">第 56 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">作者在第 44 格打印了一个自己写的重叠分数，结果在运行输出里；比赛排行榜分数作者也没写在文字里。源码不带输出，这里不列分数。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li><b>分类网络接错了线</b>：第 53 格里 <code>x=cbr(input_layer,128,3,2)</code> 和 <code>x=cbr(input_layer,256,3,2)</code> 都从输入层重新开始，前面写的残差块被整个丢掉，实际只剩“一层步长 2 的卷积 + 两个 256 通道残差块” <span data-cell="53">第 53 格</span>。</li>
+        <li>第 42 格的 <code>if mask.all==False</code> 少了括号，比较的是“函数本身”而不是结果，永远不成立，这个跳过判断形同虚设 <span data-cell="42">第 42 格</span>。</li>
+        <li>第 42 格 NMS 里的“IoU”实际算的是“交集 ÷ 当前最高分框的面积”，不是标准的交并比；第 44 格的 <code>check_iou_score</code> 也不是比赛官方指标。</li>
+        <li>第 17 格说第一步训练 15 轮，第 18 格代码写的是 <code>n_epoch=12</code>。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一页古籍扫描图，标出每个字的位置并给出它是哪个字，可以帮研究者把古书转成可搜索的文字。</li>
+        <li><b>同类问题：</b>甲骨文 / 碑帖单字切分、手写票据和试卷的字符定位、密集小目标计数（麦穗、细胞、人群）、人体关键点。</li>
+        <li><b>可迁移的套路：</b>先看目标尺寸分布 → 把图切到合适比例 → “以点代框”的热力图检测 → 合并重叠框 → 再交给分类器；检测和识别分开做，各自好调。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>标注解析成中心点：<span data-cell="5">第 5 格</span></li>
+        <li>字号占比统计：<span data-cell="10">第 10 格</span></li>
+        <li>编码器-解码器网络 + 字号回归头：<span data-cell="14">第 14 格</span></li>
+        <li>切块数推算：<span data-cell="24">第 24 格</span></li>
+        <li>热力图标签（高斯、偏移、宽高）：<span data-cell="31">第 31 格</span></li>
+        <li>焦点损失 + L1 偏移 / 尺寸损失：<span data-cell="33">第 33 格</span></li>
+        <li>NMS 与画框：<span data-cell="42">第 42 格</span></li>
+        <li>切块检测再合并：<span data-cell="44">第 44 格</span></li>
+        <li>32×32 字符分类 CNN：<span data-cell="53">第 53 格</span></li>
+        <li>三模型推理流水线：<span data-cell="62">第 62 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>CenterNet 只预测“中心点 + 宽高”，不需要预先设定一堆锚框。这对“大小差别很大、排得很密”的古书文字有什么好处？</li>
+      <li>热力图标签为什么不只在中心点写 1，还要在周围铺一圈“高斯山坡”？如果不铺，训练时会发生什么？</li>
+      <li>作者用第一个模型估字号来决定切几块。如果不训练这个模型，你还能想到什么更简单的办法决定切块数？</li>
+      <li>第 53 格的分类网络“接错了线”，但代码仍能运行、也能训练。这种错误为什么难以发现？你会用什么办法检查？</li>
+      <li>这类模型能帮博物馆、图书馆把古籍变成可搜索的文字。机器识别错了怎么办？哪些环节还必须由专家把关？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 K_mat（kmat2019），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的书页、笔画、热力图均为模拟示意。比赛：Kuzushiji Recognition（Kaggle）。
+</footer>
+</main>
+
+<script src="nb/kuzushiji-centernet.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 示意用：随机“毛笔字”与书页 ---------- */
+  function glyph(svg, x, y, w, h, seed, opt) {
+    opt = opt || {};
+    const r = K.rng(seed), g = K.svg(svg, "g");
+    const n = 2 + Math.floor(r() * 3), sw = Math.max(1.2, Math.min(w, h) / 9);
+    for (let i = 0; i < n; i++) {
+      const p = () => [x + w * (0.12 + r() * 0.76), y + h * (0.12 + r() * 0.76)];
+      const a = p(), b = p(), c = p(), d = p();
+      K.svg(g, "path", { d: `M${a[0]},${a[1]} C${b[0]},${b[1]} ${c[0]},${c[1]} ${d[0]},${d[1]}`, fill: "none", stroke: opt.color || "var(--ink)", "stroke-width": sw, "stroke-linecap": "round", opacity: opt.opacity == null ? 0.85 : opt.opacity });
+    }
+    return g;
+  }
+  /* 竖排书页：从右往左若干列，返回每个字的框 {x,y,w,h} */
+  function pageBoxes(seed, box, cols, sizeMul) {
+    const r = K.rng(seed), out = [], cw = box.w / cols;
+    for (let c = 0; c < cols; c++) {
+      let y = box.y + 4 + r() * 6;
+      const cx = box.x + box.w - (c + 0.5) * cw;
+      while (true) {
+        const s = cw * (0.55 + r() * 0.35) * (sizeMul || 1), h = s * (0.75 + r() * 0.5);
+        if (y + h > box.y + box.h - 4) break;
+        out.push({ x: cx - s / 2 + (r() - 0.5) * cw * 0.12, y, w: s, h });
+        y += h + 2 + r() * 6;
+      }
+    }
+    return out;
+  }
+  const cv = document.createElement("canvas");
+  function heatImg(svg, arr, W, H, x, y, w, h) {
+    cv.width = W; cv.height = H;
+    const g = cv.getContext("2d"), im = g.createImageData(W, H);
+    const stops = [[13, 8, 135], [126, 3, 168], [204, 71, 120], [248, 149, 64], [240, 249, 33]];
+    for (let i = 0; i < W * H; i++) {
+      const t = K.clamp(arr[i], 0, 1) * (stops.length - 1), k = Math.min(stops.length - 2, Math.floor(t)), f = t - k;
+      for (let c = 0; c < 3; c++) im.data[i * 4 + c] = stops[k][c] + (stops[k + 1][c] - stops[k][c]) * f;
+      im.data[i * 4 + 3] = 255;
+    }
+    g.putImageData(im, 0, 0);
+    return K.svg(svg, "image", { x, y, width: w, height: h, href: cv.toDataURL(), class: "pixi", preserveAspectRatio: "none" });
+  }
+  /* 作者第 31 / 33 格的高斯标签：sigma = 宽 / 10、高 / 10，多个字取最大值 */
+  function gaussMap(boxes, W, H, sigDiv) {
+    const m = new Float32Array(W * H);
+    boxes.forEach((b) => {
+      const sx = Math.max(0.3, b.w / sigDiv), sy = Math.max(0.3, b.h / sigDiv), cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+      const x0 = Math.max(0, Math.floor(cx - 4 * sx)), x1 = Math.min(W - 1, Math.ceil(cx + 4 * sx)), y0 = Math.max(0, Math.floor(cy - 4 * sy)), y1 = Math.min(H - 1, Math.ceil(cy + 4 * sy));
+      for (let yy = y0; yy <= y1; yy++) for (let xx = x0; xx <= x1; xx++) {
+        const v = Math.exp(-(((xx + 0.5 - cx) / sx) ** 2) / 2) * Math.exp(-(((yy + 0.5 - cy) / sy) ** 2) / 2);
+        if (v > m[yy * W + xx]) m[yy * W + xx] = v;
+      }
+    });
+    return m;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "CenterNet：把每个物体看成一个点", kicker: "第 0–2 格 · 作者的开场白",
+      html: `<p>作者先介绍思路：常见的检测器（R-CNN、YOLO、SSD）要先铺很多“锚框”（预先画好的各种大小的候选框），再一个个判断。<b>CornerNet</b> 换了个想法：像语义分割一样画一张热力图，找出方框的角。<b>CenterNet</b>（论文名“Objects as Points”）更进一步：<b>直接在热力图上找物体的中心点</b>，再顺便预测宽和高。</p><p>作者说自己是检测新手，欢迎指正；整篇用英语和日语两种语言写成。</p>`,
+      cells: [1],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 180, y: 24, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "锚框法：先铺满候选框");
+        K.svg(svg, "text", { x: 540, y: 24, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "CenterNet：找中心点");
+        const objs = [[110, 120, 50, 70], [210, 170, 60, 80], [150, 250, 44, 50]];
+        objs.forEach((o, i) => glyph(svg, o[0], o[1] - 50, o[2], o[3], 40 + i));
+        objs.forEach((o, i) => glyph(svg, o[0] + 360, o[1] - 50, o[2], o[3], 40 + i));
+        const anchors = [];
+        for (let gx = 0; gx < 6; gx++) for (let gy = 0; gy < 5; gy++) for (const s of [26, 46]) {
+          const cx = 70 + gx * 45, cy = 60 + gy * 52;
+          const a = K.svg(svg, "rect", { x: cx - s / 2, y: cy - s * 0.65, width: s, height: s * 1.3, fill: "none", stroke: "var(--c4)", "stroke-width": 1, opacity: 0 });
+          anchors.push(a);
+        }
+        const dots = objs.map((o) => K.svg(svg, "circle", { cx: o[0] + 360 + o[2] / 2, cy: o[1] - 50 + o[3] / 2, r: 0, fill: "var(--c6)" }));
+        const halos = objs.map((o) => K.svg(svg, "circle", { cx: o[0] + 360 + o[2] / 2, cy: o[1] - 50 + o[3] / 2, r: 0, fill: "var(--c6)", opacity: 0.18 }));
+        const boxes = objs.map((o) => K.svg(svg, "rect", { x: o[0] + 360 + o[2] / 2, y: o[1] - 50 + o[3] / 2, width: 0, height: 0, fill: "none", stroke: "var(--good)", "stroke-width": 2 }));
+        const c1 = K.svg(svg, "text", { x: 180, y: 322, "text-anchor": "middle", "font-size": 12, class: "muted" }, "");
+        const c2 = K.svg(svg, "text", { x: 540, y: 322, "text-anchor": "middle", "font-size": 12, class: "muted" }, "");
+        ctx.tween(1200, (t) => { anchors.forEach((a, i) => (a.style.opacity = K.clamp(t * anchors.length - i, 0, 1) * 0.55)); c1.textContent = `候选框 ${Math.round(t * anchors.length)} 个，逐个打分`; })
+          .then((ok) => ok && ctx.tween(900, (t) => { dots.forEach((d) => d.setAttribute("r", 5 * t)); halos.forEach((h) => h.setAttribute("r", 26 * t)); c2.textContent = "① 热力图上找到“山顶”= 中心点"; }))
+          .then((ok) => ok && ctx.tween(900, (t) => { boxes.forEach((b, i) => { const o = objs[i], cx = o[0] + 360 + o[2] / 2, cy = o[1] - 50 + o[3] / 2; K.set(b, { x: cx - (o[2] / 2) * t, y: cy - (o[3] / 2) * t, width: o[2] * t, height: o[3] * t }); }); c2.textContent = "② 在中心点上读出宽、高 → 得到方框"; }));
+      },
+    },
+    {
+      at: 3, title: "把标注改写成“中心点”", kicker: "第 3–6 格 · 读入数据",
+      html: `<p><code>train.csv</code> 的 <code>labels</code> 是一长串文字，每 5 个一组：字符编码、左上角 x、左上角 y、宽、高。作者先把所有出现过的编码排序、编成 0、1、2……的数字类别（<code>dict_cat</code>），再把每个字的左上角坐标<b>加上半个宽、半个高</b>，改写成中心点坐标。</p><p>没有任何字的书页（<code>labels</code> 为空）被 <code>dropna</code> 去掉了。</p>`,
+      cells: [5], highlight: ["reshape(-1,5)", "ann[:,1]+=ann[:,3]//2", "ann[:,2]+=ann[:,4]//2"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 24, y: 28, "font-size": 12, class: "muted" }, "labels 一长串（格式示意，编码与数字为虚构）：");
+        const s = K.svg(svg, "text", { x: 24, y: 52, "font-size": 13, "font-family": "var(--mono)" }, "U+XXXX 120 80 40 52   U+YYYY 118 140 44 38   …");
+        const gx = 450, gy = 70;
+        K.svg(svg, "rect", { x: gx, y: gy, width: 220, height: 240, fill: "var(--panel-2)", stroke: "var(--line)" });
+        const b = { x: gx + 70, y: gy + 50, w: 80, h: 104 };
+        glyph(svg, b.x, b.y, b.w, b.h, 7);
+        const box = K.svg(svg, "rect", { x: b.x, y: b.y, width: b.w, height: b.h, fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+        const tl = K.svg(svg, "circle", { cx: b.x, cy: b.y, r: 6, fill: "var(--c1)" });
+        const ctr = K.svg(svg, "circle", { cx: b.x, cy: b.y, r: 6, fill: "var(--c6)" });
+        const fields = ["编码", "左上 x", "左上 y", "宽", "高"];
+        fields.forEach((f, i) => { const n = K.node(svg, 24 + i * 78, 90, 72, 40, f, { fs: 12 }); n.style.opacity = 0; ctx.wait(300 + i * 250).then((ok) => ok && (n.style.opacity = 1)); });
+        const arrowT = K.svg(svg, "text", { x: 24, y: 175, "font-size": 13 }, "");
+        const formula = K.svg(svg, "text", { x: 24, y: 210, "font-size": 15, "font-family": "var(--mono)", fill: "var(--c6)" }, "");
+        const formula2 = K.svg(svg, "text", { x: 24, y: 236, "font-size": 15, "font-family": "var(--mono)", fill: "var(--c6)" }, "");
+        K.svg(svg, "text", { x: 24, y: 290, "font-size": 12, class: "muted" }, "编码先排序，再换成 0、1、2 …… 的类别编号（dict_cat）");
+        ctx.wait(1700).then((ok) => { if (!ok) return; arrowT.textContent = "左上角（蓝点）→ 中心点（红点）："; formula.textContent = "中心 x = 左上 x + 宽 // 2"; formula2.textContent = "中心 y = 左上 y + 高 // 2"; return ctx.tween(1200, (t) => { ctr.setAttribute("cx", b.x + (b.w / 2) * t); ctr.setAttribute("cy", b.y + (b.h / 2) * t); }); });
+        s.style.opacity = 1; box.style.opacity = 1; tl.style.opacity = 1;
+      },
+    },
+    {
+      at: 7, title: "先看看字有多大", kicker: "第 7–11 格 · 第一步：检查目标尺寸",
+      html: `<p>检测器的输出只有 128×128 个格子，字太小就会被漏掉。所以作者先统计：每一页里，<b>一个字的面积占整页面积的比例</b>平均是多少，取对数后画直方图。</p><p>结论（第 11 格）：不同书页之间这个比例差别很大。有的书一页几十个大字，有的一页几百个小字。字的相对大小越统一越好检测，所以应该把图<b>切成几块</b>再检测；至于切几块，作者打算训练一个 CNN 来估计每页的平均字号。</p>`,
+      cells: [10, 11], highlight: ["letter_size_ratio=letter_size/area", "np.log(average_letter_size)"],
+      draw(svg, ctx) {
+        const pages = [{ cols: 3, mul: 1 }, { cols: 7, mul: 0.95 }, { cols: 12, mul: 0.9 }];
+        pages.forEach((p, i) => {
+          const bx = { x: 30 + i * 140, y: 40, w: 120, h: 170 };
+          K.svg(svg, "rect", { x: bx.x, y: bx.y, width: bx.w, height: bx.h, fill: "var(--panel-2)", stroke: "var(--line)" });
+          const bs = pageBoxes(70 + i, bx, p.cols, p.mul);
+          bs.forEach((b, j) => { const g = glyph(svg, b.x, b.y, b.w, b.h, 300 + i * 100 + j); g.style.opacity = 0; ctx.wait(10 * j).then((ok) => ok && (g.style.opacity = 1)); });
+          K.svg(svg, "text", { x: bx.x + bx.w / 2, y: 228, "text-anchor": "middle", "font-size": 12 }, ["大字，字少", "中等", "小字，字多"][i]);
+        });
+        const r = K.rng(5), vals = [];
+        for (let i = 0; i < 400; i++) vals.push(-6.2 + K.randn(r) * 0.9 + (r() < 0.25 ? 1.4 : 0));
+        const ax = K.axes(svg, { x: 470, y: 40, w: 230, h: 180 }, [-9, -3], [0, 1], { yticks: 0, xlabel: "log(字面积 / 页面积)" });
+        const bins = new Array(24).fill(0);
+        vals.forEach((v) => { const k = Math.floor((v + 9) / 0.25); if (k >= 0 && k < 24) bins[k]++; });
+        const mx = Math.max(...bins);
+        const bars = bins.map((c, k) => K.svg(svg, "rect", { x: ax.sx(-9 + k * 0.25), y: ax.sy(0), width: ax.sx(-8.75) - ax.sx(-9) - 1, height: 0, fill: "var(--c1)" }));
+        K.svg(svg, "text", { x: 470, y: 30, "font-size": 12, class: "muted" }, "各页平均字号的分布（示意）");
+        K.svg(svg, "text", { x: 30, y: 290, "font-size": 13 }, "分布很宽 → 不同页的字号差很多 → 小字页要切块，否则热力图上挤在一起");
+        ctx.wait(900).then((ok) => ok && ctx.tween(1100, (t) => bars.forEach((b, k) => { const h = (bins[k] / mx) * 180 * t; K.set(b, { y: ax.sy(0) - h, height: h }); })));
+      },
+    },
+    {
+      at: 12, title: "第一个模型：一页的字有多大？", kicker: "第 12–18 格 · 字号回归 CNN",
+      html: `<p>作者搭了一个“差不多是 ResNet”的卷积网络：输入整页缩放到 512×512，输出一个数，就是“log(字面积 / 页面积)”。网络主干后面会被 CenterNet 继续用，所以这里也写好了解码器部分（<code>size_detection_mode</code> 切换）。</p><p>有个细节很巧：训练时会<b>随机裁掉一部分</b>（保留 70%–100%）。裁剪后字在画面里显得更大，于是目标值也要相应加上 <code>-np.log(crop_ratio)</code>。作者说这一步不是重点，只训练了十几轮（代码里是 12 轮）。</p>`,
+      cells: [14, 18], highlight: ["y.append(filenames[i][1]-np.log(crop_ratio))", "out=Dense(1,activation=\"linear\")(x)", "n_epoch=12"],
+      draw(svg, ctx) {
+        const page = { x: 30, y: 50, w: 160, h: 230 };
+        K.svg(svg, "rect", { x: page.x, y: page.y, width: page.w, height: page.h, fill: "var(--panel-2)", stroke: "var(--line)" });
+        pageBoxes(9, page, 6, 0.9).forEach((b, j) => glyph(svg, b.x, b.y, b.w, b.h, 900 + j));
+        const crop = K.svg(svg, "rect", { x: page.x, y: page.y, width: page.w, height: page.h, fill: "none", stroke: "var(--warn)", "stroke-width": 3, "stroke-dasharray": "6 4" });
+        const lab = K.svg(svg, "text", { x: 30, y: 36, "font-size": 13, "font-weight": 700, fill: "var(--warn)" }, "随机裁剪 100%");
+        const layers = [[230, "512×512\n输入"], [320, "卷积\n下采样"], [410, "残差块\n×多层"], [500, "全局\n平均池化"], [590, "1 个数\nlog 字号"]];
+        layers.forEach(([x, t], i) => { K.node(svg, x, 130, 80, 64, t, { fs: 12, fill: i === 4 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 4 ? "var(--accent)" : "var(--line)" }); if (i) K.arrow(svg, x - 10, 162, x, 162); });
+        const out = K.svg(svg, "text", { x: 470, y: 240, "text-anchor": "middle", "font-size": 14, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 230, y: 290, "font-size": 12, class: "muted" }, "裁得越小，字在画面里越大：目标值 = 原 log 字号 − log(裁剪比例)");
+        ctx.tween(2600, (t) => {
+          const cr = 1 - 0.3 * Math.sin(t * Math.PI);
+          K.set(crop, { x: page.x + 10 * (1 - cr) * 4, y: page.y + 14 * (1 - cr) * 4, width: page.w * cr, height: page.h * cr });
+          lab.textContent = `随机裁剪 ${Math.round(cr * 100)}%`;
+          out.textContent = `目标 = −6.0 − log(${cr.toFixed(2)}) = ${(-6 - Math.log(cr)).toFixed(2)}`;
+        });
+      },
+    },
+    {
+      at: 19, title: "字号估得不太准，照样拿来定切块数", kicker: "第 19–24 格 · 从字号推出切几块",
+      html: `<p>在验证集上把“估计值 vs 真实值”画成散点图，作者坦白：“嗯……不太好，训练不够。但先用着。”（第 21 格）</p><p>接下来是一个简单的换算：CenterNet 输出 128×128 的热力图，作者假设每隔约 5 个格子能分出一个字，那么一张图上最多能容纳约 <b>25×25</b> 个字（第 23 格）。用估计的字号算出“这一页竖着、横着大约有几个字”，再除以 25，就得到推荐的竖向、横向切块数（至少 1 块）。</p>`,
+      cells: [20, 24], highlight: ["base_detect_num_h,base_detect_num_w=25,25", "np.exp(-predicted_size/2)"],
+      draw(svg, ctx) {
+        const r = K.rng(31), ax = K.axes(svg, { x: 50, y: 30, w: 230, h: 230 }, [-9, -3], [-9, -3], { xlabel: "估计值", ylabel: "真实值", xticks: 3, yticks: 3 });
+        K.svg(svg, "line", { x1: ax.sx(-9), y1: ax.sy(-9), x2: ax.sx(-3), y2: ax.sy(-3), stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+        const pts = [];
+        for (let i = 0; i < 70; i++) { const tv = -8 + r() * 4.5, pv = -6.2 + (tv + 6.2) * 0.45 + K.randn(r) * 0.6; pts.push(K.svg(svg, "circle", { cx: ax.sx(pv), cy: ax.sy(tv), r: 0, fill: "var(--c1)", opacity: 0.7 })); }
+        K.svg(svg, "text", { x: 60, y: 22, "font-size": 12, class: "muted" }, "散点离对角线较远 = “不太准”（示意）");
+        const pg = { x: 380, y: 40, w: 150, h: 230 };
+        K.svg(svg, "rect", { x: pg.x, y: pg.y, width: pg.w, height: pg.h, fill: "var(--panel-2)", stroke: "var(--line)" });
+        pageBoxes(12, pg, 11, 0.9).forEach((b, j) => glyph(svg, b.x, b.y, b.w, b.h, 1200 + j, { opacity: 0.6 }));
+        const lines = [];
+        const info = K.svg(svg, "text", { x: 550, y: 80, "font-size": 13 }, "");
+        const info2 = K.svg(svg, "text", { x: 550, y: 104, "font-size": 13 }, "");
+        const info3 = K.svg(svg, "text", { x: 550, y: 140, "font-size": 14, "font-weight": 700, fill: "var(--accent)" }, "");
+        ctx.tween(900, (t) => pts.forEach((p, i) => p.setAttribute("r", K.clamp(t * 70 - i, 0, 1) * 3.5)))
+          .then((ok) => { if (!ok) return; info.textContent = "竖向约 50 个字"; info2.textContent = "横向约 33 个字"; return ctx.wait(700); })
+          .then((ok) => { if (!ok) return; info3.textContent = "÷ 25 → 切成 2 × 2 块"; [[pg.x, pg.y + pg.h / 2, pg.x + pg.w, pg.y + pg.h / 2], [pg.x + pg.w / 2, pg.y, pg.x + pg.w / 2, pg.y + pg.h]].forEach((l) => lines.push(K.svg(svg, "line", { x1: l[0], y1: l[1], x2: l[0], y2: l[1], stroke: "var(--warn)", "stroke-width": 3 }))); return ctx.tween(800, (t) => lines.forEach((ln, i) => { const L = i ? [pg.x + pg.w / 2, pg.y, pg.x + pg.w / 2, pg.y + pg.h] : [pg.x, pg.y + pg.h / 2, pg.x + pg.w, pg.y + pg.h / 2]; ln.setAttribute("x2", K.lerp(L[0], L[2], t)); ln.setAttribute("y2", K.lerp(L[1], L[3], t)); })); });
+        K.svg(svg, "text", { x: 550, y: 200, "font-size": 12, class: "muted" }, "数字为示意");
+      },
+    },
+    {
+      at: 25, title: "CenterNet 要交的“三张答卷”", kicker: "第 25–32 格 · 第二步：制作训练标签",
+      html: `<p>CenterNet 的输入是裁好的图（缩放到 512×512），输出是 128×128 的格子，每个格子要回答 5 个数：</p><ul class="tight"><li><b>中心热力图</b>（1 层）：这个格子是不是某个字的中心；</li><li><b>偏移</b>（2 层）：中心点在格子里偏上偏下、偏左偏右多少（因为 512 缩到 128，会丢掉小数部分）；</li><li><b>宽和高</b>（2 层）：这个字有多大。</li></ul><p>第 31 格画了一个例子：中间图只在中心点写 1，右图在每个中心周围铺一个<b>高斯“小山包”</b>（σ = 字宽 / 10）。作者解释：模型把中心点猜到旁边一格时，小山包能让惩罚轻一些。</p>`,
+      cells: [27, 31], highlight: ["heatmap=((np.exp(", "width/10", "y_c%1#height offset"],
+      draw(svg, ctx) {
+        const W = 32, H = 32, r = K.rng(4);
+        const bxs = pageBoxes(21, { x: 1, y: 1, w: 30, h: 30 }, 4, 0.9);
+        K.svg(svg, "text", { x: 100, y: 24, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "裁剪后的图（示意）");
+        K.svg(svg, "rect", { x: 20, y: 34, width: 160, height: 160, fill: "var(--panel-2)", stroke: "var(--line)" });
+        bxs.forEach((b, j) => glyph(svg, 20 + b.x * 5, 34 + b.y * 5, b.w * 5, b.h * 5, 2100 + j));
+        const pt = new Float32Array(W * H);
+        bxs.forEach((b) => { pt[Math.floor(b.y + b.h / 2) * W + Math.floor(b.x + b.w / 2)] = 1; });
+        K.svg(svg, "text", { x: 360, y: 24, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "只在中心写 1");
+        heatImg(svg, pt, W, H, 280, 34, 160, 160);
+        K.svg(svg, "text", { x: 600, y: 24, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "铺上高斯小山包");
+        const gimg = heatImg(svg, new Float32Array(W * H), W, H, 520, 34, 160, 160);
+        const lab = K.svg(svg, "text", { x: 600, y: 214, "text-anchor": "middle", "font-size": 12, class: "muted" }, "");
+        K.svg(svg, "text", { x: 20, y: 250, "font-size": 13 }, "每个中心格还要记：偏移 (y_c % 1, x_c % 1) 和 宽、高（占整张输出的比例）");
+        K.svg(svg, "text", { x: 20, y: 276, "font-size": 12, class: "muted" }, "共 5 层：热力图 1 + 偏移 2 + 宽高 2（标签里另有 1 层“是否中心”的 0/1 图，用于算损失）");
+        ctx.tween(2000, (t) => {
+          const div = K.lerp(40, 10, t);
+          const m = gaussMap(bxs, W, H, div);
+          heatImg(svg, m, W, H, -999, -999, 1, 1).remove();
+          gimg.setAttribute("href", cv.toDataURL());
+          lab.textContent = `σ = 字宽 / ${div.toFixed(0)}（作者用 / 10）`;
+        });
+      },
+    },
+    {
+      at: 33, title: "焦点损失：别让“空白”淹没“字”", kicker: "第 33 格 · 数据生成器与损失函数",
+      html: `<p>训练数据生成器每次随机裁一块（不超过推荐切块大小的 50%–100%），把落在裁剪框里的字换算到 128×128 的坐标上，生成上一章的那几层标签。</p><p>损失函数 <code>all_loss</code> 有三部分：</p><ul class="tight"><li><b>热力图损失</b>：CenterNet 论文里的“焦点损失”变体，<code>alpha=2, beta=4</code>。128×128 = 16384 个格子里只有几十个是字的中心，绝大多数是空白；焦点损失让已经猜对的空白格几乎不扣分，把注意力集中在难的格子上；越靠近真实中心（小山包越高）的格子，猜错了扣得越少。</li><li><b>偏移损失</b>、<b>尺寸损失</b>：只在真实中心格上算绝对误差，尺寸损失乘 5。</li></ul><p>三者相加后除以这一批里字的个数 <code>N</code>。</p>`,
+      cells: [33], highlight: ["alpha=2.", "beta=4.", "all_loss=(heatloss+1.0*offsetloss+5.0*sizeloss)/N"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 300, h: 230 }, [0, 1], [0, 5], { xlabel: "模型在这一格给出的分数 p", ylabel: "扣分", yticks: 5 });
+        const curves = [
+          { f: (p) => -Math.log(p + 1e-6), c: "var(--ink-3)", lab: "普通交叉熵（真是中心）" },
+          { f: (p) => -((1 - p) ** 2) * Math.log(p + 1e-6), c: "var(--c6)", lab: "焦点损失（真是中心）" },
+          { f: (p) => -(p ** 2) * Math.log(1 - p + 1e-6), c: "var(--c1)", lab: "焦点损失（空白格，远离字）" },
+          { f: (p) => -((1 - 0.8) ** 4) * (p ** 2) * Math.log(1 - p + 1e-6) * 30, c: "var(--c3)", lab: "空白格但紧挨中心（放大 30 倍才看得见）" },
+        ];
+        const paths = curves.map((c, i) => {
+          let d = ""; for (let k = 1; k < 100; k++) { const p = k / 100; d += (k > 1 ? "L" : "M") + ax.sx(p) + "," + ax.sy(Math.min(5, c.f(p))); }
+          const e = K.svg(svg, "path", { d, fill: "none", stroke: c.c, "stroke-width": 2.5 });
+          const L = e.getTotalLength ? e.getTotalLength() : 600; e.style.strokeDasharray = L; e.style.strokeDashoffset = L;
+          K.svg(svg, "text", { x: 400, y: 50 + i * 26, "font-size": 12, fill: c.c, "font-weight": 700 }, "— " + c.lab);
+          return { e, L };
+        });
+        K.svg(svg, "text", { x: 400, y: 180, "font-size": 13 }, "空白格猜得接近 0 → 几乎不扣分");
+        K.svg(svg, "text", { x: 400, y: 204, "font-size": 13 }, "真中心猜得接近 1 → 也几乎不扣分");
+        K.svg(svg, "text", { x: 400, y: 228, "font-size": 13 }, "注意力留给“猜错的难格子”");
+        K.svg(svg, "text", { x: 400, y: 262, "font-size": 13, "font-family": "var(--mono)" }, "总损失 = (热力 + 偏移 + 5×尺寸) / N");
+        (async () => { for (const p of paths) if (!(await ctx.tween(700, (t) => (p.e.style.strokeDashoffset = p.L * (1 - t))))) return; })();
+      },
+    },
+    {
+      at: 34, title: "编码器-解码器：从 512 缩到 8 再放回 128", kicker: "第 34–37 格 · 搭网络并训练",
+      html: `<p>CenterNet 用的是第 14 格那个网络的“完整版”（<code>size_detection_mode=False</code>）：</p><ul class="tight"><li><b>编码器</b>：一路下采样 512 → 256 → 128 → 64 → 32 → 16 → 8，中间穿插残差块；开头还把原图缩小两次拼进来，保留细节。</li><li><b>解码器</b>：像 U-Net 一样，一路上采样回 128×128，每一级都和编码器同尺寸的特征拼接（跳连），最后 sigmoid 输出 5 层。</li></ul><p>第 34 格用 <code>by_name=True</code> 把第一步训练好的编码器权重搬过来，相当于先“预热”。然后训练 30 轮，学习率 0.001，第 20 轮后降到 0.0002。作者说多训练会更好。</p>`,
+      cells: [34, 37], highlight: ["load_weights('final_weights_step1.h5',by_name=True", "n_epoch=30"],
+      draw(svg, ctx) {
+        const enc = [512, 256, 128, 64, 32, 16, 8], dec = [16, 32, 64, 128];
+        const encX = enc.map((s, i) => 40 + i * 48), base = 300;
+        const encEl = enc.map((s, i) => { const h = 18 + Math.log2(s) * 22; return K.svg(svg, "rect", { x: encX[i], y: base - h, width: 34, height: h, rx: 4, fill: "var(--c1)", opacity: 0 }); });
+        enc.forEach((s, i) => K.svg(svg, "text", { x: encX[i] + 17, y: base + 16, "text-anchor": "middle", "font-size": 11 }, s));
+        const decX = dec.map((s, i) => 400 + i * 70);
+        const decEl = dec.map((s, i) => { const h = 18 + Math.log2(s) * 22; return K.svg(svg, "rect", { x: decX[i], y: base - h, width: 34, height: h, rx: 4, fill: "var(--c3)", opacity: 0 }); });
+        dec.forEach((s, i) => K.svg(svg, "text", { x: decX[i] + 17, y: base + 16, "text-anchor": "middle", "font-size": 11 }, s));
+        K.svg(svg, "text", { x: 150, y: 26, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--c1)" }, "编码器（下采样）");
+        K.svg(svg, "text", { x: 510, y: 26, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--c3)" }, "解码器（上采样）+ 跳连");
+        const skips = dec.map((s, i) => { const j = enc.indexOf(s); const p = K.svg(svg, "path", { d: `M${encX[j] + 17},${base - 18 - Math.log2(s) * 22} Q${(encX[j] + decX[i]) / 2 + 17},${40 + i * 8} ${decX[i] + 17},${base - 18 - Math.log2(s) * 22}`, fill: "none", stroke: "var(--warn)", "stroke-dasharray": "4 3", "stroke-width": 1.5 }); p.style.opacity = 0; return p; });
+        K.node(svg, 600, 60, 100, 70, "128×128×5\n热力 偏移 宽高", { fs: 11, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        (async () => {
+          for (const e of encEl) if (!(await ctx.tween(220, (t) => (e.style.opacity = 0.85 * t)))) return;
+          for (let i = 0; i < decEl.length; i++) { if (!(await ctx.tween(300, (t) => { decEl[i].style.opacity = 0.85 * t; skips[i].style.opacity = t; }))) return; }
+        })();
+      },
+    },
+    {
+      at: 38, title: "从热力图到方框：NMS 去重", kicker: "第 38–42 格 · 看结果、画框",
+      html: `<p>第 40 格把一张验证图送进模型，画出中心热力图：字的中心处“颜色更深”。</p><p>热力图有 128×128 个格子，每个格子都带着一个候选框。第 42 格的处理顺序是：</p><ol class="tight"><li>只保留分数超过 <code>score_thresh</code> 的格子；</li><li>用“格子坐标 + 偏移”算出中心，用宽高算出方框；去掉超出图外的、大小离平均值 10 倍以上的怪框；</li><li><b>NMS（非极大值抑制）</b>：按分数从高到低，先留下最高分的框，把和它重叠太多的框删掉，再看剩下的最高分……直到没有框。</li></ol><p>作者提到论文里也可以用 3×3 最大池化代替 NMS。动手试试 A 就在这一格后面，两种去重方法都能试。</p>`,
+      cells: [40, 42], highlight: ["mask=(predict>score_thresh)", "still_alive=(((cross_h*cross_w)/area[0])<iou_thresh)"],
+      draw(svg, ctx) {
+        const r = K.rng(8), truth = [[140, 120, 70, 80], [300, 170, 80, 90], [190, 240, 60, 60]];
+        truth.forEach((b, i) => glyph(svg, b[0] - b[2] / 2, b[1] - b[3] / 2, b[2], b[3], 81 + i, { opacity: 0.5 }));
+        const cand = [];
+        truth.forEach((b, k) => { for (let i = 0; i < 6; i++) cand.push({ cx: b[0] + K.randn(r) * 8, cy: b[1] + K.randn(r) * 8, w: b[2] * (0.8 + r() * 0.4), h: b[3] * (0.8 + r() * 0.4), s: 0.4 + r() * 0.55, k }); });
+        cand.sort((a, b) => b.s - a.s);
+        const els = cand.map((c) => K.svg(svg, "rect", { x: c.cx - c.w / 2, y: c.cy - c.h / 2, width: c.w, height: c.h, fill: "none", stroke: "var(--c4)", "stroke-width": 1.5, opacity: 0.7 }));
+        const lab = K.svg(svg, "text", { x: 470, y: 60, "font-size": 14, "font-weight": 700 }, `候选框 ${cand.length} 个`);
+        const lab2 = K.svg(svg, "text", { x: 470, y: 90, "font-size": 12, class: "muted" }, "按分数从高到低处理");
+        K.svg(svg, "text", { x: 470, y: 150, "font-size": 12, fill: "var(--good)" }, "■ 留下");
+        K.svg(svg, "text", { x: 470, y: 172, "font-size": 12, fill: "var(--bad)" }, "■ 与已留框重叠太多 → 删除");
+        K.svg(svg, "text", { x: 30, y: 325, "font-size": 12, class: "muted" }, "示意：每个字附近有一串偏差不大的候选框");
+        (async () => {
+          if (!(await ctx.wait(700))) return;
+          const alive = cand.map(() => true), kept = [];
+          for (let i = 0; i < cand.length; i++) {
+            if (!alive[i]) continue;
+            kept.push(i); K.set(els[i], { stroke: "var(--good)", "stroke-width": 3, opacity: 1 });
+            for (let j = i + 1; j < cand.length; j++) {
+              if (!alive[j]) continue;
+              const a = cand[i], b = cand[j];
+              const iw = Math.max(0, Math.min(a.cx + a.w / 2, b.cx + b.w / 2) - Math.max(a.cx - a.w / 2, b.cx - b.w / 2)), ih = Math.max(0, Math.min(a.cy + a.h / 2, b.cy + b.h / 2) - Math.max(a.cy - a.h / 2, b.cy - b.h / 2));
+              if ((iw * ih) / (a.w * a.h) > 0.4) { alive[j] = false; K.set(els[j], { stroke: "var(--bad)" }); if (!(await ctx.wait(140))) return; els[j].style.opacity = 0.08; }
+            }
+            lab.textContent = `已留下 ${kept.length} 个框`;
+            if (!(await ctx.wait(400))) return;
+          }
+          lab2.textContent = "每个字只剩一个框";
+        })();
+      },
+    },
+    {
+      at: 43, title: "切块检测，再把结果拼回来", kicker: "第 43–45 格 · 结合第一步的字号估计",
+      html: `<p>直接把整页缩到 512×512，小字在 128×128 的热力图上只占一两个格子，挨得近的字会糊成一团。于是第 44 格的 <code>split_and_detect</code>：</p><ol class="tight"><li>按第一步推荐的切块数，把整页切成若干个<b>正方形</b>小块，相邻块之间最多重叠 50%（<code>maxlap=0.5</code>）；</li><li>每块单独送进 CenterNet，各自做一次 NMS；</li><li>把各块的框换算回整页坐标，合在一起再做一次 NMS（阈值 0.5），去掉重叠区里的重复框。</li></ol><p>作者在 5 张验证图上对比，结论是“分数提高了”（第 45 格）。</p>`,
+      cells: [44], highlight: ["maxlap=0.5", "img_crop = img.crop(", "merge_mode=True"],
+      draw(svg, ctx) {
+        const pg = { x: 40, y: 30, w: 200, h: 280 };
+        K.svg(svg, "rect", { x: pg.x, y: pg.y, width: pg.w, height: pg.h, fill: "var(--panel-2)", stroke: "var(--line)" });
+        const bs = pageBoxes(33, pg, 12, 0.9);
+        bs.forEach((b, j) => glyph(svg, b.x, b.y, b.w, b.h, 3300 + j, { opacity: 0.7 }));
+        const crops = [[pg.x, pg.y, 130], [pg.x + 70, pg.y, 130], [pg.x, pg.y + 75, 130], [pg.x + 70, pg.y + 75, 130], [pg.x, pg.y + 150, 130], [pg.x + 70, pg.y + 150, 130]];
+        const cr = K.svg(svg, "rect", { x: 0, y: 0, width: 130, height: 130, fill: "var(--c1)", "fill-opacity": 0.12, stroke: "var(--c1)", "stroke-width": 2.5 });
+        const zoom = { x: 300, y: 30, s: 200 };
+        K.svg(svg, "rect", { x: zoom.x, y: zoom.y, width: zoom.s, height: zoom.s, fill: "var(--panel-2)", stroke: "var(--c1)" });
+        const zg = K.svg(svg, "g");
+        K.svg(svg, "text", { x: zoom.x + zoom.s / 2, y: 252, "text-anchor": "middle", "font-size": 12, class: "muted" }, "每一块放大到 512×512 再检测");
+        const dots = [];
+        const lab = K.svg(svg, "text", { x: 530, y: 60, "font-size": 13, "font-weight": 700 }, "");
+        const lab2 = K.svg(svg, "text", { x: 530, y: 90, "font-size": 12, class: "muted" }, "");
+        (async () => {
+          for (let k = 0; k < crops.length; k++) {
+            const [x, y, s] = crops[k];
+            K.set(cr, { x, y, width: s, height: s });
+            zg.innerHTML = "";
+            const sc = zoom.s / s;
+            bs.forEach((b, j) => {
+              if (b.x + b.w / 2 < x || b.x + b.w / 2 > x + s || b.y + b.h / 2 < y || b.y + b.h / 2 > y + s) return;
+              glyph(zg, zoom.x + (b.x - x) * sc, zoom.y + (b.y - y) * sc, b.w * sc, b.h * sc, 3300 + j, { opacity: 0.8 });
+              K.svg(zg, "circle", { cx: zoom.x + (b.x + b.w / 2 - x) * sc, cy: zoom.y + (b.y + b.h / 2 - y) * sc, r: 4, fill: "var(--c6)" });
+              dots.push(K.svg(svg, "circle", { cx: b.x + b.w / 2, cy: b.y + b.h / 2, r: 2.5, fill: "var(--c6)", opacity: 0.6 }));
+            });
+            lab.textContent = `第 ${k + 1} / ${crops.length} 块`;
+            lab2.textContent = `累计找到中心点 ${dots.length} 个（含重叠区重复）`;
+            if (!(await ctx.wait(650))) return;
+          }
+          cr.style.opacity = 0;
+          lab.textContent = "合并后再做一次 NMS";
+          const seen = new Set();
+          dots.forEach((d) => { const key = d.getAttribute("cx") + "," + d.getAttribute("cy"); if (seen.has(key)) d.style.opacity = 0; else { seen.add(key); K.set(d, { fill: "var(--good)", opacity: 1 }); d.setAttribute("r", 3); } });
+          lab2.textContent = `去掉重复后：${seen.size} 个字`;
+        })();
+      },
+    },
+    {
+      at: 46, title: "第三步：把每个字裁下来", kicker: "第 46–52 格 · 准备分类数据",
+      html: `<p>检测只回答“哪里有字”，还要回答“是哪个字”。作者把训练集里每一个标注框都裁成一张小图存下来，记下它的类别编号（第 50 格）。</p><p>第 52 格用 <code>unicode_translation.csv</code> 把类别编号翻译回真正的字，显示一个例子。作者说这一步不是本文重点，所以做得很简单：不做额外的前后处理，也不处理类别不平衡。</p>`,
+      cells: [50, 52], highlight: ["img.crop((int(c_x-width/2)", "dict_translation"],
+      draw(svg, ctx) {
+        const pg = { x: 30, y: 30, w: 220, h: 280 };
+        K.svg(svg, "rect", { x: pg.x, y: pg.y, width: pg.w, height: pg.h, fill: "var(--panel-2)", stroke: "var(--line)" });
+        const bs = pageBoxes(46, pg, 5, 0.9).slice(0, 18);
+        bs.forEach((b, j) => glyph(svg, b.x, b.y, b.w, b.h, 4600 + j));
+        const frames = bs.map((b) => K.svg(svg, "rect", { x: b.x, y: b.y, width: b.w, height: b.h, fill: "none", stroke: "var(--c1)", "stroke-width": 1.5, opacity: 0 }));
+        (async () => {
+          for (let j = 0; j < bs.length; j++) {
+            frames[j].style.opacity = 1;
+            const tx = 300 + (j % 6) * 66, ty = 50 + Math.floor(j / 6) * 86;
+            K.svg(svg, "rect", { x: tx, y: ty, width: 56, height: 56, fill: "var(--panel-2)", stroke: "var(--line)" });
+            glyph(svg, tx + 2, ty + 2, 52, 52, 4600 + j);
+            K.svg(svg, "text", { x: tx + 28, y: ty + 72, "text-anchor": "middle", "font-size": 10, "font-family": "var(--mono)", class: "muted" }, "类别 " + ((j * 37) % 97));
+            if (!(await ctx.wait(160))) return;
+          }
+        })();
+        K.svg(svg, "text", { x: 300, y: 320, "font-size": 12, class: "muted" }, "每个标注框裁成一张小图 + 类别编号（笔画与编号均为示意）");
+      },
+    },
+    {
+      at: 53, title: "32×32 的小分类器，以及一处接错的线", kicker: "第 53–60 格 · 字符分类 CNN",
+      html: `<p>分类器输入 32×32 的小图，训练时随机裁掉 0–20% 做增强，输出层有“字符种类数”那么多个类别，用 softmax 和交叉熵训练，学习率 0.005，只训练 10 轮（作者说时间有限）。第 60 格看了 3 个训练样本的预测结果。</p><p class="callout warn"><b>代码里有个隐蔽的错误</b>：作者本想搭“64 通道 → 128 通道 → 256 通道”三级残差网络，但第二、第三级都写成了 <code>cbr(input_layer, …)</code>，又从输入层重新开始。前两级算出来的结果没人用，实际网络只剩最后一级。代码照样能运行、能训练，所以很难察觉。</p>`,
+      cells: [53, 57], highlight: ["x=cbr(input_layer,128,3,2)#16", "x=cbr(input_layer,256,3,2)#8", "n_epoch=10"],
+      draw(svg, ctx) {
+        const y = 90;
+        K.node(svg, 20, y, 80, 56, "输入\n32×32", { fs: 12 });
+        const want = [["64 通道\n+2 残差", 140], ["128 通道\n+2 残差", 280], ["256 通道\n+2 残差", 420]];
+        const nodes = want.map(([t, x]) => K.node(svg, x, y, 110, 56, t, { fs: 12 }));
+        K.node(svg, 580, y, 110, 56, "池化 + 全连接\nsoftmax", { fs: 12, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        K.svg(svg, "text", { x: 20, y: 60, "font-size": 13, "font-weight": 700 }, "作者想搭的：一级接一级");
+        const a1 = [K.arrow(svg, 100, y + 28, 140, y + 28), K.arrow(svg, 250, y + 28, 280, y + 28), K.arrow(svg, 390, y + 28, 420, y + 28), K.arrow(svg, 530, y + 28, 580, y + 28)];
+        const t2 = K.svg(svg, "text", { x: 20, y: 220, "font-size": 13, "font-weight": 700, fill: "var(--bad)" }, "代码实际做的：后两级都从输入层重新开始");
+        t2.style.opacity = 0;
+        const bad = [K.svg(svg, "path", { d: `M60,${y + 56} Q200,${y + 140} 335,${y + 56}`, fill: "none", stroke: "var(--bad)", "stroke-width": 2.5 }), K.svg(svg, "path", { d: `M60,${y + 56} Q260,${y + 190} 475,${y + 56}`, fill: "none", stroke: "var(--bad)", "stroke-width": 2.5 })];
+        bad.forEach((b) => (b.style.opacity = 0));
+        K.svg(svg, "text", { x: 20, y: 300, "font-size": 12, class: "muted" }, "x=cbr(input_layer,128,3,2) / x=cbr(input_layer,256,3,2)：应该写成 cbr(x, …)");
+        ctx.wait(1200).then((ok) => ok && ctx.tween(900, (t) => { t2.style.opacity = t; bad.forEach((b) => (b.style.opacity = t)); a1[1].style.opacity = a1[2].style.opacity = 1 - 0.85 * t; nodes[0].style.opacity = nodes[1].style.opacity = 1 - 0.7 * t; }));
+      },
+    },
+    {
+      at: 61, title: "三个模型接力，生成提交文件", kicker: "第 61–64 格 · 测试与提交",
+      html: `<p>第 62 格把三个模型串成 <code>pipeline</code>：</p><ol class="tight"><li><b>模型 1</b>：整页缩到 512×512，估计字号，算出推荐切块数；</li><li><b>模型 2</b>：<code>split_and_detect</code> 切块检测，得到所有字的方框；</li><li><b>模型 3</b>：每个框裁出来缩到 32×32，分类得到类别，再翻译回 Unicode 编码；</li></ol><p>最后按比赛格式拼成“编码 中心x 中心y 编码 中心x 中心y ……”写进 <code>submission.csv</code>。作者自嘲：“代码写得不漂亮，还很费时间。”</p>`,
+      cells: [62], highlight: ["model_1=create_model", "split_and_detect(model_2", "model_3.predict"],
+      draw(svg, ctx) {
+        const st = [["整页图", 20], ["模型 1\n估字号", 150], ["切 N 块", 280], ["模型 2\nCenterNet+NMS", 410], ["模型 3\n逐字分类", 560]];
+        const ns = st.map(([t, x], i) => { const n = K.node(svg, x, 90, i === 3 ? 130 : 110, 60, t, { fs: 12, fill: i ? "var(--panel-2)" : "var(--accent-soft)" }); n.style.opacity = 0; return n; });
+        const ar = st.slice(1).map(([t, x], i) => { const a = K.arrow(svg, st[i][1] + (i === 3 ? 130 : 110), 120, x, 120); a.style.opacity = 0; return a; });
+        const out = K.svg(svg, "text", { x: 20, y: 220, "font-size": 14, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 20, y: 250, "font-size": 12, class: "muted" }, "提交格式：Unicode 编码 + 中心 x + 中心 y，一页一行（示意，编码为虚构）");
+        (async () => {
+          for (let i = 0; i < st.length; i++) { if (!(await ctx.tween(350, (t) => { ns[i].style.opacity = t; if (i) ar[i - 1].style.opacity = t; }))) return; }
+          const parts = ["U+AAAA 812 133", "U+BBBB 806 241", "U+CCCC 799 352", "…"];
+          for (let i = 0; i < parts.length; i++) { out.textContent = "labels = " + parts.slice(0, i + 1).join("  "); if (!(await ctx.wait(400))) return; }
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：热力图 → 中心点 → 方框 ---------- */
+  const OW = 64, OH = 64;
+  function peaks(m, W, H, thr, mode, boxes) {
+    // 返回候选 [{x,y,s}]
+    const out = [];
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const v = m[y * W + x];
+      if (v <= thr) continue;
+      if (mode === "pool") {
+        let isMax = true;
+        for (let dy = -1; dy <= 1 && isMax; dy++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, yy = y + dy; if ((dx || dy) && xx >= 0 && yy >= 0 && xx < W && yy < H && m[yy * W + xx] > v) { isMax = false; break; } }
+        if (!isMax) continue;
+      }
+      out.push({ x: x + 0.5, y: y + 0.5, s: v });
+    }
+    return out;
+  }
+  function boxAt(p, truth) { // 用最近真字的宽高充当“预测宽高”（示意）
+    let best = truth[0], bd = Infinity;
+    truth.forEach((b) => { const d = (b.x + b.w / 2 - p.x) ** 2 + (b.y + b.h / 2 - p.y) ** 2; if (d < bd) { bd = d; best = b; } });
+    return { x: p.x - best.w / 2, y: p.y - best.h / 2, w: best.w, h: best.h, s: p.s };
+  }
+  function nms(bx, thr) {
+    bx.sort((a, b) => b.s - a.s);
+    const keep = [];
+    bx.forEach((b) => { if (keep.every((k) => { const iw = Math.max(0, Math.min(k.x + k.w, b.x + b.w) - Math.max(k.x, b.x)), ih = Math.max(0, Math.min(k.y + k.h, b.y + b.h) - Math.max(k.y, b.y)); return (iw * ih) / (k.w * k.h) < thr; })) keep.push(b); });
+    return keep;
+  }
+  function match(dets, truth) {
+    const used = new Set(); let tp = 0;
+    dets.forEach((d) => { const cx = d.x + d.w / 2, cy = d.y + d.h / 2; const j = truth.findIndex((b, k) => !used.has(k) && cx > b.x && cx < b.x + b.w && cy > b.y && cy < b.y + b.h); if (j >= 0) { used.add(j); tp++; } });
+    return { tp, fp: dets.length - tp, fn: truth.length - tp };
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "thr", label: "分数阈值 score_thresh（作者用 0.3）", min: 0.05, max: 0.95, step: 0.05, value: 0.3, fmt: (v) => v.toFixed(2) },
+      { id: "noise", label: "模型输出的“噪声”（训练越不充分越大）", min: 0, max: 0.5, step: 0.02, value: 0.16, fmt: (v) => v.toFixed(2) },
+      { id: "mode", label: "去重方法", value: "nms", options: [["nms", "NMS（作者的做法，重叠阈值 0.4）"], ["pool", "3×3 最大池化找峰（论文提到的做法）"], ["none", "不去重"]] },
+      { id: "seed", label: "换一页", button: true },
+    ],
+    note: "左：64×64 的“模型输出热力图”= 作者第 31 格的高斯标签 + 随机噪声 + 轻微模糊（模拟一个没训练完美的模型）。右：去重后的方框（绿 = 框中了一个真字，红 = 误报），蓝色虚框是没找到的字。",
+    render(svg, v) {
+      const r = K.rng(77 + v.seed * 13);
+      const truth = pageBoxes(500 + v.seed, { x: 1, y: 1, w: OW - 2, h: OH - 2 }, 6, 0.95);
+      const g = gaussMap(truth, OW, OH, 10), m = new Float32Array(OW * OH);
+      for (let i = 0; i < m.length; i++) m[i] = g[i] * (0.75 + r() * 0.25);
+      for (let k = 0; k < 10; k++) { const x = Math.floor(r() * OW), y = Math.floor(r() * OH); m[y * OW + x] += v.noise * 2 * r(); }
+      const sm = new Float32Array(OW * OH);
+      for (let y = 0; y < OH; y++) for (let x = 0; x < OW; x++) { let s = 0, n = 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < OW && yy < OH) { s += m[yy * OW + xx] * (dx || dy ? 0.12 : 1); n += dx || dy ? 0.12 : 1; } } sm[y * OW + x] = K.clamp(s / n * 1.4 + (r() - 0.5) * v.noise, 0, 1); }
+      const sc = 4.6;
+      heatImg(svg, sm, OW, OH, 10, 10, OW * sc, OH * sc);
+      K.svg(svg, "text", { x: 10 + OW * sc / 2, y: 318, "text-anchor": "middle", "font-size": 12 }, "模型输出的中心热力图（示意）");
+      const ox = 340;
+      K.svg(svg, "rect", { x: ox, y: 10, width: OW * sc, height: OH * sc, fill: "var(--panel-2)", stroke: "var(--line)" });
+      truth.forEach((b, j) => glyph(svg, ox + b.x * sc, 10 + b.y * sc, b.w * sc, b.h * sc, 7000 + j, { opacity: 0.35 }));
+      let cand = peaks(sm, OW, OH, v.thr, v.mode === "pool" ? "pool" : "all").map((p) => boxAt(p, truth));
+      const dets = v.mode === "nms" ? nms(cand, 0.4) : cand;
+      const mt = match(dets, truth);
+      const used = new Set();
+      dets.slice(0, 600).forEach((d) => {
+        const cx = d.x + d.w / 2, cy = d.y + d.h / 2;
+        const j = truth.findIndex((b, k) => !used.has(k) && cx > b.x && cx < b.x + b.w && cy > b.y && cy < b.y + b.h);
+        if (j >= 0) used.add(j);
+        K.svg(svg, "rect", { x: ox + d.x * sc, y: 10 + d.y * sc, width: d.w * sc, height: d.h * sc, fill: "none", stroke: j >= 0 ? "var(--good)" : "var(--bad)", "stroke-width": 1.6, opacity: 0.85 });
+      });
+      truth.forEach((b, k) => { if (!used.has(k)) K.svg(svg, "rect", { x: ox + b.x * sc, y: 10 + b.y * sc, width: b.w * sc, height: b.h * sc, fill: "none", stroke: "var(--c1)", "stroke-dasharray": "3 2", "stroke-width": 1.5 }); });
+      K.svg(svg, "text", { x: ox + OW * sc / 2, y: 318, "text-anchor": "middle", "font-size": 12 }, "去重后的检测结果");
+      const P = dets.length ? mt.tp / dets.length : 0, R = mt.tp / truth.length;
+      return { readout: [
+        { k: "真实字数 / 输出框数", v: `${truth.length} / ${dets.length}` },
+        { k: "召回率（找到几成字）", v: (R * 100).toFixed(0) + "%", color: R > 0.85 ? "var(--good)" : "var(--warn)" },
+        { k: "精确率（框里几成是字）", v: (P * 100).toFixed(0) + "%", color: P > 0.85 ? "var(--good)" : "var(--warn)" },
+        { k: "F1", v: (P + R ? (2 * P * R) / (P + R) : 0).toFixed(2) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：切块与小字 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "cols", label: "这一页有几列字（列越多，字越小越密）", min: 3, max: 24, step: 1, value: 14 },
+      { id: "split", label: "每个方向切成几块", min: 1, max: 4, step: 1, value: 1 },
+    ],
+    note: "整页切成 n×n 块，每块各自得到一张 32×32 的热力图（这里把作者的 128 缩小到 32，便于在浏览器里画）。热力图用作者的高斯标签（σ = 字宽 / 10），再用 3×3 最大池化找峰。字太小时，相邻字的“小山包”挤进同一格，峰会合并或消失。",
+    render(svg, v) {
+      const page = { x: 0, y: 0, w: 100, h: 140 };
+      const truth = pageBoxes(900 + v.cols, page, v.cols, 0.95);
+      const n = v.split, R = 32, side = Math.max(page.w, page.h) / n; // 正方形块，按长边切
+      let found = 0; const marks = [];
+      for (let by = 0; by * side < page.h; by++) for (let bx = 0; bx * side < page.w; bx++) {
+        const x0 = bx * side, y0 = by * side, s = R / side;
+        const inside = truth.filter((b) => { const cx = b.x + b.w / 2, cy = b.y + b.h / 2; return cx >= x0 && cx < x0 + side && cy >= y0 && cy < y0 + side; });
+        const local = inside.map((b) => ({ x: (b.x - x0) * s, y: (b.y - y0) * s, w: b.w * s, h: b.h * s }));
+        const m = gaussMap(local, R, R, 10);
+        const pk = peaks(m, R, R, 0.3, "pool");
+        const used = new Set();
+        pk.forEach((p) => { const j = local.findIndex((b, k) => !used.has(k) && Math.abs(b.x + b.w / 2 - p.x) < Math.max(1, b.w / 2) && Math.abs(b.y + b.h / 2 - p.y) < Math.max(1, b.h / 2)); if (j >= 0) { used.add(j); found++; marks.push(inside[j]); } });
+        if (bx === 0 && by === 0) { heatImg(svg, m, R, R, 400, 30, 220, 220); }
+      }
+      const sc = 2.1, ox = 40, oy = 20;
+      K.svg(svg, "rect", { x: ox, y: oy, width: page.w * sc, height: page.h * sc, fill: "var(--panel-2)", stroke: "var(--line)" });
+      truth.forEach((b, j) => { const hit = marks.includes(b); K.svg(svg, "rect", { x: ox + b.x * sc, y: oy + b.y * sc, width: b.w * sc, height: b.h * sc, fill: hit ? "var(--good)" : "var(--bad)", "fill-opacity": 0.35, stroke: hit ? "var(--good)" : "var(--bad)", "stroke-width": 0.8 }); });
+      for (let k = 1; k * side < page.w; k++) K.svg(svg, "line", { x1: ox + k * side * sc, y1: oy, x2: ox + k * side * sc, y2: oy + page.h * sc, stroke: "var(--warn)", "stroke-width": 2 });
+      for (let k = 1; k * side < page.h; k++) K.svg(svg, "line", { x1: ox, y1: oy + k * side * sc, x2: ox + page.w * sc, y2: oy + k * side * sc, stroke: "var(--warn)", "stroke-width": 2 });
+      K.svg(svg, "rect", { x: ox, y: oy, width: Math.min(side, page.w) * sc, height: Math.min(side, page.h) * sc, fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+      K.svg(svg, "text", { x: 510, y: 22, "text-anchor": "middle", "font-size": 12 }, "蓝框那一块的 32×32 热力图");
+      K.svg(svg, "text", { x: 280, y: 290, "font-size": 12, class: "muted" }, "左图：绿 = 热力图上找到了峰，红 = 没找到");
+      const rec = found / truth.length;
+      return { readout: [
+        { k: "这一页的字数", v: String(truth.length) },
+        { k: "块数", v: String(Math.ceil(page.w / side) * Math.ceil(page.h / side)) },
+        { k: "找到的字（召回率）", v: `${found}（${(rec * 100).toFixed(0)}%）`, color: rec > 0.9 ? "var(--good)" : rec > 0.6 ? "var(--warn)" : "var(--bad)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>分子消息传递网络</title>
+<meta name="description" content="Kaggle 案例拆解：CHAMPS 分子性质预测比赛中，用 TensorFlow 2 从零搭建 Gilmer 式消息传递神经网络（MPNN）：边网络生成消息、求和汇总、GRU 更新、重复 4 轮，再对每一对原子回归标量耦合常数。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">分子图 · 边回归 · 消息传递神经网络</div>
+  <h1>原子之间“传纸条”：用 MPNN 预测分子里的耦合常数</h1>
+  <p class="en">1. MPNN</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">MPNN 消息传递</span><span class="tag method">边网络（edge network）</span><span class="tag method">求和汇总</span>
+    <span class="tag method">GRU 更新</span><span class="tag method">权重共享 T 轮</span><span class="tag method">边回归</span><span class="tag method">log MAE</span><span class="tag method">TensorFlow 2</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>fnands</b></span>
+    <span>Kaggle 点赞 <b>347</b>（2026-11 抓取）</span>
+    <span>比赛 <b>Predicting Molecular Properties（champs-scalar-coupling）</b> + 作者预处理的 <b>fnands/champs-basic-graph</b></span>
+    <span><a href="https://www.kaggle.com/code/fnands/1-mpnn" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">一个个小分子：原子是点，原子对是边</div><p>作者说比赛数据本质上就是 QM9 小分子数据集，加上新算出的数值；每个分子最多 29 个原子。<span data-cell="0">出处</span> <span data-cell="41">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">两个原子之间的“标量耦合常数”</div><p>不是预测整个分子的性质，而是预测<b>每一条边</b>（原子对）上的一个数，作者说这是和 Gilmer 论文最大的不同。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">Gilmer 式消息传递神经网络 MPNN</div><p>边网络把每条边变成矩阵来生成消息 → 求和 → GRU 更新，同一层重复 4 轮，最后把两端原子和边拼起来回归。<span data-cell="8">出处</span> <span data-cell="28">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">生成了提交文件，文字里没写分数</div><p>训练日志和验证分数在运行输出里，作者没有在文字里报告成绩，这里不列。<span data-cell="38">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛 <b>Predicting Molecular Properties</b>（代号 CHAMPS）要求预测分子中两个原子之间的<b>标量耦合常数</b>（核磁共振实验里两个原子核之间相互影响的强度）。作者没有直接读比赛的表格，而是先把它整理成图的格式放在自己的数据集 <code>champs-basic-graph</code> 里（第 5 格）。notebook 没有说明这些数组的具体维度和特征含义，下表只写从代码里能确认的内容。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者预处理好的三种数组</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>文件</th><th>是什么</th><th>从代码能确认的</th></tr>
+        <tr><td><code>nodes_*.npz</code></td><td>每个分子每个原子的特征</td><td>先经 Dense 层嵌入成 128 维（第 19 格）</td></tr>
+        <tr><td><code>in_edges_*.npz</code></td><td>每个分子每一对原子的边特征</td><td><b>最后一维是距离</b>；距离为 0 表示“不存在的原子”或原子自己和自己（第 19 格）</td></tr>
+        <tr><td><code>out_edges_train.npz</code></td><td><b>答案</b>：每一对原子的耦合常数</td><td>已缩放到 −1～1 左右；0 表示这对原子没有要预测的值（第 21、39 格）</td></tr>
+      </table></div>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">规模</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">每个分子最多原子数</div><div class="v">29</div></div>
+        <div class="stat-tile"><div class="k">每个分子的边（含补齐）</div><div class="v">29 × 29</div></div>
+        <div class="stat-tile"><div class="k">训练 / 验证</div><div class="v">8 : 2</div></div>
+        <div class="stat-tile"><div class="k">节点表示维度</div><div class="v">128</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">29 见 <span data-cell="41">第 41 格</span>；分子不足 29 个原子的用 0 补齐，所以每个分子都是 29 × 29 个“原子对”（<span data-cell="6">第 6 格</span>）；8:2 见 <span data-cell="30">第 30 格</span>；128 见 <span data-cell="28">第 28 格</span>。分子数量 notebook 里没有写。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="9">
+    <h3>动手试试 A · 边网络：距离决定消息有多“响” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="19">
+    <h3>动手试试 B · 传几轮纸条，才能分清不同位置的氢原子 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者说了什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>比赛数据本质上是 QM9 加上新算的数值，于是想到同样用 QM9 的 Gilmer MPNN 论文</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>和论文的最大区别：要预测边（原子对）的性质，而不是整个分子的性质，所以换了输出层</td><td><span data-cell="14">第 14 格</span></td></tr>
+        <tr><td>消息：用神经网络把边嵌入成矩阵，再乘以节点状态（照论文）</td><td><span data-cell="8">第 8 格</span></td></tr>
+        <tr><td>汇总用求和；更新用 GRU，把 [旧状态, 汇总消息] 当成长度为 2 的序列</td><td><span data-cell="10">第 10、12 格</span></td></tr>
+        <tr><td>和论文一样，T 轮消息传递复用同一个层（但不是必须的）</td><td><span data-cell="18">第 18 格</span></td></tr>
+        <tr><td>BatchNorm 似乎不起作用，被注释掉</td><td><span data-cell="17">第 17 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">训练过程中的 MAE、log MAE 和验证分数都打印在运行输出里，作者文字里没有报告具体数值，这里不列分数。</p>
+      <h3>读代码时值得注意的地方</h3>
+      <ul class="tight">
+        <li><b>“边”是所有原子对</b>，不只是化学键：第 17 格把每个原子的状态复制给所有其他原子，用距离是否为 0 来屏蔽不存在的原子。所以这里的图是“全连接 + 距离”，化学键信息只能藏在边特征里。</li>
+        <li><b>用 0 判断“没有答案”</b>：标签被缩放成 (原值 − 中点) / 半宽（第 39 格），中点恰好对应 0。如果某个真实耦合常数正好等于中点，会被当成“没有值”而忽略（概率很小）。</li>
+        <li><b>损失用的是整体 MAE 取对数</b>（第 24 格）。对数不改变哪个模型更好，只改变梯度大小；不同类型的耦合常数数值范围差别很大，整体 MAE 会被数值大的类型主导。</li>
+        <li><b>学习率</b>：每 20 轮乘 0.1（第 26 格），但只训练 25 轮，所以只在第 20 轮降过一次。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一个新分子的原子和三维结构，直接算出每对原子之间的耦合常数，代替昂贵的量子化学计算。</li>
+        <li><b>同类问题：</b>分子能量、溶解度、毒性预测（预测整个分子 → 换成“读出”层）；药物与靶点结合；材料性质；蛋白质里氨基酸之间的距离。</li>
+        <li><b>可迁移的套路：</b>消息（边决定怎么传）→ 汇总（与顺序无关）→ 更新（结合旧状态）→ 重复几轮 → 按任务选读出方式（节点 / 边 / 整图）。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>边网络消息：Dense(128×128, ReLU) → reshape 成矩阵 × 邻居状态 <span data-cell="9">第 9 格</span></li>
+        <li>求和汇总 <span data-cell="11">第 11 格</span></li>
+        <li>GRU 更新 <span data-cell="13">第 13 格</span></li>
+        <li>边回归：[原子 i, 边 ij, 原子 j] → MLP(512, 512) → 1 <span data-cell="15">第 15 格</span></li>
+        <li>MPNN：嵌入 128 维，共享的消息传递层重复 T = 4 轮 <span data-cell="19">第 19 格</span> <span data-cell="28">第 28 格</span></li>
+        <li>损失 log MAE；Adam 0.001，阶梯衰减，早停（耐心 15），批大小 16，25 轮 <span data-cell="26">第 26 格</span> <span data-cell="30">第 30 格</span></li>
+        <li>预测 (i, j) 与 (j, i) 取平均，再还原缩放 <span data-cell="40">第 40 格</span> <span data-cell="43">第 43 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者把所有原子两两之间都当作边，而不是只用化学键。这样做有什么好处？分子大了以后会有什么问题？</li>
+      <li>汇总消息时为什么用“求和”这种和顺序无关的方式？如果用“拼接”会遇到什么麻烦？</li>
+      <li>4 轮消息传递复用同一个层（权重共享），和 4 层各用各的权重相比，各有什么优缺点？</li>
+      <li>模型分别预测了 (i, j) 和 (j, i) 两个值，最后取平均。为什么同一对原子会得到两个不同的预测？能不能从模型结构上保证它们相等？</li>
+      <li>CNN 处理图片时“邻居”是固定的 3×3 格子，RNN 处理句子时“邻居”是前后的词。分子里的原子，邻居是怎么定义的？为什么分子不适合直接用 CNN 或 RNN？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 fnands，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的分子、数值均为模拟示意。比赛：Predicting Molecular Properties（CHAMPS）。MPNN 论文：Gilmer et al., Neural Message Passing for Quantum Chemistry, 2017。
+</footer>
+</main>
+
+<script src="nb/champs-mpnn-molecules.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* ===== 本页图神经网络小工具（页面专用，不改共用文件） ===== */
+  const G = {};
+  /* 自查开关：网址带 ?fast 时用定时器代替 requestAnimationFrame（无界面截图时动画也能播完），并折叠代码 */
+  G.fast = /[?&]fast/.test(location.search);
+  if (G.fast) window.requestAnimationFrame = (cb) => setTimeout(() => cb(performance.now()), 8);
+  G.selfcheck = function () {
+    if (!G.fast) return;
+    setTimeout(() => {
+      if (/[?&]labs/.test(location.search)) {
+        const box = document.createElement("div"); const m = document.querySelector("main"); m.insertBefore(box, m.firstChild);
+        document.querySelectorAll(".inline-lab").forEach((x) => box.appendChild(x));
+        return;
+      }
+      if (/[?&]nofold/.test(location.search)) return;
+      const b = document.querySelector('[data-a="fold"]'); if (b) b.click();
+    }, 50);
+  };
+  /* 随机“社团图”：n 个点、k 类；同类连边概率 pIn，异类 pOut */
+  G.make = function (seed, n, k, pIn, pOut) {
+    const r = K.rng(seed), cls = [], edges = [], adj = Array.from({ length: n }, () => []);
+    for (let i = 0; i < n; i++) cls.push(i % k);
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+      if (r() < (cls[i] === cls[j] ? pIn : pOut)) { edges.push([i, j]); adj[i].push(j); adj[j].push(i); }
+    }
+    // 保证没有孤立点：孤立点随机连一个同类点
+    for (let i = 0; i < n; i++) if (!adj[i].length) {
+      let j = i; while (j === i || cls[j] !== cls[i]) j = Math.floor(r() * n);
+      edges.push([i, j]); adj[i].push(j); adj[j].push(i);
+    }
+    return { n, k, cls, edges, adj };
+  };
+  G.grav = 1;
+  /* 简单力导向布局（确定性），返回 [[x,y]...] 落在 box 里 */
+  G.layout = function (g, box, seed, iters) {
+    const r = K.rng(seed || 1), n = g.n, P = [];
+    for (let i = 0; i < n; i++) {
+      const a = (2 * Math.PI * g.cls[i]) / Math.max(1, g.k) + r() * 1.2, d = 0.25 + r() * 0.2;
+      P.push([0.5 + Math.cos(a) * d, 0.5 + Math.sin(a) * d]);
+    }
+    const it = iters || 160, kk = 0.6 / Math.sqrt(n);
+    for (let t = 0; t < it; t++) {
+      const D = P.map(() => [0, 0]), temp = 0.05 * (1 - t / it) + 0.002;
+      for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+        let dx = P[i][0] - P[j][0], dy = P[i][1] - P[j][1], d2 = dx * dx + dy * dy + 1e-6, f = (kk * kk) / d2;
+        D[i][0] += dx * f; D[i][1] += dy * f; D[j][0] -= dx * f; D[j][1] -= dy * f;
+      }
+      g.edges.forEach(([a, b]) => {
+        const dx = P[a][0] - P[b][0], dy = P[a][1] - P[b][1], d = Math.sqrt(dx * dx + dy * dy) + 1e-6, f = d / kk;
+        D[a][0] -= (dx / d) * f * d; D[a][1] -= (dy / d) * f * d; D[b][0] += (dx / d) * f * d; D[b][1] += (dy / d) * f * d;
+      });
+      for (let i = 0; i < n; i++) {
+        D[i][0] += (0.5 - P[i][0]) * G.grav; D[i][1] += (0.5 - P[i][1]) * G.grav;
+        const L = Math.sqrt(D[i][0] ** 2 + D[i][1] ** 2) + 1e-9, s = Math.min(L, temp);
+        P[i][0] = K.clamp(P[i][0] + (D[i][0] / L) * s + 0, -2, 3);
+        P[i][1] = K.clamp(P[i][1] + (D[i][1] / L) * s + 0, -2, 3);
+      }
+    }
+    const xs = P.map((p) => p[0]), ys = P.map((p) => p[1]);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys), m = 10;
+    return P.map(([x, y]) => [box.x + m + ((x - x0) / (x1 - x0 || 1)) * (box.w - 2 * m), box.y + m + ((y - y0) / (y1 - y0 || 1)) * (box.h - 2 * m)]);
+  };
+  /* 画图：返回 {nodes, lines} */
+  G.draw = function (svg, g, pos, opt) {
+    opt = opt || {};
+    const lines = g.edges.map(([a, b]) => K.svg(svg, "line", { x1: pos[a][0], y1: pos[a][1], x2: pos[b][0], y2: pos[b][1], stroke: "var(--line)", "stroke-width": opt.ew || 1.2 }));
+    const nodes = pos.map((p, i) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: opt.r || 6, fill: opt.fill ? opt.fill(i) : K.colors[g.cls[i] % 6], stroke: "var(--panel)", "stroke-width": 1.5 }));
+    return { nodes, lines };
+  };
+  /* 一个“消息”小圆点沿边从 a 飞到 b */
+  G.fly = function (svg, ctx, pa, pb, color, ms) {
+    const d = K.svg(svg, "circle", { cx: pa[0], cy: pa[1], r: 4, fill: color || "var(--accent)" });
+    return ctx.tween(ms || 600, (t) => { d.setAttribute("cx", K.lerp(pa[0], pb[0], t)); d.setAttribute("cy", K.lerp(pa[1], pb[1], t)); }).then((ok) => { d.remove(); return ok; });
+  };
+  /* 一轮消息传递：H 是每个点的向量；mode = mean / sum / max；self 是否带上自己 */
+  G.prop = function (H, adj, mode, self) {
+    return H.map((h, i) => {
+      const nb = self ? adj[i].concat([i]) : adj[i];
+      if (!nb.length) return h.slice();
+      const out = h.map(() => (mode === "max" ? -Infinity : 0));
+      nb.forEach((j) => H[j].forEach((v, d) => { if (mode === "max") out[d] = Math.max(out[d], v); else out[d] += v; }));
+      if (mode === "mean") return out.map((v) => v / nb.length);
+      return out;
+    });
+  };
+  /* GCN 式对称归一化传播：D^-1/2 (A+I) D^-1/2 H */
+  G.gcn = function (H, adj) {
+    const deg = adj.map((a) => a.length + 1);
+    return H.map((h, i) => {
+      const out = h.map((v) => v / deg[i]);
+      adj[i].forEach((j) => { const w = 1 / Math.sqrt(deg[i] * deg[j]); H[j].forEach((v, d) => (out[d] += w * v)); });
+      return out;
+    });
+  };
+  /* 多分类逻辑回归（softmax），全批量梯度下降 */
+  G.softmaxFit = function (X, y, K_, epochs, lr, l2) {
+    const D = X[0].length, W = Array.from({ length: K_ }, () => new Array(D + 1).fill(0));
+    for (let e = 0; e < epochs; e++) {
+      const Gr = W.map((w) => w.map(() => 0));
+      for (let i = 0; i < X.length; i++) {
+        const p = G.softmaxP(W, X[i]);
+        for (let c = 0; c < K_; c++) { const g = p[c] - (y[i] === c ? 1 : 0); for (let d = 0; d < D; d++) Gr[c][d] += g * X[i][d]; Gr[c][D] += g; }
+      }
+      for (let c = 0; c < K_; c++) for (let d = 0; d <= D; d++) W[c][d] -= lr * (Gr[c][d] / X.length + (d < D ? (l2 || 0) * W[c][d] : 0));
+    }
+    return W;
+  };
+  G.softmaxP = function (W, x) {
+    const z = W.map((w) => { let s = w[w.length - 1]; for (let d = 0; d < x.length; d++) s += w[d] * x[d]; return s; });
+    const m = Math.max(...z), ex = z.map((v) => Math.exp(v - m)), S = ex.reduce((a, b) => a + b, 0);
+    return ex.map((v) => v / S);
+  };
+  G.argmax = (a) => a.reduce((bi, v, i) => (v > a[bi] ? i : bi), 0);
+  /* 一圈圈扩散的“跳数”环 */
+  G.ring = function (svg, p, r, color) { return K.svg(svg, "circle", { cx: p[0], cy: p[1], r, fill: "none", stroke: color || "var(--accent)", "stroke-width": 2, "stroke-dasharray": "5 4" }); };
+  /* 小工具：节点向量 → 颜色（取最大类的颜色，透明度=置信度） */
+  G.paint = function (el, vec) {
+    const s = vec.reduce((a, b) => a + Math.max(0, b), 0) || 1, c = G.argmax(vec), conf = Math.max(0, vec[c]) / s;
+    K.set(el, { fill: K.colors[c % 6], "fill-opacity": 0.25 + 0.75 * conf });
+  };
+
+
+  const EL = { C: "var(--ink-3)", H: "var(--c1)", O: "var(--c6)", N: "var(--c3)" };
+  /* 示意分子（二维画法，原子位置是为了好看，不是真实三维坐标） */
+  const MOLS = {
+    ethanol: { name: "乙醇 CH₃CH₂OH", atoms: ["C", "C", "O", "H", "H", "H", "H", "H", "H"], pos: [[250, 190], [370, 190], [480, 130], [190, 110], [170, 230], [250, 290], [370, 90], [370, 290], [570, 160]], bonds: [[0, 1], [1, 2], [0, 3], [0, 4], [0, 5], [1, 6], [1, 7], [2, 8]] },
+    acetic: { name: "乙酸 CH₃COOH", atoms: ["C", "C", "O", "O", "H", "H", "H", "H"], pos: [[250, 190], [380, 190], [450, 90], [470, 260], [190, 110], [170, 230], [250, 300], [570, 250]], bonds: [[0, 1], [1, 2], [1, 3], [0, 4], [0, 5], [0, 6], [3, 7]] },
+    ethylamine: { name: "乙胺 CH₃CH₂NH₂", atoms: ["C", "C", "N", "H", "H", "H", "H", "H", "H", "H"], pos: [[230, 190], [350, 190], [470, 190], [170, 110], [150, 230], [230, 300], [350, 90], [350, 290], [550, 120], [550, 260]], bonds: [[0, 1], [1, 2], [0, 3], [0, 4], [0, 5], [1, 6], [1, 7], [2, 8], [2, 9]] },
+  };
+  function drawMol(svg, m, opt) {
+    opt = opt || {};
+    const lines = m.bonds.map(([a, b]) => K.svg(svg, "line", { x1: m.pos[a][0], y1: m.pos[a][1], x2: m.pos[b][0], y2: m.pos[b][1], stroke: "var(--ink-3)", "stroke-width": 3 }));
+    const nodes = m.atoms.map((el, i) => K.svg(svg, "circle", { cx: m.pos[i][0], cy: m.pos[i][1], r: el === "H" ? 13 : 20, fill: opt.fill ? opt.fill(i) : EL[el], stroke: "var(--panel)", "stroke-width": 2 }));
+    const labs = m.atoms.map((el, i) => K.svg(svg, "text", { x: m.pos[i][0], y: m.pos[i][1] + 5, "text-anchor": "middle", "font-size": el === "H" ? 11 : 14, "font-weight": 700, fill: "var(--panel)" }, el));
+    return { lines, nodes, labs };
+  }
+
+  const steps = [
+    {
+      at: 0, title: "开场：这场比赛其实是 QM9 小分子", kicker: "第 0–4 格 · 背景与环境",
+      html: `<p>作者一看数据就认出：比赛用的分子本质上就是 <b>QM9</b>（一个包含大量小有机分子的量子化学数据集），只是多算了一些新数值。于是他想到了同样用 QM9 的 <b>Gilmer 等人的 MPNN 论文</b>（第 0 格）。</p><p>和论文的区别：论文预测整个分子的性质（如能量），这里要预测<b>两个原子之间</b>的耦合常数，也就是图上<b>边</b>的性质。作者把模型拆成可替换的模块。第 1–4 格安装并检查 TensorFlow 2.0 测试版和 GPU。</p>`,
+      cells: [0, 2], highlight: ["tensorflow"],
+      draw(svg, ctx) {
+        const m = MOLS.ethanol, d = drawMol(svg, m);
+        [...d.nodes, ...d.labs, ...d.lines].forEach((e) => (e.style.opacity = 0));
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13 }, "乙醇（示意画法）：原子 = 点，原子之间 = 边");
+        const pair = K.svg(svg, "path", { d: `M${m.pos[3][0]},${m.pos[3][1]} Q 320 20 ${m.pos[6][0]},${m.pos[6][1]}`, fill: "none", stroke: "var(--warn)", "stroke-width": 3, "stroke-dasharray": "6 4" });
+        pair.style.opacity = 0;
+        const q = K.svg(svg, "text", { x: 600, y: 60, "font-size": 13, fill: "var(--warn)", "font-weight": 700, "text-anchor": "end" }, "");
+        ctx.tween(800, (t) => [...d.nodes, ...d.labs].forEach((e, i) => (e.style.opacity = K.clamp(t * 2 - (i % 9) / 9, 0, 1))))
+          .then((ok) => ok && ctx.tween(500, (t) => d.lines.forEach((l) => (l.style.opacity = t))))
+          .then((ok) => { if (ok) { q.textContent = "这两个氢之间的耦合常数 = ?"; return ctx.tween(600, (t) => (pair.style.opacity = t)); } });
+      },
+    },
+    {
+      title: "读入作者预处理好的分子图", kicker: "第 5–7 格 · 数据",
+      html: `<p>作者事先把比赛数据转成了三种数组（第 5 格）：<b>节点</b>（每个原子的特征）、<b>输入边</b>（每一对原子的特征，最后一项是距离）、<b>输出边</b>（每一对原子的耦合常数，即答案）。</p><p>每个分子补齐到 29 个原子，所以每个分子都有 29 × 29 个原子对。第 6 格把“29 × 29”拉直成 841 行，第 7 格把训练数据打乱。</p>`,
+      cells: [5, 6, 7], highlight: ["nodes_train", "in_edges_train", "out_edges_train", "reshape"],
+      draw(svg, ctx) {
+        const n = 9, cell = 24, x0 = 60, y0 = 50;
+        K.svg(svg, "text", { x: x0, y: 34, "font-size": 12, "font-weight": 700 }, "原子对矩阵（这里画 9 × 9，实际补齐到 29 × 29）");
+        const r = K.rng(5), cells = [];
+        for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+          const pad = i >= 7 || j >= 7, self = i === j;
+          cells.push(K.svg(svg, "rect", { x: x0 + j * cell, y: y0 + i * cell, width: cell - 2, height: cell - 2, fill: pad || self ? "var(--panel-2)" : "var(--accent)", "fill-opacity": pad || self ? 1 : 0.2 + 0.6 * r(), stroke: "var(--line)" }));
+        }
+        K.svg(svg, "text", { x: x0, y: y0 + n * cell + 22, "font-size": 11, class: "muted" }, "灰色 = 补齐的空原子或自己与自己（距离 0）");
+        const strip = [];
+        ctx.wait(800).then((ok) => ok && ctx.tween(1400, (t) => cells.forEach((c, k) => {
+          const tx = 360 + (k % 27) * 12, ty = 80 + Math.floor(k / 27) * 30;
+          c.setAttribute("x", K.lerp(x0 + (k % n) * cell, tx, t)); c.setAttribute("y", K.lerp(y0 + Math.floor(k / n) * cell, ty, t));
+          c.setAttribute("width", K.lerp(cell - 2, 10, t)); c.setAttribute("height", K.lerp(cell - 2, 22, t));
+        })));
+        K.svg(svg, "text", { x: 360, y: 60, "font-size": 12, "font-weight": 700 }, "reshape：拉直成一长串（每个原子对一行）");
+      },
+    },
+    {
+      title: "消息：边网络把每条边变成一个矩阵", kicker: "第 8–9 格 · Message_Passer_NNM",
+      html: `<p>照 Gilmer 论文，消息这样算：先用一个全连接层把<b>边特征</b>（含距离）变成 128 × 128 个数，排成一个<b>矩阵 A(e<sub>ij</sub>)</b>；再用这个矩阵乘以邻居原子 j 的 128 维状态，得到从 j 发给 i 的消息（第 9 格）。</p><p>这样“怎么传话”由边决定：距离近、关系紧的原子对，可以学出把信息放大的矩阵；距离远的，可以学出几乎为 0 的矩阵。</p>`,
+      cells: [9], highlight: ["units=self.node_dim*self.node_dim", "tf.linalg.matmul(A, node_j)"],
+      draw(svg, ctx) {
+        K.node(svg, 30, 60, 140, 60, "边特征 e_ij\n（含距离）", { stroke: "var(--c2)", sw: 2 });
+        K.node(svg, 220, 60, 120, 60, "Dense\n128×128 个数", {});
+        const grid = [];
+        for (let i = 0; i < 6; i++) for (let j = 0; j < 6; j++) grid.push(K.svg(svg, "rect", { x: 390 + j * 16, y: 40 + i * 16, width: 14, height: 14, fill: "var(--c2)", "fill-opacity": 0 }));
+        K.svg(svg, "text", { x: 390, y: 150, "font-size": 12 }, "矩阵 A(e_ij)");
+        const vec = []; for (let i = 0; i < 6; i++) vec.push(K.svg(svg, "rect", { x: 520, y: 40 + i * 16, width: 14, height: 14, fill: "var(--c1)", "fill-opacity": 0.6 }));
+        K.svg(svg, "text", { x: 505, y: 150, "font-size": 12 }, "× 原子 j 的状态");
+        const out = []; for (let i = 0; i < 6; i++) out.push(K.svg(svg, "rect", { x: 640, y: 40 + i * 16, width: 14, height: 14, fill: "var(--accent)", "fill-opacity": 0 }));
+        K.svg(svg, "text", { x: 620, y: 150, "font-size": 12 }, "= 消息");
+        K.arrow(svg, 170, 90, 218, 90); K.arrow(svg, 340, 90, 386, 90);
+        const r = K.rng(2), w = grid.map(() => r());
+        ctx.tween(900, (t) => grid.forEach((g, k) => K.set(g, { "fill-opacity": w[k] * t })))
+          .then((ok) => ok && ctx.tween(700, (t) => out.forEach((o, i) => K.set(o, { "fill-opacity": (0.3 + 0.6 * ((i * 37) % 10) / 10) * t }))));
+        K.svg(svg, "text", { x: 30, y: 230, "font-size": 13 }, "不同的边 → 不同的矩阵 → 同一个邻居对不同原子“说的话”不一样");
+      },
+    },
+    {
+      title: "汇总：把收到的消息加起来", kicker: "第 10–11 格 · Message_Agg",
+      html: `<p>每个原子会从所有其他原子各收到一条消息，<code>Message_Agg</code> 只做一件事：<b>求和</b>（第 11 格）。作者说单独写成一层有点多余，但方便以后换成更复杂的汇总方式。</p><p>求和与顺序无关：先加 A 再加 B，和先加 B 再加 A 结果一样。分子里的原子没有天然的先后顺序，所以汇总方式必须对顺序不敏感。</p>`,
+      cells: [11], highlight: ["reduce_sum"],
+      draw(svg, ctx) {
+        const m = MOLS.ethanol, d = drawMol(svg, m), c = 1;
+        const srcs = m.atoms.map((_, i) => i).filter((i) => i !== c);
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13 }, "第 2 个碳原子收到其余 8 个原子的消息（全连接，作者的做法）");
+        (async () => {
+          if (!(await ctx.wait(400))) return;
+          await Promise.all(srcs.map((i) => G.fly(svg, ctx, m.pos[i], m.pos[c], "var(--accent)", 900)));
+          if (ctx.alive()) { K.set(d.nodes[c], { fill: "var(--accent)" }); K.svg(svg, "text", { x: m.pos[c][0], y: m.pos[c][1] + 46, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--accent)" }, "Σ 消息"); }
+        })();
+      },
+    },
+    {
+      title: "更新：用 GRU 决定记住多少新消息", kicker: "第 12–13 格 · Update_Func_GRU",
+      html: `<p>更新函数是一个 <b>GRU</b>（门控循环单元，本来是处理序列的 RNN 部件）。作者把 [旧状态, 汇总消息] 当成长度为 2 的“序列”喂给 GRU，GRU 的输出就是原子的新状态（第 12–13 格）。</p><p>GRU 里有“门”：它会学着决定新状态里保留多少旧的自己、吸收多少新消息。这里 RNN 只是被借来当一个“聪明的合并器”，不是在读真正的序列。</p>`,
+      cells: [13], highlight: ["tf.keras.layers.GRU", "concat_layer([old_state, agg_messages])"],
+      draw(svg, ctx) {
+        K.node(svg, 40, 70, 160, 60, "旧状态 h", { stroke: "var(--c1)", sw: 2 });
+        K.node(svg, 40, 190, 160, 60, "汇总消息 m", { stroke: "var(--accent)", sw: 2 });
+        K.node(svg, 300, 120, 140, 80, "GRU\n门：保留多少？", { bold: true });
+        K.node(svg, 540, 130, 140, 60, "新状态 h'", { stroke: "var(--good)", sw: 2 });
+        K.arrow(svg, 200, 100, 298, 150); K.arrow(svg, 200, 220, 298, 175); K.arrow(svg, 440, 160, 538, 160);
+        const bar = K.svg(svg, "rect", { x: 300, y: 230, width: 140, height: 16, fill: "var(--panel-2)", stroke: "var(--line)" });
+        const fillA = K.svg(svg, "rect", { x: 300, y: 230, width: 70, height: 16, fill: "var(--c1)" });
+        const lab = K.svg(svg, "text", { x: 300, y: 270, "font-size": 12 }, "");
+        ctx.tween(2200, (t) => { const z = 0.5 + 0.4 * Math.sin(t * Math.PI * 2); fillA.setAttribute("width", 140 * z); lab.textContent = `保留旧状态 ${(z * 100).toFixed(0)}%，吸收新消息 ${(100 - z * 100).toFixed(0)}%（示意）`; });
+      },
+    },
+    {
+      title: "输出层：对每一对原子做回归", kicker: "第 14–15 格 · Edge_Regressor",
+      html: `<p>这里和论文不同。论文最后把所有原子“读出”成一个分子级的数；这里要的是<b>每一对原子</b>的耦合常数，所以作者把<b>原子 i 的状态、边 ij 的特征、原子 j 的状态</b>拼在一起，过两层 512 维的全连接网络，输出一个数（第 14–15 格）。</p><p>29 × 29 个原子对，每一对都输出一个预测值。</p>`,
+      cells: [15], highlight: ["concat_layer([state_i, edges, state_j])", "units=1"],
+      draw(svg, ctx) {
+        const parts = [["原子 i 的状态", "var(--c1)"], ["边 ij 的特征", "var(--c2)"], ["原子 j 的状态", "var(--c1)"]];
+        const bx = parts.map(([t, c], i) => { const g = K.node(svg, 40, 40 + i * 80, 170, 56, t, { stroke: c, sw: 2 }); g.style.opacity = 0; return g; });
+        const cat = K.node(svg, 280, 110, 110, 90, "拼接", { bold: true }); cat.style.opacity = 0;
+        const mlp = K.node(svg, 440, 110, 120, 90, "MLP\n512 → 512 → 1", {}); mlp.style.opacity = 0;
+        const out = K.svg(svg, "text", { x: 600, y: 162, "font-size": 18, "font-weight": 700, fill: "var(--warn)" }, "");
+        (async () => {
+          for (const b of bx) if (!(await ctx.tween(250, (t) => (b.style.opacity = t)))) return;
+          for (let i = 0; i < 3; i++) K.arrow(svg, 210, 68 + i * 80, 278, 155);
+          if (!(await ctx.tween(300, (t) => (cat.style.opacity = t)))) return;
+          K.arrow(svg, 390, 155, 438, 155);
+          if (!(await ctx.tween(300, (t) => (mlp.style.opacity = t)))) return;
+          K.arrow(svg, 560, 155, 596, 155);
+          out.textContent = "J_ij";
+        })();
+      },
+    },
+    {
+      title: "一轮消息传递：消息 → 屏蔽 → 求和 → 更新", kicker: "第 16–17 格 · MP_Layer",
+      html: `<p><code>MP_Layer</code> 把前三个零件串起来，完成<b>一轮</b>消息传递（第 17 格）：</p><ol class="tight"><li>把每个原子的状态复制给所有原子对，用边网络算出全部 29 × 29 条消息；</li><li>乘以<b>掩码</b>：距离为 0 的位置（补齐的假原子、自己对自己）消息清零；</li><li>按接收者求和；</li><li>GRU 更新。</li></ol><p>作者试过 BatchNorm，发现“似乎不起作用”，注释掉了。</p>`,
+      cells: [17], highlight: ["tf.math.multiply(messages, mask)", "self.message_aggs", "self.update_functions"],
+      draw(svg, ctx) {
+        const m = MOLS.ethanol, d = drawMol(svg, m);
+        const ghost = [[560, 290], [620, 290]];
+        ghost.forEach((p) => { K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 12, fill: "none", stroke: "var(--ink-3)", "stroke-dasharray": "3 3" }); });
+        K.svg(svg, "text", { x: 590, y: 320, "text-anchor": "middle", "font-size": 11, class: "muted" }, "补齐的假原子");
+        const lab = K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, "font-weight": 700 }, "");
+        (async () => {
+          lab.textContent = "① 所有原子同时发消息（包括假原子）";
+          const fl = [];
+          m.atoms.forEach((_, i) => { if (i !== 2) fl.push(G.fly(svg, ctx, m.pos[i], m.pos[2], "var(--accent)", 800)); });
+          ghost.forEach((p) => fl.push(G.fly(svg, ctx, p, m.pos[2], "var(--bad)", 400)));
+          await Promise.all(fl);
+          if (!ctx.alive()) return;
+          lab.textContent = "② 掩码：假原子发来的消息（红）在半路被清零 → ③ 求和 → ④ GRU 更新";
+          await ctx.tween(600, (t) => K.set(d.nodes[2], { fill: t > 0.5 ? "var(--accent)" : EL.O }));
+        })();
+      },
+    },
+    {
+      title: "完整 MPNN：同一层重复 T = 4 轮", kicker: "第 18–19 格 · MPNN 模型",
+      html: `<p>完整模型（第 19 格）：</p><ol class="tight"><li>从边特征里取出距离，距离为 0 处掩码为 0；</li><li>原子特征经 Dense 层嵌入到 128 维；</li><li><b>同一个</b> MP_Layer 重复调用 T 次（作者用 T = 4，第 28 格）；</li><li>最后交给边回归层。</li></ol><p>重复 4 轮，每个原子的信息就能经过最多 4 步传到其他原子。这里每个原子本来就和所有原子直接相连，多轮的意义是让信息“反复加工”：第 2 轮时，别人发来的消息里已经包含了他们第 1 轮从别处听来的内容。</p>`,
+      cells: [19], highlight: ["for mp in range(self.T)", "self.MP(nodes, edges, mask)", "tf.where(tf.equal(x, 0)"],
+      draw(svg, ctx) {
+        const m = MOLS.ethylamine, d = drawMol(svg, m, { fill: () => "var(--panel-2)" });
+        d.labs.forEach((l, i) => K.set(l, { fill: "var(--ink)" }));
+        const lab = K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, "font-weight": 700 }, "");
+        // 沿化学键看“知道的范围”：从氮原子出发
+        const adj = m.atoms.map(() => []); m.bonds.forEach(([a, b]) => { adj[a].push(b); adj[b].push(a); });
+        let known = new Set([2]);
+        K.set(d.nodes[2], { fill: "var(--accent)" });
+        (async () => {
+          for (let t = 1; t <= 4; t++) {
+            if (!(await ctx.wait(700))) return;
+            const nk = new Set(known); known.forEach((u) => adj[u].forEach((v) => nk.add(v)));
+            const newly = [...nk].filter((v) => !known.has(v));
+            await Promise.all(newly.map((v) => { const from = adj[v].find((u) => known.has(u)); return G.fly(svg, ctx, m.pos[from], m.pos[v], "var(--accent)", 500); }));
+            if (!ctx.alive()) return;
+            known = nk;
+            known.forEach((v) => K.set(d.nodes[v], { fill: `color-mix(in srgb, var(--accent) ${100 - (t - 1) * 15}%, var(--panel))` }));
+            lab.textContent = `第 ${t} 轮：氮原子的信息沿化学键已传到 ${known.size} / ${m.atoms.length} 个原子（示意：只沿化学键画）`;
+          }
+        })();
+      },
+    },
+    {
+      title: "损失：MAE 取对数", kicker: "第 20–24 格 · 损失函数",
+      html: `<p>作者写了四个评价函数：MSE（误差平方的平均）、log MSE、MAE（误差绝对值的平均）、log MAE（第 20–24 格）。每个函数开头都用掩码去掉标签为 0 的位置（那些原子对没有要预测的值），只在真实存在的原子对上算误差。</p><p>训练用 <b>log MAE</b> 当损失（第 28 格）。作者提醒：标签已经缩小过，所以这里的数值会比用原始单位算的小很多。</p>`,
+      cells: [21, 24], highlight: ["tf.boolean_mask", "tf.math.log(tf.reduce_mean(tf.abs"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 560, h: 240 }, [0, 1], [-5, 0.5], { xlabel: "MAE", ylabel: "log(MAE)", yticks: 5 });
+        let dd = ""; for (let x = 0.007; x <= 1; x += 0.005) dd += (dd ? "L" : "M") + ax.sx(x) + "," + ax.sy(Math.log(x));
+        const p = K.svg(svg, "path", { d: dd, fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        const dot = K.svg(svg, "circle", { cx: ax.sx(0.8), cy: ax.sy(Math.log(0.8)), r: 7, fill: "var(--warn)" });
+        const lab = K.svg(svg, "text", { x: 360, y: 300, "font-size": 12 }, "");
+        ctx.tween(2400, (t) => { const x = 0.8 * Math.pow(0.012, t); dot.setAttribute("cx", ax.sx(x)); dot.setAttribute("cy", ax.sy(Math.log(x))); lab.textContent = `MAE ${x.toFixed(3)} → log MAE ${Math.log(x).toFixed(2)}`; });
+        K.svg(svg, "text", { x: 360, y: 320, "font-size": 11, class: "muted" }, "误差越小，对数越往下掉得快：把小误差的进步也放大出来");
+      },
+    },
+    {
+      title: "学习率、早停与训练", kicker: "第 25–34 格 · 训练",
+      html: `<p>Adam 优化器，初始学习率 0.001，<b>每 20 轮乘以 0.1</b>（阶梯衰减）；验证损失 15 轮不降就<b>早停</b>并恢复最好的权重（第 26 格）。</p><p>模型：边回归中间层 512、节点状态 128、T = 4；损失 log MAE，另外监控 MAE 和 log MSE（第 28 格）。前 80% 的分子训练、后 20% 验证，批大小 16，最多 25 轮（第 30、34 格）。第 32 格先调用一次模型，让 TensorFlow 把各层建好。</p>`,
+      cells: [26, 28, 30, 32, 34], highlight: ["step_decay", "patience = 15", "MPNN(out_int_dim = 512, state_dim = 128, T = 4)", "epochs = 25"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 560, h: 220 }, [0, 25], [0, 0.0012], { xlabel: "轮数", ylabel: "学习率", yfmt: (v) => v.toExponential(0) });
+        let dd = ""; for (let e = 0; e <= 25; e += 0.05) dd += (dd ? "L" : "M") + ax.sx(e) + "," + ax.sy(0.001 * Math.pow(0.1, Math.floor(e / 20)));
+        const p = K.svg(svg, "path", { d: dd, fill: "none", stroke: "var(--c2)", "stroke-width": 3 });
+        const len = 1400; p.style.strokeDasharray = len; p.style.strokeDashoffset = len;
+        ctx.tween(1600, (t) => (p.style.strokeDashoffset = len * (1 - t)));
+        K.svg(svg, "text", { x: ax.sx(20) + 6, y: ax.sy(0.0001) - 10, "font-size": 12, fill: "var(--c2)" }, "第 20 轮：降到 0.0001");
+        K.svg(svg, "text", { x: 70, y: 310, "font-size": 12 }, "只训练 25 轮，所以学习率只降了一次");
+      },
+    },
+    {
+      title: "预测、对称平均与还原单位", kicker: "第 35–43 格 · 生成提交",
+      html: `<p>对测试分子预测后（第 36 格），作者把输出变回 29 × 29 的矩阵（第 41 格）。比赛只问某些特定原子对，作者对每一对 (i, j) 取<b>“(i, j) 的预测和 (j, i) 的预测的平均”</b>（第 40 格），因为模型对两个方向的预测不一定相同。</p><p>最后按训练集耦合常数的最小值、最大值反向还原单位：预测 × 半宽 + 中点（第 39、43 格），写出提交文件。</p>`,
+      cells: [36, 39, 40, 41, 43], highlight: ["scale_mid", "scale_norm", "/2.0"],
+      draw(svg, ctx) {
+        const n = 6, cell = 40, x0 = 60, y0 = 50, r = K.rng(11), M = [];
+        for (let i = 0; i < n; i++) { M.push([]); for (let j = 0; j < n; j++) M[i].push(i === j ? 0 : 0); }
+        for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) if (i !== j) M[i][j] = (i < j ? 1 : 1) * (0.3 + 0.5 * Math.abs(Math.sin(i * 3 + j * 5))) + (r() - 0.5) * 0.2;
+        const rects = [];
+        for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) rects.push({ i, j, e: K.svg(svg, "rect", { x: x0 + j * cell, y: y0 + i * cell, width: cell - 3, height: cell - 3, fill: "var(--accent)", "fill-opacity": M[i][j] }) });
+        K.svg(svg, "text", { x: x0, y: 34, "font-size": 12, "font-weight": 700 }, "预测矩阵：(i, j) 和 (j, i) 不完全一样");
+        const lab = K.svg(svg, "text", { x: 360, y: 120, "font-size": 13 }, "");
+        const pick = [1, 4];
+        const hl = [K.svg(svg, "rect", { x: x0 + pick[1] * cell - 2, y: y0 + pick[0] * cell - 2, width: cell + 1, height: cell + 1, fill: "none", stroke: "var(--warn)", "stroke-width": 3 }), K.svg(svg, "rect", { x: x0 + pick[0] * cell - 2, y: y0 + pick[1] * cell - 2, width: cell + 1, height: cell + 1, fill: "none", stroke: "var(--warn)", "stroke-width": 3 })];
+        hl.forEach((h) => (h.style.opacity = 0));
+        ctx.wait(500).then((ok) => { if (!ok) return; hl.forEach((h) => (h.style.opacity = 1)); lab.textContent = `(1,4) = ${M[1][4].toFixed(2)}，(4,1) = ${M[4][1].toFixed(2)}`; return ctx.wait(900); })
+          .then((ok) => { if (!ok) return; K.svg(svg, "text", { x: 360, y: 150, "font-size": 15, "font-weight": 700, fill: "var(--warn)" }, `取平均 = ${((M[1][4] + M[4][1]) / 2).toFixed(2)}`); return ctx.wait(700); })
+          .then((ok) => { if (ok) K.svg(svg, "text", { x: 360, y: 200, "font-size": 13 }, "再 × 半宽 + 中点 → 还原成原来的单位"); });
+        K.svg(svg, "text", { x: 360, y: 300, "font-size": 11, class: "muted" }, "数值为示意");
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+  G.selfcheck();
+
+  /* ---------- 实验 A：边网络 + 求和 + 门控更新（2 维示意） ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "d1", label: "邻居 1 的距离（Å，示意）", min: 0.8, max: 4, step: 0.1, value: 1.1, fmt: (v) => v.toFixed(1) },
+      { id: "d2", label: "邻居 2 的距离", min: 0.8, max: 4, step: 0.1, value: 1.5, fmt: (v) => v.toFixed(1) },
+      { id: "d3", label: "邻居 3 的距离", min: 0.8, max: 4, step: 0.1, value: 2.6, fmt: (v) => v.toFixed(1) },
+      { id: "sig", label: "边网络对距离的敏感程度", min: 0.3, max: 3, step: 0.1, value: 1, fmt: (v) => v.toFixed(1) },
+      { id: "z", label: "更新门：保留旧状态的比例", min: 0, max: 1, step: 0.05, value: 0.5, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "每个原子的状态画成一个 2 维箭头（真实模型是 128 维）。这里的“边网络”是一个手写的小函数：根据距离 d 生成一个 2×2 矩阵 A(d) = e^(−d/敏感度) × 旋转(d)，消息 = A(d) × 邻居状态。三条消息相加得到汇总消息（紫），再按更新门把旧状态（灰）和汇总消息混合成新状态（金）。拖远一个邻居，看它的消息怎么变短。",
+    render(svg, v) {
+      const C = [220, 200], nbs = [{ d: v.d1, h: [1, 0.2], c: "var(--c1)", ang: -2.4 }, { d: v.d2, h: [0.2, 1], c: "var(--c3)", ang: -0.6 }, { d: v.d3, h: [-0.8, 0.6], c: "var(--c6)", ang: 1.7 }];
+      const old = [0.3, -0.7], S = 70;
+      const arrow = (o, vec, color, w) => K.arrow(svg, o[0], o[1], o[0] + vec[0] * S, o[1] - vec[1] * S, { color, sw: w || 2.5 });
+      let sum = [0, 0];
+      nbs.forEach((n) => {
+        const p = [C[0] + Math.cos(n.ang) * (40 + n.d * 40), C[1] + Math.sin(n.ang) * (40 + n.d * 40)];
+        K.svg(svg, "line", { x1: C[0], y1: C[1], x2: p[0], y2: p[1], stroke: "var(--line)", "stroke-dasharray": "4 3" });
+        K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 13, fill: n.c });
+        K.svg(svg, "text", { x: (p[0] + C[0]) / 2 + 6, y: (p[1] + C[1]) / 2 - 4, "font-size": 11, class: "muted" }, n.d.toFixed(1) + " Å");
+        const s = Math.exp(-n.d / v.sig), th = n.d * 0.6, A = [[s * Math.cos(th), -s * Math.sin(th)], [s * Math.sin(th), s * Math.cos(th)]];
+        const msg = [A[0][0] * n.h[0] + A[0][1] * n.h[1], A[1][0] * n.h[0] + A[1][1] * n.h[1]];
+        arrow(p, n.h, n.c, 1.5);
+        sum = [sum[0] + msg[0], sum[1] + msg[1]];
+        n.msg = msg; n.s = s;
+      });
+      K.svg(svg, "circle", { cx: C[0], cy: C[1], r: 16, fill: "var(--ink-3)" });
+      // 右侧：向量图
+      const O = [500, 200];
+      K.svg(svg, "text", { x: 420, y: 40, "font-size": 12, "font-weight": 700 }, "中心原子收到的消息");
+      let cur = [...O];
+      nbs.forEach((n) => { arrow(cur, n.msg, n.c, 2); cur = [cur[0] + n.msg[0] * S, cur[1] - n.msg[1] * S]; });
+      arrow(O, sum, "var(--c5)", 3.5);
+      const nw = [v.z * old[0] + (1 - v.z) * sum[0], v.z * old[1] + (1 - v.z) * sum[1]];
+      arrow(O, old, "var(--ink-3)", 2);
+      arrow(O, nw, "var(--warn)", 3.5);
+      K.svg(svg, "text", { x: 420, y: 340, "font-size": 11, fill: "var(--c5)" }, "紫 = 消息之和");
+      K.svg(svg, "text", { x: 500, y: 340, "font-size": 11, class: "muted" }, "灰 = 旧状态");
+      K.svg(svg, "text", { x: 570, y: 340, "font-size": 11, fill: "var(--warn)" }, "金 = 新状态");
+      const L = (a) => Math.hypot(a[0], a[1]);
+      return { readout: nbs.map((n, i) => ({ k: `邻居 ${i + 1} 消息长度`, v: L(n.msg).toFixed(2), color: n.c })).concat([{ k: "新状态长度", v: L(nw).toFixed(2), color: "var(--warn)" }]) };
+    },
+  });
+
+  /* ---------- 实验 B：几轮消息传递才能区分原子（WL 颜色细化） ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "mol", label: "分子（示意画法）", value: "ethanol", options: Object.keys(MOLS).map((k) => [k, MOLS[k].name]) },
+      { id: "T", label: "消息传递轮数 T", min: 0, max: 4, step: 1, value: 0 },
+      { id: "edge", label: "边怎么连", value: "bond", options: [["bond", "只沿化学键"], ["all", "所有原子对 + 按“隔几根键”区分（像作者那样全连接）"]] },
+    ],
+    note: "每个原子一开始只知道自己是什么元素（H、C、O、N）。每一轮，它把“自己的标签 + 所有邻居标签的集合”合成一个新标签（求和汇总，与顺序无关）。颜色相同 = 到这一轮为止模型还分不出它们。从 T = 0 往上拖：乙醇里连在碳上的氢和连在氧上的氢，第几轮能分开？换成“全连接 + 距离”试试。这是浏览器里真的在做的计算（Weisfeiler-Lehman 颜色细化，消息传递网络区分能力的上限）。",
+    render(svg, v) {
+      const m = MOLS[v.mol], n = m.atoms.length, adj = m.atoms.map(() => []);
+      m.bonds.forEach(([a, b]) => { adj[a].push(b); adj[b].push(a); });
+      const hop = m.atoms.map((_, s) => { const d = new Array(n).fill(-1); d[s] = 0; const q = [s]; for (let h = 0; h < q.length; h++) adj[q[h]].forEach((w) => { if (d[w] < 0) { d[w] = d[q[h]] + 1; q.push(w); } }); return d; });
+      const refine = (T) => {
+        let lab = m.atoms.slice();
+        for (let t = 0; t < T; t++) {
+          lab = lab.map((l, i) => {
+            const ms = v.edge === "bond" ? adj[i].map((j) => lab[j]) : m.atoms.map((_, j) => (j === i ? null : hop[i][j] + ":" + lab[j])).filter(Boolean);
+            return l + "|" + ms.sort().join(",");
+          });
+          const uniq = [...new Set(lab)].sort(); lab = lab.map((l) => "c" + uniq.indexOf(l));
+        }
+        return lab;
+      };
+      const lab = refine(v.T), full = refine(8);
+      const classes = [...new Set(lab)];
+      const pal = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c5)", "var(--c6)", "var(--ink-3)", "var(--accent)", "var(--warn)", "var(--good)"];
+      const d = drawMol(svg, m, { fill: (i) => (v.T === 0 ? EL[m.atoms[i]] : pal[classes.indexOf(lab[i]) % pal.length]) });
+      d.labs.forEach((l) => K.set(l, { fill: "var(--panel)" }));
+      const hs = m.atoms.map((a, i) => [a, i]).filter(([a]) => a === "H").map(([, i]) => lab[i]);
+      const hTypes = new Set(hs).size;
+      const hTrue = new Set(m.atoms.map((a, i) => [a, i]).filter(([a]) => a === "H").map(([, i]) => full[i])).size;
+      K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, "font-weight": 700 }, `${m.name}　第 ${v.T} 轮　颜色相同 = 还分不出`);
+      return { readout: [
+        { k: "能区分的原子种类", v: String(classes.length) },
+        { k: "氢原子分成几类", v: `${hTypes}（最多能分 ${hTrue} 类）`, color: hTypes === hTrue ? "var(--good)" : "var(--warn)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

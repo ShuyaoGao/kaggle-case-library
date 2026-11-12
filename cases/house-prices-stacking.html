@@ -1,0 +1,641 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>房价模型堆叠</title>
+<meta name="description" content="Kaggle 案例拆解：用 Lasso、ElasticNet、核岭回归、梯度提升做基础模型，再用元模型把它们“堆”起来，房价预测进入排行榜前 4%。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格数据 · 回归 · 集成学习</div>
+  <h1>房价模型堆叠：让几个模型“开会”一起估价</h1>
+  <p class="en">Stacked Regressions : Top 4% on LeaderBoard</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">缺失值按含义填补</span><span class="tag method">Box-Cox 变换</span><span class="tag method">Lasso / ElasticNet</span>
+    <span class="tag method">核岭回归</span><span class="tag method">梯度提升 / XGBoost / LightGBM</span><span class="tag method">模型平均</span><span class="tag method">Stacking 元模型</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Serigne</b></span>
+    <span>Kaggle 点赞 <b>14,390</b>（2026-11 抓取）</span>
+    <span>数据集 <b>House Prices: Advanced Regression Techniques</b>（Kaggle 竞赛）</span>
+    <span><a href="https://www.kaggle.com/code/serigne/stacked-regressions-top-4-on-leaderboard" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">埃姆斯市 1460 套房子的 79 项信息</div><p>和上一个案例同一份竞赛数据：面积、质量、年份、车库、地下室、街区……数值列和文字列混在一起，有大量缺失（数据集说明）。</p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">每套房子的成交价 SalePrice</div><p>回归问题。比赛按“对数房价的均方根误差”打分，所以作者直接预测 log(1+房价)，最后再还原。<span data-cell="21">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">6 个基础模型 + 两种堆叠</div><p>Lasso、ElasticNet、核岭回归、梯度提升、XGBoost、LightGBM；先简单平均，再用 Lasso 当元模型做堆叠，最后按 0.7 / 0.15 / 0.15 加权融合。<span data-cell="151">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">排行榜 0.11420，前 4%</div><p>作者在文中写明：2017 年 7 月 2 日测试时，排行榜得分 0.11420，进入前 4%。<span data-cell="1">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据来自 Kaggle 入门竞赛 <b>House Prices: Advanced Regression Techniques</b>（Ames Housing 数据集，Dean De Cock 整理）。规模信息来自竞赛数据说明；作者在第 7 格打印了训练集、测试集的形状 <span data-cell="7">出处</span>。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">训练集（有价格）</div><div class="v">1,460 行</div></div>
+        <div class="stat-tile"><div class="k">测试集（要预测）</div><div class="v">1,459 行</div></div>
+        <div class="stat-tile"><div class="k">描述变量</div><div class="v">79 列</div></div>
+        <div class="stat-tile"><div class="k">评估指标</div><div class="v" style="font-size:18px">对数 RMSE</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">训练集 81 列 = Id + 79 个变量 + SalePrice；测试集少一列 SalePrice。评估指标为预测值与真实值取对数后的均方根误差（竞赛说明）。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">本案例重点处理的列</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>作者怎么处理</th></tr>
+        <tr><td><code>SalePrice</code></td><td><b>要预测的答案</b>：成交价（美元）</td><td>log(1+x) 变换 <span data-cell="21">出处</span></td></tr>
+        <tr><td><code>PoolQC</code>、<code>Alley</code>、<code>Fence</code></td><td>泳池、小巷、围栏；空 = 没有</td><td>填 "None" <span data-cell="34">出处</span></td></tr>
+        <tr><td><code>LotFrontage</code></td><td>房子临街的宽度（英尺）</td><td>用同街区的中位数填 <span data-cell="44">出处</span></td></tr>
+        <tr><td><code>GarageCars</code> 等</td><td>车库车位数、面积；空 = 没车库</td><td>填 0 <span data-cell="48">出处</span></td></tr>
+        <tr><td><code>MSSubClass</code></td><td>建筑类型代码（20、60…），是编号不是大小</td><td>转成文字类别 <span data-cell="76">出处</span></td></tr>
+        <tr><td><code>KitchenQual</code> 等</td><td>质量等级 Ex/Gd/TA/Fa/Po，有高低顺序</td><td>LabelEncoder 编号 <span data-cell="78">出处</span></td></tr>
+        <tr><td><code>TotalSF</code>（新）</td><td>地下室 + 一楼 + 二楼面积</td><td>新造的特征 <span data-cell="81">出处</span></td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="103">
+    <h3>动手试试 A · Lasso 的正则化强度：把没用的特征“压成 0” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="151">
+    <h3>动手试试 B · 堆叠加权：三个模型怎么配比最准 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>排行榜得分 0.11420，前 4%（作者 2017-07-02 测试）</td><td><span data-cell="1">第 1 格</span></td></tr>
+        <tr><td>对偏态特征用 Box-Cox 代替 log 变换，排行榜和交叉验证上都“略好一点”</td><td><span data-cell="1">第 1 格</span></td></tr>
+        <tr><td>关键是让（线性）模型对离群值稳健：RobustScaler、Huber 损失，这在排行榜和交叉验证上都有提升</td><td><span data-cell="1">第 1 格</span></td></tr>
+        <tr><td>只删除两个“面积极大、价格极低”的离群点；不删其余离群点，以免测试集里也有类似房子</td><td><span data-cell="15">第 15 格</span></td></tr>
+        <tr><td>最简单的“平均 4 个基础模型”就明显改善了分数</td><td><span data-cell="126">第 126 格</span></td></tr>
+        <tr><td>在 3 个基础模型之上加 Lasso 元模型，分数再次变好</td><td><span data-cell="137">第 137 格</span></td></tr>
+        <tr><td>最终提交 = 堆叠模型 × 0.70 + XGBoost × 0.15 + LightGBM × 0.15</td><td><span data-cell="151">第 151 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">各基础模型、平均模型、堆叠模型的交叉验证分数都写在运行输出里，Kaggle 下载的源码不带输出，作者文字里也没写具体数值，所以这里只列作者明写的排行榜分数 0.11420。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一套新房子的 79 项信息，输出估价；可用于房产中介估价、银行按揭评估、房产税核定。</li>
+        <li><b>同类问题：</b>二手车残值、保险定价、销量预估、能耗预测，凡是表格数据 + 连续目标的比赛，“多模型堆叠”几乎都是冲榜标配。</li>
+        <li><b>可迁移的套路：</b>目标取对数 → 按业务含义填缺失 → 偏态特征 Box-Cox → 准备几种“想法不同”的模型（线性 + 核方法 + 树模型）→ 折外预测训练元模型 → 再和强树模型加权融合。</li>
+        <li><b>代价：</b>训练和预测要跑十几个模型，可解释性差，上线维护复杂。比赛里值得，生产中要权衡。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>删除离群点 <span data-cell="14">第 14 格</span>、log1p 目标变换 <span data-cell="21">第 21 格</span></li>
+        <li>按含义填补缺失 <span data-cell="34">第 34 格</span>、街区中位数填补 <span data-cell="44">第 44 格</span></li>
+        <li>LabelEncoder <span data-cell="78">第 78 格</span>、TotalSF 新特征 <span data-cell="81">第 81 格</span></li>
+        <li>Box-Cox（λ = 0.15，偏度绝对值 > 0.75 的特征）<span data-cell="86">第 86 格</span></li>
+        <li>5 折交叉验证函数 <span data-cell="96">第 96 格</span></li>
+        <li>Lasso、ElasticNet + RobustScaler <span data-cell="99">第 99 格</span>、核岭回归 <span data-cell="103">第 103 格</span></li>
+        <li>GBDT（Huber 损失）<span data-cell="105">第 105 格</span>、XGBoost <span data-cell="107">第 107 格</span>、LightGBM <span data-cell="109">第 109 格</span></li>
+        <li>平均集成类 <span data-cell="122">第 122 格</span>、折外预测堆叠类 <span data-cell="133">第 133 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>上一个案例把缺失超过 15% 的列删掉，这个案例把 PoolQC 的空值填成 "None" 保留下来。哪种更好？什么情况下“删”更安全？</li>
+      <li>作者把训练集和测试集拼在一起做缺失填补、编码和 Box-Cox。这样做方便，但有没有“偷看测试集”的风险？哪些操作是安全的，哪些不是？</li>
+      <li>堆叠时，元模型为什么必须用“折外预测”来训练？如果直接用基础模型在自己训练集上的预测，会发生什么？</li>
+      <li>作者选的基础模型有线性模型、核方法、树模型。为什么“想法不同”的模型堆起来效果更好？如果 6 个都是梯度提升树呢？</li>
+      <li>最终权重 0.70 / 0.15 / 0.15 是作者手定的。你会怎么更有根据地定这组权重？手调权重有什么过拟合排行榜的风险？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Serigne，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：Kaggle 竞赛 House Prices: Advanced Regression Techniques（Ames Housing，Dean De Cock 整理）。
+</footer>
+</main>
+
+<script src="nb/house-prices-stacking.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  function histo(vals, lo, hi, nb) {
+    const c = new Array(nb).fill(0);
+    vals.forEach((v) => { const k = Math.floor(((v - lo) / (hi - lo)) * nb); if (k >= 0 && k < nb) c[k]++; });
+    return c;
+  }
+  function skew(a) {
+    const n = a.length, m = a.reduce((s, x) => s + x, 0) / n;
+    let m2 = 0, m3 = 0; a.forEach((x) => { m2 += (x - m) ** 2; m3 += (x - m) ** 3; });
+    return m3 / n / Math.pow(m2 / n, 1.5);
+  }
+  /* 一个表格单元格 */
+  function tcell(svg, x, y, w, h, txt, opt) {
+    opt = opt || {};
+    const r = K.svg(svg, "rect", { x, y, width: w, height: h, fill: opt.fill || "var(--panel)", stroke: "var(--line)" });
+    const t = K.svg(svg, "text", { x: x + w / 2, y: y + h / 2 + 4, "text-anchor": "middle", "font-size": opt.fs || 12, "font-family": "var(--mono)", "font-weight": opt.bold ? 700 : 400, fill: opt.color || "var(--ink)" }, txt);
+    return { r, t };
+  }
+  /* 模拟 1 维回归数据：y = f(x) + 噪声 */
+  const truef = (x) => 1.2 * Math.sin(1.3 * x) + 0.35 * x;
+  function sim1d(seed, n, noise) {
+    const r = K.rng(seed), X = [], Y = [];
+    for (let i = 0; i < n; i++) { const x = -3 + 6 * r(); X.push(x); Y.push(truef(x) + K.randn(r) * noise); }
+    return { X, Y };
+  }
+  /* 回归树桩梯度提升（1 维） */
+  function gbFit(X, Y, rounds, lr) {
+    const n = X.length, base = Y.reduce((s, v) => s + v, 0) / n, F = new Array(n).fill(base), stumps = [];
+    const xs = X.slice().sort((a, b) => a - b);
+    for (let m = 0; m < rounds; m++) {
+      const R = Y.map((y, i) => y - F[i]);
+      let best = null;
+      for (let k = 4; k < n - 4; k += 2) {
+        const thr = (xs[k] + xs[k + 1]) / 2;
+        let sl = 0, cl = 0, sr = 0, cr = 0;
+        for (let i = 0; i < n; i++) { if (X[i] <= thr) { sl += R[i]; cl++; } else { sr += R[i]; cr++; } }
+        const gain = (sl * sl) / cl + (sr * sr) / cr;
+        if (!best || gain > best.gain) best = { gain, thr, l: sl / cl, r: sr / cr };
+      }
+      stumps.push(best);
+      for (let i = 0; i < n; i++) F[i] += lr * (X[i] <= best.thr ? best.l : best.r);
+    }
+    return (x) => stumps.reduce((s, st) => s + lr * (x <= st.thr ? st.l : st.r), base);
+  }
+  /* 最小二乘（小矩阵，正规方程 + 岭） */
+  function lstsq(A, y, ridge) {
+    const p = A[0].length, M = [], b = new Array(p).fill(0);
+    for (let i = 0; i < p; i++) { M.push(new Array(p).fill(0)); }
+    A.forEach((row, k) => { for (let i = 0; i < p; i++) { b[i] += row[i] * y[k]; for (let j = 0; j < p; j++) M[i][j] += row[i] * row[j]; } });
+    for (let i = 0; i < p; i++) M[i][i] += ridge || 0;
+    for (let i = 0; i < p; i++) { let mx = i; for (let r = i + 1; r < p; r++) if (Math.abs(M[r][i]) > Math.abs(M[mx][i])) mx = r; [M[i], M[mx]] = [M[mx], M[i]]; [b[i], b[mx]] = [b[mx], b[i]]; for (let r = 0; r < p; r++) if (r !== i) { const f = M[r][i] / M[i][i]; for (let c = i; c < p; c++) M[r][c] -= f * M[i][c]; b[r] -= f * b[i]; } }
+    return b.map((v, i) => v / M[i][i]);
+  }
+  const fitLinear = (X, Y) => { const w = lstsq(X.map((x) => [1, x]), Y, 1e-6); return (x) => w[0] + w[1] * x; };
+  const fitPoly = (X, Y, d) => { const f = (x) => Array.from({ length: d + 1 }, (_, k) => Math.pow(x / 3, k)); const w = lstsq(X.map(f), Y, 0.05); return (x) => f(x).reduce((s, v, k) => s + v * w[k], 0); };
+  const rmse = (P, Y) => Math.sqrt(P.reduce((s, p, i) => s + (p - Y[i]) ** 2, 0) / Y.length);
+
+  const steps = [
+    {
+      title: "开场：堆叠到底是什么", kicker: "第 0–7 格 · 导入与读数据", at: 0, cells: [1],
+      highlight: ["0.11420", "top 4%"],
+      html: `<p>作者开门见山：这本 notebook 的目标是把<b>堆叠（stacking）</b>讲清楚。特征工程做得“很节制”：填缺失、把伪数值变成类别、给有顺序的类别编号、Box-Cox 处理偏态、生成哑变量。</p><p>然后选一批基础模型做交叉验证，再把它们堆叠、融合。作者写明：这样做在排行榜上拿到 0.11420，前 4%（2017 年 7 月测试）。</p>`,
+      draw(svg, ctx) {
+        const names = ["Lasso", "ElasticNet", "核岭回归"], ys = [50, 140, 230];
+        K.node(svg, 20, 120, 110, 70, "房子特征\n79 列", { bold: true });
+        const base = names.map((n, i) => { const g = K.node(svg, 200, ys[i], 140, 56, n); g.style.opacity = 0; return g; });
+        const ar1 = names.map((n, i) => { const a = K.arrow(svg, 130, 155, 198, ys[i] + 28); a.style.opacity = 0; return a; });
+        const preds = names.map((n, i) => { const t = K.svg(svg, "text", { x: 360, y: ys[i] + 33, "font-size": 13, "font-family": "var(--mono)", fill: K.colors[i] }, ["预测 18.2 万", "预测 17.6 万", "预测 19.0 万"][i]); t.style.opacity = 0; return t; });
+        const ar2 = names.map((n, i) => { const a = K.arrow(svg, 470, ys[i] + 28, 528, 155); a.style.opacity = 0; return a; });
+        const meta = K.node(svg, 530, 120, 160, 70, "元模型\n（Lasso）", { fill: "var(--accent-soft)", stroke: "var(--accent)", bold: true }); meta.style.opacity = 0;
+        const fin = K.svg(svg, "text", { x: 610, y: 225, "text-anchor": "middle", "font-size": 15, "font-weight": 700, fill: "var(--good)" }, "最终估价"); fin.style.opacity = 0;
+        K.svg(svg, "text", { x: 20, y: 325, "font-size": 12, class: "muted" }, "示意：数字是虚构的，用来说明“几个预测 → 元模型 → 最终预测”的结构");
+        (async () => {
+          for (let i = 0; i < 3; i++) if (!(await ctx.tween(300, (t) => { base[i].style.opacity = t; ar1[i].style.opacity = t; }))) return;
+          for (let i = 0; i < 3; i++) if (!(await ctx.tween(250, (t) => (preds[i].style.opacity = t)))) return;
+          if (!(await ctx.tween(400, (t) => ar2.forEach((a) => (a.style.opacity = t))))) return;
+          if (!(await ctx.tween(400, (t) => (meta.style.opacity = t)))) return;
+          ctx.tween(400, (t) => (fin.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "只删两个最离谱的离群点", kicker: "第 8–15 格 · 离群值", at: 8, cells: [13, 14],
+      highlight: ["GrLivArea']>4000", "SalePrice']<300000"],
+      html: `<p>数据集文档本身就提醒训练集里有离群点。散点图右下角有两套房子：居住面积极大、价格却很低。作者用条件 <code>GrLivArea &gt; 4000 且 SalePrice &lt; 300000</code> 把它们删掉。</p><p>但他特意说明：<b>删离群点并不总是安全的</b>。其他离群点不删，因为测试集里可能也有类似的房子，更好的办法是让模型本身对离群值“不敏感”。</p>`,
+      draw(svg, ctx) {
+        const r = K.rng(4), pts = [];
+        for (let i = 0; i < 260; i++) { const a = Math.exp(7.25 + K.randn(r) * 0.32); pts.push([a, Math.exp(12 + 0.85 * Math.log(a / 1400) + K.randn(r) * 0.17) / 1000]); }
+        pts.push([4500, 690], [4300, 620]);
+        const out = [[5600, 165], [4700, 185]];
+        const ax = K.axes(svg, { x: 60, y: 20, w: 620, h: 270 }, [0, 6000], [0, 800], { xlabel: "GrLivArea 居住面积（示意）", ylabel: "房价（千美元）", yticks: 4 });
+        pts.forEach((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(Math.min(p[1], 795)), r: 3, fill: "var(--c1)", opacity: 0.5 }));
+        const od = out.map((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 5.5, fill: "var(--bad)" }));
+        const box = K.svg(svg, "rect", { x: ax.sx(4000), y: ax.sy(300), width: 0, height: 0, fill: "var(--bad)", "fill-opacity": 0.08, stroke: "var(--bad)", "stroke-dasharray": "5 3" });
+        const lab = K.svg(svg, "text", { x: ax.sx(4050), y: ax.sy(300) - 8, "font-size": 12, fill: "var(--bad)", "font-weight": 700 }, "");
+        ctx.wait(500)
+          .then((ok) => ok && ctx.tween(900, (t) => { box.setAttribute("width", (ax.sx(6000) - ax.sx(4000)) * t); box.setAttribute("height", (ax.sy(0) - ax.sy(300)) * t); }))
+          .then((ok) => { if (ok) lab.textContent = "面积 > 4000 且 价格 < 30 万 → 删除"; return ok && ctx.wait(700); })
+          .then((ok) => ok && ctx.tween(800, (t) => od.forEach((d) => { d.style.opacity = 1 - t; d.setAttribute("r", 5.5 + 8 * t); })))
+          .then((ok) => ok && K.svg(svg, "text", { x: ax.sx(2600), y: ax.sy(740), "font-size": 12, fill: "var(--good)" }, "这两套很贵但顺着趋势 → 保留"));
+      },
+    },
+    {
+      title: "目标变量：log(1+房价)", kicker: "第 16–22 格 · 目标变换", at: 16, cells: [19, 21],
+      highlight: ["np.log1p"],
+      html: `<p>房价右偏，而（线性）模型偏爱接近正态分布的数据，所以作者用 <code>np.log1p</code>，即 log(1+x)，变换目标变量。变换后直方图和 Q-Q 图都更接近正态。</p><p>另一个好处：比赛的评分本来就是在对数尺度上算误差，直接预测 log 价格，训练目标和评分方式就一致了。最后提交前再用 <code>np.expm1</code> 还原成美元。</p>`,
+      draw(svg, ctx) {
+        const r = K.rng(12), raw = [];
+        for (let i = 0; i < 400; i++) raw.push(Math.exp(12 + K.randn(r) * 0.4));
+        const lg = raw.map((v) => Math.log1p(v));
+        const z = (a) => { const m = a.reduce((s, x) => s + x, 0) / a.length, sd = Math.sqrt(a.reduce((s, x) => s + (x - m) ** 2, 0) / a.length); return a.map((x) => (x - m) / sd); };
+        const zr = z(raw), zl = z(lg), nb = 26, c1 = histo(zr, -3, 6, nb), c2 = histo(zl, -3, 6, nb);
+        const ax = K.axes(svg, { x: 60, y: 30, w: 620, h: 250 }, [-3, 6], [0, 75], { yticks: 0, xlabel: "标准化后的取值（示意）" });
+        const bw = 620 / nb;
+        const bars = c1.map((v, i) => K.svg(svg, "rect", { x: 60 + i * bw + 1, y: ax.sy(v), width: bw - 2, height: ax.sy(0) - ax.sy(v), fill: "var(--c1)", opacity: 0.75 }));
+        const lab = K.svg(svg, "text", { x: 360, y: 60, "font-size": 15, "font-weight": 700, fill: "var(--warn)" }, `SalePrice：右偏，偏度 ≈ ${skew(raw).toFixed(2)}`);
+        K.svg(svg, "text", { x: 360, y: 82, "font-size": 12, class: "muted" }, "模拟数据");
+        ctx.wait(1200).then((ok) => ok && ctx.tween(1600, (t) => bars.forEach((b, i) => { const v = K.lerp(c1[i], c2[i], t); b.setAttribute("y", ax.sy(v)); b.setAttribute("height", ax.sy(0) - ax.sy(v)); })))
+          .then((ok) => { if (ok) { lab.textContent = `log1p(SalePrice)：偏度 ≈ ${skew(lg).toFixed(2)}`; lab.style.fill = "var(--good)"; } });
+      },
+    },
+    {
+      title: "训练集 + 测试集拼起来看缺失", kicker: "第 23–30 格 · 缺失统计", at: 23, cells: [25, 27],
+      highlight: ["pd.concat", "isnull"],
+      html: `<p>为了让训练集和测试集经过<b>完全相同</b>的处理，作者先把两者上下拼成一张 <code>all_data</code>（先把房价单独存到 <code>y_train</code>），然后统计每列的缺失比例，画成柱状图，再画相关矩阵热力图。</p><p>处理完后再按原来的行数 <code>ntrain</code> 切回训练集和测试集（第 90 格）。</p>`,
+      draw(svg, ctx) {
+        const tr = K.svg(svg, "g"), te = K.svg(svg, "g");
+        for (let i = 0; i < 5; i++) K.svg(tr, "rect", { x: 30, y: 30 + i * 14, width: 200, height: 12, rx: 2, fill: "color-mix(in srgb, var(--c1) 30%, var(--panel))" });
+        for (let i = 0; i < 5; i++) K.svg(te, "rect", { x: 30, y: 190 + i * 14, width: 200, height: 12, rx: 2, fill: "color-mix(in srgb, var(--c3) 30%, var(--panel))" });
+        K.svg(tr, "text", { x: 30, y: 22, "font-size": 12 }, "训练集 1460 行（房价另存 y_train）");
+        K.svg(te, "text", { x: 30, y: 182, "font-size": 12 }, "测试集 1459 行");
+        const lab = K.svg(svg, "text", { x: 30, y: 320, "font-size": 13, "font-weight": 700, fill: "var(--accent)" }, "");
+        const miss = [["PoolQC", 99.7], ["MiscFeature", 96], ["Alley", 93], ["Fence", 80], ["FireplaceQu", 49], ["LotFrontage", 17], ["GarageQual", 5], ["BsmtCond", 3]];
+        const bars = miss.map((m, i) => { K.svg(svg, "text", { x: 400, y: 44 + i * 33, "text-anchor": "end", "font-size": 11, "font-family": "var(--mono)" }, m[0]); return K.svg(svg, "rect", { x: 406, y: 30 + i * 33, width: 0, height: 20, rx: 3, fill: "var(--warn)" }); });
+        K.svg(svg, "text", { x: 406, y: 302, "font-size": 11, class: "muted" }, "缺失比例 %（示意）");
+        ctx.wait(500)
+          .then((ok) => ok && ctx.tween(1000, (t) => { te.setAttribute("transform", `translate(0,${-90 * t})`); tr.setAttribute("transform", `translate(0,${10 * t})`); }))
+          .then((ok) => { if (ok) lab.textContent = "all_data：2919 行，同一套规则处理"; return ok && ctx.wait(300); })
+          .then((ok) => ok && ctx.tween(1200, (t) => bars.forEach((b, i) => b.setAttribute("width", 2.8 * miss[i][1] * t))));
+      },
+    },
+    {
+      title: "按“空格的含义”填缺失", kicker: "第 31–52 格 · 缺失值填补（上）", at: 31, cells: [33, 34, 44],
+      highlight: ["fillna(\"None\")", "groupby(\"Neighborhood\")", "median()"],
+      html: `<p>作者逐列读数据说明，按含义填补：</p><ul class="tight"><li>PoolQC、MiscFeature、Alley、Fence、FireplaceQu、车库和地下室的类别列：说明书写明 NA 表示“没有”，填 <code>"None"</code></li><li>车库面积、车位、地下室面积等数值列：没有就是 0，填 <code>0</code></li><li>LotFrontage（临街宽度）：同一街区的房子临街宽度差不多，用<b>同街区的中位数</b>填</li></ul>`,
+      draw(svg, ctx) {
+        const hdr = ["PoolQC", "GarageArea", "LotFrontage", "Nbhd"];
+        const rows = [["NA", "548", "65", "A"], ["NA", "NA", "NA", "A"], ["Ex", "460", "80", "B"], ["NA", "608", "NA", "B"], ["NA", "NA", "68", "A"]];
+        const fill = [["None", "548", "65", "A"], ["None", "0", "66.5", "A"], ["Ex", "460", "80", "B"], ["None", "608", "80", "B"], ["None", "0", "68", "A"]];
+        const W = 92, X0 = 20;
+        hdr.forEach((h, j) => tcell(svg, X0 + j * W, 30, W, 30, h, { fill: "var(--panel-2)", bold: true, fs: 11 }));
+        const cells = rows.map((r, i) => r.map((v, j) => tcell(svg, X0 + j * W, 60 + i * 34, W, 34, v, { color: v === "NA" ? "var(--bad)" : "var(--ink)" })));
+        K.svg(svg, "text", { x: 420, y: 46, "font-size": 13, "font-weight": 700 }, "LotFrontage：按街区取中位数");
+        const grp = [["街区 A", [60, 65, 68, 70], "var(--c1)"], ["街区 B", [75, 80, 80, 92], "var(--c2)"]];
+        grp.forEach((g, k) => {
+          const y = 90 + k * 110;
+          K.svg(svg, "text", { x: 420, y, "font-size": 12, fill: g[2], "font-weight": 700 }, g[0]);
+          g[1].forEach((v, i) => K.node(svg, 420 + i * 62, y + 10, 54, 30, String(v), { fs: 12, stroke: g[2] }));
+          K.svg(svg, "text", { x: 420, y: y + 66, "font-size": 12, class: "muted" }, `中位数 = ${k ? 80 : 66.5}`);
+        });
+        (async () => {
+          if (!(await ctx.wait(600))) return;
+          for (let i = 0; i < rows.length; i++) for (let j = 0; j < 3; j++) {
+            if (rows[i][j] !== "NA") continue;
+            if (!(await ctx.tween(300, (t) => (cells[i][j].r.style.fill = `color-mix(in srgb, var(--good) ${Math.round(30 * t)}%, var(--panel))`)))) return;
+            cells[i][j].t.textContent = fill[i][j]; cells[i][j].t.style.fill = "var(--good)";
+          }
+        })();
+      },
+    },
+    {
+      title: "剩下的少量缺失：用众数填", kicker: "第 53–73 格 · 缺失值填补（下）", at: 53, cells: [56, 58, 62],
+      highlight: ["mode()[0]", "drop(['Utilities']"],
+      html: `<p>剩下几列只缺一两个值：MSZoning、Electrical、KitchenQual、Exterior、SaleType 用<b>众数</b>（出现次数最多的那个值）填；Functional 按说明书 NA 表示 “Typ”（正常）。</p><p>Utilities 几乎全是 “AllPub”，只有一条 “NoSeWa”，而且那条在训练集里，对预测没帮助，<b>整列删除</b>。最后检查确认没有缺失值了。</p>`,
+      draw(svg, ctx) {
+        const items = [{ label: "SBrkr", value: 1334, color: "var(--c1)" }, { label: "FuseA", value: 94, color: "var(--ink-3)" }, { label: "FuseF", value: 27, color: "var(--ink-3)" }, { label: "FuseP", value: 3, color: "var(--ink-3)" }];
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 13, "font-weight": 700 }, "Electrical 各取值出现次数（训练集，数据集统计）");
+        const els = K.bars(svg, { x: 30, y: 50, w: 320, h: 200 }, items, { gap: 14 });
+        els.forEach((e) => (e.rect.style.opacity = 0.85));
+        const c = tcell(svg, 430, 120, 120, 40, "NA", { color: "var(--bad)", fs: 14 });
+        K.svg(svg, "text", { x: 430, y: 110, "font-size": 12, class: "muted" }, "那一个空格");
+        K.svg(svg, "text", { x: 430, y: 220, "font-size": 13, "font-weight": 700 }, "Utilities 列");
+        const ut = K.svg(svg, "g");
+        ["AllPub", "AllPub", "AllPub", "NoSeWa", "AllPub"].forEach((v, i) => tcell(ut, 430 + (i % 5) * 54, 230, 54, 28, v, { fs: 10 }));
+        const strike = K.svg(svg, "line", { x1: 425, y1: 244, x2: 425, y2: 244, stroke: "var(--bad)", "stroke-width": 3 });
+        const drop = K.svg(svg, "text", { x: 430, y: 290, "font-size": 12, fill: "var(--bad)" }, "");
+        ctx.wait(700)
+          .then((ok) => ok && ctx.tween(500, (t) => { els[0].rect.style.stroke = "var(--good)"; els[0].rect.style.strokeWidth = 3 * t; }))
+          .then((ok) => ok && ctx.tween(600, (t) => (c.r.style.fill = `color-mix(in srgb, var(--good) ${Math.round(30 * t)}%, var(--panel))`)))
+          .then((ok) => { if (ok) { c.t.textContent = "SBrkr"; c.t.style.fill = "var(--good)"; } return ok && ctx.wait(600); })
+          .then((ok) => ok && ctx.tween(700, (t) => { strike.setAttribute("x2", 425 + 280 * t); ut.style.opacity = 1 - 0.6 * t; }))
+          .then((ok) => { if (ok) drop.textContent = "几乎全一样，没有区分度 → 整列删除"; });
+      },
+    },
+    {
+      title: "编码与新特征 TotalSF", kicker: "第 74–81 格 · 特征工程", at: 74, cells: [76, 78, 81],
+      highlight: ["astype(str)", "LabelEncoder", "TotalSF"],
+      html: `<p>三件事：</p><ul class="tight"><li><b>数字其实是类别</b>：MSSubClass（建筑类型代码 20、60…）、OverallCond、出售年份和月份，转成字符串，避免模型误以为“60 比 20 大三倍”</li><li><b>有顺序的类别编号</b>：质量等级 Ex/Gd/TA/Fa 等用 <code>LabelEncoder</code> 变成整数</li><li><b>新特征</b>：面积对房价最关键，作者加了 TotalSF = 地下室 + 一楼 + 二楼面积</li></ul>`,
+      draw(svg, ctx) {
+        // 段 1：代码 → 字符串
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 12, "font-weight": 700 }, "① MSSubClass 数字 → 类别");
+        const codes = ["20", "60", "120"].map((v, i) => tcell(svg, 20 + i * 64, 34, 60, 30, v, { fs: 13 }));
+        // 段 2：LabelEncoder
+        K.svg(svg, "text", { x: 260, y: 24, "font-size": 12, "font-weight": 700 }, "② KitchenQual 等级 → 编号");
+        const q = ["Ex", "Gd", "TA", "Fa"].map((v, i) => tcell(svg, 260 + i * 60, 34, 56, 30, v, { fs: 13 }));
+        // 段 3：TotalSF
+        K.svg(svg, "text", { x: 20, y: 120, "font-size": 12, "font-weight": 700 }, "③ TotalSF = TotalBsmtSF + 1stFlrSF + 2ndFlrSF");
+        const hdr = ["TotalBsmtSF", "1stFlrSF", "2ndFlrSF", "TotalSF（新）"], data = [[856, 856, 854], [1262, 1262, 0], [920, 920, 866]];
+        hdr.forEach((h, j) => tcell(svg, 20 + j * 150, 132, 150, 30, h, { fill: j === 3 ? "var(--accent-soft)" : "var(--panel-2)", bold: true, fs: 11 }));
+        const tot = data.map((r, i) => { r.forEach((v, j) => tcell(svg, 20 + j * 150, 162 + i * 34, 150, 34, String(v))); return tcell(svg, 470, 162 + i * 34, 150, 34, ""); });
+        (async () => {
+          if (!(await ctx.wait(500))) return;
+          for (const c of codes) { if (!(await ctx.wait(250))) return; c.t.textContent = `"${c.t.textContent}"`; c.t.style.fill = "var(--c2)"; }
+          for (let i = 0; i < 4; i++) { if (!(await ctx.wait(250))) return; q[i].t.textContent = q[i].t.textContent + "→" + [2, 3, 4, 1][i]; q[i].t.style.fill = "var(--c3)"; }
+          K.svg(svg, "text", { x: 260, y: 82, "font-size": 11, class: "muted" }, "LabelEncoder 按字母序编号（示意）");
+          for (let i = 0; i < 3; i++) {
+            const flies = data[i].map((v, j) => K.svg(svg, "text", { x: 95 + j * 150, y: 183 + i * 34, "text-anchor": "middle", "font-size": 12, "font-family": "var(--mono)", fill: "var(--accent)" }, String(v)));
+            if (!(await ctx.tween(500, (t) => flies.forEach((f, j) => f.setAttribute("x", K.lerp(95 + j * 150, 545, t)))))) return;
+            flies.forEach((f) => f.remove());
+            tot[i].t.textContent = String(data[i][0] + data[i][1] + data[i][2]); tot[i].t.style.fill = "var(--accent)"; tot[i].t.style.fontWeight = 700;
+          }
+        })();
+      },
+    },
+    {
+      title: "Box-Cox 变换偏态特征，再转哑变量", kicker: "第 82–90 格 · 特征变换", at: 82, cells: [83, 86, 88],
+      highlight: ["boxcox1p", "lam = 0.15", "abs(skewness) > 0.75", "get_dummies"],
+      html: `<p>算出所有数值特征的偏度，<b>偏度绝对值大于 0.75</b> 的都做 Box-Cox 变换。作者用 <code>boxcox1p(x, λ)</code>，即对 1+x 做 Box-Cox，固定 <b>λ = 0.15</b>。λ = 0 时它就等于 log1p，λ = 1 时基本不变。</p><p>作者说 Box-Cox 比直接取对数在排行榜和交叉验证上都“略好一点”。最后 <code>get_dummies</code> 把剩下的类别变量变成 0/1 哑变量，再切回训练集和测试集。</p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 20, w: 380, h: 270 }, [0, 30], [0, 30], { xlabel: "原始值 x", ylabel: "变换后（各自缩放到同一高度）", yticks: 3 });
+        const bc = (x, l) => (Math.abs(l) < 1e-9 ? Math.log1p(x) : (Math.pow(1 + x, l) - 1) / l);
+        const lams = [[1, "λ = 1（不变）", "var(--ink-3)"], [0.5, "λ = 0.5", "var(--c3)"], [0.15, "λ = 0.15（作者）", "var(--accent)"], [0, "λ = 0（log1p）", "var(--c6)"]];
+        const paths = lams.map((l, k) => {
+          const mx = bc(30, l[0]);
+          let d = "";
+          for (let x = 0; x <= 30.001; x += 0.5) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy((bc(x, l[0]) / mx) * 30);
+          const p = K.svg(svg, "path", { d, fill: "none", stroke: l[2], "stroke-width": l[0] === 0.15 ? 3.5 : 2 });
+          const len = p.getTotalLength ? p.getTotalLength() : 600;
+          p.style.strokeDasharray = len; p.style.strokeDashoffset = len;
+          K.svg(svg, "text", { x: 470, y: 50 + k * 24, "font-size": 13, fill: l[2], "font-weight": l[0] === 0.15 ? 700 : 400 }, "— " + l[1]);
+          return { p, len };
+        });
+        K.svg(svg, "text", { x: 470, y: 170, "font-size": 12, class: "muted" }, "只对 |偏度| > 0.75 的特征做");
+        K.svg(svg, "text", { x: 470, y: 192, "font-size": 12, class: "muted" }, "小值几乎不动，大值被压缩");
+        (async () => { for (const q of paths) if (!(await ctx.tween(600, (t) => (q.p.style.strokeDashoffset = q.len * (1 - t))))) return; })();
+      },
+    },
+    {
+      title: "交叉验证 + 线性模型：Lasso、ElasticNet、核岭回归", kicker: "第 91–103 格 · 基础模型（上）", at: 91, cells: [96, 99, 101, 103],
+      highlight: ["KFold", "RobustScaler", "Lasso(alpha =0.0005", "l1_ratio=.9", "KernelRidge"],
+      html: `<p>先定评估方法：<b>5 折交叉验证</b>（打乱后分 5 份，轮流用 4 份训练、1 份验证），指标是对数房价上的 RMSE。</p><p>三个线性类基础模型：</p><ul class="tight"><li><b>Lasso</b>（α = 0.0005）：线性回归 + L1 惩罚，会把没用的特征系数压成 0</li><li><b>ElasticNet</b>（α = 0.0005，l1_ratio = 0.9）：L1 和 L2 惩罚混合</li><li><b>核岭回归</b>（2 次多项式核）：能拟合特征之间的二次组合</li></ul><p>前两个前面接 <code>RobustScaler</code>，用中位数和四分位距缩放，减少离群值的影响。</p>`,
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 20, y: 22, "font-size": 13, "font-weight": 700 }, "5 折交叉验证");
+        const folds = [];
+        for (let k = 0; k < 5; k++) folds.push(K.svg(svg, "rect", { x: 20 + k * 82, y: 34, width: 78, height: 30, rx: 5, fill: "color-mix(in srgb, var(--c1) 22%, var(--panel))", stroke: "var(--c1)" }));
+        const fl = K.svg(svg, "text", { x: 440, y: 54, "font-size": 12 }, "");
+        K.svg(svg, "text", { x: 20, y: 110, "font-size": 13, "font-weight": 700 }, "Lasso：α 越大，越多系数被压成 0（示意 10 个特征）");
+        const names = ["TotalSF", "OverallQual", "YearBuilt", "GarageCars", "noise1", "noise2", "noise3", "noise4", "noise5", "noise6"];
+        const w0 = [0.9, 0.8, 0.45, 0.35, 0.28, -0.22, 0.18, -0.15, 0.12, 0.09], cx = 360;
+        K.svg(svg, "line", { x1: cx, y1: 120, x2: cx, y2: 330, stroke: "var(--ink-3)" });
+        const bars = names.map((n, i) => {
+          K.svg(svg, "text", { x: cx - 210, y: 136 + i * 20, "text-anchor": "end", "font-size": 11, "font-family": "var(--mono)", fill: i < 4 ? "var(--ink)" : "var(--ink-3)" }, n);
+          return K.svg(svg, "rect", { x: cx, y: 124 + i * 20, width: 0, height: 15, rx: 2, fill: i < 4 ? "var(--c1)" : "var(--ink-3)" });
+        });
+        const al = K.svg(svg, "text", { x: 560, y: 200, "font-size": 14, "font-weight": 700, fill: "var(--accent)" }, "α = 0");
+        const setW = (alpha) => bars.forEach((b, i) => { const w = Math.sign(w0[i]) * Math.max(0, Math.abs(w0[i]) - alpha); const px = 200 * w; b.setAttribute("x", px < 0 ? cx + px : cx); b.setAttribute("width", Math.abs(px)); });
+        setW(0);
+        (async () => {
+          for (let k = 0; k < 5; k++) {
+            folds.forEach((f, j) => { f.style.fill = j === k ? "color-mix(in srgb, var(--c3) 35%, var(--panel))" : "color-mix(in srgb, var(--c1) 22%, var(--panel))"; f.style.stroke = j === k ? "var(--c3)" : "var(--c1)"; });
+            fl.textContent = `第 ${k + 1} 轮：绿色 = 验证折`;
+            if (!(await ctx.wait(380))) return;
+          }
+          fl.textContent = "5 次误差取平均";
+          await ctx.tween(2200, (t) => { const a = 0.32 * t; setW(a); al.textContent = "α = " + a.toFixed(2) + "（示意）"; });
+        })();
+      },
+    },
+    {
+      title: "梯度提升三兄弟：GBDT、XGBoost、LightGBM", kicker: "第 104–117 格 · 基础模型（下）", at: 104, cells: [105, 107, 109, 112],
+      highlight: ["loss='huber'", "n_estimators=3000", "learning_rate=0.05", "rmsle_cv"],
+      html: `<p>三个树模型：</p><ul class="tight"><li><b>GradientBoostingRegressor</b>：3000 棵深度 4 的树，学习率 0.05，用 <b>Huber 损失</b>（误差小时按平方罚，误差大时按绝对值罚），对离群值更稳健</li><li><b>XGBoost</b>：2200 棵树，深度 3，带行列抽样和 L1/L2 正则</li><li><b>LightGBM</b>：720 棵树，每棵只有 5 片叶子</li></ul><p>随后对 6 个模型逐一跑 5 折交叉验证，打印均值和标准差。</p>`,
+      draw(svg, ctx) {
+        const D = sim1d(5, 70, 0.3);
+        const ax = K.axes(svg, { x: 50, y: 20, w: 600, h: 270 }, [-3, 3], [-3.2, 3.2], { xticks: 0, yticks: 0, xlabel: "某个特征（示意）", ylabel: "log 房价（示意）" });
+        D.X.forEach((x, i) => K.svg(svg, "circle", { cx: ax.sx(x), cy: ax.sy(D.Y[i]), r: 3.5, fill: "var(--c1)", opacity: 0.6 }));
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--warn)", "stroke-width": 3 });
+        const lab = K.svg(svg, "text", { x: 60, y: 318, "font-size": 14, "font-weight": 700, fill: "var(--warn)" }, "");
+        const draw = (f) => { let d = ""; for (let x = -3; x <= 3.001; x += 0.02) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(f(x)); path.setAttribute("d", d); };
+        (async () => {
+          for (const m of [0, 1, 2, 3, 5, 8, 12, 20, 35, 60]) {
+            const f = gbFit(D.X, D.Y, m, 0.3);
+            draw(f);
+            lab.textContent = `已加 ${m} 棵树，训练 RMSE = ${rmse(D.X.map(f), D.Y).toFixed(3)}（浏览器内模拟）`;
+            if (!(await ctx.wait(520))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "最简单的堆叠：平均几个模型", kicker: "第 118–126 格 · 模型平均", at: 118, cells: [122, 125],
+      highlight: ["np.mean(predictions, axis=1)", "AveragingModels(models = (ENet, GBoost, KRR, lasso))"],
+      html: `<p>作者写了一个 <code>AveragingModels</code> 类：分别训练 ENet、GBoost、KRR、Lasso 四个模型，预测时把四个预测值<b>取平均</b>。</p><p>写成 scikit-learn 风格的类（继承 <code>BaseEstimator</code>、<code>RegressorMixin</code>），就能直接交给 <code>cross_val_score</code> 做交叉验证。作者的结论：即使是最简单的平均，分数也“真的改善了”。</p>`,
+      draw(svg, ctx) {
+        const D = sim1d(21, 60, 0.35);
+        const ms = [["线性", fitLinear(D.X, D.Y), "var(--c1)"], ["梯度提升", gbFit(D.X, D.Y, 12, 0.5), "var(--c2)"], ["多项式核", fitPoly(D.X, D.Y, 6), "var(--c3)"], ["Lasso(示意)", (x) => 0.85 * fitLinear(D.X, D.Y)(x) + 0.1, "var(--c5)"]];
+        const ax = K.axes(svg, { x: 50, y: 20, w: 520, h: 280 }, [-3, 3], [-3.5, 3.5], { xticks: 0, yticks: 0 });
+        D.X.forEach((x, i) => K.svg(svg, "circle", { cx: ax.sx(x), cy: ax.sy(D.Y[i]), r: 3, fill: "var(--ink-3)", opacity: 0.45 }));
+        const line = (f, st, w, dash) => { let d = ""; for (let x = -3; x <= 3.001; x += 0.03) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(K.clamp(f(x), -3.5, 3.5)); return K.svg(svg, "path", { d, fill: "none", stroke: st, "stroke-width": w, "stroke-dasharray": dash || null }); };
+        line(truef, "var(--good)", 2, "6 4");
+        const T = sim1d(99, 400, 0.35);
+        const ps = ms.map((m, k) => { const p = line(m[1], m[2], 2); p.style.opacity = 0; K.svg(svg, "text", { x: 590, y: 50 + k * 26, "font-size": 12, fill: m[2] }, `${m[0]} ${rmse(T.X.map(m[1]), T.Y).toFixed(3)}`); return p; });
+        const avg = (x) => ms.reduce((s, m) => s + m[1](x), 0) / ms.length;
+        const pa = line(avg, "var(--ink)", 3.5); pa.style.opacity = 0;
+        const al = K.svg(svg, "text", { x: 590, y: 170, "font-size": 13, "font-weight": 700 }, `平均 ${rmse(T.X.map(avg), T.Y).toFixed(3)}`); al.style.opacity = 0;
+        K.svg(svg, "text", { x: 590, y: 28, "font-size": 11, class: "muted" }, "测试 RMSE（模拟）");
+        K.svg(svg, "text", { x: 590, y: 200, "font-size": 11, fill: "var(--good)" }, "虚线 = 真实规律");
+        (async () => {
+          for (const p of ps) if (!(await ctx.tween(350, (t) => (p.style.opacity = t)))) return;
+          if (!(await ctx.wait(400))) return;
+          await ctx.tween(700, (t) => { ps.forEach((p) => (p.style.opacity = 1 - 0.6 * t)); pa.style.opacity = t; al.style.opacity = t; });
+        })();
+      },
+    },
+    {
+      title: "进阶堆叠：用折外预测训练元模型", kicker: "第 127–137 格 · Stacking", at: 127, cells: [128, 133, 136],
+      highlight: ["out_of_fold_predictions", "holdout_index", "meta_model = lasso"],
+      html: `<p>作者的步骤（第 128 格）：</p><ol class="tight"><li>把训练集分成 5 折</li><li>对每个基础模型，轮流用 4 折训练、预测剩下那 1 折，这叫<b>折外预测</b>（out-of-fold）</li><li>5 轮后，每个样本都有一份“模型没见过它时”给出的预测</li><li>把这些预测当作新特征，房价当答案，训练<b>元模型</b></li></ol><p>预测测试集时，把每个基础模型 5 个副本的预测取平均，作为元模型的输入。这里基础模型是 ENet、GBoost、KRR，元模型是 Lasso。作者说加了元模型分数又变好了。</p>`,
+      draw(svg, ctx) {
+        const nF = 5, rowsPer = 2, n = nF * rowsPer;
+        K.svg(svg, "text", { x: 20, y: 22, "font-size": 12, "font-weight": 700 }, "训练集（5 折）");
+        const fold = [];
+        for (let k = 0; k < nF; k++) { const r = K.svg(svg, "rect", { x: 20, y: 34 + k * 52, width: 110, height: 46, rx: 5, fill: "color-mix(in srgb, var(--c1) 20%, var(--panel))", stroke: "var(--c1)" }); K.svg(svg, "text", { x: 75, y: 62 + k * 52, "text-anchor": "middle", "font-size": 12 }, `第 ${k + 1} 折`); fold.push(r); }
+        const mods = ["ENet", "GBoost", "KRR"];
+        const mb = mods.map((m, i) => K.node(svg, 175, 60 + i * 80, 100, 44, m, { fs: 12 }));
+        K.svg(svg, "text", { x: 330, y: 22, "font-size": 12, "font-weight": 700 }, "折外预测表（每个模型一列）");
+        const cells = [];
+        mods.forEach((m, j) => tcell(svg, 330 + j * 70, 30, 70, 22, m, { fill: "var(--panel-2)", bold: true, fs: 11 }));
+        tcell(svg, 540, 30, 70, 22, "真实 y", { fill: "var(--panel-2)", bold: true, fs: 11 });
+        for (let i = 0; i < n; i++) { cells.push(mods.map((m, j) => tcell(svg, 330 + j * 70, 52 + i * 26, 70, 26, "", { fs: 11 }))); tcell(svg, 540, 52 + i * 26, 70, 26, (12 + 0.05 * Math.sin(i * 1.7)).toFixed(2), { fs: 11, color: "var(--good)" }); }
+        const meta = K.node(svg, 625, 140, 85, 60, "元模型\nLasso", { fill: "var(--accent-soft)", stroke: "var(--accent)", fs: 12 }); meta.style.opacity = 0;
+        const lab = K.svg(svg, "text", { x: 20, y: 330, "font-size": 12, fill: "var(--accent)" }, "");
+        const r = K.rng(3);
+        (async () => {
+          for (let k = 0; k < nF; k++) {
+            fold.forEach((f, j) => { f.style.fill = j === k ? "color-mix(in srgb, var(--c3) 35%, var(--panel))" : "color-mix(in srgb, var(--c1) 20%, var(--panel))"; f.style.stroke = j === k ? "var(--c3)" : "var(--c1)"; });
+            lab.textContent = `第 ${k + 1} 轮：用其余 4 折训练，预测第 ${k + 1} 折（模型没见过这些房子）`;
+            if (!(await ctx.wait(450))) return;
+            for (let q = 0; q < rowsPer; q++) cells[k * rowsPer + q].forEach((c, j) => { c.t.textContent = (12 + K.randn(r) * 0.08).toFixed(2); c.r.style.fill = "color-mix(in srgb, var(--c3) 18%, var(--panel))"; });
+            if (!(await ctx.wait(350))) return;
+          }
+          lab.textContent = "表格填满 → 以三列预测为输入、真实 y 为答案，训练元模型";
+          await ctx.tween(600, (t) => (meta.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "最后一步：7 : 1.5 : 1.5 加权融合", kicker: "第 138–154 格 · 最终集成", at: 138, cells: [144, 151],
+      highlight: ["np.expm1", "stacked_pred*0.70 + xgb_pred*0.15 + lgb_pred*0.15"],
+      html: `<p>用全部训练数据重新训练堆叠模型、XGBoost、LightGBM 三者，在测试集上预测，并用 <code>np.expm1</code> 把 log 价格还原成美元。</p><p>最终提交 = 堆叠模型 × <b>0.70</b> + XGBoost × <b>0.15</b> + LightGBM × <b>0.15</b>。作者也打印了这个组合在训练集上的 RMSLE，但训练集分数会偏乐观，仅作参考。</p>`,
+      draw(svg, ctx) {
+        const parts = [["堆叠模型", 0.70, 12.05, "var(--accent)"], ["XGBoost", 0.15, 12.10, "var(--c2)"], ["LightGBM", 0.15, 12.00, "var(--c3)"]];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "某套房子的三个预测（log 价格，示意）");
+        const bars = parts.map((p, i) => { K.svg(svg, "text", { x: 140, y: 74 + i * 50, "text-anchor": "end", "font-size": 13 }, p[0]); K.svg(svg, "rect", { x: 150, y: 56 + i * 50, width: 200, height: 28, rx: 4, fill: p[3], "fill-opacity": 0.25, stroke: p[3] }); K.svg(svg, "text", { x: 360, y: 75 + i * 50, "font-size": 13, "font-family": "var(--mono)" }, `${p[2].toFixed(2)} × ${p[1]}`); return K.svg(svg, "rect", { x: 150, y: 56 + i * 50, width: 0, height: 28, rx: 4, fill: p[3] }); });
+        const tot = K.svg(svg, "rect", { x: 150, y: 240, width: 0, height: 32, rx: 4, fill: "var(--ink)" });
+        K.svg(svg, "text", { x: 140, y: 261, "text-anchor": "end", "font-size": 13, "font-weight": 700 }, "加权和");
+        const fin = parts.reduce((s, p) => s + p[1] * p[2], 0);
+        const tl = K.svg(svg, "text", { x: 470, y: 261, "font-size": 14, "font-family": "var(--mono)", "font-weight": 700 }, "");
+        const ex = K.svg(svg, "text", { x: 470, y: 290, "font-size": 14, "font-weight": 700, fill: "var(--good)" }, "");
+        let acc = 0;
+        (async () => {
+          for (let i = 0; i < 3; i++) {
+            const w = 200 * parts[i][1];
+            if (!(await ctx.tween(500, (t) => bars[i].setAttribute("width", 200 * t)))) return;
+            const a0 = acc;
+            if (!(await ctx.tween(500, (t) => { bars[i].setAttribute("width", 200 - (200 - w) * t); tot.setAttribute("width", (a0 + w * t) * 1.4); }))) return;
+            acc += w;
+          }
+          tl.textContent = `log 价格 = ${fin.toFixed(3)}`;
+          if (!(await ctx.wait(500))) return;
+          ex.textContent = `expm1 → 约 ${Math.round(Math.expm1(fin)).toLocaleString()} 美元（示意）`;
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：Lasso 坐标下降 ---------- */
+  function makeLin(seed, n) {
+    const r = K.rng(seed), X = [], Y = [], wt = [1.6, -1.1, 0.8, 0.5, 0, 0, 0, 0, 0, 0, 0, 0];
+    for (let i = 0; i < n; i++) { const x = wt.map(() => K.randn(r)); X.push(x); Y.push(x.reduce((s, v, j) => s + v * wt[j], 0) + K.randn(r) * 1.0); }
+    return { X, Y, wt };
+  }
+  function lassoCD(X, Y, alpha, iters) {
+    const n = X.length, p = X[0].length, w = new Array(p).fill(0), my = Y.reduce((s, v) => s + v, 0) / n;
+    const R = Y.map((y) => y - my), z = [];
+    for (let j = 0; j < p; j++) z.push(X.reduce((s, x) => s + x[j] * x[j], 0) / n);
+    for (let it = 0; it < iters; it++) for (let j = 0; j < p; j++) {
+      let rho = 0; for (let i = 0; i < n; i++) rho += X[i][j] * (R[i] + X[i][j] * w[j]);
+      rho /= n;
+      const nw = Math.sign(rho) * Math.max(0, Math.abs(rho) - alpha) / z[j];
+      for (let i = 0; i < n; i++) R[i] -= X[i][j] * (nw - w[j]);
+      w[j] = nw;
+    }
+    return { w, b: my };
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "la", label: "正则化强度 α（对数刻度）", min: -3, max: 0.4, step: 0.05, value: -2.5, fmt: (v) => Math.pow(10, v).toFixed(Math.pow(10, v) < 0.01 ? 4 : 3) },
+      { id: "n", label: "训练样本数（特征 12 个，其中 8 个是纯噪声）", min: 20, max: 200, step: 5, value: 30 },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "浏览器里现场用坐标下降法训练 Lasso（200 轮），在另一份 2000 条的模拟测试集上算误差。蓝色柱 = 模型学到的系数，绿色细线 = 真实系数。样本越少，噪声特征越容易“蒙混过关”。",
+    render(svg, v) {
+      const alpha = Math.pow(10, v.la);
+      const tr = makeLin(11 + v.seed * 7, v.n), te = makeLin(9999, 2000);
+      const m = lassoCD(tr.X, tr.Y, alpha, 200);
+      const pred = (D) => D.X.map((x) => m.b + x.reduce((s, xv, j) => s + xv * m.w[j], 0));
+      const trE = rmse(pred(tr), tr.Y), teE = rmse(pred(te), te.Y);
+      const box = { x: 50, y: 20, w: 570, h: 280 }, cy = box.y + box.h / 2, sc = 70, bw = box.w / 12;
+      K.svg(svg, "line", { x1: box.x, x2: box.x + box.w, y1: cy, y2: cy, stroke: "var(--ink-3)" });
+      m.w.forEach((w, j) => {
+        const x = box.x + j * bw + 6, h = K.clamp(w * sc, -135, 135);
+        K.svg(svg, "rect", { x, y: h > 0 ? cy - h : cy, width: bw - 12, height: Math.abs(h), rx: 2, fill: j < 4 ? "var(--c1)" : "var(--ink-3)" });
+        K.svg(svg, "line", { x1: x - 2, x2: x + bw - 10, y1: cy - tr.wt[j] * sc, y2: cy - tr.wt[j] * sc, stroke: "var(--good)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: x + (bw - 12) / 2, y: box.y + box.h + 16, "text-anchor": "middle", "font-size": 11, fill: j < 4 ? "var(--ink)" : "var(--ink-3)" }, j < 4 ? "x" + (j + 1) : "噪" + (j - 3));
+      });
+      const zeros = m.w.slice(4).filter((w) => Math.abs(w) < 1e-6).length;
+      K.svg(svg, "text", { x: 50, y: 350, "font-size": 12, class: "muted" }, "前 4 个是有用特征，后 8 个“噪”是和房价无关的随机列");
+      return { readout: [
+        { k: "训练 RMSE", v: trE.toFixed(3) },
+        { k: "测试 RMSE", v: teE.toFixed(3), color: teE < 1.08 ? "var(--good)" : "var(--bad)" },
+        { k: "被压成 0 的噪声特征", v: `${zeros} / 8` },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：三个模型加权 + 元模型 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "w1", label: "线性模型权重", min: 0, max: 1, step: 0.05, value: 0.05, fmt: (v) => v.toFixed(2) },
+      { id: "w2", label: "梯度提升权重（多项式核模型 = 1 − 前两者）", min: 0, max: 1, step: 0.05, value: 0.45, fmt: (v) => v.toFixed(2) },
+      { id: "meta", label: "用元模型自动学权重", value: "off", options: [["off", "手动（用上面两个滑块）"], ["on", "元模型：在 5 折折外预测上做线性回归"]] },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "浏览器里现场训练三个基础模型（直线回归、40 轮梯度提升树桩、6 次多项式岭回归），在 600 条模拟测试数据上评估。元模型模式会先做 5 折折外预测，再用最小二乘学出三个权重。",
+    render(svg, v) {
+      const seed = 31 + v.seed * 13;
+      const tr = sim1d(seed, 90, 0.4), te = sim1d(seed + 777, 600, 0.4);
+      const fitters = [(X, Y) => fitLinear(X, Y), (X, Y) => gbFit(X, Y, 40, 0.3), (X, Y) => fitPoly(X, Y, 6)];
+      const models = fitters.map((f) => f(tr.X, tr.Y));
+      let w;
+      if (v.meta === "on") {
+        const n = tr.X.length, oof = tr.X.map(() => [0, 0, 0]), idx = tr.X.map((_, i) => i);
+        for (let k = 0; k < 5; k++) {
+          const hold = idx.filter((i) => i % 5 === k), keep = idx.filter((i) => i % 5 !== k);
+          const Xk = keep.map((i) => tr.X[i]), Yk = keep.map((i) => tr.Y[i]);
+          fitters.forEach((f, j) => { const m = f(Xk, Yk); hold.forEach((i) => (oof[i][j] = m(tr.X[i]))); });
+        }
+        w = lstsq(oof, tr.Y, 1e-3);
+      } else {
+        const a = v.w1, b = Math.min(v.w2, 1 - a); w = [a, b, Math.max(0, 1 - a - b)];
+      }
+      const blend = (x) => models.reduce((s, m, j) => s + w[j] * m(x), 0);
+      const ax = K.axes(svg, { x: 40, y: 14, w: 580, h: 300 }, [-3, 3], [-3.6, 3.6], { xticks: 0, yticks: 0 });
+      tr.X.forEach((x, i) => K.svg(svg, "circle", { cx: ax.sx(x), cy: ax.sy(tr.Y[i]), r: 3, fill: "var(--ink-3)", opacity: 0.5 }));
+      const line = (f, st, wd, dash) => { let d = ""; for (let x = -3; x <= 3.001; x += 0.03) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(K.clamp(f(x), -3.6, 3.6)); K.svg(svg, "path", { d, fill: "none", stroke: st, "stroke-width": wd, "stroke-dasharray": dash || null }); };
+      const cols = ["var(--c1)", "var(--c2)", "var(--c5)"];
+      models.forEach((m, j) => line(m, cols[j], 1.6));
+      line(truef, "var(--good)", 2, "6 4");
+      line(blend, "var(--ink)", 3.2);
+      const errs = models.map((m) => rmse(te.X.map(m), te.Y)), eb = rmse(te.X.map(blend), te.Y);
+      K.svg(svg, "text", { x: 40, y: 340, "font-size": 12 }, "");
+      [["线性", cols[0]], ["梯度提升", cols[1]], ["多项式核", cols[2]], ["融合（粗线）", "var(--ink)"], ["真实规律（虚线）", "var(--good)"]].forEach((t, i) => K.svg(svg, "text", { x: 40 + i * 118, y: 340, "font-size": 12, fill: t[1] }, "■ " + t[0]));
+      K.svg(svg, "text", { x: 40, y: 366, "font-size": 12, class: "muted" }, `当前权重：线性 ${w[0].toFixed(2)} · 梯度提升 ${w[1].toFixed(2)} · 多项式核 ${w[2].toFixed(2)}${v.meta === "on" ? "（元模型学出，可不等于 1）" : ""}`);
+      const best = Math.min(...errs);
+      return { readout: [
+        { k: "线性 / 提升 / 多项式", v: errs.map((e) => e.toFixed(3)).join(" / ") },
+        { k: "融合测试 RMSE", v: eb.toFixed(3), color: eb < best ? "var(--good)" : "var(--bad)" },
+        { k: "比最好的单模型", v: (eb < best ? "好 " : "差 ") + Math.abs(((eb - best) / best) * 100).toFixed(1) + "%" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

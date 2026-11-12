@@ -1,0 +1,529 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>一维卷积查暴力破解</title>
+<meta name="description" content="Kaggle 案例拆解：在 CSE-CIC-IDS2018 的一天流量上，用一维卷积神经网络区分正常连接与 FTP / SSH 暴力破解登录，并指出测试集从训练集里抽样造成的数据泄漏。">
+<link rel="stylesheet" href="../assets/case.css">
+<style>#data table.res td:last-child{white-space:nowrap}</style>
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格数据 · 三分类 · 网络入侵检测</div>
+  <h1>一维卷积查暴力破解：把一行流量特征当成一段“信号”来扫</h1>
+  <p class="en">CICIDS - IDS 2018 Using CNN</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">标签编码</span><span class="tag method">按类有放回重采样</span><span class="tag method">独热标签</span>
+    <span class="tag method">Conv1D × 3</span><span class="tag method">BatchNorm</span><span class="tag method">MaxPooling1D</span><span class="tag method">Keras</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Azaz Ur Rehman Butt</b></span>
+    <span>Kaggle 点赞 <b>289</b>（2026-11 抓取）</span>
+    <span>数据集 <b>solarmainframe/ids-intrusion-csv</b>（CSE-CIC-IDS2018）</span>
+    <span><a href="https://www.kaggle.com/code/azazurrehmanbutt/cicids-ids-2018-using-cnn" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">一天的网络流量统计</div><p>CSE-CIC-IDS2018 入侵检测数据集里 2018-02-14 这一天的文件：100 多万条网络流，每条 80 列统计量。<span data-cell="7">出处</span> <span data-cell="11">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">正常 / FTP 暴力破解 / SSH 暴力破解</div><p>暴力破解（Brute Force）指有人反复尝试登录、猜密码。三类标签见第 31 格。<span data-cell="31">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">每类重采样 2 万条 + 一维 CNN</div><p>三类各抽 20000 条凑平衡；把一行 72 个特征排成 72×1 的“序列”，用三层 Conv1D + 池化提取模式，再接全连接层输出三类概率。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">作者：训练 99%，验证 92%（30 轮）</div><p>作者结论：训练准确率 99%；训练 50 轮时验证准确率 83.55%，30 轮时 92%。<span data-cell="59">出处</span> 但测试集是从训练集里抽出来的，这个数字并不可靠（见第 8 章）。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">CSE-CIC-IDS2018 是加拿大网络安全研究所（CIC）与加拿大通信安全局（CSE）公开的入侵检测数据集，由流量分析工具把网络数据包汇总成一条条“流”的统计。本 notebook 只读了其中一天的文件 <code>02-14-2018.csv</code>。<span data-cell="7">出处</span></p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">样本（行）</div><div class="v">100 万+</div></div>
+        <div class="stat-tile"><div class="k">列数</div><div class="v">80</div></div>
+        <div class="stat-tile"><div class="k">类别</div><div class="v">3</div></div>
+        <div class="stat-tile"><div class="k">内存占用</div><div class="v">约 700 MB</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">行数、列数见第 11、15 格 <span data-cell="11">出处</span> <span data-cell="15">出处</span>，内存和缺失值见第 17、28 格 <span data-cell="17">出处</span> <span data-cell="28">出处</span>：只有一列有缺失，共 2277 个空值。作者说大部分流量是正常的 <span data-cell="19">出处</span>，两类暴力破解合计不到 20 万 <span data-cell="24">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么（notebook 里点名的列）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>白话含义</th><th>类型</th></tr>
+        <tr><td><code>Timestamp</code></td><td>这条流开始的时间</td><td>时间</td></tr>
+        <tr><td><code>Protocol</code></td><td>传输协议编号</td><td>类别</td></tr>
+        <tr><td><code>Flow Byts/s</code>、<code>Flow Pkts/s</code></td><td>整条流每秒多少字节 / 多少包</td><td>数值</td></tr>
+        <tr><td><code>Bwd Pkts/s</code></td><td>反方向（服务器回给客户端）每秒多少包</td><td>数值</td></tr>
+        <tr><td><code>Fwd Seg Size Min</code></td><td>正方向最小的数据段大小</td><td>数值</td></tr>
+        <tr><td><code>PSH Flag Cnt</code></td><td>带 PSH 标志（“马上交给应用”）的包数</td><td>数值</td></tr>
+        <tr><td><code>Init Fwd Win Byts</code></td><td>连接刚建立时正方向的窗口大小</td><td>数值</td></tr>
+        <tr><td>其余约 70 列</td><td>包长、间隔时间、各种标志位的统计</td><td>数值</td></tr>
+        <tr><td><code>Label</code></td><td><b>要预测的答案</b>：Benign / FTP 暴力破解 / SSH 暴力破解</td><td>类别</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="45">
+    <h3>动手试试 A · 考卷从练习册里抽，分数会虚高多少？ <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="52">
+    <h3>动手试试 B · 一维卷积核沿着特征滑过去 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>CNN 在训练数据上表现极好，准确率 99%</td><td><span data-cell="59">第 59 格</span></td></tr>
+        <tr><td>训练 50 轮时验证准确率降到 83.55%，30 轮时为 92%，作者据此认为 30 轮最合适</td><td><span data-cell="59">第 59 格</span></td></tr>
+        <tr><td>大部分流量是正常的，FTP 与 SSH 暴力破解合计不到 20 万条</td><td><span data-cell="19">第 19 格</span>、<span data-cell="24">第 24 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">上面的 99%、83.55%、92% 是作者写在结论文字里的；但测试集是 <code>train_dataset.sample(frac=0.1)</code> 抽出来的，<b>每一条测试样本都在训练集里出现过</b>，所以这些验证分数不能代表模型对新流量的表现。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li>测试集从训练集里抽样，和第 47 格文字说的“80/20 切分”不符，是典型的数据泄漏。<span data-cell="45">第 45 格</span></li>
+        <li>重采样用的是有放回抽样，同一条流会被抽到很多次，泄漏更严重。<span data-cell="41">第 41 格</span></li>
+        <li>第 28 格说“删除含缺失值的那一列”，代码 <code>dropna()</code> 实际删除的是含缺失值的<b>行</b>。<span data-cell="29">第 29 格</span></li>
+        <li><code>iloc[:, :-1]</code> 是想去掉标签列，但标签已在上一格删掉，这一步其实删掉了最后一个<b>特征</b>。<span data-cell="49">第 49 格</span></li>
+        <li>第 19 格说大部分是正常流量，第 24 格又写“大多数是恶意攻击（近 70 万）”，前后矛盾。<span data-cell="24">第 24 格</span></li>
+        <li>结论说“先训练 50 轮再训练 30 轮”，代码里只有 30 轮。<span data-cell="54">第 54 格</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>服务器的流量监控每汇总出一条流，就交给模型判断它是不是在反复猜密码；判为暴力破解就临时封禁来源、要求验证码或二次验证。</li>
+        <li><b>同类问题：</b>网站登录撞库检测、远程桌面爆破告警、邮箱异常登录提醒。</li>
+        <li><b>可迁移的套路：</b>先按类别看比例 → 只在训练集上做重采样 → 测试集必须是模型从没见过的数据（最好是另一天的流量）→ 再比较不同模型。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>清洗：<code>dropna()</code> 删含空值的行 <span data-cell="29">第 29 格</span></li>
+        <li>标签：<code>LabelEncoder</code> 转 0/1/2 <span data-cell="32">第 32 格</span>，<code>to_categorical</code> 转独热 <span data-cell="46">第 46 格</span></li>
+        <li>平衡：<code>resample</code> 每类有放回抽 20000 条 <span data-cell="41">第 41 格</span></li>
+        <li>模型：3 × (Conv1D 64 核、宽 6 → BatchNorm → MaxPool) → Flatten → Dense 64 → Dense 64 → Dense 3 softmax <span data-cell="52">第 52 格</span></li>
+        <li>训练：Adam，交叉熵，30 轮，batch 32 <span data-cell="54">第 54 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>测试集是从训练集里抽的。你会怎么改代码，让测试分数变得可信？如果手头有另一天的流量文件，又该怎么用？</li>
+      <li>卷积本来是给图片、声音这类“相邻位置有关系”的数据设计的。表格里第 10 列和第 11 列谁挨着谁是随意的，一维卷积在这里还有道理吗？</li>
+      <li>原始数据里正常流量远多于暴力破解，作者把三类都变成 2 万条。这对“误报”有什么影响？</li>
+      <li>暴力破解的流量有哪些可以靠常识想到的特点（比如短时间、同一来源、很多次失败的连接）？这些能不能直接写成规则，不用神经网络？</li>
+      <li>只用一天的数据训练出来的模型，部署到另一个月、另一家公司的网络，你预计会怎样？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Azaz Ur Rehman Butt，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：CSE-CIC-IDS2018（Kaggle 镜像 solarmainframe/ids-intrusion-csv）。
+</footer>
+</main>
+
+<script src="nb/cicids2018-cnn-ids.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const F = location.hash === "#fast" ? 0.001 : 1;
+  const ms = (x) => Math.max(1, Math.round(x * F));
+
+  const steps = [
+    {
+      at: 0, title: "任务：从流量里认出“反复猜密码”", kicker: "第 0–5 格 · 目标与准备",
+      html: `<p>作者开宗明义：给一条网络流，判断它是<b>正常</b>（Benign），还是 <b>FTP 暴力破解</b>或 <b>SSH 暴力破解</b>。FTP 是传文件的服务，SSH 是远程登录服务，两者都要输账号密码。</p><p>动画是防守方看到的样子：正常用户偶尔登录一次；暴力破解则是同一个来源在很短时间里连续发起大量登录连接，绝大多数失败。检测系统要做的，就是从流量统计里把这种“节奏”认出来。</p>`,
+      cells: [0, 2], highlight: ["Benign", "BruteForce", "Conv1D"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, "font-weight": 700, fill: "var(--c3)" }, "正常用户：偶尔登录，基本成功");
+        K.svg(svg, "text", { x: 20, y: 190, "font-size": 13, "font-weight": 700, fill: "var(--c6)" }, "暴力破解：短时间内大量登录尝试，几乎全失败");
+        K.svg(svg, "line", { x1: 20, y1: 130, x2: 700, y2: 130, stroke: "var(--line)" });
+        K.svg(svg, "line", { x1: 20, y1: 300, x2: 700, y2: 300, stroke: "var(--line)" });
+        K.svg(svg, "text", { x: 640, y: 320, "font-size": 11, class: "muted" }, "时间 →");
+        const r = K.rng(3), A = [], B = [];
+        [80, 260, 470, 610].forEach((x) => A.push({ x, ok: true }));
+        for (let i = 0; i < 46; i++) B.push({ x: 60 + i * 13 + r() * 4, ok: i === 45 && false });
+        const ea = A.map((d) => { const e = K.svg(svg, "rect", { x: d.x, y: 130, width: 8, height: 0, fill: "var(--c3)" }); return e; });
+        const eb = B.map((d) => K.svg(svg, "rect", { x: d.x, y: 300, width: 7, height: 0, fill: "var(--c6)" }));
+        const cnt = K.svg(svg, "text", { x: 470, y: 230, "font-size": 14, "font-weight": 700, fill: "var(--c6)" }, "");
+        K.svg(svg, "text", { x: 20, y: 334, "font-size": 11, class: "muted" }, "示意：每根竖条是一次登录连接，高度表示传了多少数据");
+        ctx.tween(ms(1200), (t) => ea.forEach((e, i) => { const h = K.clamp(t * 4 - i, 0, 1) * 60; e.setAttribute("y", 130 - h); e.setAttribute("height", h); }))
+          .then((ok) => ok && ctx.tween(ms(2200), (t) => { eb.forEach((e, i) => { const h = K.clamp(t * 46 - i, 0, 1) * 22; e.setAttribute("y", 300 - h); e.setAttribute("height", h); }); cnt.textContent = "同一来源 " + Math.round(t * 46) + " 次尝试"; }));
+      },
+    },
+    {
+      at: 6, title: "读进 100 万行、80 列", kicker: "第 6–17 格 · 读数据",
+      html: `<p>作者只读了 2018-02-14 这一天的 CSV。看形状：<b>100 万+ 行、80 列</b>，内存约 700 MB。<span data-cell="17">出处</span></p><p>每一行是一条“流”：同一对地址和端口之间一次完整的通信，被统计成 80 个数字，比如持续多久、每秒多少包、包有多大、带了哪些标志位。</p>`,
+      cells: [7, 11, 17], highlight: ["02-14-2018.csv", "1 million+", "80"],
+      draw(svg, ctx) {
+        const cols = 40, rows = 16, cw = 15, ch = 15, ox = 60, oy = 40;
+        const cells = [];
+        for (let i = 0; i < rows; i++) for (let j = 0; j < cols; j++) cells.push(K.svg(svg, "rect", { x: ox + j * cw, y: oy + i * ch, width: cw - 2, height: ch - 2, fill: j === cols - 1 ? "var(--c6)" : "var(--c1)", opacity: 0 }));
+        K.svg(svg, "text", { x: ox, y: 28, "font-size": 13, "font-weight": 700 }, "每行一条流 · 每列一个统计量（只画出一部分）");
+        K.svg(svg, "text", { x: ox + cols * cw - 30, y: oy + rows * ch + 18, "font-size": 12, fill: "var(--c6)" }, "Label");
+        const lab = K.svg(svg, "text", { x: ox, y: 316, "font-size": 15, "font-weight": 700, "font-family": "var(--mono)" }, "");
+        ctx.tween(ms(1800), (t) => { const n = Math.round(t * cells.length); cells.forEach((c, k) => (c.style.opacity = k < n ? 0.25 + ((k * 37) % 50) / 100 : 0)); lab.textContent = `rows ≈ ${(t * 1.04).toFixed(2)} M   cols = 80`; });
+      },
+    },
+    {
+      title: "三类各有多少", kicker: "第 18–24 格 · 标签分布",
+      html: `<p>作者数了三类标签，画了柱状图和两张散点图（Bwd Pkts/s 对 Fwd Seg Size Min）。第 19 格写“大部分是正常流量”，第 24 格写“FTP 和 SSH 暴力破解不到 20 万”。</p><p>同一格里还有一句“大多数攻击是恶意的（近 70 万）”，和第 19 格矛盾：近 70 万更可能指的是正常流量。我们按“正常占多数”理解。动画里的柱高是示意，不是原文数字。</p>`,
+      cells: [18, 21, 24], highlight: ["value_counts", "less than 200k"],
+      draw(svg, ctx) {
+        const D = [["Benign", 0.78, "var(--c3)"], ["FTP 暴力破解", 0.11, "var(--c2)"], ["SSH 暴力破解", 0.11, "var(--c6)"]];
+        const ax = K.axes(svg, { x: 70, y: 30, w: 380, h: 250 }, [0, 3], [0, 1], { xticks: 0, yticks: 0 });
+        const bars = D.map((d, i) => {
+          const x = ax.sx(i + 0.2), w = ax.sx(0.6) - ax.sx(0);
+          K.svg(svg, "text", { x: x + w / 2, y: 302, "text-anchor": "middle", "font-size": 12 }, d[0]);
+          return { e: K.svg(svg, "rect", { x, y: ax.sy(0), width: w, height: 0, fill: d[2] }), v: d[1] };
+        });
+        K.svg(svg, "text", { x: 480, y: 70, "font-size": 13 }, "第 19 格：大部分是正常流量");
+        K.svg(svg, "text", { x: 480, y: 96, "font-size": 13 }, "第 24 格：两类暴力破解 < 20 万");
+        K.svg(svg, "text", { x: 480, y: 140, "font-size": 12, fill: "var(--warn)" }, "注意：同格另一句说“大多数是");
+        K.svg(svg, "text", { x: 480, y: 158, "font-size": 12, fill: "var(--warn)" }, "恶意攻击（近 70 万）”，前后矛盾");
+        K.svg(svg, "text", { x: 70, y: 330, "font-size": 11, class: "muted" }, "柱高为示意比例");
+        ctx.tween(ms(1300), (t) => bars.forEach((b) => { const h = (ax.sy(0) - ax.sy(b.v)) * t; b.e.setAttribute("y", ax.sy(0) - h); b.e.setAttribute("height", h); }));
+      },
+    },
+    {
+      at: 25, title: "处理缺失值：删的是行，不是列", kicker: "第 25–30 格 · 清洗",
+      html: `<p>检查空值后，作者发现只有一列有 2277 个空值，文字说要“把这一列删掉”。但代码用的是 <code>network_data.dropna()</code>：它默认删除的是<b>含空值的行</b>，那一列本身留下来了。</p><p>对 100 万行来说删掉 2277 行影响不大，但这提醒我们：<b>注释和代码要对得上</b>，读别人的 notebook 时要看代码到底做了什么。</p>`,
+      cells: [28, 29], highlight: ["dropna()", "2277"],
+      draw(svg, ctx) {
+        const R = 8, C = 8, s = 30, ox = 40, oy = 40, miss = [[1, 5], [4, 5], [6, 5]];
+        const el = [];
+        for (let i = 0; i < R; i++) for (let j = 0; j < C; j++) {
+          const m = miss.some(([a, b]) => a === i && b === j);
+          el.push({ i, j, e: K.svg(svg, "rect", { x: ox + j * s, y: oy + i * s, width: s - 3, height: s - 3, fill: m ? "var(--panel)" : "var(--c1)", stroke: m ? "var(--bad)" : "none", opacity: m ? 1 : 0.45 }) });
+        }
+        K.svg(svg, "text", { x: ox, y: 28, "font-size": 13, "font-weight": 700 }, "红框 = 空值");
+        K.svg(svg, "text", { x: 340, y: 60, "font-size": 13, fill: "var(--ink-3)" }, "文字说的：删掉那一列");
+        K.svg(svg, "text", { x: 340, y: 84, "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "代码 dropna() 做的：删掉那几行");
+        const colMark = K.svg(svg, "rect", { x: ox + 5 * s - 2, y: oy - 2, width: s + 1, height: R * s + 1, fill: "none", stroke: "var(--ink-3)", "stroke-dasharray": "4 3", opacity: 0 });
+        ctx.wait(ms(500))
+          .then((ok) => ok && ctx.tween(ms(600), (t) => (colMark.style.opacity = t)))
+          .then((ok) => ok && ctx.wait(ms(700)))
+          .then((ok) => ok && ctx.tween(ms(1000), (t) => { colMark.style.opacity = 1 - t; el.forEach((d) => { if (miss.some(([a]) => a === d.i)) d.e.style.opacity = (1 - t) * (d.e.style.stroke ? 1 : 0.45); }); }));
+      },
+    },
+    {
+      at: 31, title: "把文字标签换成 0、1、2", kicker: "第 31–33 格 · 标签编码",
+      html: `<p>神经网络只认数字。<code>LabelEncoder</code> 按字母顺序给三个标签编号：Benign → 0，FTP 暴力破解 → 1，SSH 暴力破解 → 2。</p><p>这里的 0/1/2 只是名字，没有大小关系；后面第 46 格还会再把它们变成独热向量。</p>`,
+      cells: [32], highlight: ["LabelEncoder"],
+      draw(svg, ctx) {
+        const L = [["Benign", "0", "var(--c3)"], ["FTP-BruteForce", "1", "var(--c2)"], ["SSH-Bruteforce", "2", "var(--c6)"]];
+        const items = L.map((l, i) => {
+          const a = K.node(svg, 60, 50 + i * 90, 200, 52, l[0], { stroke: l[2], fs: 14 });
+          const ar = K.arrow(svg, 270, 76 + i * 90, 400, 76 + i * 90); ar.style.opacity = 0;
+          const b = K.node(svg, 410, 50 + i * 90, 80, 52, l[1], { stroke: l[2], bold: true, fs: 20 }); b.style.opacity = 0;
+          return { ar, b };
+        });
+        K.svg(svg, "text", { x: 520, y: 160, "font-size": 12, class: "muted" }, "按字母顺序编号");
+        (async () => { for (const it of items) { if (!(await ctx.tween(ms(450), (t) => (it.ar.style.opacity = it.b.style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      at: 34, title: "按类别拆成三份", kicker: "第 34–39 格 · 准备重采样",
+      html: `<p>作者先在第 34 格列出了给 CNN 准备数据的七个步骤，然后把清洗后的数据按标签拆成 <code>data_1</code>、<code>data_2</code>、<code>data_3</code> 三份。</p><p>这一格还拼了一个 X 和 y，但后面完全没用到，真正用的是下一章重采样后的三份数据。</p>`,
+      cells: [35], highlight: ["data_1", "data_2", "data_3"],
+      draw(svg, ctx) {
+        const r = K.rng(9), pts = [];
+        for (let i = 0; i < 120; i++) { const u = r(); pts.push({ c: u < 0.75 ? 0 : u < 0.88 ? 1 : 2, x: 60 + r() * 220, y: 50 + r() * 240 }); }
+        const col = ["var(--c3)", "var(--c2)", "var(--c6)"], tx = [420, 520, 620];
+        const el = pts.map((p) => K.svg(svg, "circle", { cx: p.x, cy: p.y, r: 4, fill: col[p.c] }));
+        ["data_1 正常", "data_2 FTP", "data_3 SSH"].forEach((t, i) => K.svg(svg, "text", { x: tx[i], y: 320, "text-anchor": "middle", "font-size": 12, "font-family": "var(--mono)" }, t));
+        const k = [0, 0, 0];
+        const tgt = pts.map((p) => { const j = k[p.c]++; return [tx[p.c] - 36 + (j % 8) * 10, 296 - Math.floor(j / 8) * 10]; });
+        ctx.wait(ms(500)).then((ok) => ok && ctx.tween(ms(1600), (t) => el.forEach((e, i) => { e.setAttribute("cx", K.lerp(pts[i].x, tgt[i][0], t)); e.setAttribute("cy", K.lerp(pts[i].y, tgt[i][1], t)); })));
+      },
+    },
+    {
+      at: 40, title: "每类有放回抽 2 万条", kicker: "第 40–43 格 · 重采样平衡",
+      html: `<p>为了不让模型偏向数量最多的正常流量，作者对三类<b>各抽 20000 条</b>（<code>replace=True</code>，有放回），拼成 6 万条的平衡数据，并画了饼图确认三类各占三分之一。</p><p>有放回抽样就像从一袋球里摸一个、记下来、再放回去：同一条流可能被抽中好几次。少数类抽得越多，重复越多。</p>`,
+      cells: [41], highlight: ["n_samples=20000", "replace=True"],
+      draw(svg, ctx) {
+        const r = K.rng(5), N = 12;
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "原始的 12 条（示意）");
+        const src = [];
+        for (let i = 0; i < N; i++) { src.push(K.svg(svg, "rect", { x: 30 + i * 52, y: 44, width: 44, height: 34, rx: 5, fill: "var(--c2)", opacity: 0.35 })); K.svg(svg, "text", { x: 52 + i * 52, y: 66, "text-anchor": "middle", "font-size": 12 }, "#" + (i + 1)); }
+        K.svg(svg, "text", { x: 30, y: 130, "font-size": 13, "font-weight": 700 }, "有放回抽 24 次：");
+        const seen = new Array(N).fill(0);
+        const info = K.svg(svg, "text", { x: 30, y: 318, "font-size": 13 }, "");
+        (async () => {
+          for (let k = 0; k < 24; k++) {
+            const j = Math.floor(r() * N); seen[j]++;
+            const x = 30 + (k % 12) * 52, y = 144 + Math.floor(k / 12) * 60;
+            const b = K.svg(svg, "rect", { x, y, width: 44, height: 34, rx: 5, fill: seen[j] > 1 ? "var(--warn)" : "var(--c2)", opacity: 0 });
+            K.svg(svg, "text", { x: x + 22, y: y + 22, "text-anchor": "middle", "font-size": 12 }, "#" + (j + 1));
+            src[j].style.opacity = 0.9;
+            if (!(await ctx.tween(ms(140), (t) => (b.style.opacity = t)))) return;
+            const uniq = seen.filter((v) => v > 0).length;
+            info.textContent = `已抽 ${k + 1} 次，其中不同的只有 ${uniq} 条；黄色 = 重复抽到的`;
+          }
+        })();
+      },
+    },
+    {
+      at: 44, title: "测试集是从训练集里抽的", kicker: "第 44–46 格 · 数据泄漏",
+      html: `<p>这是全篇最值得讨论的一步：<code>test_dataset = train_dataset.sample(frac=0.1)</code>。测试集是从<b>训练集里</b>随机抽 10%，而不是另外留出来的。也就是说，模型考试时看到的每一道题，训练时都做过。</p><p>再加上上一章的有放回重采样，训练集内部本来就有大量重复。这样测出来的“验证准确率”会明显偏高。标签再用 <code>to_categorical</code> 变成独热向量，如 1 → [0, 1, 0]。</p>`,
+      cells: [45, 46], highlight: ["train_dataset.sample(frac=0.1)", "to_categorical"],
+      draw(svg, ctx) {
+        const tr = K.svg(svg, "rect", { x: 40, y: 60, width: 420, height: 200, rx: 10, fill: "color-mix(in srgb, var(--c1) 14%, var(--panel))", stroke: "var(--c1)" });
+        K.svg(svg, "text", { x: 60, y: 86, "font-size": 14, "font-weight": 700, fill: "var(--c1)" }, "train_dataset（6 万条）");
+        const r = K.rng(2), dots = [];
+        for (let i = 0; i < 90; i++) dots.push(K.svg(svg, "circle", { cx: 60 + r() * 380, cy: 100 + r() * 150, r: 4, fill: "var(--c1)", opacity: 0.5 }));
+        const te = K.svg(svg, "rect", { x: 510, y: 100, width: 180, height: 120, rx: 10, fill: "color-mix(in srgb, var(--c6) 12%, var(--panel))", stroke: "var(--c6)", opacity: 0 });
+        const tl = K.svg(svg, "text", { x: 520, y: 92, "font-size": 13, "font-weight": 700, fill: "var(--c6)", opacity: 0 }, "test_dataset = 其中 10%");
+        const warn = K.svg(svg, "text", { x: 40, y: 300, "font-size": 14, "font-weight": 700, fill: "var(--bad)" }, "");
+        const pick = dots.filter((_, i) => i % 10 === 0);
+        ctx.wait(ms(500)).then((ok) => ok && ctx.tween(ms(500), (t) => { te.style.opacity = t; tl.style.opacity = t; }))
+          .then((ok) => ok && ctx.tween(ms(1600), (t) => pick.forEach((d, k) => { const x0 = +d.getAttribute("cx"); d.style.fill = "var(--c6)"; d.style.opacity = 1; d.setAttribute("transform", `translate(${(530 + (k % 5) * 32 - x0) * t},${(130 + Math.floor(k / 5) * 40 - +d.getAttribute("cy")) * t})`); })))
+          .then((ok) => { if (ok) warn.textContent = "测试题全都在练习册里做过 → 分数虚高"; });
+      },
+    },
+    {
+      at: 47, title: "删几列，切出 X", kicker: "第 47–50 格 · 整理特征",
+      html: `<p>作者删掉 Timestamp、Protocol、PSH Flag Cnt、Init Fwd Win Byts、Flow Byts/s、Flow Pkts/s 和 Label 七列（Flow Byts/s 这类“每秒”列常因除以零出现无穷大，可能是删除的原因，作者没写理由）。</p><p>接着 <code>iloc[:, :-1]</code> 想“去掉最后一列标签”，可标签已经删了，这一步实际删掉的是<b>最后一个真实特征</b>。最后剩下 72 列，正好对上 CNN 的 <code>input_shape=(72, 1)</code>。第 47 格文字说“80/20 切分”，代码里并没有。</p>`,
+      cells: [48, 49], highlight: ["iloc[:, :-1]", "drop(columns"],
+      draw(svg, ctx) {
+        const n = 20, w = 30, ox = 40, oy = 80;
+        const drop = new Set([0, 2, 7, 11, 12, 15]);
+        const cs = [];
+        for (let i = 0; i < n; i++) cs.push(K.svg(svg, "rect", { x: ox + i * w, y: oy, width: w - 3, height: 60, rx: 3, fill: i === n - 1 ? "var(--c6)" : "var(--c1)", opacity: 0.6 }));
+        K.svg(svg, "text", { x: ox, y: 60, "font-size": 13, "font-weight": 700 }, "80 列（示意画 20 格）· 最右红色是 Label");
+        const t1 = K.svg(svg, "text", { x: ox, y: 180, "font-size": 13, fill: "var(--ink-3)" }, "");
+        const t2 = K.svg(svg, "text", { x: ox, y: 206, "font-size": 13, fill: "var(--bad)" }, "");
+        const t3 = K.svg(svg, "text", { x: ox, y: 260, "font-size": 15, "font-weight": 700, "font-family": "var(--mono)" }, "");
+        ctx.wait(ms(500))
+          .then((ok) => { if (!ok) return false; t1.textContent = "① drop 掉 6 个特征 + Label"; return ctx.tween(ms(800), (t) => cs.forEach((c, i) => { if (drop.has(i) || i === n - 1) c.style.opacity = 0.6 * (1 - t) + 0.05; })); })
+          .then((ok) => ok && ctx.wait(ms(500)))
+          .then((ok) => { if (!ok) return false; t2.textContent = "② iloc[:, :-1] 又砍掉最后一列：这次砍到的是真特征"; return ctx.tween(ms(800), (t) => { cs[n - 2].style.fill = "var(--warn)"; cs[n - 2].style.opacity = 0.9 - 0.85 * t; }); })
+          .then((ok) => { if (ok) t3.textContent = "剩下 72 列 → input_shape=(72, 1)"; });
+      },
+    },
+    {
+      title: "把一行特征竖起来：72 × 1", kicker: "第 51 格 · 改形状",
+      html: `<p>Conv1D 要求输入是“序列长度 × 通道数”。作者把每一行 72 个数字 reshape 成 72×1：可以想象成一段只有一个声道、72 个采样点的声音。</p><p>注意：声音里第 5 个采样点和第 6 个确实挨着；表格里第 5 列和第 6 列谁挨着谁，只取决于 CSV 里列的顺序。卷积会默认“相邻列有关系”，这是把 CNN 用在表格上需要想清楚的地方。</p>`,
+      cells: [51], highlight: ["reshape"],
+      draw(svg, ctx) {
+        const r = K.rng(14), v = [];
+        for (let i = 0; i < 24; i++) v.push(0.15 + r() * 0.85);
+        const bars = v.map((x, i) => K.svg(svg, "rect", { x: 30 + i * 27, y: 40, width: 24, height: 24, fill: K.heat(x) }));
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "一行特征（示意 24 个，实际 72 个）");
+        const line = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 30, y: 320, "font-size": 12, class: "muted" }, "下：同一行数字画成一条“信号”，卷积核会沿着它从左往右扫");
+        ctx.wait(ms(500)).then((ok) => ok && ctx.tween(ms(1400), (t) => {
+          bars.forEach((b, i) => { const h = 24 + t * v[i] * 140; b.setAttribute("y", 40 + t * (260 - 40 - h + 24)); b.setAttribute("height", h); });
+          let d = ""; v.forEach((x, i) => (d += (i ? "L" : "M") + (42 + i * 27) + "," + (300 - t * x * 140 - 6)));
+          line.setAttribute("d", t > 0.6 ? d : "");
+        }));
+      },
+    },
+    {
+      title: "三层一维卷积 + 池化", kicker: "第 52–53 格 · 搭模型",
+      html: `<p>模型是三段相同的积木：<b>Conv1D</b>（64 个宽度为 6 的卷积核，沿着 72 个特征滑动）→ <b>BatchNorm</b>（把每层输出拉回合适的范围，训练更稳）→ <b>MaxPooling1D</b>（窗口 3、步长 2，每段只留最大值，长度减半）。</p><p>长度变化：72 → 36 → 18 → 9，最后得到 9×64 = 576 个数，拉平后接两层 64 个神经元的全连接层，输出层 3 个神经元用 softmax 给出三类概率。</p>`,
+      cells: [52], highlight: ["Conv1D(filters=64, kernel_size=6", "MaxPooling1D(pool_size=(3), strides=2", "Dense(3, activation='softmax')"],
+      draw(svg, ctx) {
+        const L = [[72, "输入 72×1"], [36, "Conv+池化 36×64"], [18, "Conv+池化 18×64"], [9, "Conv+池化 9×64"]];
+        const blocks = L.map((l, i) => {
+          const h = l[0] * 3.2, x = 30 + i * 140, y = 170 - h / 2;
+          const g = K.svg(svg, "g"); g.style.opacity = i ? 0 : 1;
+          for (let k = 0; k < (i ? 5 : 1); k++) K.svg(g, "rect", { x: x + k * 5, y: y - k * 5, width: 26, height: h, fill: i ? "color-mix(in srgb, var(--c1) 25%, var(--panel))" : "var(--panel-2)", stroke: "var(--c1)" });
+          K.svg(g, "text", { x: x + 18, y: 310, "text-anchor": "middle", "font-size": 11 }, l[1]);
+          return g;
+        });
+        const dense = [K.node(svg, 590, 90, 110, 36, "Dense 64 ×2"), K.node(svg, 590, 150, 110, 36, "Dense 3 softmax", { stroke: "var(--accent)" })];
+        dense.forEach((d) => (d.style.opacity = 0));
+        const out = ["正常", "FTP", "SSH"].map((t, i) => { const e = K.svg(svg, "text", { x: 600 + i * 36, y: 220, "font-size": 12 }, t); e.style.opacity = 0; return e; });
+        const ker = K.svg(svg, "rect", { x: 26, y: 170 - 115, width: 34, height: 6 * 3.2, fill: "none", stroke: "var(--warn)", "stroke-width": 2.5 });
+        (async () => {
+          if (!(await ctx.tween(ms(1300), (t) => ker.setAttribute("y", 170 - 115 + t * (230 - 6 * 3.2))))) return;
+          ker.style.opacity = 0;
+          for (let i = 1; i < 4; i++) if (!(await ctx.tween(ms(450), (t) => (blocks[i].style.opacity = t)))) return;
+          if (!(await ctx.tween(ms(500), (t) => dense.forEach((d) => (d.style.opacity = t))))) return;
+          out.forEach((o) => (o.style.opacity = 1));
+        })();
+      },
+    },
+    {
+      title: "训练 30 轮", kicker: "第 54 格 · 训练",
+      html: `<p>用 Adam 优化器、交叉熵损失，每次喂 32 条，训练 30 轮（epochs），并把每轮的损失和准确率记进 <code>logs.csv</code>。</p><p>“一轮”就是把训练集完整看一遍。动画里两条曲线是示意：训练损失一直下降；验证曲线本该用来提醒“过拟合”，但在这里测试集和训练集重叠，验证曲线也会跟着训练曲线一起变好，失去了报警作用。</p>`,
+      cells: [54], highlight: ["epochs=30", "batch_size=32"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 20, w: 600, h: 260 }, [1, 30], [0, 1.2], { xlabel: "轮次（示意曲线）", yticks: 3 });
+        const tr = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const va = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5, "stroke-dasharray": "6 4" });
+        K.svg(svg, "text", { x: 470, y: 50, "font-size": 12, fill: "var(--c1)" }, "— 训练损失");
+        K.svg(svg, "text", { x: 470, y: 70, "font-size": 12, fill: "var(--c6)" }, "- - 验证损失（与训练集重叠）");
+        const r = K.rng(6);
+        const lt = [], lv = [];
+        for (let e = 1; e <= 30; e++) { const b = 1.1 * Math.exp(-e / 5) + 0.04; lt.push(b + r() * 0.02); lv.push(b * 1.08 + 0.03 + r() * 0.04); }
+        ctx.tween(ms(2200), (t) => {
+          const n = Math.max(1, Math.round(t * 30));
+          let a = "", b = "";
+          for (let i = 0; i < n; i++) { a += (i ? "L" : "M") + ax.sx(i + 1) + "," + ax.sy(lt[i]); b += (i ? "L" : "M") + ax.sx(i + 1) + "," + ax.sy(lv[i]); }
+          tr.setAttribute("d", a); va.setAttribute("d", b);
+        });
+      },
+    },
+    {
+      at: 55, title: "结果：99% 和 92% 能信吗", kicker: "第 55–59 格 · 评估与结论",
+      html: `<p>作者用 <code>model.evaluate</code> 算测试准确率，并画出训练 / 验证的准确率和损失曲线。结论（第 59 格）：训练准确率 <b>99%</b>；训练 50 轮时验证准确率 <b>83.55%</b>，30 轮时 <b>92%</b>，所以选 30 轮。<span data-cell="59">出处</span></p><p>但由于测试集是训练集的子集，这些数字只能说明“模型记住了见过的流量”，不能说明它能认出<b>新的</b>暴力破解。要得到可信的分数，至少要先切分、再只对训练部分重采样；更好的做法是用另一天的流量文件做测试。</p>`,
+      cells: [56, 59], highlight: ["99%", "83.55%", "92%"],
+      draw(svg, ctx) {
+        const D = [["训练准确率", 99, "var(--c1)"], ["验证（50 轮）", 83.55, "var(--c2)"], ["验证（30 轮）", 92, "var(--c3)"]];
+        const ax = K.axes(svg, { x: 70, y: 30, w: 360, h: 240 }, [0, 3], [0, 100], { xticks: 0, yticks: 4 });
+        const bars = D.map((d, i) => {
+          const x = ax.sx(i + 0.2), w = ax.sx(0.6) - ax.sx(0);
+          K.svg(svg, "text", { x: x + w / 2, y: 292, "text-anchor": "middle", "font-size": 12 }, d[0]);
+          const t = K.svg(svg, "text", { x: x + w / 2, y: 0, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "");
+          return { e: K.svg(svg, "rect", { x, y: ax.sy(0), width: w, height: 0, fill: d[2] }), d, t };
+        });
+        K.svg(svg, "text", { x: 70, y: 325, "font-size": 11, class: "muted" }, "数字来自作者第 59 格结论文字");
+        const stamp = K.svg(svg, "g"); stamp.style.opacity = 0;
+        K.svg(stamp, "rect", { x: 470, y: 90, width: 220, height: 110, rx: 10, fill: "none", stroke: "var(--bad)", "stroke-width": 3 });
+        K.svg(stamp, "text", { x: 580, y: 130, "text-anchor": "middle", "font-size": 18, "font-weight": 700, fill: "var(--bad)" }, "测试集泄漏");
+        K.svg(stamp, "text", { x: 580, y: 160, "text-anchor": "middle", "font-size": 13, fill: "var(--bad)" }, "测试样本都在训练集里");
+        K.svg(stamp, "text", { x: 580, y: 182, "text-anchor": "middle", "font-size": 13, fill: "var(--bad)" }, "分数偏乐观");
+        ctx.tween(ms(1200), (t) => bars.forEach((b) => { const v = b.d[1] * t, h = ax.sy(0) - ax.sy(v); b.e.setAttribute("y", ax.sy(0) - h); b.e.setAttribute("height", h); b.t.setAttribute("y", ax.sy(v) - 6); b.t.textContent = v.toFixed(v === b.d[1] && b.d[1] % 1 ? 2 : 0) + "%"; }))
+          .then((ok) => ok && ctx.tween(ms(500), (t) => (stamp.style.opacity = t)));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：测试集泄漏 ---------- */
+  // 三类模拟流（二维特征），1-NN / k-NN 分类；比较：测试集从训练集抽 vs 独立测试集
+  function makeFlows(seed, nPer, spread) {
+    const r = K.rng(seed), X = [], y = [];
+    const C = [[-1.2, -0.6], [1.2, -0.6], [0, 1.2]];
+    for (let c = 0; c < 3; c++) for (let i = 0; i < nPer; i++) { X.push([C[c][0] + K.randn(r) * spread, C[c][1] + K.randn(r) * spread]); y.push(c); }
+    return { X, y };
+  }
+  function knn(X, y, p, k) {
+    const d = X.map((q, i) => [(q[0] - p[0]) ** 2 + (q[1] - p[1]) ** 2, y[i]]).sort((a, b) => a[0] - b[0]);
+    const v = [0, 0, 0]; for (let i = 0; i < k; i++) v[d[i][1]]++;
+    return v.indexOf(Math.max(...v));
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "k", label: "模型的“记性”：KNN 看几个邻居（1 = 死记硬背）", min: 1, max: 15, step: 2, value: 1 },
+      { id: "sp", label: "三类流量的重叠程度", min: 0.4, max: 1.6, step: 0.05, value: 0.8, fmt: (v) => v.toFixed(2) },
+      { id: "dup", label: "有放回重采样：每条原始样本平均被抽几次", min: 1, max: 6, step: 1, value: 3 },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "每类 50 条原始模拟流，有放回重采样到“50 × 平均抽几次”条组成训练集。左柱：像作者那样从训练集里抽 10% 当测试集；右柱：另外生成一批模型从没见过的流量当测试集。两边用的是同一个现场训练的 KNN。",
+    render(svg, v) {
+      const seed = 21 + v.seed * 7;
+      const base = makeFlows(seed, 50, v.sp), r = K.rng(seed + 3);
+      const nTr = 150 * v.dup, X = [], y = [];
+      for (let i = 0; i < nTr; i++) { const j = Math.floor(r() * base.X.length); X.push(base.X[j]); y.push(base.y[j]); }
+      const leakIdx = []; for (let i = 0; i < Math.round(nTr * 0.1); i++) leakIdx.push(Math.floor(r() * nTr));
+      let okL = 0; leakIdx.forEach((i) => { if (knn(X, y, X[i], v.k) === y[i]) okL++; });
+      const fresh = makeFlows(seed + 999, 60, v.sp);
+      let okF = 0; fresh.X.forEach((p, i) => { if (knn(X, y, p, v.k) === fresh.y[i]) okF++; });
+      const aL = okL / leakIdx.length, aF = okF / fresh.X.length;
+      // 散点
+      const ax = K.axes(svg, { x: 20, y: 14, w: 300, h: 300 }, [-4, 4], [-3.5, 4.5], { xticks: 0, yticks: 0 });
+      const col = ["var(--c3)", "var(--c2)", "var(--c6)"];
+      base.X.forEach((p, i) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 3.2, fill: col[base.y[i]], opacity: 0.85 }));
+      fresh.X.forEach((p, i) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 3.2, fill: "none", stroke: col[fresh.y[i]], opacity: 0.8 }));
+      K.svg(svg, "text", { x: 20, y: 338, "font-size": 11, class: "muted" }, "实心 = 训练用的原始流，空心 = 从没见过的新流；绿正常 橙FTP 红SSH");
+      // 柱状
+      const bx = K.axes(svg, { x: 380, y: 30, w: 240, h: 260 }, [0, 2], [0, 1], { xticks: 0, yticks: 4, yfmt: (x) => Math.round(x * 100) + "%" });
+      [[aL, "测试集从训练集抽", "var(--bad)"], [aF, "独立的新测试集", "var(--good)"]].forEach((d, i) => {
+        const x = bx.sx(i + 0.2), w = bx.sx(0.6) - bx.sx(0);
+        K.svg(svg, "rect", { x, y: bx.sy(d[0]), width: w, height: bx.sy(0) - bx.sy(d[0]), fill: d[2], opacity: 0.8 });
+        K.svg(svg, "text", { x: x + w / 2, y: bx.sy(d[0]) - 6, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, (d[0] * 100).toFixed(1) + "%");
+        K.svg(svg, "text", { x: x + w / 2, y: 310, "text-anchor": "middle", "font-size": 11 }, d[1]);
+      });
+      return { readout: [
+        { k: "泄漏测试集准确率", v: (aL * 100).toFixed(1) + "%", color: "var(--bad)" },
+        { k: "新数据准确率", v: (aF * 100).toFixed(1) + "%", color: "var(--good)" },
+        { k: "虚高了", v: ((aL - aF) * 100).toFixed(1) + " 个百分点" },
+        { k: "训练集条数", v: String(nTr) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：一维卷积 + 最大池化 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "kind", label: "卷积核", value: "edge", options: [["edge", "找突变：[-1,-1,-1,1,1,1]"], ["avg", "求平均（平滑）：六个 1/6"], ["peak", "找尖峰：[-1,-1,2,2,-1,-1]"]] },
+      { id: "ks", label: "卷积核宽度（作者用 6）", min: 2, max: 10, step: 2, value: 6 },
+      { id: "cls", label: "输入的一行流量（模拟）", value: "bf", options: [["benign", "像正常流量"], ["bf", "像暴力破解"]] },
+      { id: "seed", label: "重新生成", button: true },
+    ],
+    note: "上：一行 36 个特征值（模拟，作者是 72 个）。中：卷积核从左往右滑，每到一个位置就把对应数字相乘再相加，经过 ReLU（负数变 0）得到特征图。下：最大池化，窗口 3、步长 2，长度减半。全部在浏览器里现场计算。",
+    render(svg, v) {
+      const r = K.rng(77 + v.seed * 5), n = 36, x = [];
+      for (let i = 0; i < n; i++) {
+        let b = 0.3 + K.randn(r) * 0.08;
+        if (v.cls === "bf") { if (i >= 10 && i < 16) b += 0.55; if (i >= 24 && i < 27) b += 0.4; }
+        else { if (i >= 18 && i < 22) b += 0.15; }
+        x.push(K.clamp(b, 0, 1));
+      }
+      const ks = v.ks, h = Math.floor(ks / 2);
+      let ker;
+      if (v.kind === "avg") ker = new Array(ks).fill(1 / ks);
+      else if (v.kind === "edge") ker = Array.from({ length: ks }, (_, i) => (i < h ? -1 : 1));
+      else ker = Array.from({ length: ks }, (_, i) => (Math.abs(i - (ks - 1) / 2) < ks / 4 ? 2 : -1));
+      // same padding
+      const pad = Math.floor((ks - 1) / 2), y = [];
+      for (let i = 0; i < n; i++) { let s = 0; for (let k = 0; k < ks; k++) { const j = i - pad + k; s += (j >= 0 && j < n ? x[j] : 0) * ker[k]; } y.push(Math.max(0, s)); }
+      const pool = []; for (let i = 0; i < n; i += 2) { let m = 0; for (let k = -1; k <= 1; k++) { const j = i + k; if (j >= 0 && j < n) m = Math.max(m, y[j]); } pool.push(m); }
+      const cw = 16, ox = 40;
+      const row = (vals, oy, mx, color, w) => vals.forEach((val, i) => { const hh = (val / (mx || 1)) * 60; K.svg(svg, "rect", { x: ox + i * w, y: oy + 60 - hh, width: w - 2, height: Math.max(0.5, hh), fill: color }); });
+      K.svg(svg, "text", { x: ox, y: 18, "font-size": 12, "font-weight": 700 }, "输入：一行特征（36 个）");
+      row(x, 24, 1, "var(--c1)", cw);
+      // 卷积核位置示意（最大响应处）
+      const am = y.indexOf(Math.max(...y));
+      K.svg(svg, "rect", { x: ox + (am - pad) * cw - 1, y: 22, width: ks * cw, height: 64, fill: "none", stroke: "var(--warn)", "stroke-width": 2 });
+      K.svg(svg, "text", { x: ox, y: 112, "font-size": 12, "font-weight": 700 }, "卷积 + ReLU 后的特征图（黄框 = 响应最强的位置）");
+      const my = Math.max(...y, 1e-6);
+      row(y, 118, my, "var(--c2)", cw);
+      K.svg(svg, "text", { x: ox, y: 206, "font-size": 12, "font-weight": 700 }, "最大池化（窗口 3，步长 2）：36 → 18");
+      row(pool, 212, my, "var(--c6)", cw * 2);
+      K.svg(svg, "text", { x: ox, y: 300, "font-size": 12, class: "muted" }, "卷积核权重：" + ker.map((k) => (Math.abs(k) < 1 ? k.toFixed(2) : k)).join(", "));
+      K.svg(svg, "text", { x: ox, y: 322, "font-size": 12, class: "muted" }, "真正的模型有 64 个这样的核，权重是训练学出来的，不是人定的");
+      return { readout: [
+        { k: "特征图最大响应", v: my.toFixed(2) },
+        { k: "最强位置（第几个特征）", v: String(am + 1) },
+        { k: "池化后长度", v: String(pool.length) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

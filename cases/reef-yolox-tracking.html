@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>珊瑚礁海星跟踪</title>
+<meta name="description" content="Kaggle 案例拆解：YOLOX 在水下视频里逐帧找棘冠海星，再用 norfair 跟踪器（中心点距离匹配 + 卡尔曼滤波）补回漏检，F2 从 0.53 提到 0.539。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">水下视频 · 目标检测 + 多目标跟踪 · 生态保护</div>
+  <h1>在珊瑚礁视频里数海星：YOLOX 检测 + 卡尔曼跟踪补漏</h1>
+  <p class="en">YoloX inference + Tracking on COTS [LB 0.539]</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span><span class="tag st">统计分析</span>
+    <span class="tag method">YOLOX 目标检测</span><span class="tag method">置信度阈值 + NMS</span><span class="tag method">离线安装依赖</span>
+    <span class="tag method">norfair 跟踪</span><span class="tag method">中心点欧氏距离匹配</span><span class="tag method">卡尔曼滤波</span><span class="tag method">F2 分数</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>parapapapam</b></span>
+    <span>Kaggle 点赞 <b>773</b>（2026-11 抓取）</span>
+    <span>比赛 <b>TensorFlow - Help Protect the Great Barrier Reef</b></span>
+    <span><a href="https://www.kaggle.com/code/parapapapam/yolox-inference-tracking-on-cots-lb-0-539" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">大堡礁水下巡查视频的一帧帧画面</div><p>比赛要在珊瑚礁视频里找出<b>棘冠海星</b>（COTS，一种会吃掉珊瑚的海星）。测试时比赛环境按顺序一帧帧把画面递过来。<span data-cell="20">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">每一帧里每只海星的框和置信度</div><p>提交格式是“置信度 x_min y_min 宽 高”，一帧可以有多个框。<span data-cell="22">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">YOLOX 逐帧检测 + norfair 跟踪</div><p>深度学习的 YOLOX 负责“这一帧哪里有海星”；跟踪器按中心点距离把前后帧的框连起来，用卡尔曼滤波估计位置，把<b>这一帧刚好漏掉</b>的海星补回来。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">排行榜 0.53 → 0.539</div><p>作者原文：不加跟踪 LB 0.53，加上跟踪 LB 0.539（比赛用 F2 分数，更看重“别漏掉”）。<span data-cell="0">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛 <b>TensorFlow - Help Protect the Great Barrier Reef</b>。本 notebook 只做推理：模型权重来自别人训练好的数据集，测试画面由比赛的 <code>greatbarrierreef</code> 接口逐帧提供。下面的信息都来自 notebook 代码，没有凭记忆补充数据集规模。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">本 notebook 用到的设置</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">类别数</div><div class="v">1（starfish）</div></div>
+        <div class="stat-tile"><div class="k">模型输入尺寸</div><div class="v">800×1280</div></div>
+        <div class="stat-tile"><div class="k">置信度阈值 / NMS 阈值</div><div class="v">0.35 / 0.4</div></div>
+        <div class="stat-tile"><div class="k">跟踪匹配距离</div><div class="v">30 像素</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">类别、尺寸和阈值见第 14 格 <span data-cell="14">出处</span>；匹配距离见第 22 格 <span data-cell="22">出处</span>。示例图片路径 <code>train_images/video_0/9674.jpg</code> 说明训练图片按视频分文件夹存放 <span data-cell="17">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一帧的输入和输出</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>字段</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>image_np</code></td><td>比赛接口给的一帧画面（RGB 顺序，作者用 <code>[:,:,::-1]</code> 转成 OpenCV 的 BGR）</td><td>高×宽×3 数组</td></tr>
+        <tr><td><code>sample_prediction_df</code></td><td>这一帧的提交表，要往 <code>annotations</code> 列填答案</td><td>表格</td></tr>
+        <tr><td><code>annotations</code></td><td><b>要预测的答案</b>：多个“置信度 x_min y_min 宽 高”用空格连起来</td><td>文本</td></tr>
+      </table></div>
+      <p class="note">画面只能按顺序一帧一帧拿，不能先看后面的帧。这正是“在线跟踪”的设定：只能用过去，不能用未来。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="14">
+    <h3>动手试试 A · 置信度阈值与 NMS <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="22">
+    <h3>动手试试 B · 卡尔曼滤波：带噪声的检测框怎么变平滑 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="22">
+    <h3>动手试试 C · 用跟踪补回漏检，F2 会怎么变 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结果</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>不加跟踪：排行榜（LB）0.53</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>加上 norfair 跟踪：LB 0.539，目的是提高召回率和 F2</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>检测部分基于 remekkinas 的 YOLOX 推理 notebook（其标题为 LB 0.507），权重来自 dragonzhang 的 notebook（标题 LB 0.520+）</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>作者称这只是基线，调参数还能更好</td><td><span data-cell="0">第 0 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">LB 是比赛公开排行榜上的分数，来自作者在第 0 格的文字。其余分数在运行输出里，源码不带，这里不列。</p>
+      <h3>读代码时值得注意的地方</h3>
+      <ul class="tight">
+        <li>第 1 格的提醒写着“模型只训练了 20 轮，是弱模型”，这段文字沿用自原 notebook，而第 12 格实际加载的是另一个数据集（f0-25-yolox-pth）的权重，两者说的可能不是同一个模型。</li>
+        <li>补回的框只用跟踪器估计的<b>中心点</b>，宽高和置信度直接沿用上一次检测（第 22 格），并不是重新预测的。</li>
+        <li>只往后补<b>一帧</b>：连续漏检两帧以上就不补了（第 22 格 <code>last_detected_frame_id + 1 != frame_id</code>）。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>巡查视频里每一帧的海星位置，帮潜水员统计数量、决定在哪里清除。</li>
+        <li><b>同类问题：</b>鱼群计数、野生动物相机、交通视频里的车辆计数、体育比赛球员跟踪。</li>
+        <li><b>可迁移的套路：</b>“检测 + 跟踪”：神经网络逐帧找目标，经典算法把各帧串起来、补洞、去抖。</li>
+        <li><b>哪部分是深度学习：</b>YOLOX 是卷积神经网络；NMS 是经典的去重规则；卡尔曼滤波属于统计估计；按距离配对属于经典的匹配算法。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>离线安装 YOLOX、pycocotools、filterpy、norfair <span data-cell="6">第 6 格</span> <span data-cell="10">第 10 格</span></li>
+        <li>单类别 YOLOX 配置 <span data-cell="13">第 13 格</span></li>
+        <li>阈值与 NMS：<code>confthre=0.35</code>、<code>nmsthre=0.4</code> <span data-cell="14">第 14 格</span></li>
+        <li>坐标还原与得分 = 目标分 × 类别分 <span data-cell="15">第 15 格</span></li>
+        <li>框 → 中心点、欧氏距离函数 <span data-cell="21">第 21 格</span></li>
+        <li>Tracker 参数与“补一帧”逻辑 <span data-cell="22">第 22 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>比赛用 F2 分数，它比 F1 更看重召回率（公式里 β = 2）。为什么保护珊瑚礁的人更怕“漏掉”海星，而不太怕“多报”？</li>
+      <li>跟踪器只补一帧。如果补三帧、五帧，可能带来什么好处和坏处？可以用实验 C 试一试。</li>
+      <li>匹配距离设成 30 像素。摄像机移动得快时，这个值该变大还是变小？太大会出什么问题？</li>
+      <li>补回的框沿用上一次的置信度。这样做合理吗？有没有更“诚实”的打分办法？</li>
+      <li>这里的跟踪只看位置，不看长相（DeepSORT 会看长相）。两只海星靠得很近时会发生什么？</li>
+      <li>比赛规定测试时只能一帧一帧拿数据。如果允许先看完整段视频，你会怎么改进？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 parapapapam，检测部分基于 remekkinas、dragonzhang 的公开 notebook，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。比赛：TensorFlow - Help Protect the Great Barrier Reef（Kaggle）。
+</footer>
+</main>
+
+<script src="nb/reef-yolox-tracking.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* 画一只海星（五角星形） */
+  function star(g, cx, cy, r, color, op) {
+    let d = "";
+    for (let i = 0; i < 10; i++) {
+      const a = -Math.PI / 2 + (i * Math.PI) / 5, rr = i % 2 ? r * 0.45 : r;
+      d += (i ? "L" : "M") + (cx + rr * Math.cos(a)).toFixed(1) + "," + (cy + rr * Math.sin(a)).toFixed(1);
+    }
+    return K.svg(g, "path", { d: d + "Z", fill: color || "var(--c4)", opacity: op == null ? 0.9 : op });
+  }
+  function reef(g, x, y, w, h) {
+    K.svg(g, "rect", { x, y, width: w, height: h, rx: 4, fill: "color-mix(in srgb, var(--c1) 22%, var(--panel))" });
+    const rx = Math.min(26, w / 8), ry = Math.min(12, h / 8);
+    for (let i = 0; i < 9; i++) K.svg(g, "ellipse", { cx: x + rx + ((i * 53) % Math.max(1, w - 2 * rx)), cy: y + h - ry - ((i * 17) % Math.max(1, Math.min(30, h / 4))), rx, ry, fill: "color-mix(in srgb, var(--c3) 25%, var(--panel))" });
+  }
+
+  const steps = [
+    {
+      title: "任务：在珊瑚礁视频里找海星", kicker: "第 0–1 格 · 背景与成绩",
+      html: `<p>棘冠海星（crown-of-thorns starfish，简称 COTS）会大量吃掉珊瑚。巡查船拖着摄像机拍下珊瑚礁，比赛要求模型在每一帧里把海星框出来。</p><p>作者在别人的 YOLOX 检测 notebook 基础上，加了一个<b>在线跟踪</b>：用前几帧的检测结果，补回当前帧漏掉的海星。原文给出：<b>不加跟踪 LB 0.53，加跟踪 LB 0.539</b>。<span data-cell="0">出处</span></p>`,
+      cells: [0, 1], highlight: ["LB with tracking: 0.539"],
+      draw(svg, ctx) {
+        const g = K.svg(svg, "g"); reef(g, 30, 30, 420, 280);
+        const S = [[120, 120], [300, 200], [380, 90]];
+        const st = S.map(([x, y]) => star(svg, x, y, 18, "var(--c4)"));
+        const boxes = S.map(([x, y]) => K.svg(svg, "rect", { x: x - 26, y: y - 26, width: 52, height: 52, fill: "none", stroke: "var(--good)", "stroke-width": 2.5, opacity: 0 }));
+        K.svg(svg, "text", { x: 30, y: 330, "font-size": 12, class: "muted" }, "示意画面：绿框 = 检测到的海星");
+        const bars = [["不加跟踪", 0.53, "var(--c1)"], ["加跟踪", 0.539, "var(--c3)"]];
+        K.svg(svg, "text", { x: 480, y: 60, "font-size": 13, "font-weight": 700 }, "作者给出的 LB 分数");
+        const rs = bars.map((b, i) => {
+          K.svg(svg, "text", { x: 480, y: 100 + i * 60, "font-size": 12 }, b[0]);
+          const r = K.svg(svg, "rect", { x: 480, y: 108 + i * 60, width: 0, height: 22, rx: 3, fill: b[2] });
+          K.svg(svg, "text", { x: 690, y: 124 + i * 60, "text-anchor": "end", "font-size": 13, "font-weight": 700 }, b[1].toFixed(3));
+          return [r, b[1]];
+        });
+        K.svg(svg, "text", { x: 480, y: 240, "font-size": 12, class: "muted" }, "条长按 0.50–0.55 放大显示");
+        (async () => {
+          for (const b of boxes) if (!(await ctx.tween(300, (t) => (b.style.opacity = t)))) return;
+          await ctx.tween(800, (t) => rs.forEach(([r, v]) => r.setAttribute("width", ((v - 0.5) / 0.05) * 170 * t)));
+        })();
+      },
+    },
+    {
+      title: "比赛不让联网：把工具“背”进去", kicker: "第 2–10 格 · 离线安装",
+      html: `<p>这个比赛提交时<b>不能联网</b>，<code>pip install</code> 用不了。作者的办法是：事先把 YOLOX 代码和所有依赖的安装包（.whl）存成 Kaggle 数据集，运行时从本地安装，加上 <code>--no-index</code> 表示不去网上找。<span data-cell="3">出处</span> <span data-cell="6">出处</span></p><p>跟踪库 <b>norfair</b> 和它依赖的 <b>filterpy</b>（卡尔曼滤波库）也是这样装的。<span data-cell="10">出处</span> 这一章没有算法，是比赛里的“工程体力活”。</p>`,
+      cells: [2, 5, 6, 10], highlight: ["--no-index", "filterpy", "norfair"],
+      draw(svg, ctx) {
+        K.node(svg, 30, 40, 200, 70, "Kaggle 数据集\nyolox-cots-models\nnorfair031py3", { fill: "color-mix(in srgb, var(--c2) 16%, var(--panel))", stroke: "var(--c2)" });
+        K.node(svg, 460, 40, 230, 70, "提交环境\n🚫 不能联网", { fill: "color-mix(in srgb, var(--bad) 12%, var(--panel))", stroke: "var(--bad)", bold: true });
+        const pk = ["loguru.whl", "onnx.whl", "YOLOX 源码", "pycocotools", "filterpy", "norfair.whl"];
+        const items = pk.map((p, i) => { const g = K.node(svg, 40 + (i % 3) * 70, 150 + Math.floor(i / 3) * 50, 66, 36, p, { fs: 10 }); return [g, i]; });
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 13, "font-family": "var(--mono)" }, "pip install xxx.whl -f ./ --no-index");
+        K.svg(svg, "text", { x: 30, y: 324, "font-size": 12, class: "muted" }, "--no-index：只从本地文件夹装，不上网");
+        (async () => {
+          for (const [g, i] of items) {
+            if (!(await ctx.tween(350, (t) => g.setAttribute("transform", `translate(${t * (470 - (i % 3) * 70 + (i % 3) * 70)},0)`)))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "告诉 YOLOX：只有一种东西要找", kicker: "第 11–13 格 · 模型配置",
+      html: `<p>YOLOX 是旷视开源的一个“一次看完整张图”的目标检测网络。原版在 COCO 数据集上能认 80 类东西，这里只需要 1 类：<code>num_classes = 1</code>，也就是海星。<span data-cell="13">出处</span></p><p><code>depth = 1</code>、<code>width = 1</code> 决定网络有多深多宽（这一组对应 YOLOX 中较大的型号）。权重文件 <code>best_ckpt.pth</code> 来自别人训练好的数据集。<span data-cell="12">出处</span></p>`,
+      cells: [11, 12, 13], highlight: ["self.num_classes = 1", "CHECKPOINT_FILE"],
+      draw(svg, ctx) {
+        K.node(svg, 30, 120, 150, 80, "输入一帧\n800×1280", { fill: "var(--panel-2)" });
+        const layers = [];
+        for (let i = 0; i < 6; i++) layers.push(K.svg(svg, "rect", { x: 210 + i * 40, y: 100 + i * 6, width: 30, height: 120 - i * 12, rx: 3, fill: "var(--c1)", opacity: 0.25 + i * 0.1 }));
+        K.svg(svg, "text", { x: 260, y: 250, "font-size": 12, class: "muted" }, "卷积主干（深度学习）");
+        K.arrow(svg, 182, 160, 206, 160); K.arrow(svg, 452, 160, 486, 160);
+        const coco = K.node(svg, 490, 60, 200, 70, "原版检测头：80 类\n人、车、狗、杯子……", { fs: 12 });
+        const one = K.node(svg, 490, 190, 200, 70, "这里：1 类\nstarfish", { fill: "var(--accent-soft)", stroke: "var(--accent)", bold: true });
+        one.style.opacity = 0;
+        ctx.wait(500).then((ok) => ok && ctx.tween(700, (t) => { coco.style.opacity = 1 - 0.7 * t; one.style.opacity = t; }));
+      },
+    },
+    {
+      title: "两道筛子：置信度阈值和 NMS", kicker: "第 14 格 · 推理参数",
+      html: `<p>检测网络会在画面上吐出大量候选框，每个带一个分数。作者设了两道筛子：<span data-cell="14">出处</span></p><ul class="tight"><li><code>confthre = 0.35</code>：分数低于 0.35 的框直接扔掉</li><li><code>nmsthre = 0.4</code>：非极大值抑制（NMS）。两个框重叠度（IoU）超过 0.4，就认为是同一只海星，只留分数高的那个</li></ul><p>模型被搬到 GPU 上（<code>model.cuda()</code>），并切换到推理模式 <code>model.eval()</code>。实验 A 可以亲手调这两个阈值。</p>`,
+      cells: [14], highlight: ["confthre = 0.35", "nmsthre = 0.4"],
+      draw(svg, ctx) {
+        const g = K.svg(svg, "g"); reef(g, 30, 30, 420, 280);
+        star(svg, 160, 150, 20); star(svg, 330, 220, 20);
+        const C = [[160, 150, 0.9], [168, 144, 0.7], [152, 158, 0.55], [330, 220, 0.8], [338, 214, 0.45], [250, 90, 0.2], [400, 260, 0.15]];
+        const rs = C.map(([x, y, s]) => [K.svg(svg, "rect", { x: x - 28, y: y - 28, width: 56, height: 56, fill: "none", stroke: "var(--warn)", "stroke-width": 1.5 }), s]);
+        const lab = K.svg(svg, "text", { x: 480, y: 80, "font-size": 14, "font-weight": 700 }, "候选框：7 个");
+        K.svg(svg, "text", { x: 480, y: 110, "font-size": 12, class: "muted" }, "① 分数 < 0.35 → 扔掉");
+        K.svg(svg, "text", { x: 480, y: 134, "font-size": 12, class: "muted" }, "② 互相重叠 > 0.4 → 只留最高分");
+        (async () => {
+          if (!(await ctx.wait(800))) return;
+          rs.forEach(([r, s]) => { if (s < 0.35) r.style.opacity = 0.1; }); lab.textContent = "过了阈值：5 个";
+          if (!(await ctx.wait(1000))) return;
+          rs.forEach(([r, s], i) => { if (s >= 0.35 && i !== 0 && i !== 3) r.style.opacity = 0.1; if (i === 0 || i === 3) K.set(r, { stroke: "var(--good)", "stroke-width": 3 }); });
+          lab.textContent = "NMS 之后：2 个";
+        })();
+      },
+    },
+    {
+      title: "推理函数：缩放、还原坐标、算得分", kicker: "第 15 格 · 一帧怎么检测",
+      html: `<p><code>yolox_inference</code> 做三件事：<span data-cell="15">出处</span></p><ul class="tight"><li><code>ValTransform</code> 把画面等比例缩放进 800×1280 的输入框（不够的地方补边）</li><li>网络输出后，用 <code>postprocess</code> 做阈值和 NMS；再把框的坐标<b>除以缩放比例</b>，还原到原图尺寸</li><li>最终得分 = <b>“这里有东西”的把握</b> × <b>“这东西是海星”的把握</b>（第 4、5 列相乘）</li></ul>`,
+      cells: [15], highlight: ["bboxes /= min", "outputs[:, 4] * outputs[:, 5]"],
+      draw(svg, ctx) {
+        K.svg(svg, "rect", { x: 30, y: 60, width: 240, height: 150, fill: "color-mix(in srgb, var(--c1) 22%, var(--panel))", stroke: "var(--line)" });
+        K.svg(svg, "text", { x: 30, y: 50, "font-size": 12 }, "原图");
+        const s1 = star(svg, 150, 130, 14);
+        const box = K.svg(svg, "rect", { x: 300, y: 40, width: 260, height: 180, fill: "var(--panel-2)", stroke: "var(--accent)", "stroke-dasharray": "4 3" });
+        K.svg(svg, "text", { x: 300, y: 32, "font-size": 12, fill: "var(--accent)" }, "模型输入 800×1280（等比缩放 + 补边）");
+        const inner = K.svg(svg, "rect", { x: 300, y: 40, width: 0, height: 0, fill: "color-mix(in srgb, var(--c1) 22%, var(--panel))" });
+        K.svg(svg, "text", { x: 30, y: 270, "font-size": 13, "font-family": "var(--mono)" }, "原图坐标 = 模型坐标 ÷ min(800/原高, 1280/原宽)");
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 13, "font-family": "var(--mono)" }, "得分 = obj_conf × cls_conf   例：0.8 × 0.9 = 0.72");
+        ctx.tween(1000, (t) => { inner.setAttribute("width", 260 * t); inner.setAttribute("height", 162 * t); });
+      },
+    },
+    {
+      title: "先在一张图上试试", kicker: "第 16–17 格 · 画框检查",
+      html: `<p><code>draw_yolox_predictions</code> 把分数够高的框用绿色画出来，上方写“starfish:xx%”。<span data-cell="16">出处</span> 作者挑了训练集里 <code>video_0</code> 的第 9674 帧试跑，再把 BGR 转回 RGB 显示。<span data-cell="17">出处</span></p><p>正式提交前先“目测”一张图，是很好的习惯：坐标还原错了、颜色反了，一眼就能看出来。</p>`,
+      cells: [16, 17], highlight: ["cv2.rectangle", "9674"],
+      draw(svg, ctx) {
+        const g = K.svg(svg, "g"); reef(g, 140, 30, 440, 280);
+        const S = [[250, 140, 0.81], [420, 220, 0.47]];
+        S.forEach(([x, y, s], i) => {
+          star(svg, x, y, 20);
+          const r = K.svg(svg, "rect", { x: x - 28, y: y - 28, width: 0, height: 0, fill: "none", stroke: "var(--good)", "stroke-width": 2.5 });
+          const t = K.svg(svg, "text", { x: x - 28, y: y - 32, "font-size": 12, fill: "var(--good)", opacity: 0 }, `starfish:${(s * 100).toFixed(1)}%`);
+          ctx.wait(300 + i * 700).then((ok) => ok && ctx.tween(500, (k) => { r.setAttribute("width", 56 * k); r.setAttribute("height", 56 * k); t.style.opacity = k; }));
+        });
+        K.svg(svg, "text", { x: 140, y: 330, "font-size": 12, class: "muted" }, "示意画面与分数，不是作者的真实输出");
+      },
+    },
+    {
+      title: "比赛接口：一帧一帧递过来", kicker: "第 18–20 格 · 在线推理",
+      html: `<p>提交时不能直接读测试图片，只能用比赛提供的 <code>greatbarrierreef</code> 环境：<code>iter_test()</code> 像传送带一样，每次递来<b>一帧画面</b>和一张待填的提交表，填完 <code>env.predict()</code> 才能拿到下一帧。<span data-cell="20">出处</span></p><p>这样就保证了模型只能看“现在和过去”，不能偷看“未来”，和真实巡查时边拍边识别的情况一致。也正因为如此，作者的跟踪器只能利用之前的帧。</p>`,
+      cells: [18, 19, 20], highlight: ["make_env", "iter_test"],
+      draw(svg, ctx) {
+        K.svg(svg, "line", { x1: 20, x2: 700, y1: 200, y2: 200, stroke: "var(--ink-3)", "stroke-width": 3 });
+        const frames = [];
+        for (let i = 0; i < 8; i++) {
+          const g = K.svg(svg, "g"); reef(g, 0, 0, 70, 50); star(g, 20 + i * 5, 25, 8);
+          K.svg(g, "text", { x: 35, y: 66, "text-anchor": "middle", "font-size": 10, class: "muted" }, "帧 " + i);
+          frames.push(g);
+        }
+        K.node(svg, 520, 60, 170, 70, "模型 + 跟踪器\n填好 → env.predict()", { fill: "var(--accent-soft)", stroke: "var(--accent)", fs: 12 });
+        K.svg(svg, "text", { x: 20, y: 290, "font-size": 12, class: "muted" }, "传送带：处理完当前帧，下一帧才会出现；看不到“未来”的帧");
+        const pos = (i, t) => 20 + (i - t) * 85;
+        const place = (t) => frames.forEach((g, i) => { const x = 420 - (i - t) * 85; g.setAttribute("transform", `translate(${x},140)`); g.style.opacity = x > 430 || x < -60 ? 0 : x > 400 ? 1 : 0.35; });
+        place(0);
+        ctx.tween(3600, (t) => place(t * 5));
+      },
+    },
+    {
+      title: "跟踪准备：框变成中心点", kicker: "第 21 格 · 跟踪辅助函数",
+      html: `<p>norfair 跟踪器只认“点”，不认“框”。<code>to_norfair</code> 把每个框换成<b>中心点</b> <code>(xc, yc)</code>，宽、高和当前帧号 <code>frame_id</code> 存在 <code>data</code> 里备用。<span data-cell="21">出处</span></p><p><code>euclidean_distance</code> 定义“像不像同一只”：新检测的中心点，和跟踪器<b>估计的</b>位置（<code>tracked_object.estimate</code>）之间的直线距离。距离越近，越可能是同一只海星。</p>`,
+      cells: [21], highlight: ["np.linalg.norm", "Detection(points"],
+      draw(svg, ctx) {
+        const box = [120, 90, 260, 210];
+        K.svg(svg, "rect", { x: box[0], y: box[1], width: box[2] - box[0], height: box[3] - box[1], fill: "none", stroke: "var(--good)", "stroke-width": 2.5 });
+        star(svg, 190, 150, 40);
+        const c = K.svg(svg, "circle", { cx: 190, cy: 150, r: 0, fill: "var(--bad)" });
+        K.svg(svg, "text", { x: 120, y: 240, "font-size": 12, "font-family": "var(--mono)" }, "xc = (x_min + x_max)/2");
+        K.svg(svg, "text", { x: 120, y: 260, "font-size": 12, "font-family": "var(--mono)" }, "yc = (y_min + y_max)/2");
+        const est = K.svg(svg, "circle", { cx: 470, cy: 110, r: 6, fill: "none", stroke: "var(--c5)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 480, y: 100, "font-size": 12, fill: "var(--c5)" }, "跟踪器估计的位置");
+        const det = K.svg(svg, "circle", { cx: 510, cy: 170, r: 6, fill: "var(--bad)" });
+        K.svg(svg, "text", { x: 520, y: 190, "font-size": 12, fill: "var(--bad)" }, "新检测的中心点");
+        const ln = K.svg(svg, "line", { x1: 470, y1: 110, x2: 470, y2: 110, stroke: "var(--ink)", "stroke-dasharray": "4 3" });
+        const d = Math.hypot(40, 60).toFixed(1);
+        const lab = K.svg(svg, "text", { x: 430, y: 250, "font-size": 13 }, "");
+        ctx.tween(500, (t) => c.setAttribute("r", 6 * t))
+          .then((ok) => ok && ctx.tween(700, (t) => { ln.setAttribute("x2", K.lerp(470, 510, t)); ln.setAttribute("y2", K.lerp(110, 170, t)); }))
+          .then((ok) => { if (ok) lab.textContent = `距离 = √(40² + 60²) ≈ ${d} 像素（示意）`; });
+      },
+    },
+    {
+      title: "跟踪器：卡尔曼滤波预测下一帧在哪", kicker: "第 22 格 · Tracker 参数",
+      html: `<p>作者建了一个 <code>Tracker</code>：<span data-cell="22">出处</span></p><ul class="tight"><li><code>distance_threshold = 30</code>：新检测离估计位置超过 30 像素，就不认为是同一只</li><li><code>hit_inertia_min = 3</code>、<code>hit_inertia_max = 6</code>：每个目标有一个“血条”，被检测到就加血（最多 6），没检测到就掉血，掉到下限就删除这个目标</li><li><code>initialization_delay = 1</code>：新目标要再被确认一次才正式开始跟踪</li></ul><p>“估计位置”是怎么来的？norfair 内部用 filterpy 的<b>卡尔曼滤波</b>（第 10 格装的那个库）：根据之前的位置推算速度，先<b>预测</b>这一帧它该在哪，再用新的检测<b>修正</b>。这是统计估计方法，不是神经网络。</p>`,
+      cells: [22], highlight: ["distance_threshold=30", "hit_inertia_min=3", "hit_inertia_max=6", "initialization_delay=1"],
+      draw(svg, ctx) {
+        const truth = (t) => [80 + t * 70, 230 - t * 22 + 12 * Math.sin(t)];
+        const r = K.rng(4), meas = [];
+        for (let t = 0; t < 8; t++) { const p = truth(t); meas.push([p[0] + K.randn(r) * 10, p[1] + K.randn(r) * 10]); }
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 12, class: "muted" }, "红点 = YOLOX 每帧给的中心点（有抖动）；紫圈 = 预测；绿线 = 修正后的估计（示意）");
+        let est = meas[0].slice(), vel = [60, -20];
+        const path = [est.slice()];
+        const pts = [];
+        (async () => {
+          for (let t = 1; t < 8; t++) {
+            const pred = [est[0] + vel[0], est[1] + vel[1]];
+            const pc = K.svg(svg, "circle", { cx: pred[0], cy: pred[1], r: 0, fill: "none", stroke: "var(--c5)", "stroke-width": 2 });
+            if (!(await ctx.tween(250, (k) => pc.setAttribute("r", 14 * k)))) return;
+            const m = meas[t];
+            pts.push(K.svg(svg, "circle", { cx: m[0], cy: m[1], r: 4, fill: "var(--bad)" }));
+            if (!(await ctx.wait(200))) return;
+            const g = 0.5, ne = [pred[0] + g * (m[0] - pred[0]), pred[1] + g * (m[1] - pred[1])];
+            vel = [vel[0] + 0.3 * (ne[0] - est[0] - vel[0]), vel[1] + 0.3 * (ne[1] - est[1] - vel[1])];
+            K.svg(svg, "line", { x1: est[0], y1: est[1], x2: ne[0], y2: ne[1], stroke: "var(--good)", "stroke-width": 3 });
+            est = ne;
+          }
+        })();
+        K.svg(svg, "circle", { cx: meas[0][0], cy: meas[0][1], r: 4, fill: "var(--bad)" });
+        K.svg(svg, "text", { x: 30, y: 320, "font-size": 13 }, "预测（按速度往前推） → 看到新检测 → 两者取折中 → 更新速度");
+      },
+    },
+    {
+      title: "补回漏检：只往后补一帧", kicker: "第 22 格 · 推理循环",
+      html: `<p>主循环里，每一帧先跑 YOLOX，分数过 0.35 的框直接写进提交。然后 <code>tracker.update</code> 更新所有跟踪目标，对每个目标检查它<b>最后一次被检测到</b>是哪一帧：<span data-cell="22">出处</span></p><ul class="tight"><li>就是这一帧 → 已经提交过了，跳过</li><li>是<b>上一帧</b>（这一帧漏了）→ 用卡尔曼估计的中心点 + 上次的宽高和分数，补一个框</li><li>更早 → 不补（“Track only one frame forward”）</li></ul><p>比赛用 F2 分数，漏掉一只的代价比多报一只大，所以“宁可补上”是划算的。作者原文说加跟踪是为了提高召回率和 F2。<span data-cell="0">出处</span></p>`,
+      cells: [22], highlight: ["last_detected_frame_id + 1 != frame_id", "tobj.estimate[0]", "tracker.update"],
+      draw(svg, ctx) {
+        const N = 8, miss = [3, 5, 6];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 12, class: "muted" }, "同一只海星连续 8 帧（示意）：第 3、5、6 帧 YOLOX 没检测到");
+        const cells = [];
+        for (let i = 0; i < N; i++) {
+          const x = 30 + i * 84;
+          const g = K.svg(svg, "g"); reef(g, x, 50, 76, 60); star(g, x + 20 + i * 4, 80, 10);
+          K.svg(svg, "text", { x: x + 38, y: 128, "text-anchor": "middle", "font-size": 11 }, "帧 " + i);
+          const det = !miss.includes(i);
+          const st = K.svg(svg, "text", { x: x + 38, y: 160, "text-anchor": "middle", "font-size": 12, fill: det ? "var(--good)" : "var(--bad)" }, det ? "✓ 检测到" : "✗ 漏检");
+          const fill = K.svg(svg, "text", { x: x + 38, y: 190, "text-anchor": "middle", "font-size": 12, opacity: 0 }, "");
+          cells.push({ i, det, fill, x });
+        }
+        K.svg(svg, "text", { x: 30, y: 240, "font-size": 13 }, "第 3 帧：上一帧（2）检测到 → 补一个框 ✓");
+        K.svg(svg, "text", { x: 30, y: 264, "font-size": 13 }, "第 5 帧：上一帧（4）检测到 → 补 ✓；第 6 帧：上一帧也漏了 → 不补");
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12, class: "muted" }, "补出来的框 = 卡尔曼估计的中心点 + 上一次的宽、高、分数");
+        (async () => {
+          for (const c of cells) {
+            if (!(await ctx.wait(260))) return;
+            if (c.det) continue;
+            const prevDet = cells[c.i - 1] && cells[c.i - 1].det;
+            c.fill.textContent = prevDet ? "补上（跟踪）" : "不补";
+            K.set(c.fill, { fill: prevDet ? "var(--c5)" : "var(--ink-3)", opacity: 1 });
+            if (prevDet) K.svg(svg, "rect", { x: c.x + 6 + c.i * 4, y: 66, width: 28, height: 28, fill: "none", stroke: "var(--c5)", "stroke-width": 2, "stroke-dasharray": "4 2" });
+          }
+        })();
+      },
+    },
+    {
+      title: "生成提交文件", kicker: "第 23–24 格 · 收尾",
+      html: `<p>比赛环境在循环结束后自动生成 <code>submission.csv</code>，作者读出来看看前几行。<span data-cell="23">出处</span> 每行对应一帧，<code>annotations</code> 列是这一帧所有框的“分数 x y 宽 高”，包括跟踪补出来的框。</p><p>回顾一下分工：<b>YOLOX（深度学习）</b>负责每一帧“看见”海星；<b>NMS（规则）</b>去重；<b>卡尔曼滤波（统计估计）</b>预测位置；<b>按距离配对（经典匹配）</b>把前后帧连起来。</p>`,
+      cells: [23], highlight: ["submission.csv"],
+      draw(svg, ctx) {
+        const parts = [["YOLOX\n卷积神经网络", "深度学习", "var(--c1)"], ["阈值 + NMS\n去掉重复框", "经典规则", "var(--c4)"], ["卡尔曼滤波\n预测 + 修正位置", "统计估计", "var(--c5)"], ["距离匹配\n前后帧配对", "经典算法", "var(--c3)"]];
+        const gs = parts.map((p, i) => {
+          const g = K.svg(svg, "g");
+          K.node(g, 20 + i * 175, 90, 160, 80, p[0], { fill: `color-mix(in srgb, ${p[2]} 16%, var(--panel))`, stroke: p[2] });
+          K.svg(g, "text", { x: 100 + i * 175, y: 196, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: p[2] }, p[1]);
+          if (i < 3) K.arrow(g, 182 + i * 175, 130, 193 + i * 175, 130);
+          g.style.opacity = 0; return g;
+        });
+        K.svg(svg, "text", { x: 20, y: 260, "font-size": 13, "font-family": "var(--mono)" }, "annotations = \"0.81 230 112 56 54 0.47 391 190 58 60\"（示意）");
+        (async () => { for (const g of gs) if (!(await ctx.tween(400, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：阈值 + NMS ---------- */
+  function iou(a, b) {
+    const x1 = Math.max(a.x, b.x), y1 = Math.max(a.y, b.y), x2 = Math.min(a.x + a.w, b.x + b.w), y2 = Math.min(a.y + a.h, b.y + b.h);
+    const I = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+    return I / (a.w * a.h + b.w * b.h - I);
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "conf", label: "置信度阈值 confthre（作者 0.35）", min: 0.05, max: 0.95, step: 0.01, value: 0.35 },
+      { id: "nms", label: "NMS 重叠阈值 nmsthre（作者 0.4）", min: 0.1, max: 0.9, step: 0.01, value: 0.4 },
+      { id: "seed", label: "换一批候选框", button: true },
+    ],
+    note: "模拟：画面里有 5 只真实海星（灰色星形），模型在每只周围吐出几个带分数的候选框，另有一些随机误报。浏览器现场执行“先按分数筛、再按 IoU 去重”的 NMS，并和真实位置对比。",
+    render(svg, v) {
+      const r = K.rng(31 + v.seed * 13), W = 600, H = 280;
+      const truth = []; for (let i = 0; i < 5; i++) truth.push({ x: 40 + r() * 480, y: 30 + r() * 190, w: 50, h: 50 });
+      const cand = [];
+      truth.forEach((t, k) => {
+        const hard = k === 4; // 最后一只比较模糊，分数偏低
+        for (let j = 0; j < 4; j++) cand.push({ x: t.x + K.randn(r) * 4, y: t.y + K.randn(r) * 4, w: 50 + K.randn(r) * 3, h: 50 + K.randn(r) * 3, s: K.clamp((hard ? 0.38 : 0.75) + K.randn(r) * 0.12 - j * 0.05, 0.02, 0.99) });
+      });
+      for (let j = 0; j < 8; j++) cand.push({ x: 20 + r() * 520, y: 20 + r() * 200, w: 45, h: 45, s: K.clamp(0.12 + r() * 0.35, 0, 1) });
+      K.svg(svg, "rect", { x: 20, y: 10, width: W, height: H, rx: 4, fill: "color-mix(in srgb, var(--c1) 18%, var(--panel))" });
+      truth.forEach((t) => star(svg, 20 + t.x + 25, 10 + t.y + 25, 18, "var(--ink-3)", 0.6));
+      const pass = cand.filter((c) => c.s >= v.conf).sort((a, b) => b.s - a.s), keep = [];
+      pass.forEach((c) => { if (keep.every((k) => iou(k, c) <= v.nms)) keep.push(c); });
+      cand.forEach((c) => { if (c.s < v.conf) K.svg(svg, "rect", { x: 20 + c.x, y: 10 + c.y, width: c.w, height: c.h, fill: "none", stroke: "var(--ink-3)", "stroke-dasharray": "2 3", opacity: 0.35 }); });
+      // 与真实海星配对
+      const used = new Set(); let TP = 0;
+      keep.forEach((k) => {
+        let best = -1, bi = -1; truth.forEach((t, i) => { const u = iou(k, t); if (!used.has(i) && u > best) { best = u; bi = i; } });
+        const ok = best >= 0.3; if (ok) { used.add(bi); TP++; }
+        K.svg(svg, "rect", { x: 20 + k.x, y: 10 + k.y, width: k.w, height: k.h, fill: "none", stroke: ok ? "var(--good)" : "var(--bad)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 22 + k.x, y: 6 + k.y, "font-size": 10, fill: ok ? "var(--good)" : "var(--bad)" }, k.s.toFixed(2));
+      });
+      const FP = keep.length - TP, FN = truth.length - TP;
+      const P = keep.length ? TP / keep.length : 0, R = TP / truth.length, F2 = P + R ? (5 * P * R) / (4 * P + R) : 0;
+      K.svg(svg, "text", { x: 20, y: 310, "font-size": 12, class: "muted" }, "绿框 = 对上真实海星，红框 = 误报或重复框，灰虚线 = 被分数阈值筛掉的候选");
+      return { readout: [
+        { k: "保留的框", v: keep.length + " 个" },
+        { k: "抓到 / 漏掉 / 误报", v: `${TP} / ${FN} / ${FP}` },
+        { k: "F2 分数", v: F2.toFixed(3), color: F2 > 0.8 ? "var(--good)" : "var(--bad)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：一维卡尔曼滤波（匀速模型） ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 336,
+    controls: [
+      { id: "noise", label: "检测框中心的抖动（像素）", min: 1, max: 40, step: 1, value: 15 },
+      { id: "q", label: "卡尔曼的“相信模型”程度（过程噪声，越小越平滑）", min: -3, max: 2, step: 0.1, value: -1, fmt: (v) => Math.pow(10, v).toFixed(3) },
+      { id: "miss", label: "漏检概率", min: 0, max: 0.6, step: 0.05, value: 0.2 },
+      { id: "seed", label: "重新生成", button: true },
+    ],
+    note: "一只海星在画面里横向移动（摄像机在前进，带一点加速）。每帧 YOLOX 给出带噪声的中心点，有些帧漏检。浏览器现场运行匀速模型的卡尔曼滤波：每帧先预测，有检测就修正，没检测就只预测。",
+    render(svg, v) {
+      const r = K.rng(7 + v.seed * 11), T = 80, q = Math.pow(10, v.q), R = v.noise * v.noise;
+      const truth = [], meas = [];
+      for (let t = 0; t < T; t++) { const x = 100 + 6 * t + 0.02 * t * t + 20 * Math.sin(t / 9); truth.push(x); meas.push(r() < v.miss ? null : x + K.randn(r) * v.noise); }
+      // 状态 [位置, 速度]，协方差 P
+      let x = [meas.find((m) => m != null) || 100, 6], P = [[100, 0], [0, 10]];
+      const est = [];
+      for (let t = 0; t < T; t++) {
+        // 预测：x = F x，P = F P F' + Q
+        x = [x[0] + x[1], x[1]];
+        P = [[P[0][0] + P[0][1] + P[1][0] + P[1][1] + q / 3, P[0][1] + P[1][1] + q / 2], [P[1][0] + P[1][1] + q / 2, P[1][1] + q]];
+        if (meas[t] != null) {
+          const S = P[0][0] + R, Kg = [P[0][0] / S, P[1][0] / S], y = meas[t] - x[0];
+          x = [x[0] + Kg[0] * y, x[1] + Kg[1] * y];
+          P = [[(1 - Kg[0]) * P[0][0], (1 - Kg[0]) * P[0][1]], [P[1][0] - Kg[1] * P[0][0], P[1][1] - Kg[1] * P[0][1]]];
+        }
+        est.push(x[0]);
+      }
+      const lo = Math.min(...truth) - 60, hi = Math.max(...truth) + 60;
+      const ax = K.axes(svg, { x: 50, y: 20, w: 560, h: 240 }, [0, T - 1], [lo, hi], { xlabel: "帧号", yfmt: (v) => Math.round(v) });
+      let dT = "", dE = "";
+      truth.forEach((y, t) => (dT += (dT ? "L" : "M") + ax.sx(t) + "," + ax.sy(y)));
+      est.forEach((y, t) => (dE += (dE ? "L" : "M") + ax.sx(t) + "," + ax.sy(y)));
+      K.svg(svg, "path", { d: dT, fill: "none", stroke: "var(--ink-3)", "stroke-width": 2, "stroke-dasharray": "5 4" });
+      meas.forEach((m, t) => { if (m != null) K.svg(svg, "circle", { cx: ax.sx(t), cy: ax.sy(m), r: 2.8, fill: "var(--bad)", opacity: 0.75 }); else K.svg(svg, "line", { x1: ax.sx(t), x2: ax.sx(t), y1: 255, y2: 262, stroke: "var(--warn)", "stroke-width": 2 }); });
+      K.svg(svg, "path", { d: dE, fill: "none", stroke: "var(--good)", "stroke-width": 2.5 });
+      K.svg(svg, "text", { x: 56, y: 326, "font-size": 12, fill: "var(--ink-3)" }, "-- 真实位置");
+      K.svg(svg, "text", { x: 150, y: 326, "font-size": 12, fill: "var(--bad)" }, "● YOLOX 检测（带抖动）");
+      K.svg(svg, "text", { x: 320, y: 326, "font-size": 12, fill: "var(--good)" }, "— 卡尔曼估计");
+      K.svg(svg, "text", { x: 440, y: 326, "font-size": 12, fill: "var(--warn)" }, "| 底部橙色 = 漏检帧");
+      let eM = 0, nM = 0, eK = 0;
+      truth.forEach((y, t) => { if (meas[t] != null) { eM += (meas[t] - y) ** 2; nM++; } eK += (est[t] - y) ** 2; });
+      const rm = Math.sqrt(eM / Math.max(1, nM)), rk = Math.sqrt(eK / T);
+      return { readout: [
+        { k: "检测本身的误差", v: rm.toFixed(1) + " 像素" },
+        { k: "卡尔曼估计的误差", v: rk.toFixed(1) + " 像素", color: rk < rm ? "var(--good)" : "var(--bad)" },
+        { k: "漏检帧数", v: meas.filter((m) => m == null).length + " / " + T },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：跟踪补漏与 F2 ---------- */
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "recall", label: "YOLOX 每帧检出一只海星的概率", min: 0.3, max: 0.98, step: 0.01, value: 0.7 },
+      { id: "gap", label: "最多往后补几帧（作者 = 1）", min: 0, max: 6, step: 1, value: 1 },
+      { id: "life", label: "海星平均在画面里停留多少帧", min: 3, max: 60, step: 1, value: 20 },
+      { id: "seed", label: "重新模拟", button: true },
+    ],
+    note: "模拟 300 帧视频：海星随机进出画面，每帧 YOLOX 以设定的概率检出它，另有少量误报。跟踪器对“最后一次检测在 k 帧以内”的目标补框；海星已经离开画面时补出来的框就成了误报。现场统计精确率、召回率和 F2 = 5PR / (4P + R)。",
+    render(svg, v) {
+      const r = K.rng(77 + v.seed * 5), T = 300, objs = [];
+      let t = 0; while (t < T) { const s = t + Math.floor(r() * 12), L = Math.max(2, Math.round(v.life * (0.5 + r()))); objs.push([s, Math.min(T, s + L)]); t = s + Math.floor(L * 0.6); }
+      let TP0 = 0, FP0 = 0, FN0 = 0, TP1 = 0, FP1 = 0, FN1 = 0;
+      const ax = K.axes(svg, { x: 40, y: 20, w: 580, h: 170 }, [0, T], [0, objs.length + 1], { yticks: 0, xlabel: "帧号（每一行是一只海星）" });
+      objs.forEach(([s, e], k) => {
+        const y = ax.sy(k + 1);
+        K.svg(svg, "line", { x1: ax.sx(s), x2: ax.sx(e), y1: y, y2: y, stroke: "var(--line)", "stroke-width": 4 });
+        let last = -99;
+        for (let f = s; f < e + v.gap; f++) {
+          const inside = f < e, det = inside && r() < v.recall;
+          if (det) { last = f; TP0++; TP1++; K.svg(svg, "rect", { x: ax.sx(f), y: y - 2, width: 1.9, height: 4, fill: "var(--c1)" }); continue; }
+          if (inside) FN0++;
+          const fill = f - last <= v.gap && last >= 0;
+          if (fill) { if (inside) { TP1++; K.svg(svg, "rect", { x: ax.sx(f), y: y - 2, width: 1.9, height: 4, fill: "var(--c5)" }); } else { FP1++; K.svg(svg, "rect", { x: ax.sx(f), y: y - 2, width: 1.9, height: 4, fill: "var(--bad)" }); } }
+          else if (inside) FN1++;
+        }
+      });
+      const fpRand = Math.round(T * 0.08); FP0 += fpRand; FP1 += fpRand;
+      const f2 = (TP, FP, FN) => { const P = TP / Math.max(1, TP + FP), R = TP / Math.max(1, TP + FN); return [P, R, P + R ? (5 * P * R) / (4 * P + R) : 0]; };
+      const a = f2(TP0, FP0, FN0), b = f2(TP1, FP1, FN1);
+      K.svg(svg, "text", { x: 40, y: 236, "font-size": 12, fill: "var(--c1)" }, "■ YOLOX 检出");
+      K.svg(svg, "text", { x: 140, y: 236, "font-size": 12, fill: "var(--c5)" }, "■ 跟踪补回（对的）");
+      K.svg(svg, "text", { x: 280, y: 236, "font-size": 12, fill: "var(--bad)" }, "■ 补到海星离开之后（误报）");
+      K.svg(svg, "text", { x: 40, y: 266, "font-size": 13 }, `不跟踪：精确率 ${(a[0] * 100).toFixed(1)}%，召回率 ${(a[1] * 100).toFixed(1)}%`);
+      K.svg(svg, "text", { x: 40, y: 290, "font-size": 13 }, `补 ${v.gap} 帧：精确率 ${(b[0] * 100).toFixed(1)}%，召回率 ${(b[1] * 100).toFixed(1)}%`);
+      return { readout: [
+        { k: "F2（不跟踪）", v: a[2].toFixed(3) },
+        { k: "F2（跟踪补漏）", v: b[2].toFixed(3), color: b[2] >= a[2] ? "var(--good)" : "var(--bad)" },
+        { k: "补回的正确框", v: (TP1 - TP0) + " 个" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

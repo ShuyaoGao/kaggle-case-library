@@ -1,0 +1,744 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>协同过滤推荐电影</title>
+<meta name="description" content="Kaggle 案例拆解：fast.ai 第 8 章，用 MovieLens 10 万条评分从零写出矩阵分解推荐模型：潜在因子、点积、嵌入、偏置、权重衰减，再到神经网络版。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">评分数据 · 推荐系统 · 协同过滤</div>
+  <h1>电影推荐：只看“谁给什么打了几分”，学出每个人的口味</h1>
+  <p class="en">Collaborative Filtering Deep Dive（Practical Deep Learning for Coders 第 8 章）</p>
+  <div class="tags">
+    <span class="tag dm">数据挖掘</span><span class="tag ml">机器学习</span><span class="tag dl">深度学习</span>
+    <span class="tag method">协同过滤</span><span class="tag method">潜在因子 / 矩阵分解</span><span class="tag method">点积</span>
+    <span class="tag method">Embedding 嵌入</span><span class="tag method">偏置项</span><span class="tag method">权重衰减（L2）</span>
+    <span class="tag method">PCA 看嵌入</span><span class="tag method">余弦相似度</span><span class="tag method">神经网络协同过滤</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Jeremy Howard</b>（fast.ai）</span>
+    <span>Kaggle 点赞 <b>2,043</b>（2026-11 抓取）</span>
+    <span>数据集 <b>MovieLens 100K</b>（fastai <code>URLs.ML_100k</code>）</span>
+    <span><a href="https://www.kaggle.com/code/jhoward/collaborative-filtering-deep-dive" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">10 万条“谁给哪部电影打了几分”</div><p>MovieLens 电影评分数据的一个子集：每条只有用户编号、电影编号、评分、时间戳四样东西，没有电影类型，也没有用户年龄。<span data-cell="5">出处</span></p></div>
+    <div class="card panel"><h3>要做什么</h3><div class="big">把“用户 × 电影”大表里的空格填上</div><p>空格就是“这个人还没看过这部片”。猜出他会打几分，就能把分高的推荐给他。<span data-cell="12">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">给每个人、每部电影各配一串“隐藏口味分”</div><p>用户向量和电影向量做点积得到预测分，从随机数开始用梯度下降学；再加偏置项、权重衰减，最后换成神经网络版对比。<span data-cell="28">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">没人告诉它电影类型，它自己学出了“经典 vs 流行”</div><p>加了权重衰减后“好多了”；学到的电影偏置和 PCA 方向都能解释；神经网络版比点积版“稍差一点”，但能加入更多信息。<span data-cell="96">出处</span> <span data-cell="133">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据来自明尼苏达大学 GroupLens 实验室公开的 <b>MovieLens</b> 电影评分数据。完整版有几千万条，作者只用了其中 <b>10 万条</b>的小版本（ML-100K），由 fastai 的 <code>untar_data</code> 自动下载。<span data-cell="5">出处</span></p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">评分条数（本例）</div><div class="v">100,000</div></div>
+        <div class="stat-tile"><div class="k">完整版评分条数</div><div class="v" style="font-size:16px">约 2500 万</div></div>
+        <div class="stat-tile"><div class="k">主表字段</div><div class="v">4 列</div></div>
+        <div class="stat-tile"><div class="k">附表 u.item</div><div class="v" style="font-size:16px">编号 → 片名</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">10 万条与“完整版 2500 万条”都见作者第 5 格 <span data-cell="5">出处</span>；四列字段见第 8 格 <span data-cell="8">出处</span>；片名表见第 31–32 格 <span data-cell="32">出处</span>。用户数、电影数作者没有写在文字里，这里不列。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>user</code></td><td>用户编号（只有编号，没有任何个人信息）</td><td>类别（编号）</td></tr>
+        <tr><td><code>movie</code></td><td>电影编号，之后用 <code>u.item</code> 换成片名 <code>title</code></td><td>类别（编号）</td></tr>
+        <tr><td><code>rating</code></td><td><b>要预测的答案</b>：这个人给这部片打的分</td><td>数值</td></tr>
+        <tr><td><code>timestamp</code></td><td>打分的时间（本章没有用到）</td><td>数值</td></tr>
+      </table></div>
+      <p class="callout">这份数据<b>只有“谁 × 什么 × 几分”</b>。作者强调：协同过滤不需要知道电影本身的任何信息，只需要知道谁喜欢看它。<span data-cell="2">出处</span></p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead">这一章原本是 fast.ai 教材第 8 章，文字多、代码短。作者从“手工给电影打口味分”讲起，一步步写出完整的推荐模型。</p>
+  <div id="pipe"></div>
+  <div data-at="23">
+    <h3>实验 A · 口味点积配对器 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labDot"></div>
+  </div>
+  <div data-at="72">
+    <h3>实验 B · 现场训练一个迷你矩阵分解 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labMF"></div>
+  </div>
+  <div data-at="110">
+    <h3>实验 C · “像不像”怎么量：距离还是夹角 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labSim"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>加了偏置项的模型一开始反而更差：验证损失训练到一半就开始变坏，这是过拟合</td><td><span data-cell="67">第 67 格</span></td></tr>
+        <tr><td>加上权重衰减 <code>wd=0.1</code> 之后“好多了”</td><td><span data-cell="73">第 73 格</span></td></tr>
+        <tr><td>电影偏置能告诉我们：哪怕口味对得上，大家也普遍不爱看的片；偏置最高的片里有《洛城机密》（LA Confidential）</td><td><span data-cell="92">第 92 格</span> <span data-cell="94">第 94 格</span></td></tr>
+        <tr><td>对电影向量做 PCA，模型似乎自己发现了“经典片 vs 流行文化片”（或“口碑片”）这个方向</td><td><span data-cell="96">第 96 格</span></td></tr>
+        <tr><td>用嵌入向量的相似度可以找出和《沉默的羔羊》最像的电影</td><td><span data-cell="110">第 110 格</span></td></tr>
+        <tr><td>神经网络版 <code>EmbeddingNN</code> 比点积版稍差，但可以直接加入用户、电影、时间等其他信息</td><td><span data-cell="133">第 133 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">各次训练的损失值（MSE）写在运行输出里，Kaggle 下载的源码不带输出，作者的文字里也没有写具体数字，所以这里不列分数。想看可以点上方链接在 Kaggle 上看作者的运行结果。</p>
+      <p class="callout warn">原文小问题：第 109 格的文字用勾股定理讲“距离”，第 110 格的代码实际用的是<b>余弦相似度</b>（看夹角，不看长短），两者不是一回事；第 95 格文字说画“最强的两个 PCA 方向”，代码画的是第 1 和第 3 个方向（<code>fac0</code> 和 <code>fac2</code>）。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一个用户和一部他没看过的电影，输出预计评分；对所有没看过的片排序，取前几名做推荐。</li>
+        <li><b>同类问题：</b>视频、音乐、商品、新闻推荐；作者还提到“病人 × 诊断”、“用户 × 链接点击”这类“谁 × 什么”的表都能用。<span data-cell="2">出处</span></li>
+        <li><b>可迁移的套路：</b>把每个“东西”变成一串可学习的数字（嵌入）→ 用简单的结构（点积 + 偏置）组合 → 加权重衰减防过拟合 → 事后解释学到的数字。</li>
+        <li><b>要小心：</b>新用户、新电影没有历史（冷启动）；少数狂热用户会带偏推荐，并形成反馈回路。<span data-cell="113">出处</span> <span data-cell="114">出处</span></li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>潜在因子与点积：手工示例 <span data-cell="17">第 17 格</span></li>
+        <li>嵌入 = 用独热向量查表 <span data-cell="41">第 41 格</span></li>
+        <li>点积模型 DotProduct <span data-cell="53">第 53 格</span>，sigmoid_range 限制范围 <span data-cell="61">第 61 格</span></li>
+        <li>偏置项 DotProductBias <span data-cell="64">第 64 格</span>，权重衰减 <span data-cell="72">第 72 格</span></li>
+        <li>自己写嵌入：nn.Parameter <span data-cell="85">第 85 格</span></li>
+        <li>解释：偏置排序、PCA <span data-cell="95">第 95 格</span>，余弦相似度 <span data-cell="110">第 110 格</span></li>
+        <li>神经网络版 CollabNN / EmbeddingNN <span data-cell="120">第 120 格</span> <span data-cell="126">第 126 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>模型从来没被告知“科幻”“动作”这些词，为什么它学出来的数字有时能被人解释成这些概念？又为什么有时完全解释不了？</li>
+      <li>直接按“平均分”给电影排名，和按模型学到的“电影偏置”排名，结果会一样吗？哪个更公平？（作者在第 92 格讨论过）</li>
+      <li>一个新注册、一部电影都没评过的用户，你会给他推荐什么？作者说“问他几个问题”，你会问哪几个？</li>
+      <li>如果一小群人特别爱打分、只看一类片，推荐系统会被他们带向哪里？怎么发现这种反馈回路？</li>
+      <li>第 109 格讲的是“距离”，第 110 格用的是“夹角”。对推荐来说，一部人人都看的大片和一部小众片，用这两种量法会得到什么不同的“相似”？</li>
+      <li>神经网络版更灵活却稍差一点。什么时候你会宁可用更简单的点积模型？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Jeremy Howard（内容取自 fast.ai 与 O'Reilly 出版的《Practical Deep Learning for Coders》第 8 章），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：GroupLens Research, MovieLens 100K。
+</footer>
+</main>
+
+<script src="nb/movielens-collab-filtering.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const tint = (c, p) => `color-mix(in srgb, ${c} ${p}%, var(--panel))`;
+
+  /* 画一个横向的小条形向量：vals 在 [-1,1] */
+  function vecBars(svg, x, y, vals, labels, color, w) {
+    w = w || 120;
+    const out = [];
+    vals.forEach((v, i) => {
+      const yy = y + i * 26;
+      K.svg(svg, "line", { x1: x + w / 2, y1: yy - 2, x2: x + w / 2, y2: yy + 18, stroke: "var(--line)" });
+      const r = K.svg(svg, "rect", { x: x + w / 2, y: yy, width: 0, height: 16, rx: 2, fill: color });
+      if (labels) K.svg(svg, "text", { x: x - 6, y: yy + 12, "text-anchor": "end", "font-size": 12, class: "muted" }, labels[i]);
+      const t = K.svg(svg, "text", { x: x + w + 6, y: yy + 12, "font-size": 12, "font-family": "var(--mono)" }, v.toFixed(2));
+      out.push({ r, v, set(k) { const ww = Math.abs(v) * (w / 2) * k; r.setAttribute("width", ww); r.setAttribute("x", v < 0 ? x + w / 2 - ww : x + w / 2); } });
+    });
+    return out;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "协同过滤：看口味相近的人喜欢什么", kicker: "第 0–6 格 · 问题与思路",
+      html: `<p>作者先说清要解决的问题：有一批用户、一批电影，想知道<b>该给谁推荐什么</b>。通用办法叫<b>协同过滤</b>：看你喜欢过什么，找到也喜欢这些的人，再把他们喜欢、你还没看的推荐给你。<span data-cell="2">出处</span></p><p>关键想法是<b>潜在因子</b>：电影背后有“科幻程度”“动作多少”“老不老”之类的隐藏属性，没人写进数据表，但它们确实在影响大家的选择。</p>`,
+      cells: [2],
+      draw(svg, ctx) {
+        const users = [["你", 70], ["同学甲", 170], ["同学乙", 270]];
+        const movies = ["电影 A", "电影 B", "电影 C", "电影 D"];
+        users.forEach(([n, y]) => K.node(svg, 40, y - 22, 110, 44, n, { bold: n === "你", stroke: n === "你" ? "var(--accent)" : "var(--line)" }));
+        movies.forEach((m, i) => K.node(svg, 520, 34 + i * 72, 120, 44, m));
+        const links = [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [2, 3]];
+        const ls = links.map(([u, m]) => {
+          const l = K.svg(svg, "line", { x1: 150, y1: users[u][1], x2: 520, y2: 56 + m * 72, stroke: "var(--c1)", "stroke-width": 2 });
+          l.style.opacity = 0; return l;
+        });
+        const rec = K.svg(svg, "line", { x1: 150, y1: 70, x2: 520, y2: 56 + 2 * 72, stroke: "var(--good)", "stroke-width": 3, "stroke-dasharray": "7 5" });
+        rec.style.opacity = 0;
+        const t1 = K.svg(svg, "text", { x: 250, y: 330, "font-size": 13, fill: "var(--good)", "font-weight": 700 }, "你和同学甲口味相近 → 推荐他喜欢、你没看的电影 C");
+        t1.style.opacity = 0;
+        K.svg(svg, "text", { x: 260, y: 22, "font-size": 12, class: "muted" }, "蓝线 = 喜欢过（示意）");
+        (async () => {
+          for (let i = 0; i < ls.length; i++) if (!(await ctx.tween(260, (t) => (ls[i].style.opacity = t)))) return;
+          if (!(await ctx.wait(400))) return;
+          await ctx.tween(700, (t) => { rec.style.opacity = t; t1.style.opacity = t; });
+        })();
+      },
+    },
+    {
+      title: "评分数据：一张大部分是空格的表", kicker: "第 7–12 格 · 读数据",
+      html: `<p>作者用 <code>pd.read_csv</code> 读入主表 <code>u.data</code>：每一行就是“用户、电影、评分、时间戳”。<span data-cell="9">出处</span></p><p>把它<b>交叉成一张表</b>（行是用户，列是电影）更好理解：有分的格子是看过的，<b>空格是没看过的</b>，这些空格正是模型要填的。原 notebook 这里放的是一张截图，下载版里没有图片。</p>`,
+      cells: [9], highlight: ["names=['user','movie','rating','timestamp']"],
+      draw(svg, ctx) {
+        const r = K.rng(4), R = 6, C = 8, cells = [];
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 13, class: "muted" }, "长表（一行一条评分）");
+        K.svg(svg, "text", { x: 330, y: 26, "font-size": 13, class: "muted" }, "交叉表：行=用户，列=电影（示意）");
+        const rows = [];
+        for (let i = 0; i < 9; i++) rows.push(K.svg(svg, "text", { x: 30, y: 54 + i * 24, "font-size": 12, "font-family": "var(--mono)" }, `user ${1 + Math.floor(r() * 6)}  movie ${1 + Math.floor(r() * 8)}  ★${1 + Math.floor(r() * 5)}`));
+        for (let i = 0; i < R; i++) for (let j = 0; j < C; j++) {
+          const has = r() < 0.38;
+          const x = 340 + j * 44, y = 44 + i * 44;
+          const rect = K.svg(svg, "rect", { x, y, width: 40, height: 40, rx: 4, fill: has ? tint("var(--c1)", 30) : "var(--panel-2)", stroke: "var(--line)" });
+          const t = K.svg(svg, "text", { x: x + 20, y: y + 25, "text-anchor": "middle", "font-size": 13 }, has ? String(1 + Math.floor(r() * 5)) : "?");
+          if (!has) t.style.fill = "var(--warn)";
+          rect.style.opacity = 0; t.style.opacity = 0;
+          cells.push([rect, t, has]);
+        }
+        K.svg(svg, "text", { x: 340, y: 322, "font-size": 12, fill: "var(--warn)" }, "“?” = 还没看过 → 模型要猜的分数");
+        ctx.wait(400).then((ok) => ok && ctx.tween(1600, (t) => cells.forEach((c, k) => {
+          const v = K.clamp(t * cells.length - k * 0.6, 0, 1);
+          if (c[2]) { c[0].style.opacity = v; c[1].style.opacity = v; } else { c[0].style.opacity = v; c[1].style.opacity = K.clamp(t * 2 - 1, 0, 1); }
+        })));
+      },
+    },
+    {
+      title: "潜在因子：给口味和电影打分，再做点积", kicker: "第 13–24 格 · 核心想法",
+      html: `<p>假设只有三个隐藏属性：科幻、动作、老片，每个取 −1 到 +1。作者给电影《The Last Skywalker》打成 <code>[0.98, 0.9, -0.9]</code>，给一个爱看新科幻动作片的用户打成 <code>[0.9, 0.8, -0.6]</code>。<span data-cell="13">出处</span></p><p>两串数<b>对应位置相乘再相加</b>，叫<b>点积</b>，得到的数就是“合不合口味”。按这两格的数字算：0.9×0.98 + 0.8×0.9 + (−0.6)×(−0.9) = <b>2.142</b>；换成《卡萨布兰卡》<code>[-0.99, -0.3, 0.8]</code> 则是 <b>−1.611</b>。<span data-cell="21">出处</span></p><p>问题是：真实世界里我们既不知道该有哪些属性，也不知道每个人每部片该打几分，所以要<b>让模型自己学</b>。<span data-cell="24">出处</span></p>`,
+      cells: [13, 15, 17, 21, 23], highlight: ["(user1*last_skywalker).sum()", "(user1*casablanca).sum()"],
+      draw(svg, ctx) {
+        const L = ["科幻", "动作", "老片"];
+        const u = [0.9, 0.8, -0.6], m1 = [0.98, 0.9, -0.9], m2 = [-0.99, -0.3, 0.8];
+        K.svg(svg, "text", { x: 80, y: 30, "font-size": 13, "font-weight": 700 }, "用户 user1");
+        K.svg(svg, "text", { x: 300, y: 30, "font-size": 13, "font-weight": 700 }, "电影");
+        K.svg(svg, "text", { x: 510, y: 30, "font-size": 13, "font-weight": 700 }, "逐项相乘");
+        const ub = vecBars(svg, 80, 46, u, L, "var(--c1)");
+        const title = K.svg(svg, "text", { x: 300, y: 150, "font-size": 12, class: "muted" }, "");
+        let mb = [], pb = [];
+        const sumT = K.svg(svg, "text", { x: 360, y: 230, "font-size": 22, "font-weight": 700, "text-anchor": "middle" }, "");
+        const sumT2 = K.svg(svg, "text", { x: 360, y: 300, "font-size": 15, "text-anchor": "middle" }, "");
+        const g = K.svg(svg, "g");
+        const show = async (m, name, color) => {
+          g.innerHTML = ""; title.textContent = name;
+          mb = vecBars(g, 300, 46, m, null, color);
+          const prod = m.map((x, i) => x * u[i]);
+          pb = vecBars(g, 510, 46, prod, null, "var(--c4)", 110);
+          sumT.textContent = "";
+          if (!(await ctx.tween(700, (t) => mb.forEach((b) => b.set(t))))) return false;
+          if (!(await ctx.tween(700, (t) => pb.forEach((b) => b.set(t))))) return false;
+          const s = prod.reduce((a, b) => a + b, 0);
+          sumT.textContent = "点积 = " + s.toFixed(3);
+          sumT.style.fill = s > 0 ? "var(--good)" : "var(--bad)";
+          return ctx.wait(1600);
+        };
+        (async () => {
+          if (!(await ctx.tween(600, (t) => ub.forEach((b) => b.set(t))))) return;
+          sumT2.textContent = "《The Last Skywalker》：很科幻、很动作、很新";
+          if (!(await show(m1, "The Last Skywalker", "var(--c2)"))) return;
+          sumT2.textContent = "《Casablanca》：不科幻、动作少、很老";
+          await show(m2, "Casablanca", "var(--c5)");
+        })();
+      },
+    },
+    {
+      title: "学习潜在因子：从随机数出发，一步步改", kicker: "第 25–29 格 · 梯度下降",
+      html: `<p>作者给出三步：<b>①</b>给每个用户、每部电影随机生成一串因子（先用 5 个）；<b>②</b>每个“用户 × 电影”格子算点积当预测；<b>③</b>和真实评分比，算均方误差（MSE）作为损失。<span data-cell="26">出处</span> <span data-cell="28">出处</span></p><p>然后用<b>随机梯度下降</b>：看损失往哪个方向变小，就把所有因子往那边挪一点，反复很多次。作者原文用的是一张 Excel 截图，动画用小表格示意同一个过程。</p>`,
+      cells: [26, 28],
+      draw(svg, ctx) {
+        const r = K.rng(8), nu = 4, nm = 5, k = 2;
+        const Ut = [], Mt = [];
+        for (let i = 0; i < nu; i++) Ut.push([K.randn(r), K.randn(r)]);
+        for (let j = 0; j < nm; j++) Mt.push([K.randn(r), K.randn(r)]);
+        const truth = Ut.map((u) => Mt.map((m) => K.clamp(3 + u[0] * m[0] + u[1] * m[1], 1, 5)));
+        let U = Ut.map(() => [K.randn(r) * 0.3, K.randn(r) * 0.3]), M = Mt.map(() => [K.randn(r) * 0.3, K.randn(r) * 0.3]);
+        const x0 = 150, y0 = 70, cw = 62, ch = 46;
+        K.svg(svg, "text", { x: x0, y: 30, "font-size": 13, class: "muted" }, "格子里：预测分 / 真实分（示意数据）");
+        const txt = [], rects = [];
+        for (let i = 0; i < nu; i++) for (let j = 0; j < nm; j++) {
+          rects.push(K.svg(svg, "rect", { x: x0 + j * cw, y: y0 + i * ch, width: cw - 4, height: ch - 4, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" }));
+          txt.push(K.svg(svg, "text", { x: x0 + j * cw + cw / 2 - 2, y: y0 + i * ch + 26, "text-anchor": "middle", "font-size": 12, "font-family": "var(--mono)" }, ""));
+        }
+        for (let i = 0; i < nu; i++) K.svg(svg, "text", { x: x0 - 10, y: y0 + i * ch + 26, "text-anchor": "end", "font-size": 12 }, "用户" + (i + 1));
+        for (let j = 0; j < nm; j++) K.svg(svg, "text", { x: x0 + j * cw + cw / 2 - 2, y: y0 - 8, "text-anchor": "middle", "font-size": 12 }, "片" + (j + 1));
+        const lossT = K.svg(svg, "text", { x: 500, y: 110, "font-size": 15, "font-weight": 700 }, "");
+        const epT = K.svg(svg, "text", { x: 500, y: 86, "font-size": 13, class: "muted" }, "");
+        const ax = K.axes(svg, { x: 500, y: 140, w: 190, h: 140 }, [0, 60], [0, 4], { xticks: 3, yticks: 2, xlabel: "迭代轮数" });
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--accent)", "stroke-width": 2 });
+        let pd = "";
+        const draw = (ep) => {
+          let se = 0;
+          for (let i = 0; i < nu; i++) for (let j = 0; j < nm; j++) {
+            const p = 3 + U[i][0] * M[j][0] + U[i][1] * M[j][1], e = p - truth[i][j];
+            se += e * e;
+            txt[i * nm + j].textContent = p.toFixed(1) + "/" + truth[i][j].toFixed(1);
+            K.set(rects[i * nm + j], { fill: Math.abs(e) < 0.3 ? tint("var(--good)", 25) : Math.abs(e) < 1 ? tint("var(--warn)", 22) : tint("var(--bad)", 22) });
+          }
+          const mse = se / (nu * nm);
+          lossT.textContent = "MSE = " + mse.toFixed(3);
+          epT.textContent = "第 " + ep + " 轮";
+          pd += (pd ? "L" : "M") + ax.sx(ep) + "," + ax.sy(Math.min(mse, 4));
+          path.setAttribute("d", pd);
+        };
+        const stepSGD = () => {
+          const lr = 0.05;
+          for (let i = 0; i < nu; i++) for (let j = 0; j < nm; j++) {
+            const e = 3 + U[i][0] * M[j][0] + U[i][1] * M[j][1] - truth[i][j];
+            for (let f = 0; f < k; f++) { const gu = e * M[j][f], gm = e * U[i][f]; U[i][f] -= lr * gu; M[j][f] -= lr * gm; }
+          }
+        };
+        draw(0);
+        (async () => {
+          for (let ep = 1; ep <= 60; ep++) { if (!(await ctx.wait(90))) return; stepSGD(); draw(ep); }
+        })();
+      },
+    },
+    {
+      title: "把编号换成片名，装进 DataLoaders", kicker: "第 30–36 格 · 准备数据",
+      html: `<p>为了看着方便，作者读入 <code>u.item</code> 拿到“电影编号 → 片名”，用 <code>merge</code> 拼到评分表上。<span data-cell="34">出处</span></p><p>再用 <code>CollabDataLoaders.from_df</code> 把表格变成一批批（每批 64 条）喂给模型的数据，并指定用片名 <code>title</code> 代替编号当“物品”。<span data-cell="36">出处</span></p>`,
+      cells: [32, 34, 36], highlight: ["ratings.merge(movies)", "item_name='title', bs=64"],
+      draw(svg, ctx) {
+        const A = K.node(svg, 30, 60, 200, 110, "评分表 ratings\nuser · movie · rating · timestamp");
+        const B = K.node(svg, 30, 200, 200, 80, "片名表 movies\nmovie · title");
+        const C = K.node(svg, 320, 120, 180, 100, "merge 之后\nuser · movie · rating\n· timestamp · title", { stroke: "var(--accent)" });
+        const D = K.node(svg, 560, 40, 130, 260, "", { fill: "var(--panel)" });
+        const a1 = K.arrow(svg, 230, 115, 318, 150), a2 = K.arrow(svg, 230, 240, 318, 190), a3 = K.arrow(svg, 500, 170, 558, 170);
+        [C, D, a1, a2, a3].forEach((e) => (e.style.opacity = 0));
+        K.svg(svg, "text", { x: 625, y: 30, "text-anchor": "middle", "font-size": 12, class: "muted" }, "一批 64 条");
+        const batch = [];
+        for (let i = 0; i < 8; i++) { const b = K.svg(svg, "rect", { x: 572, y: 56 + i * 30, width: 106, height: 22, rx: 4, fill: tint("var(--c1)", 22), stroke: "var(--c1)" }); b.style.opacity = 0; batch.push(b); }
+        (async () => {
+          if (!(await ctx.tween(500, (t) => { a1.style.opacity = a2.style.opacity = t; }))) return;
+          if (!(await ctx.tween(500, (t) => (C.style.opacity = t)))) return;
+          if (!(await ctx.tween(400, (t) => { a3.style.opacity = t; D.style.opacity = t; }))) return;
+          for (let i = 0; i < batch.length; i++) if (!(await ctx.tween(150, (t) => (batch[i].style.opacity = t)))) return;
+        })();
+      },
+    },
+    {
+      title: "嵌入：按编号查表 = 乘一个独热向量", kicker: "第 37–46 格 · Embedding",
+      html: `<p>作者把用户因子、电影因子各存成一个矩阵（每行是一个人或一部片，5 列）。<span data-cell="38">出处</span></p><p>要取第 3 个用户的那一行，本来是“查表”；但神经网络只会做矩阵乘法。巧妙之处：<b>用一个只有第 3 位是 1 的独热向量去乘矩阵</b>，结果正好就是第 3 行。<span data-cell="41">出处</span> <span data-cell="43">出处</span></p><p>真这样乘太浪费，于是 PyTorch 提供了 <b>Embedding（嵌入）层</b>：直接按编号取行，但求导时当作在做矩阵乘法。一开始这些数是随机的，训练后才有意义。<span data-cell="45">出处</span></p>`,
+      cells: [38, 40, 41, 43], highlight: ["one_hot(3, n_users)", "user_factors.t() @ one_hot_3", "user_factors[3]"],
+      draw(svg, ctx) {
+        const r = K.rng(12), n = 7, f = 5;
+        const M = []; for (let i = 0; i < n; i++) { const row = []; for (let j = 0; j < f; j++) row.push(K.randn(r)); M.push(row); }
+        K.svg(svg, "text", { x: 40, y: 28, "font-size": 13, class: "muted" }, "独热向量（第 3 位=1）");
+        K.svg(svg, "text", { x: 250, y: 28, "font-size": 13, class: "muted" }, "用户因子矩阵（每行一个用户，5 个因子）");
+        const oh = [];
+        for (let i = 0; i < n; i++) {
+          const v = i === 3 ? 1 : 0;
+          oh.push(K.svg(svg, "rect", { x: 80, y: 44 + i * 38, width: 34, height: 32, rx: 4, fill: v ? tint("var(--accent)", 50) : "var(--panel-2)", stroke: "var(--line)" }));
+          K.svg(svg, "text", { x: 97, y: 65 + i * 38, "text-anchor": "middle", "font-size": 13 }, String(v));
+          K.svg(svg, "text", { x: 70, y: 65 + i * 38, "text-anchor": "end", "font-size": 11, class: "muted" }, String(i));
+        }
+        const cells = [];
+        for (let i = 0; i < n; i++) for (let j = 0; j < f; j++) {
+          const v = M[i][j];
+          cells.push({ i, rect: K.svg(svg, "rect", { x: 250 + j * 52, y: 44 + i * 38, width: 48, height: 32, rx: 4, fill: K.heat((v + 2.5) / 5, true), opacity: 0.85 }) });
+          K.svg(svg, "text", { x: 274 + j * 52, y: 65 + i * 38, "text-anchor": "middle", "font-size": 11, "font-family": "var(--mono)" }, v.toFixed(1));
+        }
+        const box = K.svg(svg, "rect", { x: 246, y: 40 + 3 * 38, width: 5 * 52 + 4, height: 40, rx: 6, fill: "none", stroke: "var(--accent)", "stroke-width": 3 });
+        box.style.opacity = 0;
+        const out = K.svg(svg, "text", { x: 540, y: 220, "font-size": 13, "font-weight": 700, fill: "var(--accent)" }, "");
+        K.svg(svg, "text", { x: 540, y: 250, "font-size": 12, class: "muted" }, "= 直接取第 3 行");
+        K.svg(svg, "text", { x: 540, y: 270, "font-size": 12, class: "muted" }, "（Embedding 的捷径）");
+        (async () => {
+          if (!(await ctx.wait(500))) return;
+          if (!(await ctx.tween(600, (t) => cells.forEach((c) => (c.rect.style.opacity = c.i === 3 ? 0.85 : 0.85 - 0.65 * t))))) return;
+          if (!(await ctx.tween(400, (t) => (box.style.opacity = t)))) return;
+          out.textContent = "乘积结果 → 用户 3 的 5 个因子";
+        })();
+      },
+    },
+    {
+      title: "从零写出点积模型 DotProduct", kicker: "第 47–59 格 · 第一个模型",
+      html: `<p>作者先花几格讲 Python 的“类”，然后写出模型：两个嵌入层（用户、电影），<code>forward</code> 里取出两人的向量，<b>逐项相乘再求和</b>。<span data-cell="53">出处</span></p><p>输入一批数据，每条是“用户编号、电影编号”两列。<span data-cell="55">出处</span> 这次用 50 个因子，损失函数是均方误差，训练 5 轮。<span data-cell="57">出处</span> <span data-cell="59">出处</span></p>`,
+      cells: [53, 55, 57, 59], highlight: ["(users * movies).sum(dim=1)", "DotProduct(n_users, n_movies, 50)", "fit_one_cycle(5, 5e-3)"],
+      draw(svg, ctx) {
+        const in1 = K.node(svg, 20, 60, 120, 44, "用户编号 x[:,0]");
+        const in2 = K.node(svg, 20, 220, 120, 44, "电影编号 x[:,1]");
+        K.node(svg, 180, 50, 130, 64, "user_factors\n嵌入层", { stroke: "var(--c1)" });
+        K.node(svg, 180, 210, 130, 64, "movie_factors\n嵌入层", { stroke: "var(--c2)" });
+        K.arrow(svg, 140, 82, 178, 82); K.arrow(svg, 140, 242, 178, 242);
+        const r = K.rng(3), uv = [], mv = [];
+        for (let i = 0; i < 6; i++) { uv.push(K.randn(r) * 0.8); mv.push(K.randn(r) * 0.8); }
+        const ub = [], mb = [], pb = [];
+        for (let i = 0; i < 6; i++) {
+          ub.push(K.svg(svg, "rect", { x: 340 + i * 22, y: 70, width: 18, height: 24, rx: 2, fill: K.heat((uv[i] + 2) / 4, true) }));
+          mb.push(K.svg(svg, "rect", { x: 340 + i * 22, y: 230, width: 18, height: 24, rx: 2, fill: K.heat((mv[i] + 2) / 4, true) }));
+          pb.push(K.svg(svg, "rect", { x: 340 + i * 22, y: 150, width: 18, height: 24, rx: 2, fill: K.heat((uv[i] * mv[i] + 2) / 4, true) }));
+        }
+        K.svg(svg, "text", { x: 482, y: 87, "font-size": 12, class: "muted" }, "用户向量（示意，实际 50 维）");
+        K.svg(svg, "text", { x: 482, y: 247, "font-size": 12, class: "muted" }, "电影向量");
+        K.svg(svg, "text", { x: 482, y: 167, "font-size": 12, class: "muted" }, "逐项相乘");
+        pb.forEach((b) => (b.style.opacity = 0));
+        const sumN = K.node(svg, 600, 135, 100, 54, "求和 = 预测分", { stroke: "var(--accent)", bold: true });
+        sumN.style.opacity = 0;
+        const loss = K.svg(svg, "text", { x: 600, y: 230, "font-size": 12 }, "");
+        (async () => {
+          if (!(await ctx.wait(500))) return;
+          for (let i = 0; i < 6; i++) if (!(await ctx.tween(220, (t) => (pb[i].style.opacity = t)))) return;
+          if (!(await ctx.tween(500, (t) => (sumN.style.opacity = t)))) return;
+          loss.textContent = "和真实评分比 → MSE 损失";
+        })();
+      },
+    },
+    {
+      title: "限制在 0–5.5 之间，再给每人每片加一个偏置", kicker: "第 60–67 格 · 改进模型",
+      html: `<p>第一个改进：用 <code>sigmoid_range</code> 把输出压进 0 到 5.5（作者说经验上比正好到 5 好）。<span data-cell="60">出处</span></p><p>第二个改进：有的人就是爱打高分，有的片就是人人说好。点积表达不了这种“整体高低”，于是给每个用户、每部电影各加一个<b>偏置</b>数。<span data-cell="63">出处</span> <span data-cell="64">出处</span></p><p>结果出乎意料：<b>反而更差了</b>，验证损失训练到一半就开始变大，这是<b>过拟合</b>。<span data-cell="67">出处</span></p>`,
+      cells: [61, 62, 64, 66], highlight: ["sigmoid_range", "self.user_bias(x[:,0]) + self.movie_bias(x[:,1])"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 30, w: 290, h: 240 }, [-6, 6], [-0.5, 6], { xticks: 4, yticks: 3, xlabel: "点积原始输出", ylabel: "预测分" });
+        let d = "";
+        for (let x = -6; x <= 6.001; x += 0.1) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(5.5 / (1 + Math.exp(-x)));
+        const p = K.svg(svg, "path", { d, fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        const len = 600; p.style.strokeDasharray = len; p.style.strokeDashoffset = len;
+        [0, 5.5].forEach((v) => K.svg(svg, "line", { x1: ax.sx(-6), x2: ax.sx(6), y1: ax.sy(v), y2: ax.sy(v), stroke: "var(--ink-3)", "stroke-dasharray": "4 3" }));
+        K.svg(svg, "text", { x: ax.sx(-5.8), y: ax.sy(5.5) - 6, "font-size": 11, class: "muted" }, "上限 5.5");
+        K.svg(svg, "text", { x: 410, y: 40, "font-size": 13, "font-weight": 700 }, "预测分 = 点积 + 用户偏置 + 电影偏置");
+        const parts = [["点积（口味对不对）", 1.2, "var(--c1)"], ["用户偏置（爱打高分？）", 0.6, "var(--c2)"], ["电影偏置（公认好片？）", 0.9, "var(--c3)"]];
+        let x = 410; const bars = [];
+        parts.forEach(([n, v, c], i) => {
+          const w = v * 90;
+          bars.push({ r: K.svg(svg, "rect", { x, y: 70, width: 0, height: 34, fill: c, rx: 3 }), w });
+          K.svg(svg, "text", { x: 410, y: 140 + i * 22, "font-size": 12, fill: c }, "■ " + n);
+          x += w;
+        });
+        K.svg(svg, "text", { x: 410, y: 230, "font-size": 12, class: "muted" }, "条形长短为示意");
+        ctx.tween(1200, (t) => (p.style.strokeDashoffset = len * (1 - t))).then((ok) => ok && ctx.tween(1200, (t) => bars.forEach((b) => b.r.setAttribute("width", b.w * t))));
+      },
+    },
+    {
+      title: "权重衰减：别让参数长得太大", kicker: "第 68–73 格 · 正则化",
+      html: `<p>数据没法像图片那样做增强，作者改用<b>权重衰减</b>（也叫 L2 正则化）：在损失里加上“所有参数的平方和 × wd”。<span data-cell="69">出处</span></p><p>为什么有用？作者画了抛物线 <code>y = a·x²</code>：a 越大，曲线越窄越陡。参数越大，模型越容易拐出很尖的弯去硬记训练数据。<span data-cell="70">出处</span> 把参数往小里压，训练变难一点，但更能举一反三。加上 <code>wd=0.1</code> 后，作者的评价是“好多了！”<span data-cell="73">出处</span></p>`,
+      cells: [70, 72], highlight: ["a_s = [1,2,5,10,50]", "wd=0.1"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 24, w: 420, h: 260 }, [-2, 2], [0, 5], { xticks: 4, yticks: 5, xlabel: "x" });
+        const as = [1, 2, 5, 10, 50];
+        const paths = as.map((a, i) => {
+          let d = "";
+          for (let x = -2; x <= 2.0001; x += 0.01) { const y = a * x * x; if (y <= 5.05) d += (d && Math.abs(a * (x - 0.01) * (x - 0.01)) <= 5.05 ? "L" : "M") + ax.sx(x) + "," + ax.sy(Math.min(y, 5)); }
+          const p = K.svg(svg, "path", { d, fill: "none", stroke: K.colors[i % 6], "stroke-width": 2.2 });
+          p.style.opacity = 0;
+          K.svg(svg, "text", { x: 510, y: 60 + i * 24, "font-size": 13, fill: K.colors[i % 6] }, "a = " + a);
+          return p;
+        });
+        K.svg(svg, "text", { x: 510, y: 200, "font-size": 12 }, "照第 70 格的代码画：");
+        K.svg(svg, "text", { x: 510, y: 220, "font-size": 12 }, "a 越大，抛物线越窄");
+        K.svg(svg, "text", { x: 510, y: 250, "font-size": 12, fill: "var(--accent)" }, "损失 + wd × Σ参数²");
+        K.svg(svg, "text", { x: 510, y: 270, "font-size": 12, fill: "var(--accent)" }, "→ 把参数往小里压");
+        (async () => { for (const p of paths) if (!(await ctx.tween(400, (t) => (p.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "不用现成的 Embedding，自己造一个", kicker: "第 74–88 格 · 看清内部",
+      html: `<p>为了说明嵌入层没有魔法，作者用 <code>nn.Parameter</code> 自己建参数：普通张量放进模块里不会被当成“要学的参数”，包一层 <code>nn.Parameter</code> 才会。<span data-cell="76">出处</span> <span data-cell="78">出处</span></p><p>写一个 <code>create_params</code>，用均值 0、标准差 0.01 的随机数初始化，再用方括号直接按编号取行，重写 <code>DotProductBias</code>，训练结果和之前差不多。<span data-cell="83">出处</span> <span data-cell="85">出处</span></p>`,
+      cells: [76, 78, 83, 85, 87], highlight: ["nn.Parameter", "normal_(0, 0.01)", "self.user_factors[x[:,0]]"],
+      draw(svg, ctx) {
+        K.node(svg, 40, 60, 220, 70, "self.a = torch.ones(3)\n普通张量", { stroke: "var(--ink-3)" });
+        K.node(svg, 40, 200, 220, 70, "self.a = nn.Parameter(...)\n贴上“可学习”标签", { stroke: "var(--accent)" });
+        const opt = K.node(svg, 470, 125, 200, 80, "优化器\n只更新 parameters() 里的", { bold: true });
+        const a1 = K.arrow(svg, 260, 235, 468, 175, { color: "var(--good)" });
+        const x1 = K.svg(svg, "text", { x: 360, y: 105, "font-size": 18, fill: "var(--bad)", "font-weight": 700 }, "✗ 看不见");
+        const ok = K.svg(svg, "text", { x: 340, y: 235, "font-size": 16, fill: "var(--good)", "font-weight": 700 }, "✓ 会被训练");
+        [a1, x1, ok].forEach((e) => (e.style.opacity = 0));
+        const dots = [];
+        for (let i = 0; i < 5; i++) { const c = K.svg(svg, "circle", { cx: 260, cy: 235, r: 5, fill: "var(--accent)" }); c.style.opacity = 0; dots.push(c); }
+        (async () => {
+          if (!(await ctx.tween(500, (t) => (x1.style.opacity = t)))) return;
+          if (!(await ctx.tween(500, (t) => { a1.style.opacity = t; ok.style.opacity = t; }))) return;
+          for (let rep = 0; rep < 3; rep++) {
+            if (!(await ctx.tween(900, (t) => dots.forEach((d, i) => { const tt = K.clamp(t * 1.6 - i * 0.15, 0, 1); d.style.opacity = tt > 0 && tt < 1 ? 1 : 0; d.setAttribute("cx", K.lerp(468, 260, tt)); d.setAttribute("cy", K.lerp(175, 235, tt)); })))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "看懂模型学到了什么：偏置与 PCA", kicker: "第 89–97 格 · 解释嵌入",
+      html: `<p>最好解释的是<b>电影偏置</b>。偏置最低的片，意思是：就算口味对上了，大家还是不爱看；偏置最高的片，就算不是你的菜也值得一看，作者举的例子是《洛城机密》。<span data-cell="92">出处</span> <span data-cell="94">出处</span></p><p>50 个因子人看不过来，作者用 <b>PCA</b>（主成分分析，找数据里“最主要的几个方向”）把评分最多的电影向量压到几个方向上画出来，发现模型似乎学出了“经典片 vs 流行文化片”。<span data-cell="95">出处</span> <span data-cell="96">出处</span></p>`,
+      cells: [91, 93, 95], highlight: ["movie_bias.argsort()", "movie_w.pca(3)"],
+      draw(svg, ctx) {
+        const r = K.rng(21), P = [];
+        for (let i = 0; i < 46; i++) {
+          const cls = i % 2;
+          P.push({ x0: 360 + K.randn(r) * 160, y0: 170 + K.randn(r) * 80, x1: (cls ? 470 : 230) + K.randn(r) * 70, y1: 170 + K.randn(r) * 70, cls });
+        }
+        K.svg(svg, "line", { x1: 60, y1: 310, x2: 660, y2: 310, stroke: "var(--ink-3)" });
+        K.svg(svg, "text", { x: 60, y: 330, "font-size": 12, fill: "var(--c1)" }, "← 更像“经典 / 口碑片”");
+        K.svg(svg, "text", { x: 660, y: 330, "text-anchor": "end", "font-size": 12, fill: "var(--c2)" }, "更像“流行文化片” →");
+        K.svg(svg, "text", { x: 30, y: 28, "font-size": 13, class: "muted" }, "50 维电影向量 → PCA 取主要方向 → 画在平面上（点为示意，不是真实电影坐标）");
+        const ds = P.map((p) => K.svg(svg, "circle", { cx: p.x0, cy: p.y0, r: 5, fill: p.cls ? "var(--c2)" : "var(--c1)", opacity: 0.75 }));
+        ctx.wait(500).then((ok) => ok && ctx.tween(2000, (t) => ds.forEach((d, i) => { d.setAttribute("cx", K.lerp(P[i].x0, P[i].x1, t)); d.setAttribute("cy", K.lerp(P[i].y0, P[i].y1, t)); })));
+      },
+    },
+    {
+      title: "fastai 现成工具，以及“哪部片和它最像”", kicker: "第 98–110 格 · collab_learner 与相似度",
+      html: `<p>前面都是从零写的，实际可以一行 <code>collab_learner(dls, n_factors=50, y_range=(0, 5.5))</code> 搞定，结构完全一样，层的名字变成 <code>u_weight</code>、<code>i_bias</code> 等。<span data-cell="101">出处</span> <span data-cell="104">出处</span></p><p>学到的电影向量还能用来<b>找相似电影</b>：两部片如果被同一批人喜欢，它们的向量就会很接近。作者用它找和《沉默的羔羊》最像的片。<span data-cell="109">出处</span> <span data-cell="110">出处</span></p><p class="callout warn">注意：第 109 格文字讲的是“勾股定理算距离”，第 110 格代码用的却是 <code>CosineSimilarity</code>（余弦相似度，只看方向夹角，不看长短）。下面实验 C 可以看到两种量法的差别。</p>`,
+      cells: [101, 102, 104, 106, 110], highlight: ["collab_learner(dls, n_factors=50, y_range=(0, 5.5))", "nn.CosineSimilarity(dim=1)"],
+      draw(svg, ctx) {
+        const cx = 200, cy = 260;
+        K.svg(svg, "line", { x1: cx, y1: cy, x2: 640, y2: cy, stroke: "var(--line)" });
+        K.svg(svg, "line", { x1: cx, y1: cy, x2: cx, y2: 30, stroke: "var(--line)" });
+        const vecs = [["目标片", 30, 190, "var(--accent)"], ["候选 1", 38, 120, "var(--c2)"], ["候选 2", 70, 200, "var(--c4)"], ["候选 3", 12, 230, "var(--c5)"]];
+        const els = vecs.map(([n, deg, len, c]) => {
+          const a = (deg * Math.PI) / 180, x = cx + Math.cos(a) * len, y = cy - Math.sin(a) * len;
+          const l = K.svg(svg, "line", { x1: cx, y1: cy, x2: cx, y2: cy, stroke: c, "stroke-width": 3 });
+          const t = K.svg(svg, "text", { x: x + 6, y: y - 4, "font-size": 12, fill: c }, n);
+          t.style.opacity = 0;
+          return { l, t, x, y, deg };
+        });
+        const res = K.svg(svg, "text", { x: 470, y: 60, "font-size": 13 }, "");
+        const res2 = K.svg(svg, "text", { x: 470, y: 84, "font-size": 12, class: "muted" }, "");
+        (async () => {
+          for (const e of els) if (!(await ctx.tween(400, (t) => { e.l.setAttribute("x2", K.lerp(cx, e.x, t)); e.l.setAttribute("y2", K.lerp(cy, e.y, t)); e.t.style.opacity = t; }))) return;
+          if (!(await ctx.wait(400))) return;
+          res.textContent = "夹角最小的“候选 1”最像";
+          res2.textContent = "余弦相似度只看方向（示意）";
+          K.set(els[1].l, { "stroke-width": 5 });
+        })();
+      },
+    },
+    {
+      title: "冷启动与反馈回路：推荐系统的两个大坑", kicker: "第 111–115 格 · 实际部署",
+      html: `<p><b>冷启动</b>：新用户、新电影没有任何历史，模型无从下手。作者的建议是“用常识”：挑一个代表“平均口味”的用户；更好的是注册时问几个问题，再用一个表格模型从答案推出初始向量。<span data-cell="113">出处</span></p><p><b>反馈回路</b>：少数特别热情、只看一类片的用户打分特别多，会带偏推荐；推荐又吸引来更多同类用户，偏差会越滚越大。作者提醒要有人盯着、慢慢上线。<span data-cell="114">出处</span></p><p>作者还点明：这种点积模型就是<b>概率矩阵分解</b>（PMF）。<span data-cell="115">出处</span></p>`,
+      cells: [113, 114],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 28, "font-size": 13, class: "muted" }, "反馈回路示意：一小群狂热用户的偏好被推荐放大（数字为示意）");
+        const ax = K.axes(svg, { x: 60, y: 50, w: 360, h: 230 }, [0, 8], [0, 100], { xticks: 8, yticks: 4, xlabel: "推荐上线后的轮次", ylabel: "推荐位里该类片占比 %" });
+        let share = 10; const pts = [[0, share]];
+        for (let i = 1; i <= 8; i++) { share = share + share * (1 - share / 100) * 0.55; pts.push([i, share]); }
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--bad)", "stroke-width": 2.5 });
+        const nodes = ["少数人狂热打分", "模型以为大家都爱", "推荐里这类片变多", "吸引来更多同类用户"];
+        const ang = [-90, 0, 90, 180];
+        nodes.forEach((n, i) => { const a = (ang[i] * Math.PI) / 180; K.node(svg, 560 + Math.cos(a) * 95 - 62, 175 + Math.sin(a) * 105 - 18, 124, 36, n, { fs: 11 }); });
+        const dot = K.svg(svg, "circle", { cx: 560, cy: 70, r: 7, fill: "var(--bad)" });
+        let d = "";
+        ctx.tween(3200, (t) => {
+          const k = t * 8, i = Math.floor(k);
+          d = ""; for (let j = 0; j <= Math.min(i, 8); j++) d += (d ? "L" : "M") + ax.sx(pts[j][0]) + "," + ax.sy(pts[j][1]);
+          path.setAttribute("d", d);
+          const a = (-90 + t * 360 * 2) * Math.PI / 180;
+          dot.setAttribute("cx", 560 + Math.cos(a) * 95); dot.setAttribute("cy", 175 + Math.sin(a) * 105);
+        });
+      },
+    },
+    {
+      title: "深度学习版：把两串数拼起来过神经网络", kicker: "第 116–138 格 · CollabNN",
+      html: `<p>换一种组合方式：不做点积，而是把用户向量和电影向量<b>首尾拼接</b>，送进一个小神经网络（线性层 → ReLU → 线性层），最后同样压到 0–5.5。<span data-cell="117">出处</span> <span data-cell="120">出处</span></p><p>因为是拼接，两边向量长度可以不同，<code>get_emb_sz</code> 会给出推荐的长度。fastai 里加 <code>use_nn=True</code> 就是这个模型，还能多加几层（这里是 100 和 50）。<span data-cell="118">出处</span> <span data-cell="126">出处</span></p><p>作者的结论：神经网络版比点积版<b>稍差一点</b>，但它可以把用户、电影、时间等其他信息一起放进来。<span data-cell="133">出处</span></p>`,
+      cells: [118, 120, 124, 126], highlight: ["torch.cat(embs, dim=1)", "use_nn=True", "layers=[100,50]"],
+      draw(svg, ctx) {
+        const r = K.rng(5);
+        const ue = [], me = [];
+        for (let i = 0; i < 5; i++) ue.push(K.svg(svg, "rect", { x: 30, y: 40 + i * 22, width: 30, height: 18, rx: 2, fill: K.heat(r(), true) }));
+        for (let i = 0; i < 4; i++) me.push(K.svg(svg, "rect", { x: 30, y: 200 + i * 22, width: 30, height: 18, rx: 2, fill: K.heat(r(), true) }));
+        K.svg(svg, "text", { x: 70, y: 70, "font-size": 12 }, "用户嵌入");
+        K.svg(svg, "text", { x: 70, y: 230, "font-size": 12 }, "电影嵌入（长度可以不同）");
+        const all = ue.concat(me);
+        const hidden = [], outN = K.svg(svg, "circle", { cx: 640, cy: 170, r: 16, fill: "var(--panel-2)", stroke: "var(--accent)", "stroke-width": 2 });
+        for (let i = 0; i < 8; i++) hidden.push(K.svg(svg, "circle", { cx: 460, cy: 60 + i * 32, r: 10, fill: "var(--panel-2)", stroke: "var(--ink-3)" }));
+        K.svg(svg, "text", { x: 460, y: 330, "text-anchor": "middle", "font-size": 12 }, "Linear + ReLU（100 个）");
+        K.svg(svg, "text", { x: 640, y: 210, "text-anchor": "middle", "font-size": 12 }, "预测分");
+        K.svg(svg, "text", { x: 290, y: 330, "text-anchor": "middle", "font-size": 12 }, "torch.cat 拼接");
+        const edges = [];
+        for (let i = 0; i < 9; i++) for (let j = 0; j < 8; j++) { const e = K.svg(svg, "line", { x1: 305, y1: 60 + i * 26 + 9, x2: 450, y2: 60 + j * 32, stroke: "var(--line)" }); e.style.opacity = 0; edges.push(e); }
+        hidden.forEach((h) => { const e = K.svg(svg, "line", { x1: 470, y1: +h.getAttribute("cy"), x2: 624, y2: 170, stroke: "var(--line)" }); e.style.opacity = 0; edges.push(e); });
+        (async () => {
+          if (!(await ctx.wait(400))) return;
+          if (!(await ctx.tween(1200, (t) => all.forEach((b, i) => { const y0 = i < 5 ? 40 + i * 22 : 200 + (i - 5) * 22; b.setAttribute("x", K.lerp(30, 280, t)); b.setAttribute("y", K.lerp(y0, 60 + i * 26, t)); })))) return;
+          if (!(await ctx.tween(700, (t) => edges.forEach((e) => (e.style.opacity = t * 0.8))))) return;
+          for (let k = 0; k < 2; k++) {
+            if (!(await ctx.tween(500, (t) => hidden.forEach((h, i) => (h.style.fill = `color-mix(in srgb, var(--accent) ${Math.round(t * (20 + ((i * 37) % 70)))}%, var(--panel-2))`))))) return;
+            if (!(await ctx.tween(400, (t) => (outN.style.fill = `color-mix(in srgb, var(--accent) ${Math.round(t * 70)}%, var(--panel-2))`)))) return;
+          }
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：点积配对器 ---------- */
+  const LAB_L = ["科幻", "动作", "老片"];
+  K.lab(document.getElementById("labDot"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "a", label: "你有多爱科幻（-1 讨厌 … +1 超爱）", min: -1, max: 1, step: 0.05, value: 0.9, fmt: (v) => v.toFixed(2) },
+      { id: "b", label: "你有多爱动作", min: -1, max: 1, step: 0.05, value: 0.8, fmt: (v) => v.toFixed(2) },
+      { id: "c", label: "你有多爱老片", min: -1, max: 1, step: 0.05, value: -0.6, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "默认值就是作者第 15 格的 user1。两部电影的三个因子照抄第 13、21 格。拖动滑块，看两部片的点积（匹配度）怎么变，哪部会被推荐。",
+    render(svg, v) {
+      const u = [v.a, v.b, v.c];
+      const movies = [["The Last Skywalker", [0.98, 0.9, -0.9], "var(--c2)"], ["Casablanca", [-0.99, -0.3, 0.8], "var(--c5)"]];
+      K.svg(svg, "text", { x: 20, y: 24, "font-size": 13, "font-weight": 700 }, "你的口味向量");
+      vecBars(svg, 70, 40, u, LAB_L, "var(--c1)", 110).forEach((b) => b.set(1));
+      const scores = movies.map(([n, m, c], k) => {
+        const y0 = 140 + k * 80;
+        const prod = m.map((x, i) => x * u[i]);
+        const s = prod.reduce((a, b) => a + b, 0);
+        K.svg(svg, "text", { x: 20, y: y0, "font-size": 13, "font-weight": 700, fill: c }, n);
+        prod.forEach((p, i) => {
+          const x = 250 + i * 110;
+          K.svg(svg, "text", { x, y: y0, "font-size": 11, class: "muted" }, `${LAB_L[i]} ${u[i].toFixed(2)}×${m[i].toFixed(2)}`);
+          const w = Math.abs(p) * 45;
+          K.svg(svg, "rect", { x: x + 45 - (p < 0 ? w : 0), y: y0 + 8, width: w, height: 14, rx: 2, fill: p >= 0 ? "var(--good)" : "var(--bad)" });
+          K.svg(svg, "line", { x1: x + 45, x2: x + 45, y1: y0 + 4, y2: y0 + 26, stroke: "var(--line)" });
+        });
+        K.svg(svg, "text", { x: 20, y: y0 + 24, "font-size": 15, "font-family": "var(--mono)", fill: s >= 0 ? "var(--good)" : "var(--bad)" }, "点积 = " + s.toFixed(3));
+        return s;
+      });
+      const best = scores[0] >= scores[1] ? 0 : 1;
+      K.svg(svg, "text", { x: 20, y: 296, "font-size": 12, class: "muted" }, "绿色条 = 这一项让你更喜欢，红色条 = 这一项让你更不喜欢");
+      return { readout: [
+        { k: "与 Last Skywalker", v: scores[0].toFixed(3), color: scores[0] >= 0 ? "var(--good)" : "var(--bad)" },
+        { k: "与 Casablanca", v: scores[1].toFixed(3), color: scores[1] >= 0 ? "var(--good)" : "var(--bad)" },
+        { k: "推荐给你", v: best ? "Casablanca" : "Last Skywalker" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：迷你矩阵分解 ---------- */
+  function mfData(seed) {
+    const r = K.rng(seed), nu = 40, ni = 30;
+    const U = [], V = [], bu = [], bi = [];
+    for (let i = 0; i < nu; i++) { U.push([K.randn(r), K.randn(r)]); bu.push(K.randn(r) * 0.4); }
+    for (let j = 0; j < ni; j++) { V.push([K.randn(r), K.randn(r)]); bi.push(K.randn(r) * 0.5); }
+    const obs = [];
+    for (let i = 0; i < nu; i++) for (let j = 0; j < ni; j++) {
+      if (r() < 0.5) {
+        const s = 3.2 + 0.6 * (U[i][0] * V[j][0] + U[i][1] * V[j][1]) + bu[i] + bi[j] + K.randn(r) * 0.3;
+        obs.push({ i, j, y: Math.round(K.clamp(s, 1, 5)), val: r() < 0.25 });
+      }
+    }
+    return { nu, ni, obs };
+  }
+  function mfTrain(D, nf, wd, useBias, epochs, seed) {
+    const r = K.rng(seed);
+    const P = [], Q = [], bu = new Array(D.nu).fill(0), bi = new Array(D.ni).fill(0);
+    for (let i = 0; i < D.nu; i++) { const a = []; for (let f = 0; f < nf; f++) a.push(K.randn(r) * 0.3); P.push(a); }
+    for (let j = 0; j < D.ni; j++) { const a = []; for (let f = 0; f < nf; f++) a.push(K.randn(r) * 0.3); Q.push(a); }
+    const lo = 0, hi = 5.5, lr = 0.05;
+    const pred = (i, j) => { let z = 0; for (let f = 0; f < nf; f++) z += P[i][f] * Q[j][f]; if (useBias) z += bu[i] + bi[j]; return { z, p: lo + (hi - lo) * K.sigmoid(z) }; };
+    const tr = D.obs.filter((o) => !o.val), va = D.obs.filter((o) => o.val);
+    const rmse = (set) => Math.sqrt(set.reduce((s, o) => { const e = pred(o.i, o.j).p - o.y; return s + e * e; }, 0) / set.length);
+    const hist = [];
+    const order = tr.map((_, k) => k);
+    for (let ep = 0; ep < epochs; ep++) {
+      for (let k = order.length - 1; k > 0; k--) { const m = Math.floor(r() * (k + 1)); [order[k], order[m]] = [order[m], order[k]]; }
+      for (const k of order) {
+        const o = tr[k], { z, p } = pred(o.i, o.j);
+        const s = K.sigmoid(z), g = (p - o.y) * (hi - lo) * s * (1 - s);
+        for (let f = 0; f < nf; f++) {
+          const pu = P[o.i][f], qi = Q[o.j][f];
+          P[o.i][f] -= lr * (g * qi + wd * pu);
+          Q[o.j][f] -= lr * (g * pu + wd * qi);
+        }
+        if (useBias) { bu[o.i] -= lr * (g + wd * bu[o.i]); bi[o.j] -= lr * (g + wd * bi[o.j]); }
+      }
+      hist.push([rmse(tr), rmse(va)]);
+    }
+    const mean = tr.reduce((s, o) => s + o.y, 0) / tr.length;
+    const base = Math.sqrt(va.reduce((s, o) => s + (o.y - mean) * (o.y - mean), 0) / va.length);
+    return { hist, pred, base };
+  }
+  K.lab(document.getElementById("labMF"), {
+    width: 660, height: 340,
+    controls: [
+      { id: "nf", label: "潜在因子个数", min: 1, max: 20, step: 1, value: 10 },
+      { id: "wd", label: "权重衰减 wd", min: 0, max: 0.2, step: 0.005, value: 0, fmt: (v) => v.toFixed(3) },
+      { id: "bias", label: "模型结构", value: "bias", options: [["dot", "只有点积（DotProduct）"], ["bias", "点积 + 偏置（DotProductBias）"]] },
+      { id: "seed", label: "换一批模拟评分", button: true },
+    ],
+    note: "浏览器里现场训练：40 个虚拟用户 × 30 部虚拟电影（背后藏着 2 个真口味因子），约一半格子有评分，其中四分之一留作验证。用随机梯度下降训练 60 轮，输出同样用 sigmoid_range 压到 0–5.5。先保持 wd = 0 看蓝线和红线分叉，再把 wd 调到 0.05 左右。",
+    render(svg, v) {
+      const D = mfData(300 + v.seed * 13);
+      const m = mfTrain(D, v.nf, v.wd, v.bias === "bias", 60, 77);
+      const H = m.hist;
+      const ax = K.axes(svg, { x: 50, y: 20, w: 330, h: 260 }, [0, 60], [0, 2.5], { xticks: 6, yticks: 5, xlabel: "训练轮数", ylabel: "RMSE（越低越好）" });
+      const line = (k, c) => { let d = ""; H.forEach((h, e) => (d += (d ? "L" : "M") + ax.sx(e + 1) + "," + ax.sy(Math.min(h[k], 2.5)))); K.svg(svg, "path", { d, fill: "none", stroke: c, "stroke-width": 2.2 }); };
+      line(0, "var(--c1)"); line(1, "var(--c6)");
+      let best = 0; H.forEach((h, e) => { if (h[1] < H[best][1]) best = e; });
+      K.svg(svg, "line", { x1: ax.sx(best + 1), x2: ax.sx(best + 1), y1: 20, y2: 280, stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+      K.svg(svg, "text", { x: ax.sx(best + 1) + 4, y: 34, "font-size": 11, class: "muted" }, "验证最好");
+      K.svg(svg, "text", { x: 60, y: 334, "font-size": 12, fill: "var(--c1)" }, "■ 训练集");
+      K.svg(svg, "text", { x: 140, y: 334, "font-size": 12, fill: "var(--c6)" }, "■ 验证集");
+      // 右侧：预测出的整张表（前 30 个用户 × 30 部电影）
+      const x0 = 410, y0 = 30, cs = 8;
+      K.svg(svg, "text", { x: x0, y: 20, "font-size": 12, class: "muted" }, "模型填好的表（前 30 位用户 × 30 部片）");
+      const has = {}; D.obs.forEach((o) => (has[o.i + "," + o.j] = o));
+      for (let i = 0; i < 30; i++) for (let j = 0; j < D.ni; j++) {
+        const p = m.pred(i, j).p, o = has[i + "," + j];
+        K.svg(svg, "rect", { x: x0 + j * cs, y: y0 + i * cs, width: cs - 1, height: cs - 1, fill: K.heat(K.clamp((p - 1) / 4, 0, 1)), opacity: o ? 1 : 0.55 });
+        if (o) K.svg(svg, "circle", { cx: x0 + j * cs + cs / 2 - 0.5, cy: y0 + i * cs + cs / 2 - 0.5, r: 1.3, fill: o.val ? "var(--c6)" : "var(--ink)" });
+      }
+      K.svg(svg, "text", { x: x0, y: 290, "font-size": 11, class: "muted" }, "颜色=预测分（深=高）；黑点=训练格，");
+      K.svg(svg, "text", { x: x0, y: 306, "font-size": 11, class: "muted" }, "红点=验证格，其余都是模型猜的空格");
+      const last = H[H.length - 1];
+      return { readout: [
+        { k: "训练 RMSE（最后一轮）", v: last[0].toFixed(3) },
+        { k: "验证 RMSE（最后一轮）", v: last[1].toFixed(3), color: last[1] > H[best][1] + 0.05 ? "var(--bad)" : "var(--good)" },
+        { k: "验证最好的一轮", v: `第 ${best + 1} 轮 · ${H[best][1].toFixed(3)}` },
+        { k: "对照：全猜平均分", v: m.base.toFixed(3), color: "var(--ink-3)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：距离 vs 夹角 ---------- */
+  K.lab(document.getElementById("labSim"), {
+    width: 620, height: 320,
+    controls: [
+      { id: "ang", label: "候选片和目标片的方向夹角（度）", min: 0, max: 90, step: 1, value: 15 },
+      { id: "len", label: "候选片向量的长度（可理解为“名气”有多大）", min: 0.2, max: 3, step: 0.05, value: 2.5, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "目标片向量固定：方向 30°、长度 1。两部片口味方向相同但一部特别热门、向量特别长时，欧氏距离会说它们“不像”，余弦相似度会说“很像”。作者第 110 格用的是余弦相似度。",
+    render(svg, v) {
+      const ox = 80, oy = 280, sc = 80;
+      const ta = (30 * Math.PI) / 180, ca = ((30 + v.ang) * Math.PI) / 180;
+      const T = [Math.cos(ta), Math.sin(ta)], C = [Math.cos(ca) * v.len, Math.sin(ca) * v.len];
+      K.svg(svg, "line", { x1: ox, y1: oy, x2: 600, y2: oy, stroke: "var(--line)" });
+      K.svg(svg, "line", { x1: ox, y1: oy, x2: ox, y2: 20, stroke: "var(--line)" });
+      K.svg(svg, "text", { x: 600, y: oy + 18, "text-anchor": "end", "font-size": 11, class: "muted" }, "因子 1");
+      K.svg(svg, "text", { x: ox + 6, y: 30, "font-size": 11, class: "muted" }, "因子 2");
+      const P = (p) => [ox + p[0] * sc, oy - p[1] * sc];
+      const pt = P(T), pc = P(C);
+      K.svg(svg, "line", { x1: ox, y1: oy, x2: pt[0], y2: pt[1], stroke: "var(--accent)", "stroke-width": 3 });
+      K.svg(svg, "line", { x1: ox, y1: oy, x2: pc[0], y2: pc[1], stroke: "var(--c2)", "stroke-width": 3 });
+      K.svg(svg, "line", { x1: pt[0], y1: pt[1], x2: pc[0], y2: pc[1], stroke: "var(--warn)", "stroke-width": 1.5, "stroke-dasharray": "5 4" });
+      K.svg(svg, "text", { x: pt[0] + 6, y: pt[1] + 14, "font-size": 12, fill: "var(--accent)" }, "目标片");
+      K.svg(svg, "text", { x: pc[0] + 6, y: pc[1] - 4, "font-size": 12, fill: "var(--c2)" }, "候选片");
+      let d = ""; for (let a = 30; a <= 30 + v.ang; a += 1) { const r = (a * Math.PI) / 180; d += (d ? "L" : "M") + (ox + Math.cos(r) * 36) + "," + (oy - Math.sin(r) * 36); }
+      if (d) K.svg(svg, "path", { d, fill: "none", stroke: "var(--ink-3)" });
+      const eu = Math.hypot(T[0] - C[0], T[1] - C[1]);
+      const cos = (T[0] * C[0] + T[1] * C[1]) / (Math.hypot(...T) * Math.hypot(...C));
+      K.svg(svg, "text", { x: 360, y: 60, "font-size": 12, fill: "var(--warn)" }, "黄色虚线 = 欧氏距离（勾股定理）");
+      K.svg(svg, "text", { x: 360, y: 80, "font-size": 12, class: "muted" }, "灰色弧 = 夹角（余弦相似度只看它）");
+      return { readout: [
+        { k: "欧氏距离（越小越像）", v: eu.toFixed(3) },
+        { k: "余弦相似度（越接近 1 越像）", v: cos.toFixed(3) },
+        { k: "两种量法的看法", v: (eu < 0.8) === (cos > 0.9) ? "一致" : "不一致", color: (eu < 0.8) === (cos > 0.9) ? "var(--good)" : "var(--warn)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

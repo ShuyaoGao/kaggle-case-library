@@ -1,0 +1,782 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>车流密度估计</title>
+<meta name="description" content="Kaggle 案例拆解：用 626 张俯拍路面图片微调 YOLOv8，检测车辆，再按左右车道逐帧数车，判断交通是“拥堵”还是“畅通”。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">图像 / 视频 · 目标检测 · 交通监控</div>
+  <h1>车流密度估计：让摄像头替交警数车</h1>
+  <p class="en">Real-Time Traffic Density Estimation with YOLOv8</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">目标检测</span><span class="tag method">YOLOv8n</span><span class="tag method">迁移学习 / 微调</span>
+    <span class="tag method">IoU · mAP</span><span class="tag method">置信度阈值</span><span class="tag method">按车道计数</span><span class="tag method">ONNX 导出</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Farzad Nekouei</b></span>
+    <span>Kaggle 点赞 <b>1,545</b>（2026-11 抓取）</span>
+    <span>数据集 <b>farzadnekouei/top-view-vehicle-detection-image-dataset</b></span>
+    <span><a href="https://www.kaggle.com/code/farzadnekouei/real-time-traffic-density-estimation-with-yolov8" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">626 张从高处俯拍的公路图片</div><p>图片来自 Pexels 的公路视频，每秒取 1 帧，统一成 640×640，每辆车都画好了框，只有一个类别 Vehicle。<span data-cell="25">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">画面里每辆车在哪，左右车道各有几辆</div><p>先找出每辆车的框，再按车道数车：一条车道超过 10 辆就标“Heavy（拥堵）”，否则“Smooth（畅通）”。<span data-cell="76">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">在 COCO 上练好的 YOLOv8n，再用俯拍车辆图微调</div><p>原装模型在俯拍图上会漏车；作者用自己整理的俯拍数据集训练 100 轮，再把检测结果按车道计数，最后导出 ONNX 方便部署。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">验证集 mAP50 97.5%，召回率 93.8%</div><p>作者写明：精确率 91.6%、召回率 93.8%、mAP50 97.5%、mAP50-95 74.2%。<span data-cell="59">出处</span> 微调后原来漏掉的卡车也能找到了。<span data-cell="68">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>Top-View Vehicle Detection Image Dataset for YOLOv8</b>，作者本人在 Roboflow 上整理标注。以下规模信息都来自作者在 notebook 里的说明（第 25、26、32 格）。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">图片总数</div><div class="v">626</div></div>
+        <div class="stat-tile"><div class="k">训练 / 验证</div><div class="v">536 / 90</div></div>
+        <div class="stat-tile"><div class="k">图片尺寸</div><div class="v">640×640</div></div>
+        <div class="stat-tile"><div class="k">类别数（Vehicle）</div><div class="v" style="color:var(--c2)">1</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">训练集做过数据增强，验证集没有增强，划分比例约 85% : 15%。<span data-cell="25">第 25 格</span> <span data-cell="32">第 32 格</span> 另外附带一张测试图 <code>sample_image.jpg</code> 和一段测试视频 <code>sample_video.mp4</code>，都不在训练集里。<span data-cell="22">第 22 格</span> <span data-cell="71">第 71 格</span></p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">文件和字段是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>文件 / 字段</th><th>白话含义</th><th>类型</th></tr>
+        <tr><td><code>train/images/*.jpg</code></td><td>训练用的俯拍路面图片</td><td>图片</td></tr>
+        <tr><td><code>train/labels/*.txt</code></td><td>每张图一个文本文件，<b>每行一辆车</b>，这就是要模型学会的答案</td><td>文本</td></tr>
+        <tr><td>　<code>class</code></td><td>类别编号，本数据集只有 0 = Vehicle</td><td>整数</td></tr>
+        <tr><td>　<code>x_center y_center</code></td><td>框中心的位置，除以图宽/图高，所以在 0 到 1 之间</td><td>小数</td></tr>
+        <tr><td>　<code>width height</code></td><td>框的宽和高，同样除以图宽/图高</td><td>小数</td></tr>
+        <tr><td><code>valid/…</code></td><td>验证集，结构同上</td><td>图片 + 文本</td></tr>
+        <tr><td><code>data.yaml</code></td><td>告诉 YOLO：训练集、验证集在哪，一共几类、类名叫什么</td><td>配置</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">标签格式见作者第 26 格说明 <span data-cell="26">出处</span>：没有车的图片没有对应的 txt 文件。下方第 5 章的动画用一个示意框演示一行标签是怎么来的（数字是动画现场算的，不是数据集里的真实行）。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="18">
+    <h3>动手试试 A · IoU：两个框重叠多少才算“找对了” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="22">
+    <h3>动手试试 B · 置信度阈值和 NMS 怎样决定数出几辆车 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="76">
+    <h3>动手试试 C · 按车道数车，判断拥堵还是畅通 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>只在 COCO 上训练的原装 YOLOv8n，在俯拍样例图上漏掉了明显的卡车和小汽车</td><td><span data-cell="23">第 23 格</span></td></tr>
+        <tr><td>验证集：精确率 91.6%，召回率 93.8%，mAP50 97.5%，mAP50-95 74.2%，fitness 76.5%</td><td><span data-cell="59">第 59 格</span></td></tr>
+        <tr><td>混淆矩阵：97% 的车被找到，3% 被漏掉</td><td><span data-cell="53">第 53 格</span></td></tr>
+        <tr><td>训练损失和验证损失走势接近，作者判断没有过拟合，100 轮已经够了</td><td><span data-cell="49">第 49 格</span></td></tr>
+        <tr><td>模型约 300 万个参数，单张推理约 4.6 毫秒，适合实时</td><td><span data-cell="39">第 39 格</span></td></tr>
+        <tr><td>微调后，样例图里之前漏掉的卡车也被正确框出</td><td><span data-cell="68">第 68 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">以上数字都来自作者文字。注意它们是在<b>验证集</b>上算的，而 <code>best.pt</code> 正是按验证集成绩挑出来的那一轮，没有另外留一份测试集，所以数字可能略偏乐观。拥堵判断部分作者没有给出准确率，只展示了带标注的输出视频（源码不带视频输出）。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一段路口或高架摄像头的视频，每一帧输出所有车辆的框，以及每条车道当下有几辆车、是否拥堵。</li>
+        <li><b>同类问题：</b>停车场空位统计、收费站排队长度、行人过街人数、港口集装箱卡车计数、无人机巡检数车。</li>
+        <li><b>可迁移的套路：</b>先拿通用预训练模型试一试 → 发现视角或场景不对就收集几百张本场景图片微调 → 用 mAP 和混淆矩阵验收 → 再在检测框上叠加业务规则（划区域、数数、设阈值）。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>预训练检测器：YOLOv8n（COCO 80 类）<span data-cell="20">第 20 格</span></li>
+        <li>评价指标：IoU、mAP50、mAP50-95 <span data-cell="18">第 18 格</span></li>
+        <li>数据格式：YOLO txt 标签 + data.yaml <span data-cell="28">第 28 格</span></li>
+        <li>微调：100 轮、批大小 32、早停耐心 50 <span data-cell="37">第 37 格</span></li>
+        <li>评估：学习曲线、混淆矩阵、<code>val()</code> 指标 <span data-cell="48">第 48 格</span> <span data-cell="56">第 56 格</span></li>
+        <li>业务规则：遮掉上下区域、按横坐标分左右车道、超过 10 辆算拥堵 <span data-cell="76">第 76 格</span></li>
+        <li>部署：导出 ONNX <span data-cell="81">第 81 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>第 76 格画了两个四边形当“车道区域”，但计数时只看框左边的横坐标是否小于 609，四边形没有参与计数。路边停着的车、对向匝道上的车会被怎样计数？你会怎么改？</li>
+      <li>“一条车道超过 10 辆算拥堵”这个阈值是作者定的。换一个摄像头、换一个路段，10 还合适吗？除了数车，还有什么信息能说明“堵”（提示：车速、排队长度、停了多久）？</li>
+      <li>代码每一帧单独数车，没有跟踪同一辆车。如果要统计“一小时通过了多少辆车”（车流量），现在的做法会出什么问题？</li>
+      <li>作者比较原装模型和微调模型时，一个用了置信度 0.5（第 22 格），一个用了 0.7（第 67 格）。这对比较的公平性有什么影响？应该怎么比？</li>
+      <li>报告的 mAP50 是 97.5%，mAP50-95 只有 74.2%。这两个数差在哪里？对“数车”这个任务，哪个更重要？</li>
+      <li>训练数据全部来自白天、俯拍的公路视频。晚上、下雨、路口斜着拍的摄像头，模型还可靠吗？上线前你会补充哪些数据？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Farzad Nekouei，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：Farzad Nekouei, Top-View Vehicle Detection Image Dataset for YOLOv8（图片来源 Pexels）。
+</footer>
+</main>
+
+<script src="nb/traffic-density-yolov8.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* 自查开关：网址带 #fast 时动画直接跳到最后一帧，并折叠代码（无界面截图用） */
+  const FAST = location.hash === "#fast";
+  if (FAST) {
+    K.tween = (ms, fn, ctx) => { if (ctx && !ctx.alive()) return Promise.resolve(false); fn(1, 1); return Promise.resolve(true); };
+    K.wait = () => Promise.resolve(true);
+  }
+
+  /* ---------- 公用：俯拍路面和车 ---------- */
+  function road(svg, x, y, w, h, lanes) {
+    K.svg(svg, "rect", { x, y, width: w, height: h, fill: "color-mix(in srgb, var(--ink-3) 22%, var(--panel))", rx: 4 });
+    for (let i = 1; i < lanes; i++) {
+      const lx = x + (w * i) / lanes;
+      K.svg(svg, "line", { x1: lx, y1: y, x2: lx, y2: y + h, stroke: "var(--panel)", "stroke-width": 2, "stroke-dasharray": i === lanes / 2 ? null : "10 10" });
+    }
+  }
+  function car(svg, cx, cy, w, h, color) {
+    const g = K.svg(svg, "g");
+    K.svg(g, "rect", { x: cx - w / 2, y: cy - h / 2, width: w, height: h, rx: Math.min(w, h) * 0.25, fill: color || "var(--c1)" });
+    K.svg(g, "rect", { x: cx - w * 0.36, y: cy - h * 0.22, width: w * 0.72, height: h * 0.2, rx: 2, fill: "var(--panel)", opacity: 0.7 });
+    return g;
+  }
+  function iou(a, b) { // [x1,y1,x2,y2]
+    const ix = Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0])), iy = Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
+    const I = ix * iy, U = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - I;
+    return U > 0 ? I / U : 0;
+  }
+  function boxEl(svg, b, color, dash, label) {
+    const g = K.svg(svg, "g");
+    K.svg(g, "rect", { x: b[0], y: b[1], width: b[2] - b[0], height: b[3] - b[1], fill: "none", stroke: color, "stroke-width": 2, "stroke-dasharray": dash || null });
+    if (label) K.svg(g, "text", { x: b[0], y: b[1] - 3, "font-size": 10, fill: color, "font-weight": 700 }, label);
+    return g;
+  }
+  const fade = (els, v) => els.forEach((e) => (e.style.opacity = v));
+
+  const steps = [
+    {
+      at: 0, title: "目标检测和 YOLO：看一眼就把车全找出来", kicker: "第 0–13 格 · 背景与准备",
+      html: `<p>作者先介绍任务：<b>目标检测</b>不光要说“图里有车”，还要用<b>框</b>标出每辆车在哪，并给出类别和<b>置信度</b>（模型有多大把握）。</p><p>YOLO 是 “You Only Look Once” 的缩写：把整张图一次性送进网络，网格里每一块同时负责预测附近的物体，所以快到可以处理实时视频。随后两格安装 <code>ultralytics</code> 包并导入工具库，YOLOv8 第一次可以直接 <code>pip install</code>。<span data-cell="9">第 9 格</span></p><p>作者的目标：数出画面中指定区域里的车，用来判断<b>交通密度</b>，也就是某一时刻一段路上挤了多少车。<span data-cell="4">第 4 格</span></p>`,
+      cells: [12], highlight: ["from ultralytics import YOLO"],
+      draw(svg, ctx) {
+        road(svg, 60, 20, 300, 300, 4);
+        const cars = [[97, 70], [172, 150], [172, 260], [247, 90], [247, 210], [322, 150], [97, 230]];
+        cars.forEach((c, i) => car(svg, c[0], c[1], 34, 58, K.colors[i % 6]));
+        const grid = [];
+        for (let i = 0; i <= 6; i++) {
+          grid.push(K.svg(svg, "line", { x1: 60 + i * 50, y1: 20, x2: 60 + i * 50, y2: 320, stroke: "var(--accent)", "stroke-width": 1, opacity: 0 }));
+          grid.push(K.svg(svg, "line", { x1: 60, y1: 20 + i * 50, x2: 360, y2: 20 + i * 50, stroke: "var(--accent)", "stroke-width": 1, opacity: 0 }));
+        }
+        const hits = cars.map((c) => K.svg(svg, "rect", { x: 60 + Math.floor((c[0] - 60) / 50) * 50, y: 20 + Math.floor((c[1] - 20) / 50) * 50, width: 50, height: 50, fill: "var(--accent)", opacity: 0 }));
+        const boxes = cars.map((c) => boxEl(svg, [c[0] - 20, c[1] - 33, c[0] + 20, c[1] + 33], "var(--good)", null, "car"));
+        fade(boxes, 0);
+        K.svg(svg, "text", { x: 400, y: 60, "font-size": 15, "font-weight": 700 }, "① 整张图只看一遍");
+        K.svg(svg, "text", { x: 400, y: 120, "font-size": 15, "font-weight": 700 }, "② 每个网格同时预测");
+        K.svg(svg, "text", { x: 420, y: 142, "font-size": 12, class: "muted" }, "物体中心落在哪格，就由哪格负责");
+        K.svg(svg, "text", { x: 400, y: 200, "font-size": 15, "font-weight": 700 }, "③ 输出：框 + 类别 + 置信度");
+        const cnt = K.svg(svg, "text", { x: 400, y: 260, "font-size": 22, "font-weight": 700, fill: "var(--good)" }, "");
+        K.svg(svg, "text", { x: 400, y: 312, "font-size": 12, class: "muted" }, "示意图，网格大小不是 YOLOv8 的真实设置");
+        ctx.wait(400).then((ok) => ok && ctx.tween(700, (t) => fade(grid, t * 0.6)))
+          .then((ok) => ok && ctx.tween(600, (t) => fade(hits, t * 0.25)))
+          .then((ok) => ok && ctx.tween(600, (t) => fade(boxes, t)))
+          .then((ok) => { if (ok) cnt.textContent = "一次找到 7 辆车"; });
+      },
+    },
+    {
+      at: 14, title: "五种尺寸的 YOLOv8：快和准的取舍", kicker: "第 14–17 格 · 选模型",
+      html: `<p>官方提供 nano、small、medium、large、xlarge 五个尺寸的预训练模型，都在 <b>COCO</b> 数据集（80 类日常物体，包括 car、truck）上训练过，输入都是 640×640。作者总结：模型越大越准，但越慢。<span data-cell="17">第 17 格</span></p><p>交通监控要一秒处理很多帧，所以作者选了最小最快的 <b>nano（yolov8n）</b>。</p>`,
+      cells: [17],
+      draw(svg, ctx) {
+        const names = ["n", "s", "m", "l", "x"];
+        K.svg(svg, "text", { x: 40, y: 30, "font-size": 13, class: "muted" }, "示意：只表示趋势，条的长短不是官方数值");
+        K.svg(svg, "text", { x: 140, y: 64, "font-size": 13, "font-weight": 700, fill: "var(--c3)" }, "精度（mAP）");
+        K.svg(svg, "text", { x: 430, y: 64, "font-size": 13, "font-weight": 700, fill: "var(--c4)" }, "每张图耗时");
+        const bars = names.map((n, i) => {
+          const y = 80 + i * 48;
+          K.svg(svg, "text", { x: 60, y: y + 22, "font-size": 15, "font-weight": 700 }, "YOLOv8" + n);
+          const a = K.svg(svg, "rect", { x: 140, y, width: 0, height: 30, rx: 4, fill: "var(--c3)" });
+          const b = K.svg(svg, "rect", { x: 430, y, width: 0, height: 30, rx: 4, fill: "var(--c4)" });
+          return { a, b, A: 150 + i * 25, B: 30 + i * i * 12 + i * 20 };
+        });
+        const pick = K.svg(svg, "rect", { x: 50, y: 74, width: 640, height: 42, rx: 8, fill: "none", stroke: "var(--accent)", "stroke-width": 3, opacity: 0 });
+        const lab = K.svg(svg, "text", { x: 600, y: 100, "font-size": 13, fill: "var(--accent)", "font-weight": 700, opacity: 0 }, "作者选它");
+        ctx.tween(1400, (t) => bars.forEach((d) => { d.a.setAttribute("width", d.A * t); d.b.setAttribute("width", d.B * t); }))
+          .then((ok) => ok && ctx.tween(600, (t) => { pick.style.opacity = t; lab.style.opacity = t; }));
+      },
+    },
+    {
+      title: "IoU 和 mAP：怎么给检测框打分", kicker: "第 18–19 格 · 评价指标",
+      html: `<p><b>IoU（交并比）</b> = 两个框重叠部分的面积 ÷ 两个框合起来的面积。预测框和标准答案框完全重合是 1，毫不相干是 0。通常 IoU ≥ 0.5 才算“找对了”。</p><p><b>mAP</b>：对每一类算精确率-召回率曲线下的面积（AP），再对各类取平均。<b>mAP50</b> 是 IoU 门槛取 0.5 时的成绩，<b>mAP50-95</b> 是门槛从 0.5 一路提高到 0.95、每隔 0.05 算一次再平均，要求框画得更贴。<span data-cell="18">第 18 格</span></p>`,
+      cells: [18],
+      draw(svg, ctx) {
+        const gt = [120, 80, 300, 260];
+        const inter = K.svg(svg, "rect", { x: 0, y: 0, width: 0, height: 0, fill: "var(--c3)", opacity: 0.35 });
+        boxEl(svg, gt, "var(--good)", null, "标准答案框");
+        const pg = K.svg(svg, "rect", { x: 0, y: 0, width: 180, height: 180, fill: "none", stroke: "var(--c6)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        const pl = K.svg(svg, "text", { x: 0, y: 0, "font-size": 10, fill: "var(--c6)", "font-weight": 700 }, "预测框");
+        const v = K.svg(svg, "text", { x: 400, y: 120, "font-size": 30, "font-weight": 700 }, "");
+        const j = K.svg(svg, "text", { x: 400, y: 160, "font-size": 15 }, "");
+        K.svg(svg, "text", { x: 400, y: 70, "font-size": 15 }, "IoU = 重叠面积 ÷ 合并面积");
+        K.svg(svg, "text", { x: 400, y: 220, "font-size": 12, class: "muted" }, "预测框从远处滑向答案框（示意）");
+        ctx.tween(3200, (t) => {
+          const dx = K.lerp(260, 0, t), dy = K.lerp(-60, 0, t);
+          const p = [gt[0] + dx, gt[1] + dy, gt[2] + dx, gt[3] + dy];
+          K.set(pg, { x: p[0], y: p[1] }); K.set(pl, { x: p[0] + 4, y: p[3] + 14 });
+          const ix0 = Math.max(p[0], gt[0]), iy0 = Math.max(p[1], gt[1]), ix1 = Math.min(p[2], gt[2]), iy1 = Math.min(p[3], gt[3]);
+          K.set(inter, { x: ix0, y: iy0, width: Math.max(0, ix1 - ix0), height: Math.max(0, iy1 - iy0) });
+          const u = iou(p, gt);
+          v.textContent = "IoU = " + u.toFixed(2);
+          v.setAttribute("fill", u >= 0.5 ? "var(--good)" : "var(--bad)");
+          j.textContent = u >= 0.5 ? "≥ 0.5：算找对（真阳性）" : "< 0.5：不算数（假阳性）";
+        });
+      },
+    },
+    {
+      title: "原装模型先试一试：俯拍视角会漏车", kicker: "第 20–23 格 · 预训练模型推理",
+      html: `<p>作者加载 <code>yolov8n.pt</code>，在一张俯拍样例图上推理：图片缩放到 640，<b>置信度阈值 0.5</b>，即模型把握低于 50% 的框都不要。<span data-cell="22">第 22 格</span></p><p>结果：原装模型漏掉了明显可见的卡车和小汽车。<span data-cell="23">第 23 格</span> 原因在于 COCO 里的车大多是从侧面、平视拍的；从高处往下看，车只剩一个车顶，模型“没见过”这种样子。所以要用专门的俯拍车辆数据<b>微调</b>。</p>`,
+      cells: [20, 22], highlight: ["conf=0.5", "yolov8n.pt"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 13, "font-weight": 700 }, "COCO 里常见的车：侧面平视");
+        const side = K.svg(svg, "g");
+        K.svg(side, "rect", { x: 60, y: 90, width: 170, height: 46, rx: 12, fill: "var(--c1)" });
+        K.svg(side, "rect", { x: 95, y: 60, width: 95, height: 38, rx: 10, fill: "var(--c1)" });
+        K.svg(side, "circle", { cx: 100, cy: 140, r: 16, fill: "var(--ink)" });
+        K.svg(side, "circle", { cx: 195, cy: 140, r: 16, fill: "var(--ink)" });
+        boxEl(svg, [52, 52, 240, 160], "var(--good)", null, "car 0.92");
+        K.svg(svg, "text", { x: 30, y: 210, "font-size": 12, class: "muted" }, "有车轮、车窗、车身轮廓");
+        K.svg(svg, "text", { x: 330, y: 26, "font-size": 13, "font-weight": 700 }, "本案例：高处俯拍，只看到车顶");
+        road(svg, 330, 40, 360, 280, 4);
+        const C = [[375, 90, 34, 56], [465, 170, 34, 56], [555, 80, 40, 110], [645, 230, 34, 56], [375, 250, 34, 56]];
+        C.forEach((c, i) => car(svg, c[0], c[1], c[2], c[3], K.colors[(i + 1) % 6]));
+        const det = [0, 3], miss = [1, 2, 4];
+        const els = [];
+        det.forEach((i) => { const c = C[i]; els.push(boxEl(svg, [c[0] - c[2] / 2 - 4, c[1] - c[3] / 2 - 4, c[0] + c[2] / 2 + 4, c[1] + c[3] / 2 + 4], "var(--good)", null, "car")); });
+        miss.forEach((i) => { const c = C[i]; els.push(boxEl(svg, [c[0] - c[2] / 2 - 4, c[1] - c[3] / 2 - 4, c[0] + c[2] / 2 + 4, c[1] + c[3] / 2 + 4], "var(--bad)", "5 4", "漏检")); });
+        fade(els, 0);
+        const note = K.svg(svg, "text", { x: 30, y: 300, "font-size": 14, fill: "var(--bad)", "font-weight": 700 }, "");
+        (async () => {
+          for (let i = 0; i < els.length; i++) if (!(await ctx.tween(380, (t) => (els[i].style.opacity = t)))) return;
+          note.textContent = "示意：视角变了，原装模型认不全";
+        })();
+      },
+    },
+    {
+      at: 24, title: "数据集：626 张俯拍图和 YOLO 标签格式", kicker: "第 24–30 格 · 认识数据",
+      html: `<p>作者自己做了一个俯拍车辆数据集：从 Pexels 的公路视频里每秒抽 1 帧，在 Roboflow 上逐辆画框，只设一个类别 <b>Vehicle</b>（小汽车、卡车、公交都算）。<span data-cell="25">第 25 格</span></p><p>YOLO 的标签是纯文本，每行一辆车：<code>类别 中心x 中心y 宽 高</code>，四个数都除以了图片宽高，所以在 0~1 之间。<span data-cell="26">第 26 格</span> 第 28 格打印的 <code>data.yaml</code> 告诉模型训练集、验证集在哪、只有 1 类。</p>`,
+      cells: [28], highlight: ["data.yaml"],
+      draw(svg, ctx) {
+        const X0 = 40, Y0 = 20, S = 300;
+        K.svg(svg, "rect", { x: X0, y: Y0, width: S, height: S, fill: "color-mix(in srgb, var(--ink-3) 22%, var(--panel))", stroke: "var(--line)" });
+        K.svg(svg, "text", { x: X0 + S / 2, y: Y0 + S + 16, "text-anchor": "middle", "font-size": 11, class: "muted" }, "640 × 640 的图片（示意）");
+        const b = { x: 0.62, y: 0.38, w: 0.12, h: 0.22 };
+        car(svg, X0 + b.x * S, Y0 + b.y * S, b.w * S * 0.9, b.h * S * 0.9, "var(--c2)");
+        const bx = boxEl(svg, [X0 + (b.x - b.w / 2) * S, Y0 + (b.y - b.h / 2) * S, X0 + (b.x + b.w / 2) * S, Y0 + (b.y + b.h / 2) * S], "var(--good)");
+        const cross = K.svg(svg, "circle", { cx: X0 + b.x * S, cy: Y0 + b.y * S, r: 4, fill: "var(--warn)", opacity: 0 });
+        const gx = K.svg(svg, "line", { x1: X0, y1: Y0 + b.y * S, x2: X0, y2: Y0 + b.y * S, stroke: "var(--warn)", "stroke-dasharray": "4 3" });
+        const gy = K.svg(svg, "line", { x1: X0 + b.x * S, y1: Y0, x2: X0 + b.x * S, y2: Y0, stroke: "var(--warn)", "stroke-dasharray": "4 3" });
+        const parts = [["0", "类别：Vehicle"], [b.x.toFixed(2), "中心 x = 397 ÷ 640"], [b.y.toFixed(2), "中心 y = 243 ÷ 640"], [b.w.toFixed(2), "宽 = 77 ÷ 640"], [b.h.toFixed(2), "高 = 141 ÷ 640"]];
+        K.svg(svg, "text", { x: 380, y: 50, "font-size": 13, class: "muted" }, "标签文件里的一行（示意值）");
+        const tx = parts.map((p, i) => {
+          const g = K.svg(svg, "g", { opacity: 0 });
+          K.svg(g, "text", { x: 380 + i * 62, y: 90, "font-size": 20, "font-family": "var(--mono)", "font-weight": 700, fill: i ? "var(--warn)" : "var(--c2)" }, p[0]);
+          K.svg(g, "text", { x: 390, y: 140 + i * 30, "font-size": 13 }, "· " + p[1]);
+          return g;
+        });
+        K.svg(svg, "text", { x: 380, y: 310, "font-size": 12, class: "muted" }, "除以图宽高后，图片缩放了标签也不用改");
+        (async () => {
+          if (!(await ctx.tween(500, (t) => (tx[0].style.opacity = t)))) return;
+          if (!(await ctx.tween(700, (t) => { gx.setAttribute("x2", X0 + b.x * S * t); gy.setAttribute("y2", Y0 + b.y * S * t); cross.style.opacity = t; }))) return;
+          for (let i = 1; i < 5; i++) if (!(await ctx.tween(450, (t) => (tx[i].style.opacity = t)))) return;
+        })();
+      },
+    },
+    {
+      title: "数一数、看一看：536 张训练，90 张验证", kicker: "第 31–34 格 · 检查数据",
+      html: `<p>第 31 格逐张打开图片，数数量、查尺寸。作者的结论：训练集 536 张、验证集 90 张，全部是 640×640，约 85% 用来训练、15% 用来验证。<span data-cell="32">第 32 格</span></p><p>训练集做了数据增强（同一张图稍作变化再用一次），验证集保持原样，这样验证成绩才代表真实水平。第 34 格从训练集里等间隔挑 8 张图看看样子。</p>`,
+      cells: [31, 34],
+      draw(svg, ctx) {
+        const N = 120, cols = 20;
+        K.svg(svg, "text", { x: 30, y: 24, "font-size": 13, class: "muted" }, "每个小方块代表约 5 张图（示意）");
+        const sq = [];
+        for (let i = 0; i < N; i++) sq.push(K.svg(svg, "rect", { x: 30 + (i % cols) * 16, y: 40 + Math.floor(i / cols) * 16, width: 12, height: 12, rx: 2, fill: "var(--ink-3)" }));
+        const nTr = Math.round(N * 536 / 626);
+        K.svg(svg, "text", { x: 420, y: 70, "font-size": 16, "font-weight": 700, fill: "var(--c1)" }, "训练集 536 张（约 85%）");
+        K.svg(svg, "text", { x: 420, y: 92, "font-size": 12, class: "muted" }, "做过数据增强（同一张图稍作变化再用）");
+        K.svg(svg, "text", { x: 420, y: 250, "font-size": 16, "font-weight": 700, fill: "var(--c3)" }, "验证集 90 张（约 15%）");
+        K.svg(svg, "text", { x: 420, y: 272, "font-size": 12, class: "muted" }, "不增强，只用来打分");
+        const tgt = sq.map((_, i) => i < nTr ? [30 + (i % 25) * 15, 120 + Math.floor(i / 25) * 15] : [30 + ((i - nTr) % 25) * 15, 250 + Math.floor((i - nTr) / 25) * 15]);
+        ctx.wait(600).then((ok) => ok && ctx.tween(1600, (t) => sq.forEach((s, i) => {
+          s.setAttribute("x", K.lerp(30 + (i % cols) * 16, tgt[i][0], t));
+          s.setAttribute("y", K.lerp(40 + Math.floor(i / cols) * 16, tgt[i][1], t));
+          s.style.fill = t > 0.5 ? (i < nTr ? "var(--c1)" : "var(--c3)") : "var(--ink-3)";
+        })));
+      },
+    },
+    {
+      at: 35, title: "微调 YOLOv8：站在 COCO 的肩膀上", kicker: "第 35–39 格 · 迁移学习",
+      html: `<p>第 37 格只用一行 <code>model.train(...)</code>：从 COCO 上训练好的权重出发，在俯拍车辆数据上继续训练 100 轮（epochs），每批 32 张图，50 轮没有进步就提前停（patience），初始学习率设得很小（<code>lr0=0.0001</code>），意思是在原有本事上轻轻调整，不要推倒重来。</p><p>输出头也变了：原来要在 80 类里挑，现在只有 Vehicle 一类。第 39 格作者解释了训练日志里各项指标（mAP、精确率、召回率、三种损失）的含义。</p>`,
+      cells: [37], highlight: ["epochs=100", "lr0=0.0001", "patience=50"],
+      draw(svg, ctx) {
+        const blocks = [["主干 Backbone\n提取线条、纹理、形状", 40, "var(--c1)"], ["颈部 Neck\n融合大小不同的特征", 240, "var(--c4)"]];
+        blocks.forEach((b) => K.node(svg, b[1], 110, 170, 90, b[0], { fill: `color-mix(in srgb, ${b[2]} 16%, var(--panel))`, stroke: b[2] }));
+        K.arrow(svg, 210, 155, 238, 155); K.arrow(svg, 410, 155, 438, 155);
+        const head = K.node(svg, 440, 100, 130, 110, "检测头 Head", { fill: "color-mix(in srgb, var(--c6) 16%, var(--panel))", stroke: "var(--c6)" });
+        const outs = [];
+        for (let i = 0; i < 12; i++) outs.push(K.svg(svg, "rect", { x: 600, y: 60 + i * 16, width: 80, height: 12, rx: 2, fill: "var(--ink-3)", opacity: 0.6 }));
+        const outLab = K.svg(svg, "text", { x: 440, y: 280, "font-size": 12 }, "COCO：80 类（person、car、dog…）");
+        K.svg(svg, "text", { x: 40, y: 50, "font-size": 13, "font-weight": 700 }, "从 COCO 学到的权重整体搬过来，作为起点");
+        const lr = K.svg(svg, "text", { x: 40, y: 250, "font-size": 13, fill: "var(--accent)" }, "");
+        const nudges = [];
+        for (let i = 0; i < 18; i++) nudges.push(K.svg(svg, "circle", { cx: 60 + (i % 9) * 40, cy: 220 + Math.floor(i / 9) * 10, r: 3, fill: "var(--accent)", opacity: 0 }));
+        K.svg(svg, "text", { x: 40, y: 310, "font-size": 12, class: "muted" }, "示意：所有层都会被训练，只是学习率很小，改动幅度小");
+        (async () => {
+          await ctx.wait(500);
+          if (!(await ctx.tween(1000, (t) => outs.forEach((o, i) => { if (i > 0) o.style.opacity = 0.6 * (1 - t); })))) return;
+          outs[0].style.fill = "var(--c2)"; outs[0].style.opacity = 1; outLab.textContent = "现在：只剩 1 类 Vehicle";
+          for (let ep = 1; ep <= 100; ep += 9) {
+            lr.textContent = `epoch ${Math.min(ep, 100)} / 100：每批 32 张图，权重小步微调`;
+            if (!(await ctx.tween(220, (t) => nudges.forEach((n, i) => (n.style.opacity = ((i + ep) % 3 === 0 ? t : 0.2)))))) return;
+          }
+          lr.textContent = "epoch 100 / 100 完成，保存 best.pt 和 last.pt";
+        })();
+      },
+    },
+    {
+      at: 40, title: "学习曲线：三种损失一起往下走", kicker: "第 40–49 格 · 训练过程",
+      html: `<p>训练结束后 <code>runs/detect/train</code> 下有权重、混淆矩阵、PR 曲线和每轮指标 <code>results.csv</code>。<span data-cell="43">第 43 格</span> 作者读入 csv，画了三条损失曲线：</p><ul class="tight"><li><b>box_loss</b>：框的位置、大小画得准不准</li><li><b>cls_loss</b>：类别判断得对不对</li><li><b>dfl_loss</b>：分布焦点损失，让框的边缘更精细</li></ul><p>作者看到训练和验证损失一开始快速下降，后来走平，两条线贴得很近，判断模型没有过拟合，100 轮已经够了。<span data-cell="49">第 49 格</span></p>`,
+      cells: [47, 48], highlight: ["results.csv"],
+      draw(svg, ctx) {
+        const names = [["box_loss", "var(--c1)"], ["cls_loss", "var(--c3)"], ["dfl_loss", "var(--c4)"]];
+        const r = K.rng(4);
+        names.forEach((nm, k) => {
+          const ax = K.axes(svg, { x: 40 + k * 230, y: 40, w: 190, h: 230 }, [0, 100], [0, 2], { xticks: 2, yticks: 0, xlabel: nm[0] });
+          let dT = "", dV = "";
+          const pts = [];
+          for (let e = 0; e <= 100; e += 2) {
+            const base = 0.4 + 1.4 * Math.exp(-e / (12 + k * 6));
+            pts.push([e, base + K.randn(r) * 0.02, base + 0.08 + K.randn(r) * 0.04]);
+          }
+          const pT = K.svg(svg, "path", { d: "", fill: "none", stroke: nm[1], "stroke-width": 2 });
+          const pV = K.svg(svg, "path", { d: "", fill: "none", stroke: nm[1], "stroke-width": 2, "stroke-dasharray": "5 3" });
+          ctx.tween(2200, (t) => {
+            dT = ""; dV = "";
+            pts.forEach((p) => { if (p[0] <= t * 100) { dT += (dT ? "L" : "M") + ax.sx(p[0]) + "," + ax.sy(p[1]); dV += (dV ? "L" : "M") + ax.sx(p[0]) + "," + ax.sy(p[2]); } });
+            pT.setAttribute("d", dT); pV.setAttribute("d", dV);
+          });
+        });
+        K.svg(svg, "text", { x: 40, y: 24, "font-size": 12, class: "muted" }, "实线 = 训练损失，虚线 = 验证损失（示意曲线，不是作者的真实数值）");
+        K.svg(svg, "text", { x: 40, y: 325, "font-size": 13 }, "两条线贴得近 → 没有“只会背训练题”；走平 → 再多练也提升不大");
+      },
+    },
+    {
+      at: 50, title: "混淆矩阵：97% 的车被找到", kicker: "第 50–53 格 · 混淆矩阵",
+      html: `<p>第 52 格显示训练时自动生成的<b>归一化混淆矩阵</b>。检测任务里只有一个真类别 Vehicle，另一个是“背景”（没有车的地方）。</p><p>作者的解读：真有车的地方，97% 被模型找到了；3% 被当成背景漏掉了（假阴性）。<span data-cell="53">第 53 格</span> 对数车来说，漏掉 3% 意味着拥堵时会少数几辆。</p>`,
+      cells: [52],
+      draw(svg, ctx) {
+        const cells = [["真：车\n判：车", "97%", "var(--good)", 0.97], ["真：车\n判：背景（漏检）", "3%", "var(--bad)", 0.03]];
+        K.svg(svg, "text", { x: 60, y: 40, "font-size": 13, class: "muted" }, "按“真有车”这一列归一化（数字来自作者第 53 格）");
+        const tiles = cells.map((c, i) => {
+          const g = K.node(svg, 60 + i * 200, 70, 180, 150, c[0], { fill: `color-mix(in srgb, ${c[2]} 15%, var(--panel))`, stroke: c[2] });
+          const v = K.svg(svg, "text", { x: 150 + i * 200, y: 200, "text-anchor": "middle", "font-size": 28, "font-weight": 700, fill: c[2] }, "0%");
+          g.style.opacity = 0;
+          return { g, v, p: c[3] };
+        });
+        K.svg(svg, "text", { x: 490, y: 110, "font-size": 14, "font-weight": 700 }, "如果路上真有 100 辆车：");
+        const cars = [];
+        for (let i = 0; i < 100; i++) cars.push(K.svg(svg, "rect", { x: 490 + (i % 10) * 20, y: 125 + Math.floor(i / 10) * 18, width: 14, height: 12, rx: 2, fill: "var(--ink-3)" }));
+        (async () => {
+          for (const t of tiles) if (!(await ctx.tween(500, (u) => { t.g.style.opacity = u; t.v.textContent = Math.round(t.p * 100 * u) + "%"; }))) return;
+          if (!(await ctx.tween(1400, (u) => cars.forEach((c, i) => { if (i / 100 < u) c.style.fill = i >= 97 ? "var(--bad)" : "var(--good)"; })))) return;
+        })();
+      },
+    },
+    {
+      at: 54, title: "验证集成绩单：精确率、召回率、mAP", kicker: "第 54–59 格 · 性能指标",
+      html: `<p>第 56 格加载最好的一轮权重 <code>best.pt</code>，在验证集上跑 <code>val()</code>；第 58 格把结果整理成表。作者的解读<span data-cell="59">（第 59 格）</span>：</p><ul class="tight"><li><b>精确率 91.6%</b>：框出来的东西里，九成多真是车</li><li><b>召回率 93.8%</b>：真有的车里，九成多被找到</li><li><b>mAP50 97.5%</b>、<b>mAP50-95 74.2%</b>：门槛放宽时几乎全对，要求框画得很贴时成绩下降</li><li><b>fitness 76.5%</b>：综合分</li></ul><p>动画里的 fitness 公式是我们按 Ultralytics 的默认权重验算的：0.1×97.5 + 0.9×74.2 ≈ 76.5，和作者写的数一致。</p>`,
+      cells: [56, 58], highlight: ["best.pt", "val("],
+      draw(svg, ctx) {
+        const items = [{ label: "精确率", value: 91.6, color: "var(--c1)" }, { label: "召回率", value: 93.8, color: "var(--c3)" }, { label: "mAP50", value: 97.5, color: "var(--c2)" }, { label: "mAP50-95", value: 74.2, color: "var(--c4)" }, { label: "fitness", value: 76.5, color: "var(--accent)" }];
+        const els = K.bars(svg, { x: 30, y: 30, w: 470, h: 230 }, items.map((d) => Object.assign({}, d, { value: 0.001 })), { horizontal: true, max: 100, labelWidth: 90, gap: 14, fmt: () => "" });
+        ctx.tween(1500, (t) => els.forEach((e, i) => {
+          const w = ((470 - 90 - 50) * items[i].value * t) / 100;
+          e.rect.setAttribute("width", w); e.text.setAttribute("x", 30 + 90 + w + 6); e.text.textContent = (items[i].value * t).toFixed(1) + "%";
+        }));
+        K.svg(svg, "text", { x: 520, y: 70, "font-size": 13, "font-weight": 700 }, "fitness 怎么来的");
+        K.svg(svg, "text", { x: 520, y: 100, "font-size": 13, "font-family": "var(--mono)" }, "0.1 × mAP50");
+        K.svg(svg, "text", { x: 520, y: 122, "font-size": 13, "font-family": "var(--mono)" }, "+ 0.9 × mAP50-95");
+        K.svg(svg, "text", { x: 520, y: 150, "font-size": 13, "font-family": "var(--mono)", fill: "var(--accent)" }, "= " + (0.1 * 97.5 + 0.9 * 74.2).toFixed(1) + "%");
+        K.svg(svg, "text", { x: 520, y: 190, "font-size": 12, class: "muted" }, "更看重“框画得贴不贴”");
+        K.svg(svg, "text", { x: 30, y: 315, "font-size": 12, class: "muted" }, "数字来自作者第 59 格的文字；是验证集成绩，best.pt 也是按验证集挑出来的");
+      },
+    },
+    {
+      at: 60, title: "在验证图和新图上推理", kicker: "第 60–68 格 · 推理与泛化",
+      html: `<p>第 64 格从验证集等间隔挑 9 张图，用微调后的模型画框（置信度 0.5）。第 67 格再拿第 4 章那张样例图来试，这次阈值设成 <b>0.7</b>。</p><p>作者的对比：原装模型漏掉并认错了卡车，微调后的模型把各种车辆，包括之前漏掉的卡车，都正确框了出来。<span data-cell="68">第 68 格</span> 注意两次用的阈值不同（0.5 和 0.7），严格比较时应该用同一个阈值。</p>`,
+      cells: [64, 67], highlight: ["conf=0.7", "best_model.predict"],
+      draw(svg, ctx) {
+        const C = [[60, 80, 34, 56], [150, 170, 34, 56], [240, 90, 40, 110], [60, 240, 34, 56], [240, 250, 34, 56]];
+        const scene = (ox, title, found, color) => {
+          K.svg(svg, "text", { x: ox, y: 24, "font-size": 13, "font-weight": 700 }, title);
+          road(svg, ox, 34, 300, 290, 3);
+          C.forEach((c, i) => car(svg, ox + c[0] - 10, c[1], c[2], c[3], K.colors[(i + 1) % 6]));
+          return C.map((c, i) => {
+            const hit = found.includes(i);
+            const b = boxEl(svg, [ox + c[0] - 10 - c[2] / 2 - 4, c[1] - c[3] / 2 - 4, ox + c[0] - 10 + c[2] / 2 + 4, c[1] + c[3] / 2 + 4], hit ? color : "var(--bad)", hit ? null : "5 4", hit ? "Vehicle" : "漏");
+            b.style.opacity = 0; return b;
+          });
+        };
+        const A = scene(20, "原装 YOLOv8n（阈值 0.5）", [0, 3], "var(--good)");
+        const B = scene(380, "微调后（阈值 0.7）", [0, 1, 2, 3, 4], "var(--good)");
+        K.svg(svg, "text", { x: 20, y: 336, "font-size": 11, class: "muted" }, "示意图，不是作者的真实输出");
+        (async () => {
+          if (!(await ctx.tween(700, (t) => fade(A, t)))) return;
+          await ctx.wait(400);
+          for (const b of B) if (!(await ctx.tween(260, (t) => (b.style.opacity = t)))) return;
+        })();
+      },
+    },
+    {
+      at: 69, title: "整段视频：一帧一帧地检测", kicker: "第 69–73 格 · 视频推理",
+      html: `<p>视频其实就是一张张连续的图片（帧）。第 71 格把测试视频复制到工作目录，让模型对每一帧做检测并保存成带框的视频；这里没传 <code>conf</code>，用的是 Ultralytics 的默认阈值。第 73 格用 ffmpeg 把 .avi 转成 .mp4 好在 notebook 里播放。</p><p>作者在第 75 格说明：Kaggle 上没法真正实时，但同样的代码在本地电脑（甚至只有 CPU）上可以接摄像头实时跑。</p>`,
+      cells: [71, 73], highlight: ["save=True"],
+      draw(svg, ctx) {
+        const frames = [];
+        for (let i = 0; i < 6; i++) {
+          const g = K.svg(svg, "g");
+          K.svg(g, "rect", { x: 0, y: 0, width: 90, height: 72, rx: 3, fill: "color-mix(in srgb, var(--ink-3) 30%, var(--panel))", stroke: "var(--ink-3)" });
+          K.svg(g, "line", { x1: 45, y1: 0, x2: 45, y2: 72, stroke: "var(--panel)", "stroke-width": 2 });
+          const cy = 14 + ((i * 9) % 44);
+          car(g, 24, cy, 10, 16, "var(--c1)"); car(g, 66, 60 - cy * 0.7, 10, 16, "var(--c3)");
+          const bx = K.svg(g, "g", { opacity: 0 });
+          boxEl(bx, [17, cy - 10, 31, cy + 10], "var(--good)");
+          boxEl(bx, [59, 60 - cy * 0.7 - 10, 73, 60 - cy * 0.7 + 10], "var(--good)");
+          K.svg(g, "text", { x: 3, y: 69, "font-size": 9, class: "muted" }, "帧 " + (i + 1));
+          frames.push({ g, bx });
+        }
+        K.node(svg, 290, 30, 140, 60, "YOLOv8\n（微调后）", { fill: "var(--accent-soft)", stroke: "var(--accent)", bold: true });
+        K.svg(svg, "text", { x: 20, y: 200, "font-size": 13, class: "muted" }, "原视频：一帧帧排队进入模型");
+        K.svg(svg, "text", { x: 470, y: 200, "font-size": 13, fill: "var(--good)" }, "输出：每帧都画好框，再拼回视频");
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 12, class: "muted" }, "示意：帧数和画面都是模拟的");
+        ctx.tween(5000, (t) => frames.forEach((f, i) => {
+          const p = K.clamp(t * 1.8 - i * 0.16, 0, 1);
+          const fx = 20 + (5 - i) * 10, tx = 440 + i * 36, ty = 220 + (i % 2) * 20;
+          const x = p < 0.5 ? K.lerp(fx, 315, p * 2) : K.lerp(315, tx, (p - 0.5) * 2);
+          const y = p < 0.5 ? K.lerp(220 + i * 6, 100, p * 2) : K.lerp(100, ty, (p - 0.5) * 2);
+          f.g.setAttribute("transform", `translate(${x},${y})`);
+          f.bx.style.opacity = p >= 0.5 ? 1 : 0;
+        }));
+      },
+    },
+    {
+      at: 74, title: "按车道数车：判断拥堵还是畅通", kicker: "第 74–78 格 · 交通密度估计",
+      html: `<p>这一步把检测框变成交通信息。第 76 格对每一帧：</p><ul class="tight"><li>把第 325 行以上、第 635 行以下的画面<b>涂黑</b>，只在中间一条带子里检测（远处车太小、近处被截断，都不好数）；</li><li>用置信度 0.4 检测，再看每个框<b>左边缘的横坐标</b>：小于 609 算左侧车道，否则算右侧；</li><li>某一侧超过 <code>heavy_traffic_threshold = 10</code> 辆就标 <b>Heavy</b>，否则 <b>Smooth</b>，写到画面左上、右上角。</li></ul><p>画面上的绿色、蓝色四边形只是画出来给人看的车道范围，<b>计数时并没有用到它们</b>。</p>`,
+      cells: [76], highlight: ["heavy_traffic_threshold = 10", "box[0] < lane_threshold", "conf=0.4"],
+      draw(svg, ctx) {
+        // 按作者坐标缩小一半：s = 0.5
+        const s = 0.5, ox = 20, oy = 0;
+        const P = (x, y) => [ox + x * s, oy + y * s];
+        K.svg(svg, "rect", { x: ox, y: oy, width: 1280 * s, height: 680 * s, fill: "color-mix(in srgb, var(--ink-3) 18%, var(--panel))" });
+        const L = [[465, 350], [609, 350], [510, 630], [2, 630]], R = [[678, 350], [815, 350], [1203, 630], [743, 630]];
+        const poly = (V, c) => K.svg(svg, "polygon", { points: V.map((v) => P(v[0], v[1]).join(",")).join(" "), fill: c, "fill-opacity": 0.12, stroke: c, "stroke-width": 2 });
+        // 远处的路
+        K.svg(svg, "polygon", { points: [P(560, 0), P(720, 0), P(1203, 630), P(2, 630)].map((p) => p.join(",")).join(" "), fill: "color-mix(in srgb, var(--ink-3) 30%, var(--panel))" });
+        poly(L, "var(--good)"); poly(R, "var(--c1)");
+        const blk1 = K.svg(svg, "rect", { x: ox, y: oy, width: 1280 * s, height: 325 * s, fill: "black", opacity: 0 });
+        const blk2 = K.svg(svg, "rect", { x: ox, y: oy + 635 * s, width: 1280 * s, height: 45 * s, fill: "black", opacity: 0 });
+        K.svg(svg, "line", { x1: ox + 609 * s, y1: oy + 325 * s, x2: ox + 609 * s, y2: oy + 635 * s, stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        K.svg(svg, "text", { x: ox + 612 * s, y: oy + 320 * s, "font-size": 11, fill: "var(--warn)" }, "x = 609");
+        const tL = K.svg(svg, "text", { x: ox + 10, y: 24, "font-size": 13, "font-weight": 700, fill: "white" }, "");
+        const tR = K.svg(svg, "text", { x: ox + 410, y: 24, "font-size": 13, "font-weight": 700, fill: "white" }, "");
+        const iL = K.svg(svg, "text", { x: ox + 10, y: 46, "font-size": 13, "font-weight": 700 }, "");
+        const iR = K.svg(svg, "text", { x: ox + 410, y: 46, "font-size": 13, "font-weight": 700 }, "");
+        const r = K.rng(12), cars = [];
+        for (let i = 0; i < 20; i++) { const side = i % 2, slot = Math.floor(i / 2) % 2, k = Math.floor(i / 4); cars.push({ side, u: slot ? 0.72 : 0.28, p0: k / 5 + slot * 0.1 + r() * 0.03, sp: side ? 0.11 : 0.13 }); }
+        const els = cars.map((c) => ({ g: K.svg(svg, "g"), c }));
+        [blk1, blk2, tL, tR, iL, iR].forEach((e) => svg.appendChild(e));
+        const edge = (V, t) => [K.lerp(V[0][0], V[3][0], t), K.lerp(V[1][0], V[2][0], t)];
+        ctx.wait(300).then((ok) => ok && ctx.tween(600, (t) => { blk1.style.opacity = blk2.style.opacity = 0.75 * t; }))
+          .then((ok) => ok && ctx.tween(9000, (_, raw) => {
+            let nl = 0, nr = 0;
+            els.forEach((e) => {
+              const c = e.c, V = c.side ? R : L;
+              const ph = (c.p0 + raw * c.sp * 3) % 1, t = c.side ? 1.2 - ph * 1.4 : ph * 1.4 - 0.2; // 左侧驶近、右侧驶远
+              const yy = K.lerp(350, 630, t), tt = K.clamp(t, -0.6, 1.1), ex = edge(V, tt);
+              const xx = K.lerp(ex[0], ex[1], c.u), w = K.lerp(30, 70, K.clamp(tt, 0, 1)), h = w * 1.6;
+              e.g.innerHTML = "";
+              const [px, py] = P(xx, yy);
+              if (py < oy - 20 || py > oy + 680 * s + 20) return;
+              car(e.g, px, py, w * s, h * s, c.side ? "var(--c1)" : "var(--c2)");
+              const inBand = yy - h / 2 > 325 - 30 && yy + h / 2 < 635 + 30 && yy > 325 && yy < 635;
+              if (inBand) {
+                boxEl(e.g, [px - w * s / 2 - 2, py - h * s / 2 - 2, px + w * s / 2 + 2, py + h * s / 2 + 2], "var(--good)");
+                if (xx - w / 2 < 609) nl++; else nr++;
+              }
+            });
+            [[tL, iL, nl, "左"], [tR, iR, nr, "右"]].forEach(([a, b, n, nm]) => {
+              a.textContent = `${nm}侧车道：${n} 辆`;
+              b.textContent = "Traffic Intensity: " + (n > 10 ? "Heavy" : "Smooth");
+              b.setAttribute("fill", n > 10 ? "var(--bad)" : "var(--good)");
+            });
+          }));
+      },
+    },
+    {
+      at: 79, title: "导出 ONNX：换个平台也能用", kicker: "第 79–83 格 · 部署",
+      html: `<p>训练得到的 <code>best.pt</code> 是 PyTorch 格式，适合继续训练。第 81 格用一行 <code>best_model.export(format='onnx')</code> 导出成 <b>ONNX</b>：一种通用的模型“交换格式”，可以拿到别的框架、别的硬件上运行，比如路口边的小型计算盒子。</p><p>最后作者给出了项目的 GitHub 仓库链接。</p>`,
+      cells: [81], highlight: ["format='onnx'"],
+      draw(svg, ctx) {
+        K.node(svg, 40, 130, 150, 70, "best.pt\nPyTorch 权重", { bold: true });
+        const ox = K.node(svg, 280, 130, 150, 70, "best.onnx\n通用交换格式", { fill: "var(--accent-soft)", stroke: "var(--accent)", bold: true });
+        const a0 = K.arrow(svg, 190, 165, 278, 165);
+        const tg = [["路口边缘计算盒", 40], ["交通指挥中心服务器", 135], ["手机 / 浏览器", 230]];
+        const outs = tg.map((d) => { const g = K.node(svg, 520, d[1], 170, 56, d[0]); g.style.opacity = 0; return g; });
+        const arr = tg.map((d) => { const a = K.arrow(svg, 430, 165, 518, d[1] + 28); a.style.opacity = 0; return a; });
+        ox.style.opacity = 0; a0.style.opacity = 0;
+        (async () => {
+          if (!(await ctx.tween(500, (t) => { a0.style.opacity = t; ox.style.opacity = t; }))) return;
+          for (let i = 0; i < 3; i++) if (!(await ctx.tween(400, (t) => { arr[i].style.opacity = t; outs[i].style.opacity = t; }))) return;
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+  if (FAST) document.head.appendChild(K.el("style", null, ".ch-cells > :not(.inline-lab){display:none}"));
+
+  /* ---------- 实验 A：IoU ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "dx", label: "预测框左右偏移（像素）", min: -150, max: 150, step: 1, value: 18 },
+      { id: "dy", label: "预测框上下偏移（像素）", min: -150, max: 150, step: 1, value: 12 },
+      { id: "sc", label: "预测框大小（相对答案框）", min: 0.4, max: 1.8, step: 0.01, value: 1, fmt: (v) => v.toFixed(2) + " 倍" },
+    ],
+    note: "绿框是标准答案（人工标的车），红虚线是模型的预测框，橙色是重叠部分。右边列出 mAP50-95 用到的 10 个 IoU 门槛：这个预测框在几个门槛下算“找对”。",
+    render(svg, v) {
+      const gt = [110, 90, 230, 270];
+      const cx = (gt[0] + gt[2]) / 2 + v.dx, cy = (gt[1] + gt[3]) / 2 + v.dy, w = (gt[2] - gt[0]) * v.sc, h = (gt[3] - gt[1]) * v.sc;
+      const p = [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2];
+      K.svg(svg, "rect", { x: 10, y: 10, width: 360, height: 320, fill: "color-mix(in srgb, var(--ink-3) 18%, var(--panel))", rx: 4 });
+      car(svg, (gt[0] + gt[2]) / 2, (gt[1] + gt[3]) / 2, 100, 165, "var(--c2)");
+      const ix0 = Math.max(p[0], gt[0]), iy0 = Math.max(p[1], gt[1]), ix1 = Math.min(p[2], gt[2]), iy1 = Math.min(p[3], gt[3]);
+      if (ix1 > ix0 && iy1 > iy0) K.svg(svg, "rect", { x: ix0, y: iy0, width: ix1 - ix0, height: iy1 - iy0, fill: "var(--warn)", opacity: 0.45 });
+      boxEl(svg, gt, "var(--good)", null, "答案");
+      boxEl(svg, p, "var(--c6)", "6 4", "预测");
+      const u = iou(p, gt);
+      const th = []; for (let t = 0.5; t < 0.951; t += 0.05) th.push(+t.toFixed(2));
+      K.svg(svg, "text", { x: 400, y: 30, "font-size": 13, "font-weight": 700 }, "IoU 门槛（mAP50-95 用的 10 个）");
+      let pass = 0;
+      th.forEach((t, i) => {
+        const ok = u >= t; if (ok) pass++;
+        const y = 44 + i * 27;
+        K.svg(svg, "rect", { x: 400, y, width: 220, height: 22, rx: 4, fill: ok ? "color-mix(in srgb, var(--good) 22%, var(--panel))" : "color-mix(in srgb, var(--bad) 12%, var(--panel))" });
+        K.svg(svg, "text", { x: 410, y: y + 16, "font-size": 12 }, `IoU ≥ ${t.toFixed(2)}`);
+        K.svg(svg, "text", { x: 610, y: y + 16, "font-size": 12, "text-anchor": "end", fill: ok ? "var(--good)" : "var(--bad)", "font-weight": 700 }, ok ? "算找对" : "不算");
+      });
+      return { readout: [
+        { k: "IoU", v: u.toFixed(3), color: u >= 0.5 ? "var(--good)" : "var(--bad)" },
+        { k: "按 IoU≥0.5（mAP50）", v: u >= 0.5 ? "找对了" : "没找对", color: u >= 0.5 ? "var(--good)" : "var(--bad)" },
+        { k: "10 个门槛中通过", v: pass + " / 10" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：置信度阈值 + NMS ---------- */
+  function makeScene(seed) {
+    const r = K.rng(seed), gts = [], cand = [];
+    const lanesX = [70, 160, 250, 340];
+    lanesX.forEach((lx, li) => {
+      let y = 30 + r() * 40;
+      while (y < 300) {
+        const w = 40 + r() * 8, h = li === 2 && r() < 0.3 ? 100 : 62 + r() * 10;
+        if (y + h > 320) break;
+        gts.push([lx - w / 2, y, lx + w / 2, y + h]);
+        y += h + 20 + r() * 50;
+      }
+    });
+    gts.forEach((g, gi) => {
+      const hard = r() < 0.25; // 车顶颜色接近路面、被遮挡等，模型信心偏低
+      const top = hard ? 0.3 + r() * 0.3 : 0.65 + r() * 0.33;
+      const n = 2 + Math.floor(r() * 3);
+      for (let k = 0; k < n; k++) {
+        const j = k === 0 ? 2 : 5, w = g[2] - g[0], h = g[3] - g[1];
+        const dx = K.randn(r) * j, dy = K.randn(r) * j, sw = 1 + K.randn(r) * (k ? 0.12 : 0.03), sh = 1 + K.randn(r) * (k ? 0.12 : 0.03);
+        const cx = (g[0] + g[2]) / 2 + dx, cy = (g[1] + g[3]) / 2 + dy;
+        cand.push({ b: [cx - (w * sw) / 2, cy - (h * sh) / 2, cx + (w * sw) / 2, cy + (h * sh) / 2], s: k === 0 ? top : top * (0.55 + r() * 0.4) });
+      }
+    });
+    for (let k = 0; k < 6; k++) { // 阴影、路面标线引起的误报
+      const x = 30 + r() * 340, y = 30 + r() * 260;
+      cand.push({ b: [x, y, x + 30 + r() * 20, y + 40 + r() * 30], s: 0.1 + r() * 0.45 });
+    }
+    return { gts, cand };
+  }
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "conf", label: "置信度阈值 conf（低于它的框直接丢掉）", min: 0.05, max: 0.95, step: 0.01, value: 0.5, fmt: (v) => v.toFixed(2) },
+      { id: "nms", label: "NMS 的 IoU 阈值（重叠超过它就只留分高的）", min: 0.1, max: 0.95, step: 0.01, value: 0.5, fmt: (v) => v.toFixed(2) },
+      { id: "show", label: "显示", value: "after", options: [["after", "NMS 之后保留的框"], ["before", "NMS 之前所有过线的候选框"]] },
+      { id: "seed", label: "换一张路面", button: true },
+    ],
+    note: "模型对每辆车往往吐出好几个相互重叠的候选框，还会被阴影、路面标线骗出几个低分框。先按置信度过滤，再做 NMS（非极大值抑制）：按分数从高到低，删掉和已保留框重叠太多的框。最后数剩下的框，就是“数出的车数”。作者的几处设置：第 22 格 0.5，第 67 格 0.7，第 76 格 0.4。",
+    render(svg, v) {
+      const sc = makeScene(31 + v.seed * 7);
+      road(svg, 25, 10, 360, 330, 4);
+      sc.gts.forEach((g, i) => car(svg, (g[0] + g[2]) / 2, (g[1] + g[3]) / 2, (g[2] - g[0]) * 0.86, (g[3] - g[1]) * 0.9, K.colors[i % 6]));
+      const pass = sc.cand.filter((c) => c.s >= v.conf).sort((a, b) => b.s - a.s);
+      const keep = [];
+      pass.forEach((c) => { if (keep.every((k) => iou(k.b, c.b) < v.nms)) keep.push(c); });
+      const shown = v.show === "before" ? pass : keep;
+      // 匹配：每个保留框找 IoU≥0.5 的未匹配答案
+      const used = new Set(); let TP = 0;
+      keep.forEach((k) => {
+        let best = -1, bu = 0.5;
+        sc.gts.forEach((g, gi) => { const u = iou(k.b, g); if (!used.has(gi) && u >= bu) { bu = u; best = gi; } });
+        k.tp = best >= 0; if (best >= 0) { used.add(best); TP++; }
+      });
+      shown.forEach((c) => boxEl(svg, c.b, v.show === "before" ? "var(--warn)" : c.tp ? "var(--good)" : "var(--bad)", c.tp || v.show === "before" ? null : "5 3", c.s.toFixed(2)));
+      const FP = keep.length - TP, FN = sc.gts.length - TP;
+      K.svg(svg, "text", { x: 400, y: 40, "font-size": 13, "font-weight": 700 }, "流程");
+      [["全部候选框", sc.cand.length], ["置信度 ≥ " + v.conf.toFixed(2), pass.length], ["NMS 后保留", keep.length]].forEach((d, i) => {
+        K.svg(svg, "rect", { x: 400, y: 56 + i * 52, width: (220 * d[1]) / sc.cand.length, height: 30, rx: 4, fill: ["var(--ink-3)", "var(--warn)", "var(--c1)"][i] });
+        K.svg(svg, "text", { x: 400, y: 52 + i * 52, "font-size": 11 }, `${d[0]}：${d[1]} 个`);
+      });
+      K.svg(svg, "text", { x: 400, y: 240, "font-size": 12 }, "绿框 = 对上了真车（IoU ≥ 0.5）");
+      K.svg(svg, "text", { x: 400, y: 260, "font-size": 12, fill: "var(--bad)" }, "红虚线 = 误报或重复框");
+      K.svg(svg, "text", { x: 400, y: 280, "font-size": 12, class: "muted" }, "框上的数字是置信度（模拟）");
+      return { readout: [
+        { k: "路上真有", v: sc.gts.length + " 辆" },
+        { k: "模型数出", v: keep.length + " 辆", color: keep.length === sc.gts.length ? "var(--good)" : "var(--warn)" },
+        { k: "漏检 / 误报", v: `${FN} / ${FP}`, color: FN + FP ? "var(--bad)" : "var(--good)" },
+        { k: "精确率 / 召回率", v: `${keep.length ? Math.round((TP / keep.length) * 100) : 0}% / ${Math.round((TP / sc.gts.length) * 100)}%` },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：按车道计数与拥堵判断 ---------- */
+  const LQ = [[465, 350], [609, 350], [510, 630], [2, 630]], RQ = [[678, 350], [815, 350], [1203, 630], [743, 630]];
+  function inPoly(x, y, V) {
+    let c = false;
+    for (let i = 0, j = V.length - 1; i < V.length; j = i++) if ((V[i][1] > y) !== (V[j][1] > y) && x < ((V[j][0] - V[i][0]) * (y - V[i][1])) / (V[j][1] - V[i][1]) + V[i][0]) c = !c;
+    return c;
+  }
+  function placeCars(seed, nL, nR, nO) {
+    const r = K.rng(seed), out = [];
+    const tryPut = (gen, n) => {
+      let k = 0, guard = 0;
+      while (k < n && guard++ < 4000) {
+        const c = gen();
+        const okZone = c.kind === "O" ? !inPoly(c.x, c.y, LQ) && !inPoly(c.x, c.y, RQ) && !inPoly(c.x - c.w / 2, c.y, RQ) && !inPoly(c.x + c.w / 2, c.y, LQ) : true;
+        if (okZone && out.every((o) => Math.abs(o.x - c.x) > (o.w + c.w) / 2 + 4 || Math.abs(o.y - c.y) > (o.h + c.h) / 2 + 4)) { out.push(c); k++; }
+      }
+    };
+    const inLane = (V, kind) => () => {
+      const t = r(), y = K.lerp(370, 610, t), tt = (y - 350) / 280;
+      const a = K.lerp(V[0][0], V[3][0], tt), b = K.lerp(V[1][0], V[2][0], tt);
+      const w = K.lerp(36, 72, tt), h = w * 1.5;
+      return { x: K.lerp(a + w / 2, b - w / 2, r()), y, w, h, kind };
+    };
+    tryPut(inLane(LQ, "L"), nL);
+    tryPut(inLane(RQ, "R"), nR);
+    tryPut(() => { // 车道外：路边停车、远侧匝道、中间隔离带
+      const zone = Math.floor(r() * 3);
+      const y = zone === 0 ? K.lerp(370, 460, r()) : K.lerp(370, 610, r()), w = K.lerp(36, 72, (y - 350) / 280), h = w * 1.5;
+      const x = zone === 0 ? K.lerp(30, 380, r()) : zone === 1 ? K.lerp(1150, 1255, r()) : K.lerp(612, 700, r());
+      return { x, y, w, h, kind: "O" };
+    }, nO);
+    for (let k = 0; k < 4; k++) { const y = 200 + r() * 110, w = 26; out.push({ x: 560 + r() * 160, y, w, h: w * 1.5, kind: "far" }); }
+    return out;
+  }
+  K.lab(document.getElementById("lab3"), {
+    width: 660, height: 400,
+    controls: [
+      { id: "nL", label: "左侧车道里的车", min: 0, max: 16, step: 1, value: 7 },
+      { id: "nR", label: "右侧车道里的车", min: 0, max: 16, step: 1, value: 11 },
+      { id: "nO", label: "车道外的车（路边停车、匝道）", min: 0, max: 6, step: 1, value: 2 },
+      { id: "th", label: "拥堵阈值 heavy_traffic_threshold", min: 2, max: 20, step: 1, value: 10 },
+      { id: "rule", label: "计数规则", value: "author", options: [["author", "作者：框左边 x < 609 算左侧"], ["poly", "改进：框中心落在哪个四边形里"]] },
+      { id: "seed", label: "重新摆放", button: true },
+    ],
+    note: "坐标按作者第 76 格代码里的像素位置缩小一半来画。上下灰黑区域被涂黑不检测（第 325 行以上、第 635 行以下）。这里假设每辆车都被检测到，只看计数规则本身。切换到“改进”规则，看看车道外的车还会不会被算进去。",
+    render(svg, v) {
+      const s = 0.5, ox = 10, oy = 10, P = (x, y) => [ox + x * s, oy + y * s];
+      K.svg(svg, "rect", { x: ox, y: oy, width: 640, height: 360, fill: "color-mix(in srgb, var(--good) 8%, var(--panel))" });
+      K.svg(svg, "polygon", { points: [P(560, 0), P(720, 0), P(1210, 720), P(0, 720)].map((p) => p.join(",")).join(" "), fill: "color-mix(in srgb, var(--ink-3) 28%, var(--panel))" });
+      const poly = (V, c) => K.svg(svg, "polygon", { points: V.map((q) => P(q[0], q[1]).join(",")).join(" "), fill: c, "fill-opacity": 0.12, stroke: c, "stroke-width": 2 });
+      poly(LQ, "var(--good)"); poly(RQ, "var(--c1)");
+      const cars = placeCars(500 + v.seed * 13, v.nL, v.nR, v.nO);
+      let nl = 0, nr = 0, wrong = 0;
+      cars.forEach((c) => {
+        const [px, py] = P(c.x, c.y);
+        car(svg, px, py, c.w * s * 0.9, c.h * s * 0.9, c.kind === "O" ? "var(--c5)" : c.kind === "L" ? "var(--c2)" : c.kind === "R" ? "var(--c1)" : "var(--ink-3)");
+        const top = c.y - c.h / 2, bot = c.y + c.h / 2;
+        if (c.y < 325 || c.y > 635) return; // 被涂黑区域，检测不到
+        let side = null;
+        if (v.rule === "author") side = c.x - c.w / 2 < 609 ? "L" : "R";
+        else side = inPoly(c.x, c.y, LQ) ? "L" : inPoly(c.x, c.y, RQ) ? "R" : null;
+        if (side === "L") nl++; else if (side === "R") nr++;
+        const truth = c.kind === "L" || c.kind === "R" ? c.kind : null;
+        if (side !== truth) wrong++;
+        boxEl(svg, [px - c.w * s / 2, py - c.h * s / 2, px + c.w * s / 2, py + c.h * s / 2], side === null ? "var(--ink-3)" : side === truth ? "var(--good)" : "var(--bad)", side === null ? "3 3" : null, side === null ? "不计" : side === "L" ? "左" : "右");
+        void top; void bot;
+      });
+      K.svg(svg, "rect", { x: ox, y: oy, width: 640, height: 325 * s, fill: "black", opacity: 0.6 });
+      K.svg(svg, "rect", { x: ox, y: oy + 635 * s, width: 640, height: 360 - 635 * s, fill: "black", opacity: 0.6 });
+      K.svg(svg, "text", { x: ox + 8, y: oy + 150, "font-size": 11, fill: "white" }, "涂黑：不检测（远处的车太小）");
+      if (v.rule === "author") {
+        K.svg(svg, "line", { x1: ox + 609 * s, y1: oy + 325 * s, x2: ox + 609 * s, y2: oy + 635 * s, stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        K.svg(svg, "text", { x: ox + 609 * s + 4, y: oy + 325 * s + 14, "font-size": 11, fill: "var(--warn)", "font-weight": 700 }, "lane_threshold = 609");
+      }
+      const tag = (x, n, nm) => {
+        const heavy = n > v.th;
+        K.svg(svg, "rect", { x, y: oy + 6, width: 200, height: 46, rx: 4, fill: heavy ? "var(--bad)" : "var(--good)", opacity: 0.9 });
+        K.svg(svg, "text", { x: x + 8, y: oy + 24, "font-size": 12, fill: "var(--panel)", "font-weight": 700 }, `${nm} Lane：${n} 辆`);
+        K.svg(svg, "text", { x: x + 8, y: oy + 43, "font-size": 12, fill: "var(--panel)", "font-weight": 700 }, "Intensity: " + (heavy ? "Heavy" : "Smooth"));
+      };
+      tag(ox + 6, nl, "Left"); tag(ox + 432, nr, "Right");
+      K.svg(svg, "text", { x: ox, y: 392, "font-size": 11, class: "muted" }, "绿框 = 算对车道  红框 = 算错（含车道外的车被算进去）  灰虚线 = 不计入  橙色车 = 车道外");
+      return { readout: [
+        { k: "左侧计数", v: `${nl} 辆 · ${nl > v.th ? "Heavy" : "Smooth"}`, color: nl > v.th ? "var(--bad)" : "var(--good)" },
+        { k: "右侧计数", v: `${nr} 辆 · ${nr > v.th ? "Heavy" : "Smooth"}`, color: nr > v.th ? "var(--bad)" : "var(--good)" },
+        { k: "算错车道 / 不该算的", v: wrong + " 辆", color: wrong ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

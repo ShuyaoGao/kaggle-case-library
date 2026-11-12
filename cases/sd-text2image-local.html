@@ -1,0 +1,598 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文字变图片</title>
+<meta name="description" content="Kaggle 案例拆解：手写 Stable Diffusion 文生图流水线（分词、文本编码、潜空间去噪、无分类器引导、VAE 解码），并在本机 RTX 5090 上用 ONNX Runtime + DirectML 真跑出图片。">
+<link rel="stylesheet" href="../assets/case.css">
+<style>
+.localrun { border: 2px solid var(--c3); border-radius: 10px; padding: 10px 12px; margin: 12px 0; background: color-mix(in srgb, var(--c3) 6%, var(--panel)); }
+.localrun .lr-tag, .authorrun .lr-tag { display: inline-block; font-size: 12px; font-weight: 700; color: #fff; border-radius: 4px; padding: 1px 8px; margin-bottom: 6px; }
+.localrun .lr-tag { background: var(--c3); }
+.localrun img { display: block; max-width: 100%; height: auto; border-radius: 6px; margin: 6px 0; }
+.localrun p, .authorrun p { font-size: 13.5px; margin: 4px 0; color: var(--ink-2); }
+.localrun .pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.localrun .pair figure { margin: 0; }
+.localrun figcaption { font-size: 12.5px; color: var(--ink-3); }
+.authorrun { border: 2px dashed var(--c1); border-radius: 10px; padding: 10px 12px; margin: 12px 0; }
+.authorrun .lr-tag { background: var(--c1); }
+.prompt { font-family: var(--mono); font-size: 12.5px; background: var(--panel-2); border-radius: 6px; padding: 6px 8px; word-break: break-word; }
+.toks { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 8px; }
+.toks span { font-family: var(--mono); font-size: 12px; padding: 1px 5px; border-radius: 4px; background: color-mix(in srgb, var(--c1) 16%, var(--panel)); border: 1px solid color-mix(in srgb, var(--c1) 40%, var(--panel)); }
+.toks span.sp { background: color-mix(in srgb, var(--c4) 22%, var(--panel)); }
+.toks span.cut { background: var(--panel-2); color: var(--ink-3); text-decoration: line-through; border-color: var(--line); }
+#runTable th, #runTable td:nth-child(n+3) { white-space: nowrap; }
+.toks span.pad { background: transparent; color: var(--ink-3); border-style: dashed; }
+</style>
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">文本 → 图像 · 条件生成 · 潜空间扩散</div>
+  <h1>一句话变成一张画：亲手拆开 Stable Diffusion，并在本机真跑出来</h1>
+  <p class="en">💬Text to Image generation🖼️ (Stable Diffusion)</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">Stable Diffusion</span><span class="tag method">CLIP 分词与文本编码</span><span class="tag method">潜空间</span>
+    <span class="tag method">U-Net 去噪</span><span class="tag method">K-LMS 调度器</span><span class="tag method">无分类器引导 CFG</span><span class="tag method">VAE 解码</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Burhanuddin Latsaheb</b></span>
+    <span>Kaggle 点赞 <b>582</b>（2026-11 抓取）</span>
+    <span>模型 <b>CompVis/stable-diffusion-v1-4</b>（预训练，不需要数据集）</span>
+    <span><a href="https://www.kaggle.com/code/burhanuddinlatsaheb/text-to-image-generation-stable-diffusion" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+  <p class="callout">本页有两种结果，请注意区分：<b>蓝色虚线框</b> = 作者原 notebook 里的设置和文字；<b>绿色实线框</b> = 2026-11 在本机（RTX 5090 笔记本，Windows 11）真实运行得到的图片和耗时。本机 PyTorch 被 Windows 智能应用控制拦截，所以没有原样运行作者的代码，而是按作者的步骤用 numpy 重写了调度器循环，三个神经网络（文本编码器、U-Net、VAE 解码器）交给 ONNX Runtime + DirectML 在显卡上算。模型换成了 Hugging Face 上公开的 ONNX 版本：Stable Diffusion v1.5（v1.4 的后续训练版）和 SD-Turbo。脚本在 <code>local_runs/sd-text2image-local/</code>。</p>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>输入是什么</h3><div class="big">一句英文描述（提示词）</div><p>比如“一位探险家在巨大洞穴里发现一座地下城市……”。不需要训练数据，用的是别人已经训练好的模型。<span data-cell="25">出处</span></p></div>
+    <div class="card panel"><h3>要得到什么</h3><div class="big">一张 512×512 的彩色图片</div><p>图片内容符合这句话，而且每换一个随机种子，就得到一张不同的新图。<span data-cell="13">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">在“压缩画布”上反复去噪，再放大成图</div><p>CLIP 把文字变成数字 → 在 64×64×4 的潜空间里放一团噪声 → U-Net 一步步去噪，用“无分类器引导”贴近文字 → VAE 解码成图片。<span data-cell="30">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">作者：手写流水线 + 现成管道各出图</div><p>作者的图在运行输出里（源码不带）。<b>本机</b>：SD v1.5 走 50 步约 12 秒，SD-Turbo 只走 1 步不到 1 秒（见第 9、12 章绿色框）。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">这个案例<b>不训练模型</b>，所以没有训练表格。真正流过流水线的“数据”是：一句提示词，以及它在各个零件之间变成的几种数组。下面的形状来自作者代码和本机运行时打印的结果。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">提示词最多</div><div class="v">77 个词块</div></div>
+        <div class="stat-tile"><div class="k">文本向量</div><div class="v">77 × 768</div></div>
+        <div class="stat-tile"><div class="k">潜空间画布</div><div class="v">4 × 64 × 64</div></div>
+        <div class="stat-tile"><div class="k">输出图片</div><div class="v">3 × 512 × 512</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">77 来自 <code>tokenizer.model_max_length</code> <span data-cell="26">出处</span>；潜空间是 HEIGHT // 8 <span data-cell="27">出处</span>；768 是本机用同一个 CLIP 文本编码器（clip-vit-large-patch14）运行时打印的形状。</p>
+      <p class="callout">潜空间只有 4×64×64 = 16,384 个数，而图片有 3×512×512 = 786,432 个数，小了 48 倍。在小画布上去噪，所以快。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">流水线里的每一样东西</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>东西</th><th>白话含义</th><th>形状 / 类型</th></tr>
+        <tr><td><code>prompt</code></td><td>你写的那句英文描述</td><td>文字</td></tr>
+        <tr><td><code>text_input.input_ids</code></td><td>分词后每个词块的编号，不够 77 个用填充补齐</td><td>1 × 77 整数</td></tr>
+        <tr><td><code>text_embeddings</code></td><td>文本编码器给每个词块算出的 768 维“意思向量”，和空字符串的那份拼在一起</td><td>2 × 77 × 768</td></tr>
+        <tr><td><code>latents</code></td><td>潜空间里的画布，一开始是纯随机噪声</td><td>1 × 4 × 64 × 64</td></tr>
+        <tr><td><code>noise_pred</code></td><td>U-Net 每一步猜出来的“画布上的噪声”</td><td>同 latents</td></tr>
+        <tr><td><code>image</code></td><td><b>最终输出</b>：VAE 解码后的图片，值在 −1 到 1，再变成 0–255</td><td>1 × 3 × 512 × 512</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="22">
+    <h3>动手试试 A · 调度器与步数：从噪声走回数据要走几步 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="26">
+    <h3>动手试试 B · 77 个位置够不够：看作者的提示词被切成了哪些词块 <span class="sim-badge">本机分词结果</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="30">
+    <h3>动手试试 C · 无分类器引导：把“贴题程度”拖大拖小 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的内容</h3>
+      <div class="authorrun"><span class="lr-tag">作者原 notebook</span>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>两种做法：自己搭流水线；用现成的 StableDiffusionPipeline</td><td><span data-cell="2">第 2 格</span></td></tr>
+        <tr><td>设置：512×512、500 步、引导强度 7.5、种子 48、K-LMS 调度器</td><td><span data-cell="13">第 13 格</span> <span data-cell="22">第 22 格</span></td></tr>
+        <tr><td>手写流水线生成两张图（地下洞穴城市、持剑女子）</td><td><span data-cell="34">第 34 格</span> <span data-cell="46">第 46 格</span></td></tr>
+        <tr><td>现成管道用 200 步，每句提示词生成 4 张拼成 2×2</td><td><span data-cell="52">第 52 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">作者生成的图片都在运行输出里，Kaggle 下载的源码不带输出，作者文字里也没有给出耗时或评分，这里不列。想看可以点上方链接到 Kaggle 原页面。</p>
+      </div>
+      <div class="localrun"><span class="lr-tag">本机运行结果（2026-11，RTX 5090 笔记本，ONNX Runtime 1.24 + DirectML）</span>
+        <div class="scroll-x"><table class="res" id="runTable"></table></div>
+        <p>“去噪耗时”只算调度器循环，不含读模型（每次约 5–10 秒）。SD-Turbo 4 步那次还在每一步额外解码了一张中间图，所以偏慢。numpy 的随机数和 PyTorch 不同，所以种子同为 48 也不会和作者的图一样。</p>
+      </div>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>根据文字生成插图、概念草图、海报素材；换成“图生图”可以改图、补全、放大。</li>
+        <li><b>同类问题：</b>文字生成视频、文字生成音乐、给图片自动配说明（反方向）、作者引用的比赛“从图片反推提示词”。</li>
+        <li><b>可迁移的套路：</b>大模型拆成几个零件 → 每个零件只做一件事 → 在压缩空间里做最贵的计算 → 用一个“引导旋钮”平衡贴题和多样性。</li>
+        <li><b>要注意：</b>模型许可证、在提示词里点名在世画家模仿其画风是否合适、生成图片要标注是 AI 生成。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>零件加载：VAE、CLIP 分词器与文本编码器、U-Net <span data-cell="19">第 19 格</span></li>
+        <li>调度器：K-LMS（线性多步）<span data-cell="22">第 22 格</span></li>
+        <li>文本编码 + 空字符串编码（为引导做准备）<span data-cell="26">第 26 格</span></li>
+        <li>去噪循环 + 无分类器引导 <span data-cell="30">第 30 格</span></li>
+        <li>VAE 解码（除以 0.18215）<span data-cell="32">第 32 格</span></li>
+        <li>现成管道 StableDiffusionPipeline（半精度 fp16）<span data-cell="50">第 50 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者把去噪循环那一节叫“Encoding the image”（编码图片），把 VAE 那一节叫“Decoding”。去噪循环真的是在“编码”吗？你会怎么给它起名？</li>
+      <li>作者用了 500 步，本机 50 步和 500 步的图几乎一样，后者慢了约 7 倍。步数应该怎么选？SD-Turbo 为什么 1 步就够？</li>
+      <li>作者第 54 格的提示词有 139 个词块，超过 77 的部分被直接截掉了。你能想出哪些办法，让长描述里的重要信息不被丢掉？</li>
+      <li>引导强度从 1 拖到 15，图片从“乱”变得“贴题但发艳”。为什么不是越大越好？</li>
+      <li>作者第 37、56 格的提示词点名了在世画家的名字。用 AI 模仿某位画家的风格，会带来哪些版权和公平问题？</li>
+      <li>第 52 格的 “--ar 9:16 --hd --q 2” 是另一款绘图软件 Midjourney 的参数写法。放进 Stable Diffusion 的提示词里会发生什么？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Burhanuddin Latsaheb，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验 A、C 中的数据均为模拟示意；绿色框内为本机实际运行结果，所用模型：Stable Diffusion v1.5 ONNX（onnx-community/stable-diffusion-v1-5-ONNX，CreativeML OpenRAIL-M 许可）、SD-Turbo ONNX（Heliosoph/sd-turbo-onnx，原模型 stabilityai/sd-turbo，Stability AI 非商业研究许可）。本机生成的图片仅作课堂演示，均为 AI 生成。
+</footer>
+</main>
+
+<script src="nb/sd-text2image-local.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const IMG = "img/sd-text2image-local/";
+  const RUNS = {"sd15_cave_50":{"model":"sd15","prompt":"a curious explorer discovers a massive sprawling underground city in a huge cave…","negative":"","steps":50,"guidance":7.5,"seed":48,"size":512,"provider":"dml","prompt_tokens":68,"truncated":false,"text_embedding_shape":[1,77,768],"seconds_load":7.82,"seconds_denoise_loop":12.31,"seconds_vae":0.1,"seconds_total":20.26,"out":"sd15_cave_50.png"},"sd15_cave_500":{"model":"sd15","prompt":"a curious explorer discovers a massive sprawling underground city in a huge cave…","negative":"","steps":500,"guidance":7.5,"seed":48,"size":512,"provider":"dml","prompt_tokens":68,"truncated":false,"text_embedding_shape":[1,77,768],"seconds_load":7.38,"seconds_denoise_loop":84.35,"seconds_vae":0.68,"seconds_total":92.44,"out":"sd15_cave_500.png"},"sd15_synth_g1":{"model":"sd15","prompt":"futuristic synthwave city, retro sunset, crystals, spires, volumetric lighting, …","negative":"","steps":30,"guidance":1.0,"seed":48,"size":512,"provider":"dml","prompt_tokens":40,"truncated":false,"text_embedding_shape":[1,77,768],"seconds_load":5.11,"seconds_denoise_loop":3.27,"seconds_vae":0.67,"seconds_total":9.09,"out":"sd15_synth_g1.png"},"sd15_synth_g15":{"model":"sd15","prompt":"futuristic synthwave city, retro sunset, crystals, spires, volumetric lighting, …","negative":"","steps":30,"guidance":15.0,"seed":48,"size":512,"provider":"dml","prompt_tokens":40,"truncated":false,"text_embedding_shape":[1,77,768],"seconds_load":5.95,"seconds_denoise_loop":6.13,"seconds_vae":0.84,"seconds_total":13.01,"out":"sd15_synth_g15.png"},"sd15_synth_g3":{"model":"sd15","prompt":"futuristic synthwave city, retro sunset, crystals, spires, volumetric lighting, …","negative":"","steps":30,"guidance":3.0,"seed":48,"size":512,"provider":"dml","prompt_tokens":40,"truncated":false,"text_embedding_shape":[1,77,768],"seconds_load":5.37,"seconds_denoise_loop":5.37,"seconds_vae":0.87,"seconds_total":11.66,"out":"sd15_synth_g3.png"},"sd15_synth_g7.5":{"model":"sd15","prompt":"futuristic synthwave city, retro sunset, crystals, spires, volumetric lighting, …","negative":"","steps":30,"guidance":7.5,"seed":48,"size":512,"provider":"dml","prompt_tokens":40,"truncated":false,"text_embedding_shape":[1,77,768],"seconds_load":5.39,"seconds_denoise_loop":6.45,"seconds_vae":0.8,"seconds_total":12.69,"out":"sd15_synth_g7.5.png"},"turbo_cave_s1":{"model":"turbo","prompt":"a curious explorer discovers a massive sprawling underground city in a huge cave…","negative":"","steps":1,"guidance":0.0,"seed":48,"size":512,"provider":"dml","prompt_tokens":68,"truncated":false,"text_embedding_shape":[1,77,1024],"seconds_load":7.18,"seconds_denoise_loop":0.69,"seconds_vae":0.63,"seconds_total":8.53,"out":"turbo_cave_s1.png"},"turbo_cave_s4":{"model":"turbo","prompt":"a curious explorer discovers a massive sprawling underground city in a huge cave…","negative":"","steps":4,"guidance":0.0,"seed":48,"size":512,"provider":"dml","prompt_tokens":68,"truncated":false,"text_embedding_shape":[1,77,1024],"seconds_load":10.49,"seconds_denoise_loop":1.96,"seconds_vae":0.09,"seconds_total":12.57,"out":"turbo_cave_s4.png"},"turbo_glass_s1":{"model":"turbo","prompt":"postapocalyptic city turned to fractal glass, shiny : : close shot : : 3 5 mm, r…","negative":"","steps":1,"guidance":0.0,"seed":48,"size":512,"provider":"dml","prompt_tokens":139,"truncated":true,"text_embedding_shape":[1,77,1024],"seconds_load":10.69,"seconds_denoise_loop":0.77,"seconds_vae":0.82,"seconds_total":12.32,"out":"turbo_glass_s1.png"},"turbo_synth_s1":{"model":"turbo","prompt":"futuristic synthwave city, retro sunset, crystals, spires, volumetric lighting, …","negative":"","steps":1,"guidance":0.0,"seed":48,"size":512,"provider":"dml","prompt_tokens":40,"truncated":false,"text_embedding_shape":[1,77,1024],"seconds_load":6.8,"seconds_denoise_loop":0.44,"seconds_vae":0.61,"seconds_total":7.9,"out":"turbo_synth_s1.png"},"turbo_synth_seed1":{"model":"turbo","prompt":"futuristic synthwave city, retro sunset, crystals, spires, volumetric lighting, …","negative":"","steps":2,"guidance":0.0,"seed":1,"size":512,"provider":"dml","prompt_tokens":40,"truncated":false,"text_embedding_shape":[1,77,1024],"seconds_load":8.15,"seconds_denoise_loop":0.81,"seconds_vae":0.84,"seconds_total":9.85,"out":"turbo_synth_seed1.png"},"turbo_synth_seed2":{"model":"turbo","prompt":"futuristic synthwave city, retro sunset, crystals, spires, volumetric lighting, …","negative":"","steps":2,"guidance":0.0,"seed":2,"size":512,"provider":"dml","prompt_tokens":40,"truncated":false,"text_embedding_shape":[1,77,1024],"seconds_load":9.31,"seconds_denoise_loop":0.99,"seconds_vae":0.8,"seconds_total":11.16,"out":"turbo_synth_seed2.png"},"turbo_synth_seed3":{"model":"turbo","prompt":"futuristic synthwave city, retro sunset, crystals, spires, volumetric lighting, …","negative":"","steps":2,"guidance":0.0,"seed":3,"size":512,"provider":"dml","prompt_tokens":40,"truncated":false,"text_embedding_shape":[1,77,1024],"seconds_load":7.93,"seconds_denoise_loop":0.77,"seconds_vae":0.69,"seconds_total":9.42,"out":"turbo_synth_seed3.png"},"turbo_synth_seed4":{"model":"turbo","prompt":"futuristic synthwave city, retro sunset, crystals, spires, volumetric lighting, …","negative":"","steps":2,"guidance":0.0,"seed":4,"size":512,"provider":"dml","prompt_tokens":40,"truncated":false,"text_embedding_shape":[1,77,1024],"seconds_load":7.05,"seconds_denoise_loop":0.76,"seconds_vae":0.74,"seconds_total":8.6,"out":"turbo_synth_seed4.png"}};
+  const TOKS = {"cave":["<|startoftext|>","a·","curious·","explorer·","discovers·","a·","massive·","spraw","ling·","underground·","city·","in·","a·","huge·","cave·","system·",".·","city·","has·","churches·",",·","european·","-·","style·","buildings·","and·","big·","towers·",",·","and·","is·","really·","far·","away·",",·","illuminated·","by·","dim·","ambient·","lighting·",".·","waterfalls·","are·","flowing·","between·","different·","levels·","of·","the·","city·",".·","award·","winning·","digital·","art·",",·","concept·","art·",",·","breathtaking·",",·","imaginative·",",·","detailed·",".,·","8·","k·","<|endoftext|>"],"girl":["<|startoftext|>","a·","ultra","detailed·","beautiful·","pan","ting·","of·","a·","stylish·","woman·","with·","a·","sword·",",·","by·","conrad·","ro","set·",",·","greg·","rut","kowski·","and·","ma","koto·","shin","kai·",",·","trending·","on·","art","station·",",·","8·","k·","<|endoftext|>"],"synth":["<|startoftext|>","futuristic·","synth","wave·","city·",",·","retro·","sunset·",",·","crystals·",",·","spires·",",·","volu","metric·","lighting·",",·","studio·","ghibli·","style·",",·","rendered·","in·","unreal·","engine·","with·","clean·","details·","--·","ar·","9·",":·","1·","6·","--·","hd·","--·","q·","2·","<|endoftext|>"],"glass":["<|startoftext|>","po","sta","pocaly","ptic·","city·","turned·","to·","fractal·","glass·",",·","shiny·",":·",":·","close·","shot·",":·",":·","3·","5·","mm·",",·","realism·",",·","octane·","render·",",·","8·","k·",",·","exploration·",",·","cinematic·",",·","trending·","on·","art","station·",",·","realistic·",",·","3·","5·","mm·","camera·",",·","unreal·","engine·",",·","hyper·","detailed·",",·","photo·","-·","realistic·","maximum·","detail·",",·","volu","metric·","light·",",·","moody·","cinematic·","epic·","concept·","art·",",·","realistic·","matte·","painting·",",·","hyper·","photo","realistic·",",·","concept·","art·",",·","volu","metric·","light·",",·","cinematic·","epic·",",·","octane·","render·",",·","8·","k·",",·","corona·","render·",",·","movie·","concept·","art·",",·","octane·","render·",",·","8·","k·",",·","corona·","render·",",·","cinematic·",",·","trending·","on·","art","station·",",·","movie·","concept·","art·",",·","cinematic·","composition·",",·","ultra·","-·","detailed·",",·","realistic·",",·","hyper·","-·","realistic·",",·","volu","metric·","lighting·",",·","8·","k·","<|endoftext|>"],"anime":["<|startoftext|>","cyber","ne","tic·","clo","aked·","anime·","character·","concept·","design·",",·","dynamic·","pose·",",·","fantasy·","anime·",",·","dark·",",·","be","jewel","led·","and·","en","crusted·","technological·","royal·","cloak·",",·","powerful·","aggressive·","sword·","stance·",",·","biological·","human·","face·",",·","iri","descent·",",·","dark·","and·","intricate·",",·","greg·","rut","kowski·",",·","ma","koto·","shin","kai·",",·","anime·","cgi·",",·","animated·",",·","animation·",",·","art","ger","m·",",·","art","station·",",·","digital·","illustration·",",·","8·","k·","<|endoftext|>"]};
+  const PROMPTS = {
+    cave: "a curious explorer discovers a massive sprawling underground city in a huge cave system. city has churches, european - style buildings and big towers, and is really far away, illuminated by dim ambient lighting. waterfalls are flowing between different levels of the city. award winning digital art, concept art, breathtaking, imaginative, detailed., 8k",
+    synth: "futuristic synthwave city, retro sunset, crystals, spires, volumetric lighting, studio Ghibli style, rendered in unreal engine with clean details --ar 9:16 --hd --q 2",
+    glass: "postapocalyptic city turned to fractal glass, shiny : : close shot : : 3 5 mm, realism, octane render, 8 k, exploration, …（共 139 个词块）",
+  };
+  const tag = "本机运行结果（2026-11，RTX 5090 笔记本，ONNX Runtime + DirectML）";
+  const run = (k) => RUNS[k] || {};
+  const desc = (k) => { const r = run(k); return `模型 ${r.model === "turbo" ? "SD-Turbo" : "SD v1.5"}，${r.steps} 步，引导 ${r.guidance}，种子 ${r.seed}，去噪 ${r.seconds_denoise_loop} 秒`; };
+  const box = (inner) => `<div class="localrun"><span class="lr-tag">${tag}</span>${inner}</div>`;
+  const fig = (src, cap) => `<figure><img src="${IMG}${src}" alt="${cap}" loading="lazy"><figcaption>${cap}</figcaption></figure>`;
+
+  /* ---------- 公共：SD 的 sigma 日程（scaled_linear，β 0.00085 → 0.012） ---------- */
+  const SIG = (function () {
+    const T = 1000, s = new Float64Array(T); let p = 1;
+    for (let t = 0; t < T; t++) { const b = Math.pow(Math.sqrt(0.00085) + (Math.sqrt(0.012) - Math.sqrt(0.00085)) * t / (T - 1), 2); p *= 1 - b; s[t] = Math.sqrt((1 - p) / p); }
+    return s;
+  })();
+  function sigmasFor(n) {
+    const out = [];
+    for (let k = 0; k < n; k++) { const t = n === 1 ? 999 : 999 - (999 * k) / (n - 1); const i = Math.floor(t), f = t - i; out.push(i >= 999 ? SIG[999] : SIG[i] * (1 - f) + SIG[i + 1] * f); }
+    out.push(0);
+    return out;
+  }
+  /* 二维“完美去噪器”：x = x0 + σ·ε，已知全部数据点时 E[x0|x] = 按距离加权平均 */
+  function denoise(x, data, s) {
+    let m = -Infinity; const lw = new Float64Array(data.length);
+    for (let i = 0; i < data.length; i++) { const dx = x[0] - data[i][0], dy = x[1] - data[i][1]; lw[i] = -(dx * dx + dy * dy) / (2 * s * s); if (lw[i] > m) m = lw[i]; }
+    let w = 0, ex = 0, ey = 0;
+    for (let i = 0; i < data.length; i++) { const q = Math.exp(lw[i] - m); w += q; ex += q * data[i][0]; ey += q * data[i][1]; }
+    return [ex / w, ey / w];
+  }
+  function lmsCoef(order, t, cur, sig) {
+    const f = (tau) => { let p = 1; for (let k = 0; k < order; k++) { if (k === cur) continue; p *= (tau - sig[t - k]) / (sig[t - cur] - sig[t - k]); } return p; };
+    const a = sig[t], b = sig[t + 1], N = 200; let s = 0;
+    for (let i = 0; i <= N; i++) { const x = a + ((b - a) * i) / N, w = i === 0 || i === N ? 0.5 : 1; s += w * f(x); }
+    return (s * (b - a)) / N;
+  }
+  function sample2d(Z, data, sig, method, dFn) {
+    const X = Z.map((z) => [z[0] * sig[0], z[1] * sig[0]]), traj = [X.map((p) => p.slice())];
+    const hist = X.map(() => []);
+    for (let i = 0; i < sig.length - 1; i++) {
+      X.forEach((x, j) => {
+        const d0 = dFn ? dFn(x, sig[i]) : denoise(x, data, sig[i]);
+        const e = [(x[0] - d0[0]) / sig[i], (x[1] - d0[1]) / sig[i]];
+        if (method === "euler") { x[0] += (sig[i + 1] - sig[i]) * e[0]; x[1] += (sig[i + 1] - sig[i]) * e[1]; }
+        else {
+          hist[j].push(e); if (hist[j].length > 4) hist[j].shift();
+          const order = Math.min(i + 1, 4), H = hist[j];
+          for (let c = 0; c < order; c++) { const co = lmsCoef(order, i, c, sig), dv = H[H.length - 1 - c]; x[0] += co * dv[0]; x[1] += co * dv[1]; }
+        }
+      });
+      traj.push(X.map((p) => p.slice()));
+    }
+    return traj;
+  }
+  function moon(n, r) {
+    const P = [];
+    for (let i = 0; i < n; i++) { const a = Math.PI * (i % (n / 2)) / (n / 2); P.push(i < n / 2 ? [Math.cos(a) - 0.5 + K.randn(r) * 0.05, Math.sin(a) - 0.25 + K.randn(r) * 0.05] : [0.5 - Math.cos(a) + K.randn(r) * 0.05, 0.25 - Math.sin(a) + K.randn(r) * 0.05]); }
+    return P;
+  }
+  function gridImg(svg, x0, y0, n, c, fn) {
+    const out = [];
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) out.push(K.svg(svg, "rect", { x: x0 + j * c, y: y0 + i * c, width: c - 1, height: c - 1, fill: fn(i, j) }));
+    return out;
+  }
+  const rgbNoise = (r) => { const q = () => Math.round(K.clamp(128 + K.randn(r) * 70, 0, 255)); return `rgb(${q()},${q()},${q()})`; };
+
+  const steps = [
+    {
+      title: "两种做法：自己搭流水线，或用现成管道", kicker: "第 0–3 格 · 简介",
+      html: `<p>作者在第 2 格说明这本 notebook 做两件事：①<b>自己动手搭</b> Stable Diffusion 的生成流水线，把每个零件单独加载、单独调用；②直接用 Hugging Face <code>diffusers</code> 库里<b>现成的</b> <code>StableDiffusionPipeline</code>，几行代码出图。</p><p>前者像自己买零件组装电脑，能看清每一步；后者像买整机，开机就用。我们重点看前者。第 3 格是目录。</p>`,
+      cells: [0, 2],
+      draw(svg, ctx) {
+        const parts = ["分词器", "文本编码器", "随机噪声", "U-Net × N 步", "VAE 解码"];
+        K.svg(svg, "text", { x: 30, y: 36, "font-size": 14, "font-weight": 700 }, "做法一：自己搭（第 4 节）");
+        const nodes = parts.map((p, i) => { const g = K.node(svg, 30 + i * 136, 52, 120, 56, p, { fill: "color-mix(in srgb, var(--c1) 14%, var(--panel))", stroke: "var(--c1)" }); g.style.opacity = 0; return g; });
+        const ars = parts.slice(1).map((_, i) => { const a = K.arrow(svg, 150 + i * 136, 80, 166 + i * 136, 80); a.style.opacity = 0; return a; });
+        K.svg(svg, "text", { x: 30, y: 196, "font-size": 14, "font-weight": 700 }, "做法二：现成管道（第 5 节）");
+        const pipe = K.node(svg, 30, 212, 660, 60, "StableDiffusionPipeline(prompt) → 图片", { fill: "color-mix(in srgb, var(--c3) 14%, var(--panel))", stroke: "var(--c3)" });
+        pipe.style.opacity = 0;
+        (async () => {
+          for (let i = 0; i < parts.length; i++) { if (!(await ctx.tween(320, (t) => { nodes[i].style.opacity = t; if (i) ars[i - 1].style.opacity = t; }))) return; }
+          await ctx.tween(600, (t) => (pipe.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "准备工作：Hugging Face 令牌与导入", kicker: "第 4–11 格 · 准备",
+      html: `<p>作者用的 <code>CompVis/stable-diffusion-v1-4</code> 当年需要先在 Hugging Face 网站同意许可证、创建访问令牌，再存进 Kaggle 的“机密”里。第 5–9 格是作者的操作截图（放在作者自己的 Kaggle 数据集里，源码只带文件名）。</p><p>第 11 格导入：<code>torch</code>、<code>transformers</code> 里的 CLIP 文本模型和分词器、<code>diffusers</code> 里的 VAE、U-Net、调度器和现成管道，并从 Kaggle 机密里读出令牌。</p>` +
+        box(`<p>本机没有用令牌：用的是 Hugging Face 上公开、无需登录的 ONNX 导出版。也没有导入 PyTorch（被系统安全功能拦截），只用了 <code>onnxruntime-directml</code>（微软签名）、<code>numpy</code>、<code>transformers</code>（只用它的分词器）和 <code>Pillow</code>。</p>`),
+      cells: [4, 7, 11], highlight: ["UserSecretsClient", "CLIPTextModel, CLIPTokenizer", "LMSDiscreteScheduler"],
+      notes: { 5: "作者的截图：在 Hugging Face 设置页创建令牌。", 8: "作者的截图：把令牌加到 Kaggle 的 Secrets 里。" },
+      draw(svg, ctx) {
+        const libs = [["torch", "张量计算 + GPU"], ["transformers", "CLIP 分词器 / 文本编码器"], ["diffusers", "VAE、U-Net、调度器、管道"], ["kaggle_secrets", "读取 Hugging Face 令牌"]];
+        libs.forEach((l, i) => {
+          const g = K.node(svg, 60, 30 + i * 72, 220, 54, l[0], { bold: true });
+          const t = K.svg(svg, "text", { x: 300, y: 62 + i * 72, "font-size": 14 }, "→ " + l[1]);
+          g.style.opacity = t.style.opacity = 0;
+          ctx.wait(i * 400).then((ok) => ok && ctx.tween(400, (u) => (g.style.opacity = t.style.opacity = u)));
+        });
+      },
+    },
+    {
+      at: 12, title: "超参数：512×512、500 步、引导 7.5、种子 48", kicker: "第 12–15 格 · Hyperparameters",
+      html: `<p>第 13 格把所有设置放进一个 <code>config</code> 类：</p><ul class="tight"><li><b>HEIGHT / WIDTH = 512</b>：输出图片尺寸</li><li><b>NUM_INFERENCE_STEPS = 500</b>：去噪走多少步（这个数很大，常见用法是 25–50 步）</li><li><b>GUIDANCE_SCALE = 7.5</b>：引导强度，越大越“听话”</li><li><b>GENERATOR = torch.manual_seed(48)</b>：随机种子，固定后每次生成的图都一样</li></ul><p>第 15 格的 <code>image_grid</code> 把几张图拼成网格，最后一节会用到。</p>`,
+      cells: [13, 15], highlight: ["NUM_INFERENCE_STEPS = 500", "GUIDANCE_SCALE = 7.5", "torch.manual_seed(48)"],
+      draw(svg, ctx) {
+        const knobs = [["尺寸", "512×512", 0.5], ["步数", "500", 0.95], ["引导", "7.5", 0.5], ["种子", "48", 0.3]];
+        knobs.forEach((k, i) => {
+          const cx = 100 + i * 170, cy = 150;
+          K.svg(svg, "circle", { cx, cy, r: 56, fill: "var(--panel-2)", stroke: "var(--line)", "stroke-width": 2 });
+          const hand = K.svg(svg, "line", { x1: cx, y1: cy, x2: cx, y2: cy - 48, stroke: "var(--accent)", "stroke-width": 4 });
+          K.svg(svg, "text", { x: cx, y: cy + 90, "text-anchor": "middle", "font-size": 15, "font-weight": 700 }, k[0]);
+          K.svg(svg, "text", { x: cx, y: cy + 114, "text-anchor": "middle", "font-size": 14, "font-family": "var(--mono)" }, k[1]);
+          ctx.tween(1200, (t) => { const a = -Math.PI * 0.75 + Math.PI * 1.5 * k[2] * t; K.set(hand, { x2: cx + 48 * Math.sin(a), y2: cy - 48 * Math.cos(a) }); });
+        });
+      },
+    },
+    {
+      at: 16, title: "四个零件：分词器、文本编码器、U-Net、VAE", kicker: "第 16–20 格 · Loading the pretrained models",
+      html: `<p>第 19 格加载四个预训练零件：</p><ol class="tight"><li><b>分词器</b>（CLIPTokenizer）：把句子切成词块，换成编号</li><li><b>文本编码器</b>（CLIPTextModel）：把编号变成“意思向量”</li><li><b>U-Net</b>：看一张带噪的画布 + 文字向量，猜出画布上的噪声</li><li><b>VAE</b>（变分自编码器）：在 512×512 图片和 64×64×4 潜空间之间来回转换，这里只用它的解码器</li></ol><p>注意分词器和文本编码器来自 OpenAI 的 <code>clip-vit-large-patch14</code>，U-Net 和 VAE 来自 <code>CompVis/stable-diffusion-v1-4</code>。第 18 格是作者的结构示意图。</p>` +
+        box(`<p>本机用的两套 ONNX 模型：<b>SD v1.5</b>（文本编码器同为 CLIP ViT-L/14，输出 77×768，和作者一致）；<b>SD-Turbo</b>（基于 SD 2.1，文本编码器换成 OpenCLIP ViT-H，输出 77×1024；经过“对抗蒸馏”训练，1–4 步就能出图）。三个网络都由 ONNX Runtime 的 DirectML 后端在 RTX 5090 上运行。</p>`),
+      cells: [17, 19], highlight: ["AutoencoderKL.from_pretrained", "UNet2DConditionModel.from_pretrained", "CLIPTextModel.from_pretrained"],
+      notes: { 18: "作者放的 Stable Diffusion 推理结构图（图片在作者的数据集里）。", 20: "打印一句“四个零件都加载好了”。" },
+      draw(svg, ctx) {
+        const N = [["分词器", 30, 40, "var(--c1)"], ["文本编码器", 30, 150, "var(--c1)"], ["U-Net", 300, 95, "var(--c4)"], ["VAE 解码器", 540, 95, "var(--c3)"]];
+        const g = N.map((n) => { const e = K.node(svg, n[1], n[2], 150, 60, n[0], { fill: `color-mix(in srgb, ${n[3]} 16%, var(--panel))`, stroke: n[3] }); e.style.opacity = 0; return e; });
+        const a = [K.arrow(svg, 105, 100, 105, 148), K.arrow(svg, 180, 180, 298, 135), K.arrow(svg, 450, 125, 538, 125)];
+        a.forEach((x) => (x.style.opacity = 0));
+        const loop = K.svg(svg, "path", { d: "M 340 160 C 300 260, 440 260, 410 160", fill: "none", stroke: "var(--c4)", "stroke-width": 2, "stroke-dasharray": "5 4" });
+        loop.style.opacity = 0;
+        K.svg(svg, "text", { x: 330, y: 270, "font-size": 12, fill: "var(--c4)" }, "反复 N 步");
+        const noise = K.node(svg, 300, 10, 150, 40, "随机噪声 4×64×64", {});
+        noise.style.opacity = 0;
+        const na = K.arrow(svg, 375, 50, 375, 93); na.style.opacity = 0;
+        (async () => {
+          const seq = [g[0], a[0], g[1], a[1], noise, na, g[2], loop, a[2], g[3]];
+          for (const e of seq) { if (!(await ctx.tween(300, (t) => (e.style.opacity = t)))) return; }
+        })();
+      },
+    },
+    {
+      title: "调度器：K-LMS 决定每一步去掉多少噪声", kicker: "第 21–22 格 · Scheduler",
+      html: `<p>调度器不含神经网络，它只管两件事：<b>走哪些时刻</b>，以及<b>拿到 U-Net 的猜测后，画布该怎么更新</b>。</p><p>作者选了 <b>K-LMS</b>（线性多步法）：不光用这一步的猜测，还参考前面最多 4 步的猜测，像开车时看前几秒的方向盘轨迹来决定下一步怎么打方向。参数 β 从 0.00085 到 0.012（scaled_linear），要和模型训练时一致。作者提到默认是 PNDM，其他还有 DDIM、DDPM 等。</p><p>动画：噪声强度 σ 随步数下降的曲线（按作者的 β 设置真算），10 步时每一步取的点。</p>`,
+      cells: [21, 22], highlight: ["LMSDiscreteScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule=\"scaled_linear\""],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 20, w: 600, h: 260 }, [0, 999], [0, 15], { xlabel: "训练时刻 t（去噪从右往左走）" });
+        let d = "";
+        for (let t = 0; t < 1000; t += 4) d += (d ? "L" : "M") + ax.sx(t) + "," + ax.sy(SIG[t]);
+        K.svg(svg, "path", { d, fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 80, y: 40, "font-size": 12 }, "噪声强度 σ（t = 999 时约 14.6）");
+        const s10 = sigmasFor(10);
+        const ts = s10.slice(0, 10).map((_, k) => 999 - (999 * k) / 9);
+        const dots = ts.map((t, k) => K.svg(svg, "circle", { cx: ax.sx(t), cy: ax.sy(s10[k]), r: 0, fill: "var(--warn)" }));
+        const lab = K.svg(svg, "text", { x: 400, y: 120, "font-size": 13 }, "");
+        (async () => {
+          for (let k = 0; k < 10; k++) { if (!(await ctx.tween(260, (u) => K.set(dots[k], { r: 6 * u })))) return; lab.textContent = `第 ${k + 1} 步：t = ${Math.round(ts[k])}，σ = ${s10[k].toFixed(2)}`; }
+        })();
+      },
+    },
+    {
+      title: "文字变成数字：分词与文本嵌入", kicker: "第 23–26 格 · Tokenize & Text embeddings",
+      html: `<p>第 25 格写下第一句提示词：一位探险家在巨大洞穴里发现一座地下城市，有教堂、欧式建筑和高塔，瀑布在不同层之间流动……</p><p>第 26 格做了两次编码：</p><ul class="tight"><li>把提示词切成词块、补齐到 77 个，送进文本编码器，得到 77×768 的“意思向量”</li><li>再对<b>空字符串</b>做一次同样的编码，得到“什么都没说”的向量</li></ul><p>两份拼在一起（2×77×768），后面每一步 U-Net 会同时看“有文字”和“没文字”两种情况，这是无分类器引导的准备。</p>` +
+        box(`<p>本机用同一套 CLIP 分词器数了一下：这句洞穴提示词是 <b>68 个词块</b>（含开头和结尾标记），没有超过 77。实验 B 可以看到每个词块。</p>`),
+      cells: [23, 25, 26], highlight: ["padding=\"max_length\"", "uncond_input = tokenizer(", "torch.cat([uncond_embeddings, text_embeddings])"],
+      notes: { 24: "作者放的一张示意图（在作者的数据集里）。" },
+      draw(svg, ctx) {
+        const words = ["a", "curious", "explorer", "discovers", "a", "massive", "spraw", "ling", "…"];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "① 切成词块（真实的前几个，来自本机分词）");
+        const ws = words.map((w, i) => { const g = K.node(svg, 30 + i * 74, 42, 68, 34, w, {}); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 30, y: 116, "font-size": 13, "font-weight": 700 }, "② 每个词块 → 768 维向量（颜色示意）");
+        const r = K.rng(3), bars = [];
+        for (let i = 0; i < 9; i++) for (let j = 0; j < 12; j++) { const v = K.randn(r); bars.push(K.svg(svg, "rect", { x: 30 + i * 74 + (j % 4) * 16, y: 128 + Math.floor(j / 4) * 16, width: 14, height: 14, fill: v > 0 ? "var(--c6)" : "var(--c1)", opacity: 0 })); }
+        K.svg(svg, "text", { x: 30, y: 216, "font-size": 13, "font-weight": 700 }, "③ 再编码一次空字符串 \"\"，两份拼起来：2 × 77 × 768");
+        const u = K.node(svg, 30, 230, 300, 40, "空字符串的 77×768", { fill: "var(--panel-2)" }), c = K.node(svg, 350, 230, 300, 40, "提示词的 77×768", { fill: "color-mix(in srgb, var(--accent) 16%, var(--panel))", stroke: "var(--accent)" });
+        u.style.opacity = c.style.opacity = 0;
+        (async () => {
+          for (const w of ws) { if (!(await ctx.tween(150, (t) => (w.style.opacity = t)))) return; }
+          if (!(await ctx.tween(700, (t) => bars.forEach((b) => (b.style.opacity = 0.75 * t))))) return;
+          await ctx.tween(600, (t) => (u.style.opacity = c.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "随机起点：4×64×64 的潜空间噪声", kicker: "第 27–28 格 · Latent initialization",
+      html: `<p>第 27 格用固定种子生成一块 1×4×64×64 的标准正态噪声，这就是画布的起点。为什么是 64×64？因为 VAE 把 512×512 的图压缩了 8 倍；4 个通道是 VAE 设计的“压缩色彩层”，不是红绿蓝。</p><p>第 29 格还要把它乘上调度器的第一个 σ（约 14.6），让起点的“噪声音量”和最嘈杂的时刻对上。</p>` +
+        box(`<img src="${IMG}sd15_cave_50_latent.png" alt="潜空间的 4 个通道" loading="lazy" style="image-rendering:pixelated"><p>本机：SD v1.5 去噪 50 步<b>之后</b>的潜变量，4 个通道分别显示成灰度图（每个 64×64，放大 2 倍）。已经能看出洞穴的轮廓，但它还不是图片，要交给 VAE 解码。${desc("sd15_cave_50")}。</p>`),
+      cells: [27], highlight: ["config.HEIGHT // 8", "unet.in_channels"],
+      draw(svg, ctx) {
+        const r = K.rng(48);
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "图片 512×512×3");
+        const big = K.svg(svg, "rect", { x: 30, y: 44, width: 256, height: 256, fill: "var(--panel-2)", stroke: "var(--line)" });
+        K.svg(svg, "text", { x: 158, y: 175, "text-anchor": "middle", "font-size": 13, class: "muted" }, "786,432 个数");
+        K.arrow(svg, 300, 170, 380, 170);
+        K.svg(svg, "text", { x: 300, y: 158, "font-size": 12 }, "÷ 8");
+        K.svg(svg, "text", { x: 400, y: 30, "font-size": 13, "font-weight": 700 }, "潜空间 4 × 64×64（示意 4 层）");
+        const layers = [0, 1, 2, 3].map((k) => { const g = K.svg(svg, "g", {}); gridImg(g, 400 + k * 18, 50 + k * 18, 8, 22, () => { const v = Math.round(K.clamp(128 + K.randn(r) * 60, 0, 255)); return `rgb(${v},${v},${v})`; }); g.style.opacity = 0; svg.appendChild(g); return g; });
+        K.svg(svg, "text", { x: 400, y: 300, "font-size": 13, class: "muted" }, "16,384 个数，全部随机");
+        (async () => { for (const l of layers) { if (!(await ctx.tween(350, (t) => (l.style.opacity = t)))) return; } })();
+        big.style.opacity = 1;
+      },
+    },
+    {
+      title: "去噪循环：U-Net 猜噪声 + 无分类器引导", kicker: "第 29–30 格 · Denoising loop（作者标题写作 Encoding）",
+      html: `<p>这是整本 notebook 的核心（第 30 格），每一步做四件事：</p><ol class="tight"><li>把画布复制成两份（一份配空字符串，一份配提示词），按当前 σ 缩放</li><li>U-Net 同时猜出两份噪声：“没给文字时的猜测” ε<sub>无</sub> 和 “给了文字时的猜测” ε<sub>文</sub></li><li><b>无分类器引导</b>：ε = ε<sub>无</sub> + 7.5 × (ε<sub>文</sub> − ε<sub>无</sub>)，即把“文字带来的差别”放大 7.5 倍</li><li>调度器按 K-LMS 公式更新画布</li></ol><p>注意：作者把这一节叫“Encoding the image”，其实这里没有编码图片，而是在潜空间里<b>反复去噪</b>。</p>` +
+        box(`<img src="${IMG}sd15_steps.png" alt="去噪过程" loading="lazy"><p>本机：洞穴提示词，SD v1.5，K-LMS 50 步，引导 7.5，种子 48。<b>上排</b>是第 1、10、20、30、40、50 步之后的画布（直接解码带噪潜变量），<b>下排</b>是同一时刻 U-Net“猜测的成品”。前几步只看得出大块明暗，越往后细节越清楚。</p>`) +
+        box(`<img src="${IMG}sd15_cfg.png" alt="引导强度对比" loading="lazy"><p>本机：作者第 52 格的“合成波城市”提示词，SD v1.5，30 步，种子 48，引导强度从左到右为 <b>1（不引导）、3、7.5（作者）、15</b>。引导为 1 时画面杂乱、不太像城市；7.5 主题清楚；15 颜色过饱和、细节变少。</p>`),
+      cells: [29, 30], highlight: ["noise_pred = noise_pred_uncond + config.GUIDANCE_SCALE * (noise_pred_text - noise_pred_uncond)", "latents = scheduler.step(noise_pred, i, latents).prev_sample", "torch.cat([latents] * 2)"],
+      draw(svg, ctx) {
+        const r = K.rng(7), n = 10, c = 22;
+        const base = [], target = [];
+        for (let i = 0; i < n * n; i++) { base.push([K.randn(r), K.randn(r), K.randn(r)]); const y = Math.floor(i / n), x = i % n; const sky = y < 4, cave = x < 3 || x > 7; target.push(sky ? [0.4, 0.6, 0.9] : cave ? [0.25, 0.2, 0.15] : [0.2, 0.55, 0.5]); }
+        const cells = gridImg(svg, 40, 50, n, c, () => "var(--panel-2)");
+        K.svg(svg, "text", { x: 40, y: 36, "font-size": 13, "font-weight": 700 }, "画布（示意）");
+        const lab = K.svg(svg, "text", { x: 300, y: 60, "font-size": 14, "font-family": "var(--mono)" }, "");
+        K.node(svg, 300, 80, 170, 44, "U-Net(画布, 空文字)", {});
+        K.node(svg, 300, 136, 170, 44, "U-Net(画布, 提示词)", { fill: "color-mix(in srgb, var(--accent) 16%, var(--panel))", stroke: "var(--accent)" });
+        K.svg(svg, "text", { x: 490, y: 112, "font-size": 13 }, "ε无");
+        K.svg(svg, "text", { x: 490, y: 166, "font-size": 13, fill: "var(--accent)" }, "ε文");
+        K.svg(svg, "text", { x: 300, y: 220, "font-size": 14, "font-weight": 700 }, "ε = ε无 + 7.5 × (ε文 − ε无)");
+        K.svg(svg, "text", { x: 300, y: 246, "font-size": 12, class: "muted" }, "“文字带来的差别”被放大 7.5 倍");
+        K.svg(svg, "text", { x: 300, y: 290, "font-size": 12, class: "muted" }, "然后 K-LMS 更新画布，进入下一步");
+        ctx.tween(4500, (u) => {
+          const k = Math.min(50, Math.round(u * 50)), a = k / 50;
+          lab.textContent = `第 ${k} / 50 步`;
+          cells.forEach((e, i) => { const q = target[i].map((v, j) => Math.round(K.clamp(a * v + (1 - a) * (0.5 + base[i][j] * 0.25), 0, 1) * 255)); K.set(e, { fill: `rgb(${q[0]},${q[1]},${q[2]})` }); });
+        });
+      },
+    },
+    {
+      at: 31, title: "VAE 解码：把潜变量还原成 512×512 图片", kicker: "第 31–34 格 · Decode & Visualize",
+      html: `<p>第 32 格先把潜变量除以 0.18215（这是 SD 训练时为了让潜变量数值大小合适而乘上的系数，现在除回去），再交给 VAE 解码器，放大成 1×3×512×512。第 34 格把 −1~1 变成 0~1、再变成 0~255 的整数，转成图片显示。</p>` +
+        box(`<div class="pair">${fig("sd15_cave_50.png", "SD v1.5，K-LMS 50 步：去噪 " + (run("sd15_cave_50").seconds_denoise_loop || "") + " 秒")}${fig("sd15_cave_500.png", "SD v1.5，K-LMS 500 步（作者设置）：去噪 " + (run("sd15_cave_500").seconds_denoise_loop || "") + " 秒")}</div><p>本机：作者的洞穴提示词，引导 7.5，种子 48。<b>500 步和 50 步的图几乎一样，但慢了约 7 倍。</b>VAE 解码一次不到 1 秒。注意本机是 SD v1.5（作者是 v1.4），随机数也不同，所以和作者的图不会一样。</p>`),
+      cells: [32, 34], highlight: ["latents = 1 / 0.18215 * latents", "vae.decode(latents).sample", "(image / 2 + 0.5).clamp(0, 1)"],
+      draw(svg, ctx) {
+        const r = K.rng(5);
+        const small = gridImg(svg, 60, 110, 8, 14, () => rgbNoise(r));
+        K.svg(svg, "text", { x: 60, y: 96, "font-size": 13, "font-weight": 700 }, "64×64×4");
+        K.svg(svg, "text", { x: 60, y: 250, "font-size": 12, class: "muted" }, "÷ 0.18215");
+        const dec = K.node(svg, 230, 130, 140, 70, "VAE 解码器\n放大 8 倍", { fill: "color-mix(in srgb, var(--c3) 16%, var(--panel))", stroke: "var(--c3)" });
+        K.arrow(svg, 175, 165, 228, 165); K.arrow(svg, 372, 165, 420, 165);
+        K.svg(svg, "text", { x: 430, y: 30, "font-size": 13, "font-weight": 700 }, "512×512×3");
+        const big = gridImg(svg, 430, 40, 16, 17, () => "var(--panel-2)");
+        dec.style.opacity = 1;
+        ctx.tween(2500, (u) => big.forEach((e, i) => { if (i / big.length < u) { const y = Math.floor(i / 16), x = i % 16; const v = y < 6 ? [110, 150, 210] : x < 4 || x > 11 ? [70, 55, 40] : [60, 140, 120]; K.set(e, { fill: `rgb(${v[0]},${v[1]},${v[2]})` }); } }));
+        small.forEach((e) => (e.style.opacity = 1));
+      },
+    },
+    {
+      title: "第二张图：同样流程换一句提示词", kicker: "第 35–47 格 · Second image",
+      html: `<p>第 35–46 格把第 25–34 格原样重复了一遍，只换了提示词：一位持剑的时髦女子的超精细画作，并点名了几位画家的名字。种子仍是同一个生成器（已经用过一次，所以起点噪声和第一张不同）。第 46 格多存了一份 <code>img2.jpg</code>。</p><p>第 47 格删掉 VAE、文本编码器、U-Net，回收显存，为第 5 节的现成管道腾地方。</p><p>重复的代码其实可以写成一个函数 <code>generate(prompt)</code>，只调用两次。</p>` +
+        box(`<p>本机<b>没有</b>重跑这句提示词：它点名模仿在世画家的画风（见讨论题 5）。用同一个分词器数了一下，它有 37 个词块。</p>`),
+      cells: [35, 37, 38, 42, 47], highlight: ["del unet", "gc.collect()"],
+      notes: { 36: "作者的示意图（在作者的数据集里）。", 41: "和第 29 格相同：设定步数，把起点乘上第一个 σ。", 44: "和第 32 格相同：VAE 解码。" },
+      draw(svg, ctx) {
+        const a = K.node(svg, 40, 60, 280, 200, "第一张\n第 25–34 格\n分词 → 编码 → 噪声\n→ 去噪 → 解码", { fill: "color-mix(in srgb, var(--c1) 12%, var(--panel))", stroke: "var(--c1)" });
+        const b = K.node(svg, 400, 60, 280, 200, "第二张\n第 37–46 格\n（同样的代码，\n只换提示词）", { fill: "color-mix(in srgb, var(--c2) 12%, var(--panel))", stroke: "var(--c2)" });
+        b.style.opacity = 0;
+        K.arrow(svg, 322, 160, 398, 160);
+        K.svg(svg, "text", { x: 40, y: 310, "font-size": 13, class: "muted" }, "复制粘贴 ≈ 12 格代码；写成函数只要 1 行调用");
+        ctx.tween(900, (t) => (b.style.opacity = t));
+        a.style.opacity = 1;
+      },
+    },
+    {
+      title: "现成管道：一行代码完成全部步骤", kicker: "第 48–50 格 · StableDiffusionPipeline",
+      html: `<p>第 50 格用 <code>StableDiffusionPipeline.from_pretrained</code> 一次加载全部零件，指定 <code>revision="fp16"</code> 和 <code>torch_dtype=torch.float16</code>：权重用<b>半精度</b>（每个数 2 字节而不是 4 字节），显存省一半、速度更快，画质几乎不变。</p><p>管道内部做的就是前面第 4 节手写的那些步骤，默认调度器是 PNDM。</p>`,
+      cells: [48, 50], highlight: ["torch_dtype=torch.float16", "revision=\"fp16\""],
+      draw(svg, ctx) {
+        const steps2 = ["分词", "编码", "噪声", "去噪 × N", "解码"];
+        const outer = K.svg(svg, "rect", { x: 30, y: 90, width: 660, height: 110, rx: 14, fill: "color-mix(in srgb, var(--c3) 10%, var(--panel))", stroke: "var(--c3)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 40, y: 80, "font-size": 14, "font-weight": 700, fill: "var(--c3)" }, "pipe(prompt)");
+        const ns = steps2.map((s, i) => K.node(svg, 50 + i * 128, 120, 112, 50, s, {}));
+        K.svg(svg, "text", { x: 30, y: 250, "font-size": 13 }, "fp32：每个参数 4 字节    →    fp16：每个参数 2 字节（显存减半）");
+        const bar1 = K.svg(svg, "rect", { x: 30, y: 266, width: 0, height: 16, fill: "var(--c1)" }), bar2 = K.svg(svg, "rect", { x: 30, y: 290, width: 0, height: 16, fill: "var(--c3)" });
+        ctx.tween(1200, (t) => { K.set(bar1, { width: 600 * t }); K.set(bar2, { width: 300 * t }); });
+        outer.style.opacity = 1; ns.forEach((n) => (n.style.opacity = 1));
+      },
+    },
+    {
+      title: "批量生成 4 张：同一句话，不同的随机起点", kicker: "第 51–57 格 · Visualizing the images",
+      html: `<p>最后三格每次把同一句提示词复制 4 份，用现成管道走 200 步，拼成 2×2 网格。同一句话、4 个不同的随机起点，就得到 4 张不同的图，这正是生成模型“有创造性”的来源。</p><p>两处值得注意：第 52 格提示词结尾的 <code>--ar 9:16 --hd --q 2</code> 是 Midjourney 的参数写法，Stable Diffusion 不认识，只会把它当成普通字符；第 54 格的提示词有 <b>139 个词块</b>，超出 77 的后半段被直接截掉，等于没写。</p>` +
+        box(`<div class="pair">${fig("turbo_cave_s1.png", "SD-Turbo，<b>1 步</b>：去噪 " + (run("turbo_cave_s1").seconds_denoise_loop || "") + " 秒")}${fig("turbo_cave_s4.png", "SD-Turbo，4 步")}</div><img src="${IMG}turbo_steps.png" alt="SD-Turbo 4 步" loading="lazy"><p>本机：作者的洞穴提示词，SD-Turbo，Euler 调度器，不用引导（Turbo 训练时就不用），种子 48。下排是 4 步里每一步“猜测的成品”：第 1 步已经有完整构图，后面几步只是在加细节。对比作者设置的 500 步，Turbo 快了两个数量级。</p>`) +
+        box(`<div class="pair">${fig("turbo_seeds.png", "合成波城市提示词，SD-Turbo 2 步，种子 1、2、3、4")}${fig("turbo_glass_s1.png", "第 54 格的长提示词（139 个词块，被截到 77），SD-Turbo 1 步，种子 48")}</div><p>本机：左图对应作者“每句生成 4 张”的做法，只是换成了 SD-Turbo；右图虽然后半句被截掉，前半句里的“碎玻璃般的末日城市”仍然画出来了。</p>`),
+      cells: [51, 52, 54, 56], highlight: ["num_inference_steps=200", "image_grid(images, rows=2, cols=2)", "--ar 9:16 --hd --q 2"],
+      notes: { 53: "第二句提示词：玻璃碎片般的末日城市（很长）。", 55: "第三句提示词：赛博斗篷动漫角色（点名了画家）。", 57: "参考文献：diffusers 官方 Colab、潜空间扩散论文、Imagen 论文。" },
+      draw(svg, ctx) {
+        const seeds = [1, 2, 3, 4];
+        K.node(svg, 30, 140, 170, 60, "同一句提示词 × 4", { bold: true });
+        seeds.forEach((s, i) => {
+          const r = K.rng(s * 31), x = 300 + (i % 2) * 200, y = 20 + Math.floor(i / 2) * 160;
+          K.arrow(svg, 202, 170, x - 4, y + 70);
+          const cells = gridImg(svg, x, y, 8, 17, () => rgbNoise(r));
+          K.svg(svg, "text", { x: x + 140, y: y + 74, "font-size": 12, "font-family": "var(--mono)" }, "seed " + s);
+          const tint = [[200, 80, 160], [90, 120, 220], [230, 150, 60], [80, 190, 170]][i];
+          ctx.wait(400).then((ok) => ok && ctx.tween(2200, (u) => cells.forEach((e, k) => { if (k / cells.length < u) { const yy = Math.floor(k / 8), q = yy < 3 ? tint : [40 + yy * 8, 30 + yy * 6, 70]; K.set(e, { fill: `rgb(${q[0]},${q[1]},${q[2]})` }); } })));
+        });
+      },
+    },
+  ];
+
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 本机运行表 ---------- */
+  (function () {
+    const tb = document.getElementById("runTable");
+    const order = ["sd15_cave_500", "sd15_cave_50", "sd15_synth_g1", "sd15_synth_g7.5", "sd15_synth_g15", "turbo_cave_s1", "turbo_cave_s4", "turbo_synth_s1", "turbo_glass_s1"];
+    const name = { cave: "洞穴城市（第 25 格）", synth: "合成波城市（第 52 格）", glass: "玻璃末日城市（第 54 格）" };
+    const pk = (r) => (/cave/.test(r.prompt) ? name.cave : /synthwave/.test(r.prompt) ? name.synth : name.glass);
+    tb.innerHTML = "<tr><th>模型</th><th>提示词</th><th>步数</th><th>引导</th><th>种子</th><th>去噪耗时</th></tr>" +
+      order.filter((k) => RUNS[k]).map((k) => { const r = RUNS[k]; return `<tr><td>${r.model === "turbo" ? "SD-Turbo" : "SD v1.5"}</td><td>${pk(r)}${r.truncated ? `（${r.prompt_tokens} 词块，截断）` : ""}</td><td>${r.steps}</td><td>${r.guidance}</td><td>${r.seed}</td><td>${r.seconds_denoise_loop} 秒</td></tr>`; }).join("");
+  })();
+
+  /* ---------- 实验 A：二维数据上的调度器与步数 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "n", label: "去噪步数", value: "10", options: [["1", "1 步"], ["2", "2 步"], ["4", "4 步"], ["10", "10 步"], ["50", "50 步"], ["500", "500 步（作者）"]] },
+      { id: "m", label: "调度器", value: "lms", options: [["lms", "K-LMS（作者，参考前 4 步）"], ["euler", "Euler（SD-Turbo 用，只看当前一步）"]] },
+      { id: "seed", label: "换一批起点噪声", button: true },
+    ],
+    note: "数据是二维的“两个月牙”（150 个点）。因为数据点全部已知，可以直接算出完美的去噪器（按距离加权平均数据点），只比较调度器和步数。σ 日程按作者的 β（0.00085 → 0.012，scaled_linear）真算，起点乘上 σ≈14.6。1 步时所有点都落到数据的“平均位置”；4–10 步已经很好；50 和 500 步几乎看不出区别。",
+    render(svg, v, api) {
+      const r = K.rng(5), data = moon(150, r);
+      const rr = K.rng(77 + v.seed * 11), Z = Array.from({ length: 150 }, () => [K.randn(rr), K.randn(rr)]);
+      const sig = sigmasFor(+v.n);
+      const t0 = performance.now();
+      const traj = sample2d(Z, data, sig, v.m);
+      const ms = performance.now() - t0, fin = traj[traj.length - 1];
+      const ax = K.axes(svg, { x: 20, y: 10, w: 360, h: 360 }, [-2, 2], [-2, 2], { xticks: 0, yticks: 0 });
+      data.forEach((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 2.4, fill: "var(--c3)", opacity: 0.45 }));
+      const dots = fin.map(() => K.svg(svg, "circle", { r: 2.8, fill: "var(--c6)", opacity: 0.85 }));
+      const ax2 = K.axes(svg, { x: 420, y: 30, w: 200, h: 150 }, [0, +v.n], [0, 15], { xlabel: "步" });
+      let d = ""; sig.forEach((s, i) => (d += (d ? "L" : "M") + ax2.sx(i) + "," + ax2.sy(s)));
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+      sig.forEach((s, i) => { if (sig.length < 60) K.svg(svg, "circle", { cx: ax2.sx(i), cy: ax2.sy(s), r: 2.5, fill: "var(--c1)" }); });
+      K.svg(svg, "text", { x: 420, y: 22, "font-size": 12 }, "每一步的噪声强度 σ");
+      K.svg(svg, "text", { x: 420, y: 230, "font-size": 12, fill: "var(--c3)" }, "绿：数据（两个月牙）");
+      K.svg(svg, "text", { x: 420, y: 250, "font-size": 12, fill: "var(--c6)" }, "红：生成的 150 个点");
+      const lab = K.svg(svg, "text", { x: 420, y: 280, "font-size": 13, "font-family": "var(--mono)" }, "");
+      const show = Math.min(traj.length - 1, 60);
+      api.tween(1800, (u) => { const k = Math.round(u * show), idx = Math.round((k / show) * (traj.length - 1)); traj[idx].forEach((p, i) => K.set(dots[i], { cx: ax.sx(K.clamp(p[0], -2, 2)), cy: ax.sy(K.clamp(p[1], -2, 2)) })); lab.textContent = `第 ${idx} / ${traj.length - 1} 步`; });
+      let dsum = 0; fin.forEach((p) => { let m = Infinity; data.forEach((q) => { const dd = Math.hypot(p[0] - q[0], p[1] - q[1]); if (dd < m) m = dd; }); dsum += m; });
+      let mx = 0, my = 0; fin.forEach((p) => { mx += p[0]; my += p[1]; }); mx /= fin.length; my /= fin.length;
+      let spread = 0; fin.forEach((p) => (spread += Math.hypot(p[0] - mx, p[1] - my))); spread /= fin.length;
+      return { readout: [
+        { k: "到最近数据点的平均距离", v: (dsum / fin.length).toFixed(3), color: dsum / fin.length > 0.1 ? "var(--bad)" : "var(--good)" },
+        { k: "生成点的分散程度", v: spread.toFixed(2) },
+        { k: "去噪网络调用次数", v: String(+v.n) },
+        { k: "浏览器计算耗时", v: ms.toFixed(0) + " ms", color: "var(--ink-3)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：词块 ---------- */
+  (function () {
+    const el = document.getElementById("lab2");
+    el.classList.add("lab", "panel");
+    const opts = [["cave", "第 25 格：洞穴城市"], ["girl", "第 37 格：持剑女子"], ["synth", "第 52 格：合成波城市"], ["glass", "第 54 格：玻璃末日城市"], ["anime", "第 56 格：赛博动漫角色"]];
+    el.innerHTML = `<div class="ctrl"><div><label>选择作者的一句提示词</label><select>${opts.map((o) => `<option value="${o[0]}">${o[1]}</option>`).join("")}</select></div><div class="note">词块由本机用 CLIP 分词器（和作者第 19 格同一个 clip-vit-large-patch14）真实切分后存进页面。“·”表示一个词的结尾；长词会被拆成几块（如 spraw + ling）。紫色是开头/结尾标记，灰色划线的是超过 77 个位置、被截掉的部分，虚线格是填充位。</div></div><div class="view" style="display:block"><div class="toks"></div><div class="readout" style="margin-top:10px"></div></div>`;
+    const sel = el.querySelector("select"), box2 = el.querySelector(".toks"), ro = el.querySelector(".readout");
+    const draw = () => {
+      const t = TOKS[sel.value] || [], n = t.length;
+      // 截断规则：保留前 76 个，最后一格放结尾标记
+      const kept = n > 77 ? t.slice(0, 76).concat([t[n - 1]]) : t, cut = n > 77 ? t.slice(76, n - 1) : [];
+      let html = kept.map((w) => `<span class="${/^<\|/.test(w) ? "sp" : ""}">${K.esc(w)}</span>`).join("");
+      for (let i = kept.length; i < 77; i++) html += `<span class="pad">·</span>`;
+      html += cut.map((w) => `<span class="cut">${K.esc(w)}</span>`).join("");
+      box2.innerHTML = html;
+      ro.innerHTML = [["词块总数（含首尾标记）", n], ["能放进 77 个位置的", Math.min(n, 77)], ["被截掉的", cut.length], ["填充位", Math.max(0, 77 - n)]].map(([k, v]) => `<div class="stat-tile"><div class="k">${k}</div><div class="v" style="${k === "被截掉的" && v ? "color:var(--bad)" : ""}">${v}</div></div>`).join("");
+    };
+    sel.onchange = draw;
+    draw();
+  })();
+
+  /* ---------- 实验 C：二维无分类器引导 ---------- */
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "w", label: "引导强度（作者用 7.5）", min: 0, max: 15, step: 0.5, value: 7.5, fmt: (v) => v.toFixed(1) },
+      { id: "cls", label: "“提示词”要的是", value: "A", options: [["A", "左边的圆环（A 类）"], ["B", "右边的小团（B 类）"]] },
+      { id: "seed", label: "换一批起点噪声", button: true },
+    ],
+    note: "数据有两类：A 是左边的圆环，B 是右边的一小团。“无条件去噪器”用全部点，“有条件去噪器”只用被要的那一类，两者都按完美去噪器真算。每一步按作者的公式混合：猜测 = 无条件 + 强度 ×（有条件 − 无条件），用 Euler 走 30 步。强度 0 = 完全不看提示词；1 = 普通的条件生成；越大越“听话”，但点会被推到数据外面、挤成一小撮（多样性下降）。",
+    render(svg, v, api) {
+      const r = K.rng(9), A = [], B = [];
+      for (let i = 0; i < 120; i++) { const a = (i / 120) * Math.PI * 2; A.push([-0.9 + 0.7 * Math.cos(a) + K.randn(r) * 0.04, 0.7 * Math.sin(a) + K.randn(r) * 0.04]); }
+      for (let i = 0; i < 60; i++) B.push([1.1 + K.randn(r) * 0.18, 0.2 + K.randn(r) * 0.18]);
+      const all = A.concat(B), want = v.cls === "A" ? A : B, other = v.cls === "A" ? B : A, w = v.w;
+      const dFn = (x, s) => { const u = denoise(x, all, s), c = denoise(x, want, s); return [u[0] + w * (c[0] - u[0]), u[1] + w * (c[1] - u[1])]; };
+      const rr = K.rng(300 + v.seed * 7), Z = Array.from({ length: 160 }, () => [K.randn(rr), K.randn(rr)]);
+      const traj = sample2d(Z, all, sigmasFor(30), "euler", dFn), fin = traj[traj.length - 1];
+      const ax = K.axes(svg, { x: 20, y: 10, w: 420, h: 360 }, [-2.2, 2.4], [-1.9, 1.9], { xticks: 0, yticks: 0 });
+      A.forEach((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 2.4, fill: "var(--c1)", opacity: 0.4 }));
+      B.forEach((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 2.4, fill: "var(--c2)", opacity: 0.4 }));
+      const dots = fin.map(() => K.svg(svg, "circle", { r: 2.8, fill: "var(--c6)", opacity: 0.9 }));
+      api.tween(1600, (u) => { const k = Math.round(u * (traj.length - 1)); traj[k].forEach((p, i) => K.set(dots[i], { cx: ax.sx(K.clamp(p[0], -2.2, 2.4)), cy: ax.sy(K.clamp(p[1], -1.9, 1.9)) })); });
+      K.svg(svg, "text", { x: 460, y: 40, "font-size": 12, fill: "var(--c1)" }, "蓝：A 类数据（圆环）");
+      K.svg(svg, "text", { x: 460, y: 60, "font-size": 12, fill: "var(--c2)" }, "橙：B 类数据（小团）");
+      K.svg(svg, "text", { x: 460, y: 80, "font-size": 12, fill: "var(--c6)" }, "红：生成的 160 个点");
+      const near = (p, S2) => { let m = Infinity; S2.forEach((q) => { const d = Math.hypot(p[0] - q[0], p[1] - q[1]); if (d < m) m = d; }); return m; };
+      let inWant = 0, off = 0, mx = 0, my = 0;
+      fin.forEach((p) => { const dw = near(p, want), dO = near(p, other); if (dw < dO) inWant++; if (Math.min(dw, dO) > 0.15) off++; mx += p[0]; my += p[1]; });
+      mx /= fin.length; my /= fin.length;
+      let spread = 0; fin.forEach((p) => (spread += Math.hypot(p[0] - mx, p[1] - my))); spread /= fin.length;
+      return { readout: [
+        { k: "落在要求那一类的比例", v: Math.round((inWant / fin.length) * 100) + "%", color: inWant / fin.length > 0.9 ? "var(--good)" : "var(--bad)" },
+        { k: "跑到数据外面的比例", v: Math.round((off / fin.length) * 100) + "%", color: off / fin.length > 0.2 ? "var(--bad)" : "var(--ink)" },
+        { k: "分散程度（多样性）", v: spread.toFixed(2) },
+        { k: "强度", v: w.toFixed(1) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

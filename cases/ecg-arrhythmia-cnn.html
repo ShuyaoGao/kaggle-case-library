@@ -1,0 +1,513 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>心电图心律失常</title>
+<meta name="description" content="Kaggle 案例拆解：把 MIT-BIH 心电图里切出的单个心拍分成五类，用重采样处理类别不平衡、加噪声做数据增强，再用一维卷积神经网络分类。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">生理信号 · 五分类 · 一维卷积</div>
+  <h1>心电图心律失常分类：让卷积网络读懂每一次心跳</h1>
+  <p class="en">Arrhythmia on ECG Classification using CNN</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span><span class="tag dl">深度学习</span>
+    <span class="tag method">重采样（欠采样 + 过采样）</span><span class="tag method">高斯噪声增强</span>
+    <span class="tag method">一维卷积 Conv1D</span><span class="tag method">批归一化</span><span class="tag method">最大池化</span>
+    <span class="tag method">早停 EarlyStopping</span><span class="tag method">归一化混淆矩阵</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Gregoire DC</b></span>
+    <span>Kaggle 点赞 <b>1,912</b>（2026-11 抓取）</span>
+    <span>数据集 <b>shayanfazeli/heartbeat</b>（MIT-BIH 部分）</span>
+    <span><a href="https://www.kaggle.com/code/gregoiredc/arrhythmia-on-ecg-classification-using-cnn" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">从心电图里切出来的一个个心拍</div><p>来自 MIT-BIH 心律失常数据库：47 位受试者、48 段半小时的动态心电图。每一行是一个心拍，采样频率 125 Hz。<span data-cell="3">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这个心拍属于 N / S / V / F / Q 哪一类</div><p>N 正常，S 室上性异位，V 室性异位，F 融合，Q 未知。<span data-cell="3">出处</span> 正常心拍占绝大多数，各类极不平衡 <span data-cell="13">出处</span>。</p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">每类凑到 2 万条 + 加噪声 + 1D CNN</div><p>正常类抽 2 万条、其余四类有放回地复制到 2 万条 <span data-cell="14">出处</span>；训练信号加高斯噪声；三层一维卷积 + 批归一化 + 池化，最后两层全连接输出 5 类。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">S 和 F 两类最弱</div><p>作者文字：室上性（S）和融合（F）两类比其他类弱，可能是原始样本太少。<span data-cell="53">出处</span> 具体准确率在运行输出里，源码不带，这里不列。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">Kaggle 数据集 <b>ECG Heartbeat Categorization Dataset</b>（shayanfazeli/heartbeat）里有两份数据：MIT-BIH 心律失常和 PTB 诊断心电图。作者只用了 MIT-BIH 这一份 <span data-cell="3">出处</span>，已经切好训练文件 <code>mitbih_train.csv</code> 和测试文件 <code>mitbih_test.csv</code> <span data-cell="9">出处</span>。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">心拍样本总数</div><div class="v">109,446</div></div>
+        <div class="stat-tile"><div class="k">类别数</div><div class="v">5</div></div>
+        <div class="stat-tile"><div class="k">采样频率</div><div class="v">125 Hz</div></div>
+        <div class="stat-tile"><div class="k">原始记录</div><div class="v">48 段 × 30 分钟</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">以上数字都抄自作者第 3 格引用的数据集说明 <span data-cell="3">出处</span>。48 段记录里 23 段是从 4000 份 24 小时动态心电图里随机抽的，另外 25 段专门挑了少见但有临床意义的心律失常。</p>
+      <p class="callout">心电图（ECG）是什么？心脏每跳一次，心肌细胞会先“通电”再收缩。贴在皮肤上的电极能记下这股微弱的电流，画成一条曲线就是心电图 <span data-cell="5">出处</span>。一次正常心跳在图上依次是：<b>P 波</b>（心房通电、收缩）、<b>QRS 波群</b>（心室通电、收缩，最高最尖的那一下）、<b>T 波</b>（心室恢复、准备下一次）。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列</th><th>白话含义</th><th>类型</th></tr>
+        <tr><td>第 0–186 列</td><td>一个心拍的电压曲线，每列是一个时间点（125 Hz，即每 8 毫秒一个点）。数据集说明：每个样本都经过裁剪、降采样，不够长的末尾补 0，固定为 188 维（含最后的标签）</td><td>数值</td></tr>
+        <tr><td>第 187 列</td><td><b>要预测的答案</b>：0 = N，1 = S，2 = V，3 = F，4 = Q <span data-cell="3">出处</span></td><td>类别</td></tr>
+      </table></div>
+      <h3>五类心拍是什么意思</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>类</th><th>名称</th><th>白话解释</th></tr>
+        <tr><td><b>N</b></td><td>正常心拍</td><td>由心脏的“司令部”窦房结按时发出指令的正常一跳</td></tr>
+        <tr><td><b>S</b></td><td>室上性异位心拍</td><td>心房或房室交界处有个地方“抢先”发了指令，常见的房性早搏；波形和正常的很像，只是来得早</td></tr>
+        <tr><td><b>V</b></td><td>室性异位心拍</td><td>心室自己抢先跳了一下（室性早搏），QRS 又宽又怪</td></tr>
+        <tr><td><b>F</b></td><td>融合心拍</td><td>正常指令和心室的“抢跳”同时到达，两种波形混在一起</td></tr>
+        <tr><td><b>Q</b></td><td>未知心拍</td><td>无法归类的心拍，作者说它对应“其他”类 <span data-cell="37">出处</span></td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="43">
+    <h3>动手试试 A · 合成一个心拍：P、QRS、T 和噪声 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="47">
+    <h3>动手试试 B · 一维卷积和池化在心拍上怎么滑 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>五个类别极不平衡，作者试过后选择重采样，而不是给类别加权重</td><td><span data-cell="13">第 13 格</span></td></tr>
+        <tr><td>重采样后每类 2 万条，“效果很好，可以继续”</td><td><span data-cell="17">第 17 格</span></td></tr>
+        <tr><td>用二维直方图把同一类的所有心拍叠在一起，可以估计这一类的典型形状</td><td><span data-cell="27">第 27 格</span></td></tr>
+        <tr><td>作者坦言看不出融合心拍和前一类的差别（“我不是心电图专家”）</td><td><span data-cell="35">第 35 格</span></td></tr>
+        <tr><td>室上性（S）和融合（F）两类比其他类弱，可能因为原始样本太少</td><td><span data-cell="53">第 53 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">准确率、各类召回率、混淆矩阵的数值都在运行输出里，Kaggle 下载的源码不带输出，作者文字里也没写，这里不列。</p>
+      <p class="callout warn"><b>读原 notebook 时要注意：</b>① 第 47 格训练时把<b>测试集</b>当成验证集：早停和“保存最好模型”都看测试集上的损失，等于用考卷挑模型，最后在同一份测试集上的分数会偏乐观。规范做法是从训练集里再分出验证集。② 信号共有第 0–186 列，代码只取了 <code>:186</code>，最后一个点被丢掉了（影响很小）。③ 据数据集引用的论文（Kachuee 等，arXiv:1805.00794）描述，每个心拍的幅度被归一化到 0–1，而第 41 格加的噪声标准差是 0.5，相对信号非常大，见实验 A。④ 少数类有放回地复制到 2 万条，F 类每条原始心拍会被复制很多遍，重复样本容易被记住（过拟合）；作者加噪声能缓解一些。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>动态心电图（Holter）一天要记 10 万次心跳，模型可以先把异常心拍挑出来，让医生只看可疑片段。<b>模型只是辅助，诊断要由心内科医生确认。</b></li>
+        <li><b>同类问题：</b>脑电、肌电、呼吸、可穿戴设备的脉搏信号，机器振动、电流波形的故障诊断——都是“一段一维曲线 → 类别”。</li>
+        <li><b>可迁移的套路：</b>把长信号切成等长片段 → 只在训练集上重采样 → 加噪声做增强 → Conv1D + 池化提取局部形状 → 用归一化混淆矩阵看每一类的召回率，尤其是危险但少见的那几类。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>类别分布饼图 <span data-cell="12">第 12 格</span></li>
+        <li>欠采样 N + 有放回过采样 S/V/F/Q <span data-cell="14">第 14 格</span></li>
+        <li>二维直方图看每类典型形状 <span data-cell="25">第 25 格</span></li>
+        <li>高斯噪声增强 <span data-cell="41">第 41 格</span> <span data-cell="45">第 45 格</span></li>
+        <li>Conv1D(64,6) → BN → MaxPool → Conv1D(64,3) ×2 → Dense 64 → 32 → 5 <span data-cell="47">第 47 格</span></li>
+        <li>EarlyStopping(patience=8) + ModelCheckpoint <span data-cell="47">第 47 格</span></li>
+        <li>归一化混淆矩阵 <span data-cell="52">第 52 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者把正常心拍从很多条抽到 2 万条，把融合心拍从很少复制到 2 万条。哪一种操作丢信息？哪一种可能让模型“背答案”？</li>
+      <li>如果一个模型把 S 类（房性早搏）都判成 N 类，总准确率还会很高吗？为什么在心电监护里要单独看每一类的召回率？</li>
+      <li>作者用测试集来做早停、挑最好的模型。为什么这样得到的测试分数不能当作“新病人上的成绩”？应该怎么改？</li>
+      <li>心电图信号的幅度被归一化到 0 到 1，作者却加了标准差 0.5 的噪声。结合实验 A，你觉得噪声该多大才合适？</li>
+      <li>训练集和测试集的心拍可能来自同一个病人。如果要上线给新病人用，应该怎样切分数据才更能反映真实效果？</li>
+      <li>卷积核为什么适合心电图？如果把 187 个点打乱顺序再喂给网络，卷积网络和普通全连接网络谁受的影响更大？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Gregoire DC，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的波形均为代码合成的示意，不是真实心电图。数据集：Shayan Fazeli, ECG Heartbeat Categorization Dataset（源自 PhysioNet MIT-BIH Arrhythmia Database）。模型结果仅用于教学，不能代替医生诊断。
+</footer>
+</main>
+
+<script>/* 自查开关：网址带 #fast 时让动画在无界面截图里也能走完 */ if (/fast/.test(location.hash)) window.requestAnimationFrame = (f) => setTimeout(() => f(performance.now()), 4);</script>
+<script src="nb/ecg-arrhythmia-cnn.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const fade = (els, v) => els.forEach((e) => (e.style.opacity = v));
+
+  /* 合成心拍：t ∈ [0,1.5) 秒，返回 0–1 归一化前的电压 */
+  const G = (t, m, a, w) => a * Math.exp(-0.5 * ((t - m) / w) ** 2);
+  const BEAT = {
+    N: { p: [0.18, 0.12, 0.025], q: [0.36, -0.12, 0.01], r: [0.39, 1, 0.012], s: [0.42, -0.2, 0.012], t: [0.66, 0.3, 0.045] },
+    S: { p: [0.12, 0.06, 0.02], q: [0.27, -0.1, 0.01], r: [0.3, 0.95, 0.012], s: [0.33, -0.18, 0.012], t: [0.56, 0.26, 0.045] },
+    V: { p: [0.18, 0, 0.02], q: [0.34, -0.1, 0.03], r: [0.4, 1, 0.04], s: [0.5, -0.35, 0.035], t: [0.72, -0.35, 0.07] },
+    F: { p: [0.18, 0.08, 0.025], q: [0.35, -0.1, 0.02], r: [0.395, 1, 0.025], s: [0.46, -0.28, 0.025], t: [0.7, -0.05, 0.06] },
+    Q: { p: [0.18, 0.02, 0.02], q: [0.33, 0.3, 0.004], r: [0.39, 0.85, 0.03], s: [0.47, -0.3, 0.03], t: [0.7, 0.2, 0.07] },
+  };
+  function beat(type, n, noise, seed, rate) {
+    const b = BEAT[type], r = K.rng(seed || 1), out = [], k = rate || 1;
+    for (let i = 0; i < n; i++) {
+      const t = (i / 125) * k;
+      let v = 0;
+      ["p", "q", "r", "s", "t"].forEach((key) => { const [m, a, w] = b[key]; v += G(t, m, a, w); });
+      if (type === "Q") v += G(t, 0.33, 0.6, 0.003);
+      out.push(v);
+    }
+    const mn = Math.min(...out), mx = Math.max(...out);
+    return out.map((v) => (v - mn) / (mx - mn) + (noise ? K.randn(r) * noise : 0));
+  }
+  function wave(svg, ys, box, color, opt) {
+    opt = opt || {};
+    const lo = opt.lo == null ? -0.1 : opt.lo, hi = opt.hi == null ? 1.1 : opt.hi;
+    const d = ys.map((y, i) => (i ? "L" : "M") + (box.x + (i / (ys.length - 1)) * box.w).toFixed(1) + "," + (box.y + box.h - ((y - lo) / (hi - lo)) * box.h).toFixed(1)).join("");
+    const p = K.svg(svg, "path", { d, fill: "none", stroke: color, "stroke-width": opt.sw || 2 });
+    if (opt.draw) { const L = p.getTotalLength ? p.getTotalLength() : 1000; p.style.strokeDasharray = L; p.style.strokeDashoffset = L; p._L = L; }
+    return p;
+  }
+  const reveal = (ctx, p, ms) => ctx.tween(ms, (t) => (p.style.strokeDashoffset = p._L * (1 - t)));
+
+  const steps = [
+    {
+      at: 0, title: "开场：什么是心电图，五类心拍", kicker: "第 0–6 格 · 背景",
+      html: `<p>作者先介绍任务：在心电图上识别不同的心律失常（心跳节律或形状不正常）<span data-cell="3">第 3 格</span>。数据来自 MIT-BIH 心律失常数据库，分 N、S、V、F、Q 五类。</p><p>然后解释心电图：皮肤上的传感器记录心脏每次跳动产生的电信号，由医生判断是否异常 <span data-cell="5">第 5 格</span>。动画画出一个<b>合成</b>的正常心拍，依次标出 P 波、QRS 波群、T 波。</p>`,
+      cells: [3, 5],
+      draw(svg, ctx) {
+        const ys = beat("N", 187, 0, 1);
+        const box = { x: 40, y: 40, w: 640, h: 230 };
+        for (let i = 0; i <= 16; i++) K.svg(svg, "line", { x1: 40 + i * 40, x2: 40 + i * 40, y1: 40, y2: 270, stroke: "var(--line)", "stroke-width": 0.6 });
+        const p = wave(svg, ys, box, "var(--c6)", { draw: true, sw: 2.5 });
+        const X = (sec) => 40 + (sec * 125 / 186) * 640;
+        const labs = [["P 波：心房通电收缩", 0.18, 205, "var(--c1)"], ["QRS 波群：心室通电收缩", 0.39, 60, "var(--c6)"], ["T 波：心室恢复", 0.66, 170, "var(--c3)"]];
+        const tags = labs.map(([t, s, y, c]) => { const g = K.svg(svg, "g"); K.svg(g, "line", { x1: X(s), x2: X(s), y1: y + 8, y2: y + 30, stroke: c, "stroke-width": 1.5 }); K.svg(g, "text", { x: X(s) + 6, y, "font-size": 13, "font-weight": 700, fill: c }, t); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 40, y: 300, "font-size": 12, class: "muted" }, "代码合成的示意心拍（不是真实记录）；每一小格 ≈ 0.12 秒");
+        (async () => {
+          if (!(await reveal(ctx, p, 1600))) return;
+          for (const g of tags) if (!(await ctx.tween(350, (t) => (g.style.opacity = t)))) return;
+        })();
+      },
+    },
+    {
+      at: 7, title: "读数据：每一行是一个心拍", kicker: "第 7–9 格 · 读入",
+      html: `<p>导入工具包后，作者读入两个没有表头的 CSV：<code>mitbih_train.csv</code> 和 <code>mitbih_test.csv</code> <span data-cell="9">第 9 格</span>。数据集作者已经把长长的心电图<b>切成了一个个心拍</b>，每个心拍补齐成同样长度。</p><p>所以每一行就是一个心拍：前面一串数字是这个心拍的电压曲线，最后一列（第 187 列）是类别标签。动画把一条长心电图切成一段段，再“摊平”成表格的一行。</p>`,
+      cells: [9], highlight: ["header=None"],
+      draw(svg, ctx) {
+        const types = ["N", "N", "V", "N", "S"];
+        const long = [];
+        types.forEach((ty, k) => beat(ty, 60, 0, k + 2).forEach((v) => long.push(v)));
+        const p = wave(svg, long, { x: 30, y: 30, w: 660, h: 110 }, "var(--c6)", { draw: true });
+        const cuts = [1, 2, 3, 4].map((k) => { const l = K.svg(svg, "line", { x1: 30 + k * 132, x2: 30 + k * 132, y1: 24, y2: 148, stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "5 3" }); l.style.opacity = 0; return l; });
+        K.svg(svg, "text", { x: 30, y: 18, "font-size": 12, class: "muted" }, "一长段心电图（示意）");
+        const rowY = 200;
+        const cells = [];
+        for (let i = 0; i < 12; i++) cells.push(K.node(svg, 30 + i * 50, rowY, 46, 30, i < 10 ? ["0.98", "0.93", "0.68", "0.25", "0.15", "0.13", "0.10", "…", "0.0", "0.0"][i] : i === 10 ? "…" : "2", { fs: 11, stroke: i === 11 ? "var(--accent)" : "var(--line)", bold: i === 11 }));
+        fade(cells, 0);
+        K.svg(svg, "text", { x: 30, y: rowY + 52, "font-size": 12 }, "第 0 列 … 第 186 列：电压（末尾不够长的补 0）");
+        K.svg(svg, "text", { x: 580, y: rowY + 52, "font-size": 12, fill: "var(--accent)" }, "第 187 列：类别");
+        K.svg(svg, "text", { x: 30, y: rowY + 76, "font-size": 11, class: "muted" }, "表格里的数字为示意");
+        (async () => {
+          if (!(await reveal(ctx, p, 1400))) return;
+          if (!(await ctx.tween(500, (t) => fade(cuts, t)))) return;
+          for (let i = 0; i < cells.length; i++) if (!(await ctx.tween(90, (t) => (cells[i].style.opacity = t)))) return;
+        })();
+      },
+    },
+    {
+      at: 10, title: "五类心拍极不平衡", kicker: "第 10–13 格 · 类别分布",
+      html: `<p>作者统计第 187 列每一类有多少条，再画一个环形饼图 <span data-cell="12">第 12 格</span>。结论：类别之间差别巨大 <span data-cell="13">第 13 格</span>，正常心拍占了绝大多数，融合心拍最少。</p><p>这很符合现实：一个人一天大部分心跳都是正常的。但如果直接训练，模型会偷懒全猜“正常”。作者试过后决定用<b>重采样</b>而不是“类别权重”来解决 <span data-cell="13">第 13 格</span>。动画里环形图的比例只是示意。</p>`,
+      cells: [11, 12], highlight: ["value_counts()"],
+      draw(svg, ctx) {
+        const parts = [["N 正常", 0.8, "var(--c1)"], ["Q 未知", 0.08, "var(--c3)"], ["V 室性", 0.07, "var(--c6)"], ["S 室上性", 0.035, "var(--c4)"], ["F 融合", 0.015, "var(--c2)"]];
+        const cx = 200, cy = 175, R = 120, r0 = 70;
+        const arcs = parts.map((p) => K.svg(svg, "path", { d: "", fill: p[2] }));
+        const arcPath = (a0, a1) => { const p = (a, rr) => [cx + rr * Math.cos(a - Math.PI / 2), cy + rr * Math.sin(a - Math.PI / 2)]; const [x0, y0] = p(a0, R), [x1, y1] = p(a1, R), [x2, y2] = p(a1, r0), [x3, y3] = p(a0, r0); const lg = a1 - a0 > Math.PI ? 1 : 0; return `M${x0},${y0}A${R},${R} 0 ${lg} 1 ${x1},${y1}L${x2},${y2}A${r0},${r0} 0 ${lg} 0 ${x3},${y3}Z`; };
+        parts.forEach((p, i) => { K.svg(svg, "rect", { x: 400, y: 70 + i * 40, width: 18, height: 18, rx: 3, fill: p[2] }); K.svg(svg, "text", { x: 428, y: 84 + i * 40, "font-size": 14 }, p[0]); });
+        K.svg(svg, "text", { x: 400, y: 300, "font-size": 12, class: "muted" }, "比例为示意，具体数字见原 notebook 输出");
+        ctx.tween(1500, (t) => { let a = 0; parts.forEach((p, i) => { const a1 = a + p[1] * Math.PI * 2 * t; arcs[i].setAttribute("d", arcPath(a, Math.max(a + 0.0001, a1))); a = a1; }); });
+      },
+    },
+    {
+      at: 14, title: "重采样：每一类都凑到 2 万条", kicker: "第 14–17 格 · 处理不平衡",
+      html: `<p>作者对<b>训练集</b>做了两件事 <span data-cell="14">第 14 格</span>：</p><ul class="tight"><li><b>欠采样</b>：正常心拍（类 0）随机抽 20000 条，其余扔掉</li><li><b>过采样</b>：其余四类用 <code>resample(replace=True)</code> 有放回地抽到各 20000 条，样本少的类，同一条心拍会被抽中很多次</li></ul><p>拼起来正好 5 × 20000 = 10 万条，每类各占 20%。测试集没有动，保持真实比例，这一点是对的。作者说“重采样效果很好，可以继续” <span data-cell="17">第 17 格</span>。</p>`,
+      cells: [14], highlight: ["sample(n=20000", "replace=True,n_samples=20000"],
+      draw(svg, ctx) {
+        const before = [[200, "N"], [22, "Q"], [20, "V"], [9, "S"], [4, "F"]];
+        const cols = ["var(--c1)", "var(--c3)", "var(--c6)", "var(--c4)", "var(--c2)"];
+        const bars = before.map((b, i) => {
+          K.svg(svg, "text", { x: 60, y: 70 + i * 52, "text-anchor": "end", "font-size": 14, "font-weight": 700 }, b[1]);
+          return K.svg(svg, "rect", { x: 70, y: 52 + i * 52, width: b[0] * 2.6, height: 30, rx: 4, fill: cols[i] });
+        });
+        const target = 80 * 2.6;
+        const line = K.svg(svg, "line", { x1: 70 + target, x2: 70 + target, y1: 40, y2: 310, stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        line.style.opacity = 0;
+        K.svg(svg, "text", { x: 70, y: 30, "font-size": 12, class: "muted" }, "条的长短为示意");
+        const t1 = K.svg(svg, "text", { x: 70 + target + 8, y: 330, "font-size": 13, fill: "var(--warn)", "font-weight": 700 }, "");
+        const dup = [];
+        (async () => {
+          if (!(await ctx.wait(600))) return;
+          if (!(await ctx.tween(400, (t) => (line.style.opacity = t)))) return;
+          t1.textContent = "每类 20000 条";
+          if (!(await ctx.tween(1400, (t) => bars.forEach((b, i) => K.set(b, { width: K.lerp(before[i][0] * 2.6, target, t) }))))) return;
+          // 少数类里的“复印件”
+          for (let k = 0; k < 18; k++) dup.push(K.svg(svg, "rect", { x: 72 + k * 11.4, y: 52 + 4 * 52 + 4, width: 9, height: 22, rx: 2, fill: "none", stroke: "#fff", "stroke-opacity": 0.6 }));
+          K.svg(svg, "text", { x: 330, y: 268, "font-size": 12 }, "F 类：同一条心拍被复制了很多遍");
+        })();
+      },
+    },
+    {
+      at: 18, title: "每一类心拍长什么样：正常心拍", kicker: "第 18–27 格 · 认识类别①",
+      html: `<p>作者从每类随机抽一条心拍当例子 <span data-cell="20">第 20 格</span>，先画正常心拍 <span data-cell="23">第 23 格</span>。</p><p>只看一条容易被个例误导，作者写了个函数 <code>plot_hist</code>：把这一类<b>所有</b>心拍叠在一张二维直方图上，越多心拍经过的地方颜色越亮，这样能估计这一类“通常长什么样” <span data-cell="27">第 27 格</span>。动画把许多条带噪声的合成心拍一条条叠上去。</p>`,
+      cells: [20, 23, 26], highlight: ["plot_hist", "hist2d"],
+      draw(svg, ctx) {
+        const box = { x: 40, y: 30, w: 640, h: 260 };
+        const W = 64, H = 26, grid = Array.from({ length: H }, () => Array(W).fill(0));
+        const cells = [];
+        for (let i = 0; i < H; i++) for (let j = 0; j < W; j++) cells.push(K.svg(svg, "rect", { x: box.x + j * 10, y: box.y + i * 10, width: 10, height: 10, fill: "var(--panel)" }));
+        K.svg(svg, "text", { x: 40, y: 312, "font-size": 12, class: "muted" }, "把同一类的很多条心拍叠起来：亮的地方 = 经过的心拍多（合成示意）");
+        const cnt = K.svg(svg, "text", { x: 560, y: 22, "font-size": 13, "font-weight": 700 }, "");
+        (async () => {
+          let mx = 1;
+          for (let k = 0; k < 40; k++) {
+            const ys = beat("N", 120, 0.04, 100 + k, 0.92 + (k % 7) * 0.025);
+            const p = wave(svg, ys, box, "var(--c6)", { sw: 1.2 });
+            ys.forEach((y, i) => { const j = Math.floor((i / 120) * W), r = Math.floor((1 - (y + 0.1) / 1.2) * H); if (r >= 0 && r < H && j < W) { grid[r][j]++; mx = Math.max(mx, grid[r][j]); } });
+            cells.forEach((c, idx) => { const v = grid[Math.floor(idx / W)][idx % W]; if (v) K.set(c, { fill: K.heat(Math.sqrt(v / mx)) }); });
+            cnt.textContent = "已叠加 " + (k + 1) + " 条";
+            if (!(await ctx.wait(70))) return;
+            p.remove();
+          }
+        })();
+      },
+    },
+    {
+      at: 28, title: "S 和 V：两种“抢跳”的早搏", kicker: "第 28–32 格 · 认识类别②",
+      html: `<p>接着画类 1（S，室上性异位）和类 2（V，室性异位）的例子和叠加图 <span data-cell="28">第 28 格</span> <span data-cell="31">第 31 格</span>，作者还贴了一张教科书插图对比这两类 <span data-cell="32">第 32 格</span>。</p><ul class="tight"><li><b>S</b>：指令来自心房附近，传导路线基本正常，所以 QRS 仍然窄，但<b>来得比预期早</b>，P 波形状可能不一样或看不清</li><li><b>V</b>：心室自己抢跳，电流在心室里“绕远路”，QRS <b>又宽又怪</b>，后面的 T 波常常方向相反</li></ul><p>动画把三种合成心拍叠在一起比较（示意形状）。</p>`,
+      cells: [28, 31], highlight: ["c.iloc[1,:186]", "c.iloc[2,:186]"],
+      draw(svg, ctx) {
+        const box = { x: 40, y: 40, w: 640, h: 230 };
+        const ps = [["N", "var(--c1)", "N 正常"], ["S", "var(--c4)", "S：来得早、QRS 仍窄"], ["V", "var(--c6)", "V：QRS 宽、T 波倒置"]].map(([ty, c, lab], i) => {
+          const p = wave(svg, beat(ty, 120, 0, 3), box, c, { draw: true, sw: 2.5 });
+          const tx = K.svg(svg, "text", { x: 460, y: 70 + i * 26, "font-size": 13, "font-weight": 700, fill: c }, "— " + lab); tx.style.opacity = 0;
+          return [p, tx];
+        });
+        K.svg(svg, "text", { x: 40, y: 300, "font-size": 12, class: "muted" }, "合成示意波形，用来说明形状差别，不是真实记录");
+        (async () => { for (const [p, tx] of ps) { if (!(await reveal(ctx, p, 900))) return; tx.style.opacity = 1; } })();
+      },
+    },
+    {
+      at: 33, title: "F 融合心拍和 Q 未知心拍", kicker: "第 33–38 格 · 认识类别③",
+      html: `<p>类 3 是<b>融合心拍</b> F <span data-cell="33">第 33 格</span>：窦房结的正常指令和心室的“抢跳”几乎同时到达，两股电流在心室里相遇，画出来的波形介于正常和室性之间。作者很坦诚：“我看不出它和前一类的区别，我不是心电图专家” <span data-cell="35">第 35 格</span>。</p><p>类 4 是 Q，对应无法归类的“其他”心拍，作者没有多讲 <span data-cell="37">第 37 格</span>。动画演示“融合”：正常波形和室性波形按比例混合。</p>`,
+      cells: [33, 36], highlight: ["c.iloc[3,:186]", "c.iloc[4,:186]"],
+      draw(svg, ctx) {
+        const box = { x: 40, y: 40, w: 640, h: 220 };
+        const n = beat("N", 120, 0, 1), v = beat("V", 120, 0, 1);
+        wave(svg, n, box, "var(--c1)", { sw: 1.5 }).style.opacity = 0.5;
+        wave(svg, v, box, "var(--c6)", { sw: 1.5 }).style.opacity = 0.5;
+        const mix = wave(svg, n, box, "var(--c2)", { sw: 3 });
+        const lab = K.svg(svg, "text", { x: 440, y: 70, "font-size": 14, "font-weight": 700, fill: "var(--c2)" }, "");
+        K.svg(svg, "text", { x: 440, y: 96, "font-size": 12, fill: "var(--c1)" }, "淡蓝：正常心拍");
+        K.svg(svg, "text", { x: 440, y: 116, "font-size": 12, fill: "var(--c6)" }, "淡红：室性心拍");
+        K.svg(svg, "text", { x: 40, y: 300, "font-size": 12, class: "muted" }, "融合 = 两股电流同时到达心室，波形介于两者之间（示意）");
+        ctx.wait(500).then((ok) => ok && ctx.tween(2000, (t) => {
+          const a = 0.5 * (1 - Math.cos(t * Math.PI));
+          const ys = n.map((x, i) => (1 - a * 0.6) * x + a * 0.6 * v[i]);
+          mix.setAttribute("d", ys.map((y, i) => (i ? "L" : "M") + (box.x + (i / 119) * box.w).toFixed(1) + "," + (box.y + box.h - ((y + 0.1) / 1.2) * box.h).toFixed(1)).join(""));
+          lab.textContent = "融合比例 " + Math.round(a * 60) + "%";
+        }));
+      },
+    },
+    {
+      at: 39, title: "加高斯噪声做数据增强", kicker: "第 39–45 格 · 预处理",
+      html: `<p>作者写了 <code>add_gaussian_noise</code>：给 186 个点各加一个均值 0、标准差 0.5 的随机数 <span data-cell="41">第 41 格</span>，让训练数据“每次都有点不一样”，提高模型的泛化能力 <span data-cell="42">第 42 格</span>。第 43 格把原始和加噪后的心拍上下对比。</p><p>然后把标签变成独热编码（5 类 → 5 个 0/1），对<b>每一条训练心拍</b>都加一次噪声，测试集不加；最后把形状改成 (样本数, 186, 1)，这是一维卷积要求的“长度 × 通道”格式 <span data-cell="45">第 45 格</span>。注意：据数据集引用的论文，信号幅度被归一化到 0–1，标准差 0.5 的噪声相当大，见下面的实验 A。</p>`,
+      cells: [41, 43, 45], highlight: ["np.random.normal(0,0.5,186)", "add_gaussian_noise(X_train[i,:186])", "reshape"],
+      draw(svg, ctx) {
+        const clean = beat("N", 186, 0, 1);
+        const r = K.rng(9), nz = clean.map(() => K.randn(r));
+        K.svg(svg, "text", { x: 40, y: 26, "font-size": 13, "font-weight": 700 }, "原始心拍");
+        wave(svg, clean, { x: 40, y: 34, w: 640, h: 110 }, "var(--c1)", { sw: 2 });
+        const lab = K.svg(svg, "text", { x: 40, y: 180, "font-size": 13, "font-weight": 700 }, "");
+        const noisy = wave(svg, clean, { x: 40, y: 190, w: 640, h: 130 }, "var(--c6)", { sw: 1.4, lo: -1.6, hi: 2.6 });
+        (async () => {
+          for (const s of [0.05, 0.15, 0.3, 0.5]) {
+            if (!(await ctx.tween(700, (t) => {
+              const ys = clean.map((y, i) => y + nz[i] * s * t);
+              noisy.setAttribute("d", ys.map((y, i) => (i ? "L" : "M") + (40 + (i / 185) * 640).toFixed(1) + "," + (190 + 130 - ((y + 1.6) / 4.2) * 130).toFixed(1)).join(""));
+              lab.textContent = "加噪声后：标准差 σ = " + (s * t).toFixed(2) + (s === 0.5 ? "（作者用的值）" : "");
+            }))) return;
+            if (!(await ctx.wait(400))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 46, title: "一维卷积网络的结构", kicker: "第 46–48 格 · 网络",
+      html: `<p>网络结构 <span data-cell="47">第 47 格</span>：</p><ul class="tight"><li>卷积层 1：64 个长度为 6 的卷积核 → 批归一化 → 最大池化（窗口 3、步长 2）</li><li>卷积层 2、3：各 64 个长度为 3 的卷积核 → 批归一化 → 最大池化（窗口 2、步长 2）</li><li>展平 → 全连接 64 → 32 → 输出 5 类（softmax 给出每类的概率）</li></ul><p><b>一维卷积</b>就是拿一小段“模板”沿着时间轴滑动，每到一处就算一次和信号的相似程度，专门找“尖峰”“下坡”这类局部形状。<b>池化</b>每几格只留最大值，让曲线变短、对小的左右偏移不敏感。<b>批归一化</b>把每层的输出拉回差不多的尺度，训练更稳。</p>`,
+      cells: [47], highlight: ["Convolution1D(64, (6)", "MaxPool1D(pool_size=(3), strides=(2)", "BatchNormalization", "Dense(5, activation='softmax'"],
+      draw(svg, ctx) {
+        const layers = [["输入\n186×1", 186, "var(--ink-3)"], ["Conv 6\n181×64", 181, "var(--c1)"], ["池化\n91×64", 91, "var(--c2)"], ["Conv 3\n89×64", 89, "var(--c1)"], ["池化\n45×64", 45, "var(--c2)"], ["Conv 3\n43×64", 43, "var(--c1)"], ["池化\n22×64", 22, "var(--c2)"], ["全连接\n64→32", 12, "var(--c4)"], ["输出\n5 类", 5, "var(--c6)"]];
+        const blocks = layers.map((L, i) => {
+          const h = 30 + 200 * L[1] / 186, x = 20 + i * 78, y = 160 - h / 2;
+          const g = K.svg(svg, "g"); g.style.opacity = 0;
+          K.svg(g, "rect", { x, y, width: 52, height: h, rx: 4, fill: L[2], opacity: 0.85 });
+          L[0].split("\n").forEach((s, k) => K.svg(g, "text", { x: x + 26, y: 290 + k * 16, "text-anchor": "middle", "font-size": 11 }, s));
+          if (i) K.arrow(g, x - 24, 160, x - 2, 160);
+          return g;
+        });
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 12, class: "muted" }, "方块高度 ∝ 序列长度（按 Keras 默认 valid 卷积、same 池化推算）");
+        (async () => { for (const b of blocks) if (!(await ctx.tween(260, (t) => (b.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      at: 49, title: "训练：早停与保存最好的模型", kicker: "第 49–50 格 · 训练",
+      html: `<p>训练最多 40 轮、每批 32 条，用 Adam 优化、交叉熵损失 <span data-cell="47">第 47 格</span>。两个“回调”：</p><ul class="tight"><li><b>EarlyStopping(patience=8)</b>：验证损失连续 8 轮不再下降就停</li><li><b>ModelCheckpoint</b>：只保存验证损失最低的那一版模型</li></ul><p>问题在于，这里的“验证集”就是 <code>(X_test, y_test)</code>，也就是测试集 <span data-cell="47">第 47 格</span>。训练过程在用测试集挑模型，最后又在同一份测试集上打分 <span data-cell="50">第 50 格</span>，分数会偏乐观。</p>`,
+      cells: [49, 50], highlight: ["network(X_train,y_train,X_test,y_test)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 420, h: 240 }, [0, 30], [0, 1.2], { xticks: 6, yticks: 3, xlabel: "训练轮数（示意曲线）", ylabel: "损失" });
+        const tr = (e) => 1.05 * Math.exp(-e / 5) + 0.06, va = (e) => 0.95 * Math.exp(-e / 5) + 0.16 + 0.0045 * Math.max(0, e - 12) ** 1.4;
+        const pT = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 }), pV = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        let best = 0; for (let e = 0; e <= 30; e++) if (va(e) < va(best)) best = e;
+        const mk = K.svg(svg, "circle", { cx: ax.sx(best), cy: ax.sy(va(best)), r: 0, fill: "var(--warn)" });
+        const t1 = K.svg(svg, "text", { x: 500, y: 70, "font-size": 12, fill: "var(--c1)" }, "— 训练损失");
+        const t2 = K.svg(svg, "text", { x: 500, y: 92, "font-size": 12, fill: "var(--c6)" }, "— “验证”损失（实为测试集）");
+        const t3 = K.svg(svg, "text", { x: 500, y: 150, "font-size": 13, "font-weight": 700, fill: "var(--warn)" }, "");
+        const t4 = K.svg(svg, "text", { x: 500, y: 176, "font-size": 12 }, "");
+        const stop = best + 8;
+        ctx.tween(2000, (t) => {
+          const E = t * stop; let a = "", b = "";
+          for (let e = 0; e <= E; e += 0.25) { a += (a ? "L" : "M") + ax.sx(e) + "," + ax.sy(tr(e)); b += (b ? "L" : "M") + ax.sx(e) + "," + ax.sy(va(e)); }
+          K.set(pT, { d: a }); K.set(pV, { d: b });
+        }).then((ok) => { if (ok) { K.set(mk, { r: 7 }); t3.textContent = `第 ${best} 轮最好 → 保存`; t4.textContent = "再等 8 轮没进步就停"; K.svg(svg, "text", { x: 500, y: 210, "font-size": 12, fill: "var(--bad)" }, "挑选依据来自测试集"); K.svg(svg, "text", { x: 500, y: 230, "font-size": 12, fill: "var(--bad)" }, "→ 测试分数偏乐观"); } });
+      },
+    },
+    {
+      at: 51, title: "混淆矩阵：S 和 F 最弱", kicker: "第 51–53 格 · 评估",
+      html: `<p>作者借用了另一位 Kaggle 作者的函数画<b>归一化混淆矩阵</b> <span data-cell="51">第 51 格</span>：每一行是真实类别，每一行加起来是 1，对角线上的数就是每一类的召回率（这一类被认对的比例）<span data-cell="52">第 52 格</span>。</p><p>结论：室上性（S）和融合（F）两类比其他类弱，作者猜是原始样本太少，打算在下个版本改进 <span data-cell="53">第 53 格</span>。复制 2 万遍也补不回真正缺少的多样性。动画里的数值是<b>示意</b>，只表达作者描述的“S、F 弱”。</p>`,
+      cells: [52], highlight: ["normalize=True"],
+      draw(svg, ctx) {
+        const C = ["N", "S", "V", "F", "Q"];
+        const diag = [0.97, 0.78, 0.93, 0.72, 0.97];
+        const s = 52, x0 = 150, y0 = 40;
+        const cells = [];
+        C.forEach((a, i) => {
+          K.svg(svg, "text", { x: x0 - 10, y: y0 + i * s + 32, "text-anchor": "end", "font-size": 13, "font-weight": 700 }, a);
+          K.svg(svg, "text", { x: x0 + i * s + 26, y: y0 + 5 * s + 20, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, a);
+          C.forEach((b, j) => { const v = i === j ? diag[i] : (1 - diag[i]) * (j === 0 ? 0.7 : 0.075); const r = K.svg(svg, "rect", { x: x0 + j * s, y: y0 + i * s, width: s - 3, height: s - 3, rx: 4, fill: "var(--panel-2)" }); const t = K.svg(svg, "text", { x: x0 + j * s + 24, y: y0 + i * s + 31, "text-anchor": "middle", "font-size": 11 }, ""); cells.push({ r, t, v, i }); });
+        });
+        K.svg(svg, "text", { x: x0 - 40, y: 26, "font-size": 12, class: "muted" }, "行 = 真实类别，列 = 预测类别（示意数值）");
+        const ring = [1, 3].map((i) => { const e = K.svg(svg, "rect", { x: x0 - 4, y: y0 + i * s - 4, width: 5 * s + 5, height: s + 5, rx: 6, fill: "none", stroke: "var(--warn)", "stroke-width": 2.5 }); e.style.opacity = 0; return e; });
+        const note = K.svg(svg, "text", { x: 460, y: 140, "font-size": 14, "font-weight": 700, fill: "var(--warn)" }, "");
+        const note2 = K.svg(svg, "text", { x: 460, y: 164, "font-size": 12 }, "");
+        ctx.tween(1400, (t) => cells.forEach((c) => { K.set(c.r, { fill: K.heat(c.v * t) }); c.t.textContent = (c.v * t).toFixed(2); }))
+          .then((ok) => ok && ctx.tween(500, (t) => fade(ring, t)))
+          .then((ok) => { if (ok) { note.textContent = "S、F 两行对角线偏低"; note2.textContent = "不少被认成了 N（正常）"; } });
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+  if (/fold/.test(location.hash)) { const fb = document.querySelector('[data-a="fold"]'); if (fb) fb.click(); }
+  if (/labs/.test(location.hash)) { const box = document.createElement("div"); box.className = "wrap"; document.querySelectorAll(".inline-lab").forEach((l) => box.appendChild(l)); document.querySelector("main").style.display = "none"; document.body.appendChild(box); }  // 自查用：只看实验
+
+  /* ---------- 实验 A：合成心拍 + 噪声 + 简单测量 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "ty", label: "心拍类型", value: "N", options: [["N", "N 正常"], ["S", "S 室上性早搏"], ["V", "V 室性早搏"], ["F", "F 融合"], ["Q", "Q 未知（示意）"]] },
+      { id: "noise", label: "加入的高斯噪声 σ（作者用 0.5）", min: 0, max: 0.6, step: 0.01, value: 0.05, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "换一组噪声", button: true },
+    ],
+    note: "波形由 5 个钟形曲线（P、Q、R、S、T）叠加合成并归一化到 0–1，与数据集同为 125 Hz、186 个点。右侧读数是在浏览器里对曲线现场测量的：R 峰位置、QRS 宽度（R 峰两侧降到一半高度的距离）、信噪比。把噪声拖到 0.5，看看心拍还认不认得出来。",
+    render(svg, v) {
+      const clean = beat(v.ty, 186, 0, 1), r = K.rng(50 + v.seed * 7), ys = clean.map((y) => y + K.randn(r) * v.noise);
+      const lo = -1.6, hi = 2.6, box = { x: 40, y: 20, w: 580, h: 260 };
+      for (let i = 0; i <= 12; i++) K.svg(svg, "line", { x1: 40 + i * (580 / 12), x2: 40 + i * (580 / 12), y1: 20, y2: 280, stroke: "var(--line)", "stroke-width": 0.5 });
+      wave(svg, ys, box, "var(--c6)", { lo, hi, sw: 1.4 });
+      wave(svg, clean, box, "var(--c1)", { lo, hi, sw: 2.2 }).style.opacity = 0.8;
+      // 测量
+      let ri = 0; clean.forEach((y, i) => { if (y > clean[ri]) ri = i; });
+      let a = ri, b = ri; while (a > 0 && clean[a] > 0.5 * clean[ri] + 0.5 * clean[0]) a--; while (b < 185 && clean[b] > 0.5 * clean[ri] + 0.5 * clean[0]) b++;
+      const sig = clean.reduce((s, y) => s + y * y, 0) / 186, nse = ys.reduce((s, y, i) => s + (y - clean[i]) ** 2, 0) / 186;
+      K.svg(svg, "line", { x1: 40 + ri / 185 * 580, x2: 40 + ri / 185 * 580, y1: 20, y2: 280, stroke: "var(--warn)", "stroke-dasharray": "4 3" });
+      K.svg(svg, "text", { x: 40, y: 302, "font-size": 12, fill: "var(--c1)" }, "蓝：干净的合成心拍");
+      K.svg(svg, "text", { x: 180, y: 302, "font-size": 12, fill: "var(--c6)" }, "红：加噪声后（模型训练时看到的样子）");
+      K.svg(svg, "text", { x: 40, y: 322, "font-size": 12, class: "muted" }, "每条竖线间隔约 0.12 秒；纵轴范围 −1.6 到 2.6，信号本身只在 0–1 之间");
+      const snr = nse > 0 ? 10 * Math.log10(sig / nse) : Infinity;
+      return { readout: [
+        { k: "R 峰时刻", v: (ri * 8) + " 毫秒" },
+        { k: "QRS 宽度（半高）", v: ((b - a) * 8) + " 毫秒", color: (b - a) * 8 > 80 ? "var(--bad)" : "var(--ink)" },
+        { k: "信噪比", v: isFinite(snr) ? snr.toFixed(1) + " dB" : "无噪声", color: snr < 3 ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：一维卷积 + ReLU + 最大池化 ---------- */
+  const KERN = {
+    edge: { name: "上升沿检测 [-1,-1,-1,1,1,1]", w: [-1, -1, -1, 1, 1, 1] },
+    peak: { name: "尖峰检测 [-1,-1,2,2,-1,-1]", w: [-1, -1, 2, 2, -1, -1] },
+    smooth: { name: "平滑（求平均）", w: [1, 1, 1, 1, 1, 1].map((x) => x / 6) },
+    wide: { name: "宽波检测 [1,1,1,1,1,1]−均值", w: [0.5, 1, 1, 1, 1, 0.5].map((x) => x - 0.8333) },
+  };
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "ty", label: "输入心拍", value: "V", options: [["N", "N 正常"], ["S", "S 室上性早搏"], ["V", "V 室性早搏"], ["F", "F 融合"]] },
+      { id: "k", label: "卷积核（长度 6，和作者第一层一样）", value: "peak", options: Object.keys(KERN).map((k) => [k, KERN[k].name]) },
+      { id: "pos", label: "卷积核滑到的位置", min: 0, max: 180, step: 1, value: 48 },
+      { id: "noise", label: "输入噪声 σ", min: 0, max: 0.5, step: 0.01, value: 0, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "在浏览器里现场计算：输入 186 点 → 长度 6 的卷积（不补边，输出 181 点）→ ReLU（负数变 0）→ 最大池化（窗口 3、步长 2，输出 91 点）。真实网络第一层有 64 个这样的卷积核，数值是训练学出来的；这里的卷积核是人工设计的示意。",
+    render(svg, v) {
+      const r = K.rng(5), x = beat(v.ty, 186, 0, 1).map((y) => y + K.randn(r) * v.noise), w = KERN[v.k].w;
+      const conv = []; for (let i = 0; i + 6 <= 186; i++) { let s = 0; for (let j = 0; j < 6; j++) s += w[j] * x[i + j]; conv.push(s); }
+      const relu = conv.map((c) => Math.max(0, c));
+      const pool = []; for (let i = 0; i < relu.length; i += 2) pool.push(Math.max(...relu.slice(Math.max(0, i - 1), i + 2)));
+      const rowH = 100, W = 560, X0 = 60;
+      const plot = (arr, y0, col, lab, n) => {
+        const mn = Math.min(0, ...arr), mx = Math.max(1e-6, ...arr);
+        K.svg(svg, "text", { x: 6, y: y0 + 16, "font-size": 11, "font-weight": 700 }, lab);
+        K.svg(svg, "text", { x: 6, y: y0 + 32, "font-size": 10, class: "muted" }, n + " 点");
+        K.svg(svg, "line", { x1: X0, x2: X0 + W, y1: y0 + rowH - 14 - (0 - mn) / (mx - mn) * (rowH - 24), y2: y0 + rowH - 14 - (0 - mn) / (mx - mn) * (rowH - 24), stroke: "var(--line)" });
+        const d = arr.map((a, i) => (i ? "L" : "M") + (X0 + i / (arr.length - 1) * W).toFixed(1) + "," + (y0 + rowH - 14 - (a - mn) / (mx - mn) * (rowH - 24)).toFixed(1)).join("");
+        K.svg(svg, "path", { d, fill: "none", stroke: col, "stroke-width": 2 });
+        return (i) => X0 + i / (arr.length - 1) * W;
+      };
+      const sx = plot(x, 0, "var(--c6)", "输入", 186);
+      const p = Math.min(v.pos, 180);
+      K.svg(svg, "rect", { x: sx(p), y: 2, width: sx(p + 5) - sx(p), height: rowH - 10, fill: "var(--warn)", "fill-opacity": 0.25, stroke: "var(--warn)" });
+      const sc = plot(conv, rowH, "var(--c1)", "卷积", 181);
+      plot(relu, rowH * 2, "var(--c3)", "ReLU", 181);
+      const sp = plot(pool, rowH * 3 - 20, "var(--c2)", "池化", pool.length);
+      const cmn = Math.min(0, ...conv), cmx = Math.max(1e-6, ...conv);
+      K.svg(svg, "circle", { cx: sc(p), cy: rowH + rowH - 14 - (conv[p] - cmn) / (cmx - cmn) * (rowH - 24), r: 6, fill: "var(--warn)" });
+      let best = 0; relu.forEach((c, i) => { if (c > relu[best]) best = i; });
+      return { readout: [
+        { k: "当前位置的卷积输出", v: conv[p].toFixed(3) },
+        { k: "响应最强的位置", v: "第 " + best + " 点（" + best * 8 + " 毫秒）" },
+        { k: "长度变化", v: "186 → 181 → " + pool.length },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

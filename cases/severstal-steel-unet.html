@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>钢板缺陷分割</title>
+<meta name="description" content="Kaggle 案例拆解：Severstal 钢板表面缺陷分割。RLE 掩码解码、四类缺陷不平衡、Dice 系数、预训练 U-Net，以及作者对“误报掩码”的错误分析。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">工业图像 · 语义分割 · 表面质检</div>
+  <h1>钢板表面找瑕疵：用 U-Net 把缺陷一像素一像素圈出来</h1>
+  <p class="en">Keras UNET with EDA</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">RLE 游程编码</span><span class="tag method">多类掩码</span><span class="tag method">数据生成器</span>
+    <span class="tag method">U-Net</span><span class="tag method">ResNet34 预训练主干</span><span class="tag method">Dice 系数</span><span class="tag method">阈值与最小面积</span><span class="tag method">错误分析</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Chris Deotte</b></span>
+    <span>Kaggle 点赞 <b>785</b>（2026-11 抓取）</span>
+    <span>竞赛 <b>severstal-steel-defect-detection</b></span>
+    <span><a href="https://www.kaggle.com/code/cdeotte/keras-unet-with-eda" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">钢厂产线拍下的钢板表面照片</div><p>俄罗斯钢铁公司 Severstal 办的竞赛。每张图 256×1600 像素，作者缩小一半到 128×800 训练。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">每个像素属于哪类缺陷（共 4 类）</div><p>不是只说“有没有缺陷”，而是把缺陷的位置和形状圈出来，叫<b>分割</b>。答案以 RLE（游程编码）字符串给出。<span data-cell="4">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">ImageNet 预训练的 ResNet34 + U-Net</div><p>用开源库 segmentation_models 搭 U-Net，4 个输出通道各管一类缺陷，sigmoid 输出，二元交叉熵训练 30 轮，用 Dice 系数监控。<span data-cell="11">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">发现模型在“没缺陷的图”上乱画</div><p>作者结论：U-Net 不管有没有缺陷都会画出掩码，直接提交会比“全部交空掩码”（LB 0.85674）还低，需要另想办法判断“有没有”。<span data-cell="19">出处</span> <span data-cell="22">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">竞赛 <b>Severstal: Steel Defect Detection</b>。训练集是一批钢板图片 + 一张 <code>train.csv</code>，每张图对应 4 行（每类缺陷一行），没有该类缺陷时 <code>EncodedPixels</code> 为空。下面的数字来自作者在 notebook 里的文字。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">原图尺寸</div><div class="v">256 × 1600</div></div>
+        <div class="stat-tile"><div class="k">训练用尺寸</div><div class="v">128 × 800</div></div>
+        <div class="stat-tile"><div class="k">含缺陷 1 / 2 的图片</div><div class="v">7.1% / 2.0%</div></div>
+        <div class="stat-tile"><div class="k">含缺陷 3 / 4 的图片</div><div class="v" style="color:var(--c1)">41.0% / 6.4%</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">尺寸见 <span data-cell="0">第 0 格</span>；四类缺陷占比见 <span data-cell="5">第 5 格</span>。测试集要交 7200 个掩码 <span data-cell="22">第 22 格</span>（每张图 4 个，即 1800 张图）。竞赛没有公开四类缺陷各是什么，只给编号 1–4。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>ImageId_ClassId</code></td><td>图片文件名 + 缺陷类别，如 <code>xxx.jpg_3</code></td><td>文本</td></tr>
+        <tr><td><code>EncodedPixels</code></td><td><b>要预测的答案</b>：这一类缺陷占了哪些像素，用 RLE 编码的“起点 长度 起点 长度…”；空表示没有这类缺陷</td><td>文本</td></tr>
+        <tr><td><code>e1…e4</code>、<code>count</code></td><td>作者整理后：一张图一行，4 类各一列，<code>count</code> = 有几类缺陷 <span data-cell="1">出处</span></td><td>整理列</td></tr>
+        <tr><td>图片本身</td><td>灰色钢板表面，存成 3 通道 JPG</td><td>图像</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="4">
+    <h3>动手试试 A · RLE 编码：画一块缺陷，看它变成一串数字 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="10">
+    <h3>动手试试 B · Dice 系数：预测掩码偏一点、大一点会怎样 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>训练集中含缺陷 1、2、3、4 的图片分别占 7.1%、2.0%、41.0%、6.4%</td><td><span data-cell="5">第 5 格</span></td></tr>
+        <tr><td>只看有缺陷的图，预测掩码“看起来相当不错”</td><td><span data-cell="16">第 16 格</span></td></tr>
+        <tr><td>对没有缺陷 3 的图，模型仍然画出缺陷 3 的掩码</td><td><span data-cell="16">第 16 格</span></td></tr>
+        <tr><td>无论阈值取多少，U-Net 在有缺陷和没缺陷的图上画掩码的多少差不多</td><td><span data-cell="19">第 19 格</span></td></tr>
+        <tr><td>直接提交会低于“全部交空掩码”的 LB 0.85674；每个误报扣 1/7200，每个正确掩码只加 c/7200（c 为平均 Dice）</td><td><span data-cell="19">第 19 格</span></td></tr>
+        <tr><td>需要另设计办法，在没缺陷时把掩码置空</td><td><span data-cell="22">第 22 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">训练曲线的 Dice 值、各阈值下“正确/错误掩码”的个数都在运行输出里，源码不带，这里不列。</p>
+      <p class="callout">读代码发现的问题（原文未改）：第 21 格遍历验证集预测时，用 <code>train2.iloc[i, j+1]</code> 查“这张图有没有该缺陷”，但 <code>i</code> 从 0 开始，查到的是<b>训练集开头</b>的图，而不是对应的第 <code>idx+i</code> 张验证图。“正确/错误掩码”的统计因此和图片对不上，作者“模型不分有无都乱画”的结论可能部分来自这个错位 <span data-cell="21">第 21 格</span>。第 15、18 格标题里的文件名也用 <code>train2.iloc[16*i+k,0]</code>，同样不是被画的那张图 <span data-cell="15">第 15 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>产线相机拍下的每一块钢板，自动标出缺陷的类别、位置和面积，决定降级、切除还是放行。</li>
+        <li><b>同类问题：</b>铝箔、玻璃、纺织布匹、锂电池极片、PCB 板、路面裂缝、混凝土表面的缺陷分割；医学影像里的病灶分割。</li>
+        <li><b>可迁移的套路：</b>RLE ↔ 掩码互转 → 统计每类占比（严重不平衡）→ 预训练主干 + U-Net → 用 Dice 评估 → <b>先判断“有没有”，再画“在哪里”</b>（作者引用的两步法）→ 调阈值和最小面积。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>数据整理：每图 4 行 → 1 行 4 列 <span data-cell="1">第 1 格</span></li>
+        <li>Keras 数据生成器，按批读图、缩放、解码掩码 <span data-cell="2">第 2 格</span></li>
+        <li>RLE 解码（列优先）、掩码轮廓与外扩用于可视化 <span data-cell="4">第 4 格</span></li>
+        <li>Dice 系数 <span data-cell="10">第 10 格</span></li>
+        <li>U-Net（ResNet34，ImageNet 预训练），sigmoid 4 通道，Adam + 二元交叉熵，30 轮，80/20 切分 <span data-cell="11">第 11 格</span></li>
+        <li>阈值 0.1–0.9 × 最小面积 250 像素的误报分析 <span data-cell="21">第 21 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>“全部交空掩码”就能得 0.85674 分。为什么什么都不做也能拿这么高的分？这和信用卡欺诈里“全猜正常”是不是同一个坑？</li>
+      <li>作者建议先判断“有没有缺陷”，再画“缺陷在哪”。为什么分两步比一个 U-Net 同时做更好？</li>
+      <li>第 21 格的索引错位如果修好，你预计“正确/错误掩码”的分布会变成什么样？怎么验证？</li>
+      <li>缺陷 2 只出现在 2.0% 的图里，缺陷 3 却有 41%。训练时你会怎么处理这种不平衡？</li>
+      <li>对钢厂来说，漏掉一块缺陷和误报一块缺陷，代价分别是什么？阈值和最小面积该偏向哪边？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Chris Deotte，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的图像与掩码均为程序生成的示意，不是竞赛原图。数据：Kaggle 竞赛 Severstal: Steel Defect Detection。
+</footer>
+</main>
+
+<script src="nb/severstal-steel-unet.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const DCOL = ["#e8d23a", "#3cc46b", "#4a8cff", "#e04bd8"]; // 作者约定：黄=1 绿=2 蓝=3 品红=4
+
+  /* 生成一块示意“钢板”灰度纹理 */
+  function plate(svg, x0, y0, W, H, cols, rows, seed) {
+    const r = K.rng(seed), cw = W / cols, ch = H / rows;
+    for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+      const g = 50 + 12 * Math.sin(i * 0.7 + j * 0.2) + 10 * K.randn(r);
+      K.svg(svg, "rect", { x: x0 + i * cw, y: y0 + j * ch, width: cw + 0.5, height: ch + 0.5, fill: `rgb(${g + 70},${g + 72},${g + 76})` });
+    }
+  }
+
+  const steps = [
+    {
+      title: "钢板质检：每张图 4 行答案，先整理成一行", kicker: "第 0–1 格 · 读数据", at: 0, cells: [0, 1], highlight: ["[::4]", "e1", "count"],
+      html: `<p>原始 <code>train.csv</code> 里，每张图占 4 行：<code>xxx.jpg_1</code> 到 <code>xxx.jpg_4</code>，分别写着第 1–4 类缺陷的 RLE，没有就空着。</p><p>作者每隔 4 行取一次，把它们拼成<b>一张图一行</b>：<code>e1…e4</code> 四列，再加一列 <code>count</code> 记录这张图有几类缺陷。动画演示这个“4 行并 1 行”的过程。</p>`,
+      draw(svg, ctx) {
+        const rows = [["a.jpg_1", ""], ["a.jpg_2", ""], ["a.jpg_3", "29102 12 29346 24 …"], ["a.jpg_4", ""], ["b.jpg_1", "18661 28 …"], ["b.jpg_2", ""], ["b.jpg_3", "37665 8 …"], ["b.jpg_4", ""]];
+        const left = rows.map((r0, i) => { const g = K.svg(svg, "g"); K.svg(g, "rect", { x: 20, y: 20 + i * 36, width: 300, height: 30, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" }); K.svg(g, "text", { x: 30, y: 40 + i * 36, "font-size": 12, "font-family": "var(--mono)" }, r0[0]); K.svg(g, "text", { x: 120, y: 40 + i * 36, "font-size": 11, "font-family": "var(--mono)", fill: r0[1] ? DCOL[i % 4] : "var(--ink-3)" }, r0[1] || "（空）"); return g; });
+        const hdr = ["ImageId", "e1", "e2", "e3", "e4", "count"];
+        hdr.forEach((h, j) => K.svg(svg, "text", { x: 380 + j * 55, y: 90, "font-size": 12, "font-weight": 700, "font-family": "var(--mono)" }, h));
+        const outs = [["a.jpg", "", "", "■", "", "1"], ["b.jpg", "■", "", "■", "", "2"]].map((r0, k) => { const g = K.svg(svg, "g"); g.style.opacity = 0; K.svg(g, "rect", { x: 372, y: 104 + k * 44, width: 335, height: 34, rx: 4, fill: "var(--panel-2)", stroke: "var(--accent)" }); r0.forEach((c, j) => K.svg(g, "text", { x: 380 + j * 55, y: 126 + k * 44, "font-size": 13, "font-family": "var(--mono)", fill: c === "■" ? DCOL[j - 1] : "var(--ink)" }, c || "·")); return g; });
+        K.arrow(svg, 325, 160, 365, 140);
+        (async () => { for (let k = 0; k < 2; k++) { if (!(await ctx.tween(700, (t) => { for (let i = 0; i < 4; i++) left[k * 4 + i].style.opacity = 1 - 0.6 * t; outs[k].style.opacity = t; }))) return; } })();
+      },
+    },
+    {
+      title: "数据生成器：边读边缩小，一次喂 16 张", kicker: "第 2 格 · 数据管道", cells: [2], highlight: ["keras.utils.Sequence", "resize((800,128))", "rle2maskResize"],
+      html: `<p>几千张大图一次全读进内存装不下。作者写了一个 Keras <b>数据生成器</b>：训练时每次只读一批（16 张），把图片缩成 128×800，同时把 4 类缺陷的 RLE 解码成 4 张 128×800 的 0/1 掩码。</p><p>所以输入 X 的形状是 (16, 128, 800, 3)，答案 y 是 (16, 128, 800, 4)：<b>每类缺陷一个“通道”</b>，一个像素可以同时属于多类。</p>`,
+      draw(svg, ctx) {
+        plate(svg, 30, 40, 200, 120, 40, 12, 3);
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 12, class: "muted" }, "原图 256×1600");
+        const small = K.svg(svg, "g"); small.style.opacity = 0; plate(small, 290, 70, 120, 60, 24, 6, 3);
+        K.svg(small, "text", { x: 290, y: 60, "font-size": 12, class: "muted" }, "缩小到 128×800");
+        K.arrow(svg, 235, 100, 285, 100);
+        const chans = [];
+        for (let c = 0; c < 4; c++) { const g = K.svg(svg, "g"); g.style.opacity = 0; K.svg(g, "rect", { x: 470 + c * 14, y: 40 + c * 60, width: 160, height: 50, fill: "var(--panel-2)", stroke: DCOL[c] }); if (c === 2) K.svg(g, "rect", { x: 520 + c * 14, y: 52 + c * 60, width: 50, height: 22, fill: DCOL[c], opacity: 0.8 }); if (c === 0) K.svg(g, "rect", { x: 490, y: 50, width: 18, height: 30, fill: DCOL[0], opacity: 0.8 }); K.svg(g, "text", { x: 640 + c * 14, y: 70 + c * 60, "font-size": 12, fill: DCOL[c] }, "通道 " + (c + 1)); chans.push(g); }
+        K.svg(svg, "text", { x: 30, y: 230, "font-size": 13 }, "X：一批 16 张图 → (16, 128, 800, 3)");
+        K.svg(svg, "text", { x: 30, y: 256, "font-size": 13 }, "y：每张图 4 张 0/1 掩码 → (16, 128, 800, 4)");
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12, class: "muted" }, "示意：灰色纹理是程序生成的，不是竞赛原图");
+        ctx.tween(700, (t) => (small.style.opacity = t)).then(async (ok) => { if (!ok) return; for (const g of chans) if (!(await ctx.tween(300, (t) => (g.style.opacity = t)))) return; });
+      },
+    },
+    {
+      title: "RLE 解码：一串数字还原成缺陷形状", kicker: "第 3–4 格 · 掩码工具", cells: [3, 4], highlight: ["starts = array[0::2]-1", "order='F'", "[::2,::2]"],
+      html: `<p><b>RLE（游程编码）</b>：把掩码拉成一长条，只记“从第几个像素开始、连续有几个是缺陷”。例如 <code>5 3</code> 表示第 5、6、7 个像素是缺陷。这样一张 40 万像素的掩码只需要几十个数字。</p><p>两个细节：①编号从 1 开始，所以代码先减 1；②这个竞赛是<b>按列</b>往下数的（<code>order='F'</code>），先数完第一列 256 个像素，再数第二列。最后 <code>[::2,::2]</code> 隔一个取一个，缩小一半。</p><p>另外两个函数 <code>mask2contour</code>、<code>mask2pad</code> 只是为了画图：把掩码外扩一圈、只留轮廓线。</p>`,
+      draw(svg, ctx) {
+        const R = 8, C = 14, cs = 20, x0 = 60, y0 = 50;
+        const runs = [[19, 4], [27, 5], [35, 6], [44, 4], [53, 3]];
+        const on = new Set(); runs.forEach(([s, l]) => { for (let k = 0; k < l; k++) on.add(s - 1 + k); });
+        const cells = [];
+        for (let c = 0; c < C; c++) for (let r0 = 0; r0 < R; r0++) cells.push(K.svg(svg, "rect", { x: x0 + c * cs, y: y0 + r0 * cs, width: cs - 2, height: cs - 2, rx: 2, fill: "var(--panel-2)", stroke: "var(--line)" }));
+        K.svg(svg, "text", { x: x0, y: 36, "font-size": 12, class: "muted" }, "按列编号：第 1 列是 1–8，第 2 列是 9–16 …");
+        K.svg(svg, "text", { x: 400, y: 80, "font-size": 13, "font-weight": 700 }, "RLE 字符串：");
+        const str = K.svg(svg, "text", { x: 400, y: 104, "font-size": 14, "font-family": "var(--mono)", fill: "var(--c1)" }, "");
+        const cur = K.svg(svg, "rect", { x: 0, y: 0, width: cs - 2, height: cs - 2, fill: "none", stroke: "var(--warn)", "stroke-width": 2 });
+        (async () => {
+          let s = "";
+          for (const [st, l] of runs) {
+            s += st + " " + l + " "; str.textContent = s;
+            for (let k = 0; k < l; k++) {
+              const i = st - 1 + k, c = Math.floor(i / R), r0 = i % R;
+              cur.setAttribute("x", x0 + c * cs); cur.setAttribute("y", y0 + r0 * cs);
+              K.set(cells[i], { fill: DCOL[2] });
+              if (!(await ctx.wait(90))) return;
+            }
+          }
+          K.svg(svg, "text", { x: 400, y: 150, "font-size": 12 }, "“起点 长度”成对出现");
+          K.svg(svg, "text", { x: 400, y: 172, "font-size": 12 }, "22 个缺陷像素只用 10 个数字记下");
+        })();
+      },
+    },
+    {
+      title: "看数据：缺陷 3 最常见，缺陷 2 最罕见", kicker: "第 5–7 格 · 训练集 EDA", cells: [5, 6, 7], highlight: ["7.1%, 2.0%, 41.0%, 6.4%", "yellow=defect1"],
+      html: `<p>作者统计了每类缺陷出现在多少比例的训练图片里：<b>缺陷 1：7.1%，缺陷 2：2.0%，缺陷 3：41.0%，缺陷 4：6.4%</b>。<span data-cell="5">出处</span> 类别非常不平衡。</p><p>然后用数据生成器抽出每类缺陷的几张样例，把掩码画成彩色轮廓叠在原图上：黄 = 1，绿 = 2，蓝 = 3，品红 = 4。</p>`,
+      draw(svg, ctx) {
+        const v = [7.1, 2.0, 41.0, 6.4];
+        const ax = K.axes(svg, { x: 70, y: 30, w: 400, h: 260 }, [0, 4], [0, 50], { xticks: 0, ylabel: "含该缺陷的图片 %" });
+        const bs = v.map((p, i) => { K.svg(svg, "text", { x: ax.sx(i + 0.5), y: 310, "text-anchor": "middle", "font-size": 13 }, "缺陷 " + (i + 1)); return { r: K.svg(svg, "rect", { x: ax.sx(i + 0.15), y: ax.sy(0), width: ax.sx(0.7) - ax.sx(0), height: 0, fill: DCOL[i] }), t: K.svg(svg, "text", { x: ax.sx(i + 0.5), y: ax.sy(0) - 6, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "") }; });
+        K.svg(svg, "text", { x: 500, y: 80, "font-size": 13 }, "数字来自作者第 5 格");
+        K.svg(svg, "text", { x: 500, y: 110, "font-size": 13, fill: "var(--warn)" }, "最多与最少相差约 20 倍");
+        ctx.tween(1400, (t) => bs.forEach((b, i) => { const h = ax.sy(0) - ax.sy(v[i] * t); b.r.setAttribute("y", ax.sy(v[i] * t)); b.r.setAttribute("height", h); b.t.setAttribute("y", ax.sy(v[i] * t) - 6); b.t.textContent = (v[i] * t).toFixed(1) + "%"; }));
+      },
+    },
+    {
+      title: "Dice 系数：怎么给“圈得准不准”打分", kicker: "第 8–10 格 · 评价指标", cells: [8, 9, 10], highlight: ["def dice_coef", "2. * intersection"],
+      html: `<p>分割任务不能用“准确率”：缺陷只占图片很小一块，全猜“没缺陷”像素准确率也有 99%。竞赛用 <b>Dice 系数</b>：</p><p style="text-align:center"><code>Dice = 2 × 重叠面积 / (预测面积 + 真实面积)</code></p><p>完全重合是 1，完全不重合是 0。代码里加了 <code>smooth=1</code>，防止两边都是空时除以 0。</p><p>作者还说明：模型下半部分（编码器）是预训练好的，上半部分（解码器）要在本数据上训练，大约需要 90 分钟。<span data-cell="8">出处</span></p>`,
+      draw(svg, ctx) {
+        const A = { x: 200, y: 170, r: 80 };
+        K.svg(svg, "circle", { cx: A.x, cy: A.y, r: A.r, fill: "var(--c3)", "fill-opacity": 0.25, stroke: "var(--c3)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: A.x - 60, y: 70, "font-size": 13, fill: "var(--c3)" }, "真实缺陷");
+        const B = K.svg(svg, "circle", { cx: A.x + 160, cy: A.y, r: 80, fill: "var(--c6)", "fill-opacity": 0.25, stroke: "var(--c6)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 330, y: 70, "font-size": 13, fill: "var(--c6)" }, "预测掩码");
+        const val = K.svg(svg, "text", { x: 480, y: 170, "font-size": 26, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 480, y: 200, "font-size": 12, class: "muted" }, "（两个圆的 Dice，现场计算）");
+        const inter = (d) => { const r = 80; if (d >= 2 * r) return 0; return 2 * r * r * Math.acos(d / (2 * r)) - (d / 2) * Math.sqrt(4 * r * r - d * d); };
+        ctx.tween(2600, (t) => { const d = 160 * (1 - t); B.setAttribute("cx", A.x + d); const a = Math.PI * 80 * 80; val.textContent = "Dice = " + (2 * inter(d) / (2 * a)).toFixed(2); });
+      },
+    },
+    {
+      title: "U-Net + ResNet34 预训练主干，训练 30 轮", kicker: "第 11–12 格 · 建模", cells: [11, 12], highlight: ["Unet('resnet34'", "classes=4, activation='sigmoid'", "binary_crossentropy", "epochs = 30"],
+      html: `<p>作者没有从零写网络，而是用开源库 <code>segmentation_models</code> 一行建好 <b>U-Net</b>：</p><ul class="tight"><li><b>编码器</b>用在 ImageNet 上预训练过的 ResNet34，一层层把图缩小、提取“哪里有划痕、斑点”的特征</li><li><b>解码器</b>再一层层放大回 128×800，并通过<b>跳连</b>把编码器同尺寸的细节拿过来，边缘才画得准</li><li>最后输出 <b>4 个通道、sigmoid</b>：每个像素对每类缺陷各给一个 0–1 的概率，互不排斥</li></ul><p>前 80% 的图训练，后 20% 验证，训练 30 轮，并画出训练/验证 Dice 曲线。</p>`,
+      draw(svg, ctx) {
+        const lv = [[40, 60, 34, 200], [120, 95, 30, 130], [195, 125, 26, 70], [265, 150, 22, 30]];
+        const dv = [[395, 150, 22, 30], [455, 125, 26, 70], [530, 95, 30, 130], [610, 60, 34, 200]];
+        const all = [];
+        lv.forEach((b, i) => { const r0 = K.svg(svg, "rect", { x: b[0], y: b[1], width: b[2], height: b[3], rx: 3, fill: "var(--c1)", opacity: 0.25 }); all.push(r0); });
+        const bott = K.svg(svg, "rect", { x: 325, y: 158, width: 40, height: 16, rx: 3, fill: "var(--c4)", opacity: 0.25 }); all.push(bott);
+        dv.forEach((b) => all.push(K.svg(svg, "rect", { x: b[0], y: b[1], width: b[2], height: b[3], rx: 3, fill: "var(--c2)", opacity: 0.25 })));
+        K.svg(svg, "text", { x: 40, y: 290, "font-size": 12, fill: "var(--c1)" }, "编码器：ResNet34（预训练）");
+        K.svg(svg, "text", { x: 470, y: 290, "font-size": 12, fill: "var(--c2)" }, "解码器：逐级放大（要训练）");
+        K.svg(svg, "text", { x: 650, y: 50, "font-size": 12 }, "4 通道");
+        const skips = [];
+        for (let i = 0; i < 4; i++) { const a = lv[i], b = dv[3 - i]; const l = K.svg(svg, "line", { x1: a[0] + a[2], y1: a[1] + 8, x2: b[0], y2: b[1] + 8, stroke: "var(--warn)", "stroke-dasharray": "4 3" }); l.style.opacity = 0; skips.push(l); }
+        K.svg(svg, "text", { x: 300, y: 40, "font-size": 12, fill: "var(--warn)" }, "跳连：把细节直接传过去");
+        (async () => {
+          for (const r0 of all) if (!(await ctx.tween(160, (t) => (r0.style.opacity = 0.25 + 0.6 * t)))) return;
+          for (const l of skips) if (!(await ctx.tween(200, (t) => (l.style.opacity = t)))) return;
+        })();
+      },
+    },
+    {
+      title: "预测可视化：只看“确实有缺陷”的图", kicker: "第 13–15 格 · 预测 EDA", cells: [13, 14, 15], highlight: ["max pixel", "predict_generator"],
+      html: `<p>作者从验证集里挑出含各类缺陷的图（缺陷 3 多挑一些），左边画原图 + 真实缺陷轮廓，右边画模型对“这张图实际存在的那类缺陷”的预测概率图。</p><p>作者提醒：matplotlib 会把每张图的最大值自动染成黄色，所以“看起来黄”不代表概率到了 1，标题里的 <code>max pixel</code> 才是真正的最高置信度。<span data-cell="13">出处</span></p>`,
+      draw(svg, ctx) {
+        plate(svg, 20, 40, 320, 110, 48, 14, 9);
+        const blob = (cx, cy) => { let d = ""; for (let a = 0; a <= 6.3; a += 0.3) { const rr = 18 + 6 * Math.sin(3 * a); d += (d ? "L" : "M") + (cx + 2.2 * rr * Math.cos(a)) + "," + (cy + rr * Math.sin(a)); } return d + "Z"; };
+        K.svg(svg, "path", { d: blob(170, 95), fill: "none", stroke: DCOL[2], "stroke-width": 3 });
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 12 }, "原图 + 真实缺陷 3 的轮廓（示意）");
+        K.svg(svg, "text", { x: 380, y: 30, "font-size": 12 }, "模型对缺陷 3 的概率图");
+        const cells = [];
+        for (let j = 0; j < 14; j++) for (let i = 0; i < 40; i++) { const x = 380 + i * 8, y = 40 + j * 8; const dx = (i - 19) / 9, dy = (j - 7) / 3.5; const p = Math.exp(-(dx * dx + dy * dy)) * 0.72; cells.push({ e: K.svg(svg, "rect", { x, y, width: 8, height: 8, fill: K.heat(0) }), p }); }
+        const mx = K.svg(svg, "text", { x: 380, y: 175, "font-size": 13, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 20, y: 230, "font-size": 13 }, "画图时颜色按“这张图自己的最大值”拉伸：");
+        K.svg(svg, "text", { x: 20, y: 254, "font-size": 13, fill: "var(--warn)" }, "最亮处只有 0.72，看起来也是最亮的黄色");
+        ctx.tween(1600, (t) => { cells.forEach((c) => K.set(c.e, { fill: K.heat(c.p / 0.72 * t) })); mx.textContent = "max pixel = " + (0.72 * t).toFixed(3); });
+      },
+    },
+    {
+      title: "错误分析 1：没有缺陷 3，也画出了缺陷 3", kicker: "第 16–18 格 · 误报", cells: [16, 17, 18], highlight: ["(val_set['e3']=='')", "NO DEFECT 3"],
+      html: `<p>上一章只看了“有这类缺陷”的通道，当然看起来不错。作者换了个角度：专挑<b>没有缺陷 3</b> 的验证图（但有别的缺陷），强行画出模型的“缺陷 3”通道。</p><p>结果：本该一片空白的地方，模型仍然画出了缺陷 3 的掩码。<span data-cell="16">出处</span> 这就是<b>误报</b>：没病说有病。</p>`,
+      draw(svg, ctx) {
+        const imgs = [0, 1, 2, 3].map((k) => { const g = K.svg(svg, "g"); plate(g, 20 + k * 172, 50, 160, 60, 20, 8, 20 + k); return g; });
+        const defs = [[0, DCOL[0]], [1, DCOL[3]], [2, DCOL[1]], [3, DCOL[0]]];
+        defs.forEach(([k, c]) => K.svg(svg, "rect", { x: 50 + k * 172 + (k % 2) * 40, y: 65, width: 40, height: 25, fill: "none", stroke: c, "stroke-width": 2.5 }));
+        K.svg(svg, "text", { x: 20, y: 36, "font-size": 12 }, "上：没有缺陷 3 的图（只有黄/绿/品红缺陷）");
+        K.svg(svg, "text", { x: 20, y: 160, "font-size": 12 }, "下：模型的“缺陷 3”通道，理想情况应全黑");
+        const preds = [0.1, 0.55, 0.3, 0.7].map((m, k) => { const cs = []; for (let j = 0; j < 6; j++) for (let i = 0; i < 20; i++) { const p = m * Math.exp(-(((i - 8 - k) / 5) ** 2 + ((j - 3) / 2) ** 2)); cs.push({ e: K.svg(svg, "rect", { x: 20 + k * 172 + i * 8, y: 170 + j * 10, width: 8, height: 10, fill: K.heat(0) }), p }); } return cs; });
+        const labs = [0.1, 0.55, 0.3, 0.7].map((m, k) => K.svg(svg, "text", { x: 20 + k * 172, y: 250, "font-size": 12, fill: m > 0.25 ? "var(--bad)" : "var(--good)" }, ""));
+        ctx.tween(1500, (t) => preds.forEach((cs, k) => { cs.forEach((c) => K.set(c.e, { fill: K.heat(c.p * t) })); labs[k].textContent = (k ? "误报 " : "") + "max = " + ([0.1, 0.55, 0.3, 0.7][k] * t).toFixed(2); }))
+          .then((ok) => ok && K.svg(svg, "text", { x: 20, y: 300, "font-size": 12, class: "muted" }, "数值为示意，用来说明“误报”的样子，不是原 notebook 的输出"));
+      },
+    },
+    {
+      title: "错误分析 2：阈值、250 像素，和“交白卷反而更高分”", kicker: "第 19–21 格 · 阈值与面积", cells: [19, 20, 21], highlight: ["for THRESHOLD in", "pix_min = 250", "train2.iloc[i,j+1]"],
+      html: `<p>sigmoid 输出是 0–1 的小数，提交时要用<b>阈值</b>变成 0/1；另外作者把面积小于 <b>250 像素</b>的掩码当作“没画”。他对阈值 0.1、0.25、0.5、0.75、0.9 分别统计：</p><ul class="tight"><li>图里确实有这类缺陷时画出的掩码 = “正确”</li><li>图里没有这类缺陷却画出的掩码 = “错误”</li></ul><p>作者结论：不管阈值多少，两种掩码的多少差不多；因为每个误报扣 1/7200、每个正确掩码只加 Dice/7200，直接提交会比<b>全部交空掩码的 LB 0.85674</b> 还低。<span data-cell="19">出处</span></p><p class="callout">但第 21 格用 <code>train2.iloc[i, j+1]</code> 判断真假，<code>i</code> 是验证集里的序号，却拿去查了训练集开头的图，真假标签和预测对不上（见结果一节）。</p>`,
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 14, "font-weight": 700 }, "一张图、一类缺陷的四种情况（竞赛按 Dice 计分）：");
+        const rows = [["真没有", "交空掩码", "得 1 分", "var(--good)"], ["真没有", "画了掩码（误报）", "得 0 分", "var(--bad)"], ["真有", "交空掩码（漏报）", "得 0 分", "var(--bad)"], ["真有", "画了掩码", "得 Dice（0–1）", "var(--warn)"]];
+        const gs = rows.map((r0, i) => { const g = K.svg(svg, "g"); g.style.opacity = 0; K.svg(g, "rect", { x: 20, y: 50 + i * 52, width: 660, height: 42, rx: 6, fill: "var(--panel-2)", stroke: r0[3] }); K.svg(g, "text", { x: 36, y: 77 + i * 52, "font-size": 14 }, r0[0]); K.svg(g, "text", { x: 160, y: 77 + i * 52, "font-size": 14 }, r0[1]); K.svg(g, "text", { x: 520, y: 77 + i * 52, "font-size": 14, "font-weight": 700, fill: r0[3] }, r0[2]); return g; });
+        const note = K.svg(svg, "text", { x: 20, y: 320, "font-size": 13, fill: "var(--warn)" }, "大多数“图×类”本来就没有缺陷 → 全交空掩码已经拿到 0.85674");
+        note.style.opacity = 0;
+        (async () => { for (const g of gs) if (!(await ctx.tween(350, (t) => (g.style.opacity = t)))) return; await ctx.tween(400, (t) => (note.style.opacity = t)); })();
+      },
+    },
+    {
+      title: "提交：分批预测，省内存", kicker: "第 22–23 格 · 推理", cells: [22, 23], highlight: ["model.save", "steps=1", "NEXT CONVERT MASKS TO RLE"],
+      html: `<p>竞赛要求推理 notebook 离线、一小时内跑完，所以作者先把模型存成 <code>UNET.h5</code>，再在另一个 notebook 里加载、预测。</p><p>作者算了一笔账：7200 个 256×1600 的浮点掩码要 11 GB 内存（128×800 也要 3 GB），所以要<b>预测一批 → 转成 RLE → 删掉掩码 → 再预测下一批</b>。这里只示范了一批。</p><p>最后一句是方向：要设计办法在“没有缺陷”时把掩码置空，作者引用了一个“先分类、再分割”的两步法 notebook。<span data-cell="22">出处</span></p>`,
+      draw(svg, ctx) {
+        const st = ["读一批测试图", "U-Net 预测掩码", "阈值 → 0/1", "编码成 RLE", "删掉掩码释放内存"];
+        const gs = st.map((s, i) => { const a = (i / st.length) * Math.PI * 2 - Math.PI / 2, x = 360 + 210 * Math.cos(a) - 75, y = 170 + 120 * Math.sin(a) - 24; const g = K.node(svg, x, y, 150, 48, s, {}); g.style.opacity = 0.25; return g; });
+        K.svg(svg, "text", { x: 360, y: 168, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "循环直到 7200 个掩码");
+        const mem = K.svg(svg, "text", { x: 360, y: 192, "text-anchor": "middle", "font-size": 12, class: "muted" }, "");
+        (async () => { for (let k = 0; k < 10; k++) { const i = k % 5; gs.forEach((g, j) => (g.style.opacity = j === i ? 1 : 0.3)); mem.textContent = "第 " + (Math.floor(k / 5) + 1) + " 批"; if (!(await ctx.wait(450))) return; } })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：RLE 编码 ---------- */
+  const R = 12, C = 24;
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "shape", label: "缺陷形状", value: "scratch", options: [["scratch", "斜划痕"], ["spot", "圆斑"], ["patch", "大片污渍"], ["two", "两处小坑"]] },
+      { id: "size", label: "缺陷大小", min: 1, max: 5, step: 1, value: 3 },
+      { id: "order", label: "编号方向", value: "F", options: [["F", "按列往下数（本竞赛，order='F'）"], ["C", "按行往右数"]] },
+    ],
+    note: "在 12×24 的小网格上现场生成一块缺陷，按选择的方向把掩码拉成一长条，再算出 RLE（起点从 1 开始）。看同一块缺陷换个编号方向，RLE 完全不同：解码时方向弄错，缺陷就会被画到别处。",
+    render(svg, v) {
+      const m = []; const s = v.size;
+      for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+        let on = false;
+        if (v.shape === "scratch") on = Math.abs((r - 1) * 1.6 - (c - 4)) < 0.6 + s * 0.25 && c >= 4 && c < 6 + s * 3;
+        else if (v.shape === "spot") on = (r - 6) ** 2 + ((c - 12) / 1.2) ** 2 <= (s * 0.9 + 0.6) ** 2;
+        else if (v.shape === "patch") on = r >= 2 && r < 3 + s * 1.8 && c >= 3 && c < 6 + s * 3.5 && !((r + c) % 7 === 0);
+        else on = ((r - 4) ** 2 + (c - 6) ** 2 <= s) || ((r - 8) ** 2 + (c - 17) ** 2 <= s);
+        m.push(on ? 1 : 0);
+      }
+      const at = (r, c) => m[r * C + c];
+      const flat = []; if (v.order === "F") { for (let c = 0; c < C; c++) for (let r = 0; r < R; r++) flat.push(at(r, c)); } else { for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) flat.push(at(r, c)); }
+      const rle = []; for (let i = 0; i < flat.length; i++) if (flat[i] && (i === 0 || !flat[i - 1])) { let l = 0; while (flat[i + l]) l++; rle.push(i + 1, l); }
+      const cs = 22, x0 = 20, y0 = 14;
+      for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) K.svg(svg, "rect", { x: x0 + c * cs * 1.1, y: y0 + r * cs, width: cs * 1.1 - 1.5, height: cs - 1.5, rx: 2, fill: at(r, c) ? DCOL[2] : "var(--panel-2)", stroke: "var(--line)" });
+      // 画前两段 run 的走向
+      const pos = (i) => v.order === "F" ? [Math.floor(i / R), i % R] : [i % C, Math.floor(i / C)];
+      for (let k = 0; k < Math.min(rle.length, 4); k += 2) { const [c1, r1] = pos(rle[k] - 1), [c2, r2] = pos(rle[k] - 1 + rle[k + 1] - 1); K.svg(svg, "line", { x1: x0 + (c1 + 0.5) * cs * 1.1, y1: y0 + (r1 + 0.5) * cs, x2: x0 + (c2 + 0.5) * cs * 1.1, y2: y0 + (r2 + 0.5) * cs, stroke: "var(--warn)", "stroke-width": 3 }); }
+      const txt = rle.join(" "), lines = txt.match(/.{1,78}(\s|$)/g) || [""];
+      K.svg(svg, "text", { x: 20, y: 290, "font-size": 12, class: "muted" }, "RLE（橙线 = 前两段“连续缺陷”的走向）：");
+      lines.slice(0, 3).forEach((l, i) => K.svg(svg, "text", { x: 20, y: 310 + i * 16, "font-size": 12, "font-family": "var(--mono)", fill: "var(--c1)" }, l.trim() + (i === 2 && lines.length > 3 ? " …" : "")));
+      const n1 = m.reduce((a, b) => a + b, 0);
+      return { readout: [
+        { k: "缺陷像素数", v: String(n1) },
+        { k: "RLE 段数", v: String(rle.length / 2) },
+        { k: "RLE 数字个数 / 总像素", v: `${rle.length} / ${R * C}` },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：Dice ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "dx", label: "预测掩码左右偏移（像素）", min: -30, max: 30, step: 1, value: 6 },
+      { id: "sc", label: "预测掩码大小（相对真实）", min: 0, max: 2, step: 0.05, value: 1.2, fmt: (v) => v.toFixed(2) + "×" },
+      { id: "truth", label: "真实缺陷大小", value: "mid", options: [["big", "大缺陷"], ["mid", "中等缺陷"], ["tiny", "很小的缺陷"], ["none", "这张图没有该缺陷"]] },
+    ],
+    note: "在 60×160 的网格上逐像素计算 Dice = 2|A∩B| / (|A|+|B|)。真实为空、预测也为空时按竞赛规则记 1 分。试试：同样偏移 6 像素，大缺陷和小缺陷的 Dice 差多少？真实为空时，预测哪怕画一点点，Dice 就变成 0。",
+    render(svg, v) {
+      const H = 60, W = 160, tr = { big: [18, 40], mid: [10, 22], tiny: [4, 7], none: [0, 0] }[v.truth];
+      const ry = tr[0], rx = tr[1], pr = v.truth === "none" ? [6 * v.sc, 14 * v.sc] : [ry * v.sc, rx * v.sc];
+      let A = 0, B = 0, I = 0; const cs = 3.6, x0 = 32, y0 = 14;
+      const inA = (x, y) => ry > 0 && ((x - 80) / rx) ** 2 + ((y - 30) / ry) ** 2 <= 1;
+      const inB = (x, y) => pr[0] > 0.3 && ((x - 80 - v.dx) / pr[1]) ** 2 + ((y - 30) / pr[0]) ** 2 <= 1;
+      for (let y = 0; y < H; y += 1) for (let x = 0; x < W; x += 1) {
+        const a = inA(x, y), b = inB(x, y); if (a) A++; if (b) B++; if (a && b) I++;
+        if (x % 2 === 0 && y % 2 === 0) { const f = a && b ? "var(--c3)" : a ? "var(--c1)" : b ? "var(--c6)" : null; if (f) K.svg(svg, "rect", { x: x0 + x * cs, y: y0 + y * cs, width: cs * 2, height: cs * 2, fill: f, opacity: 0.8 }); }
+      }
+      K.svg(svg, "rect", { x: x0, y: y0, width: W * cs, height: H * cs, fill: "none", stroke: "var(--line)" });
+      K.svg(svg, "text", { x: 32, y: 250, "font-size": 12 }, "蓝 = 只有真实   红 = 只有预测（误报部分）   绿 = 重叠");
+      const dice = A + B === 0 ? 1 : 2 * I / (A + B);
+      return { readout: [
+        { k: "Dice", v: dice.toFixed(3), color: dice > 0.7 ? "var(--good)" : dice > 0.4 ? "var(--warn)" : "var(--bad)" },
+        { k: "真实像素", v: String(A) },
+        { k: "预测像素", v: String(B) },
+        { k: "重叠像素", v: String(I) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

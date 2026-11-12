@@ -1,0 +1,676 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>黑色素瘤识别</title>
+<meta name="description" content="Kaggle 案例拆解：SIIM-ISIC 黑色素瘤比赛，用 TFRecord + 三重分层 K 折 + EfficientNet + 测试时增强，从皮肤镜照片里判断痣是不是恶性。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">皮肤镜照片 · 二分类 · 比赛级训练框架</div>
+  <h1>黑色素瘤识别：一张痣的照片，是不是皮肤癌？</h1>
+  <p class="en">Triple Stratified KFold with TFRecords</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">TFRecord</span><span class="tag method">三重分层 K 折</span><span class="tag method">仿射矩阵数据增强</span>
+    <span class="tag method">EfficientNet 迁移学习</span><span class="tag method">标签平滑</span><span class="tag method">学习率热身 + 衰减</span>
+    <span class="tag method">测试时增强 TTA</span><span class="tag method">OOF AUC</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Chris Deotte</b></span>
+    <span>Kaggle 点赞 <b>1,713</b>（2026-11 抓取）</span>
+    <span>比赛 <b>siim-isic-melanoma-classification</b></span>
+    <span><a href="https://www.kaggle.com/code/cdeotte/triple-stratified-kfold-with-tfrecords" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">皮肤镜拍的痣和斑的照片</div><p>每张照片还附带病人编号、性别、大约年龄、长在身体哪个部位。作者用的是自己提前缩放好、打包成 TFRecord 的版本。<span data-cell="14">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这块皮肤病变是不是黑色素瘤</div><p>黑色素瘤是最危险的一种皮肤癌。输出 0 到 1 的概率，比赛按 AUC 打分。作者说这“非常有挑战”，肉眼很难分辨。<span data-cell="1">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">EfficientNet + 5 折 + 测试时增强</div><p>按 15 个 TFRecord 文件切 5 折；旋转、剪切、缩放、平移、翻转和颜色扰动；预训练 EfficientNet-B6；学习率先升后降；预测时每张图增强 11 次取平均。<span data-cell="7">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一个可复用的比赛训练框架</div><p>作者把它定位为“入门框架”：改配置就能换图片大小、模型大小、是否加外部数据。分数写在运行输出里，源码不带输出，这里不列。<span data-cell="0">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛数据来自国际皮肤影像协作组织（ISIC）。作者没有直接读原始大图，而是用自己预先做好的数据集：把照片缩放到 128～768 像素几种尺寸，每种尺寸打包成一组 TFRecord 文件。<span data-cell="9">出处</span></p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">训练图片</div><div class="v">32,692</div></div>
+        <div class="stat-tile"><div class="k">测试图片</div><div class="v">10,982</div></div>
+        <div class="stat-tile"><div class="k">训练 TFRecord 文件</div><div class="v">15 个</div></div>
+        <div class="stat-tile"><div class="k">可选图片边长</div><div class="v">128–768</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">张数来自数据集 <code>cdeotte/melanoma-384x384</code> 的文件列表：文件名末尾的数字就是这个文件里的图片张数（如 <code>train00-2182.tfrec</code> 有 2182 张），15 个训练文件加起来 32,692 张，16 个测试文件加起来 10,982 张。作者在第 14 格的 <code>count_data_items</code> 也是这样数的 <span data-cell="14">出处</span>。可选尺寸见第 9 格 <span data-cell="9">出处</span>。</p>
+      <p style="font-size:14px;color:var(--ink-2)">另外还可以加入 2017、2018、2019 年往届比赛的图片作外部数据（配置里的 <code>INC2018</code>、<code>INC2019</code>）<span data-cell="6">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每张图片带的字段（TFRecord 里）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>字段</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>image</code></td><td>JPEG 编码的皮肤镜照片</td><td>图片</td></tr>
+        <tr><td><code>image_name</code></td><td>图片编号</td><td>文字</td></tr>
+        <tr><td><code>patient_id</code></td><td>病人编号（同一个人可能拍了很多张）</td><td>整数</td></tr>
+        <tr><td><code>sex</code></td><td>性别</td><td>类别（已编码）</td></tr>
+        <tr><td><code>age_approx</code></td><td>大约年龄</td><td>整数</td></tr>
+        <tr><td><code>anatom_site_general_challenge</code></td><td>长在身体哪个部位</td><td>类别（已编码）</td></tr>
+        <tr><td><code>diagnosis</code></td><td>具体诊断（如普通痣、黑色素瘤……）</td><td>类别（已编码）</td></tr>
+        <tr><td><code>target</code></td><td><b>要预测的答案</b>：1 = 黑色素瘤，0 = 不是</td><td>0 / 1</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">字段名见第 14 格 <span data-cell="14">出处</span>。作者的模型<b>只用了 image 和 target</b>，其他字段读出来但没用；他在第 0 格提示可以把这些“元数据”也喂给模型。<span data-cell="0">出处</span></p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="13">
+    <h3>动手试试 A · 用作者的 3×3 矩阵给图片做几何增强 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labA"></div>
+  </div>
+  <div data-at="19">
+    <h3>动手试试 B · 学习率曲线：热身多久、降多快 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labB"></div>
+  </div>
+  <div data-at="21">
+    <h3>动手试试 C · 测试时增强为什么能让 AUC 变高 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labC"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的说法</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>说法</th><th>出处</th></tr>
+        <tr><td>这是一个很难的图像分类任务，有病和没病的照片肉眼很难区分</td><td><span data-cell="1">第 1 格</span></td></tr>
+        <tr><td>想要可靠的整体 CV 分数，5 折必须用同一套配置；每折配置不同时，整体 CV 分数没有意义</td><td><span data-cell="0">第 0 格</span> <span data-cell="6">第 6 格</span></td></tr>
+        <tr><td>批量越大，学习率最大值也应该越大</td><td><span data-cell="18">第 18 格</span></td></tr>
+        <tr><td>每折保存验证损失最低的那一轮模型，用它预测 OOF 和测试集</td><td><span data-cell="20">第 20 格</span></td></tr>
+        <tr><td>OOF 预测可以用来决定多个模型融合时的权重</td><td><span data-cell="22">第 22 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">原 notebook 的 AUC 分数打印在运行输出里（第 21 格每折一行、第 23 格总分），Kaggle 下载的源码不带输出，作者的文字里也没写具体数值，所以这里不列分数。</p>
+      <p class="callout">一个值得注意的小细节：第 21 格打印的“without TTA”分数取的是<b>所有轮次里验证 AUC 的最大值</b>，而真正留下来的模型是<b>验证损失最低</b>的那一轮，两者不一定是同一轮。这个数字是在验证集上“挑最好的一轮”得来的，会略微偏乐观。<span data-cell="21">出处</span></p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一张皮肤镜照片，输出“是黑色素瘤”的概率，可以帮医生把高风险的病例排到前面先看。它是辅助筛查，不能代替病理诊断。</li>
+        <li><b>同类问题：</b>眼底照片筛糖网病、胸片筛结核、病理切片找癌细胞，凡是“一张医学图片 → 有没有病”都可以套用。</li>
+        <li><b>可迁移的套路：</b>数据提前打包成快读格式 → 按病人分组切折 → 强数据增强 → 预训练模型微调 → 学习率热身 → 保存最好的一轮 → OOF 评估 → 测试时增强 + 多折平均。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>数据格式：TFRecord + <code>tf.data</code> 流水线 <span data-cell="15">第 15 格</span></li>
+        <li>切分：按 15 个文件做 5 折（三重分层在制作文件时完成） <span data-cell="21">第 21 格</span></li>
+        <li>增强：旋转 / 剪切 / 缩放 / 平移矩阵 <span data-cell="13">第 13 格</span>，翻转与颜色扰动 <span data-cell="14">第 14 格</span></li>
+        <li>模型：EfficientNet B0–B6 + 全局平均池化 + sigmoid，标签平滑 0.05 <span data-cell="17">第 17 格</span></li>
+        <li>训练：学习率热身 5 轮后按 0.8 衰减 <span data-cell="19">第 19 格</span></li>
+        <li>评估与提交：TTA 11 次、OOF AUC、5 折平均 <span data-cell="21">第 21 格</span> <span data-cell="23">第 23 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>同一个病人往往拍了很多颗痣。如果切分时不管病人，把同一个人的照片同时放进训练和验证，分数会怎样？为什么？</li>
+      <li>作者把图片随机旋转最多几百度、左右翻转。对皮肤照片这样做合理吗？如果是胸片（心脏固定在左边），还能随便左右翻转吗？</li>
+      <li>标签平滑把“1”改成 0.975、“0”改成 0.025。为什么故意让模型“别太自信”反而可能更好？</li>
+      <li>第 21 格打印的“without TTA”分数取的是所有轮里验证 AUC 最高的那一轮。这样报告分数有什么问题？</li>
+      <li>模型没用病人年龄、性别、部位这些信息。你觉得哪一个最可能有帮助？会不会带来不公平？</li>
+      <li>AUC 只看排序，不看阈值。真要在医院用，阈值该定高还是定低？漏诊和误诊哪个代价更大？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Chris Deotte（部分代码作者注明来自 AgentAuers 的 notebook），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意，图中的“痣”是用代码画的示意图，不是真实病人照片。比赛数据：SIIM-ISIC Melanoma Classification。
+</footer>
+</main>
+
+<script src="nb/melanoma-tfrecords-kfold.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  if (/[?&]fast/.test(location.search)) { K.tween = (ms, fn, ctx) => { if (ctx && !ctx.alive()) return Promise.resolve(false); fn(1, 1); return Promise.resolve(true); }; K.wait = (ms, ctx) => Promise.resolve(!ctx || ctx.alive()); }
+  if (/[?&]fold/.test(location.search)) document.head.appendChild(Object.assign(document.createElement("style"), { textContent: ".walk .ch-cells > .cell, .walk .cell-note { display: none !important; }" }));
+  /* ===== 页面专用：像素图工具（用代码生成小图，在浏览器里真算卷积、模糊、池化、几何变换） ===== */
+  const PX = (function () {
+    function rgbOf(name, fb) {
+      let s = (K.css(name) || fb || "#888888").trim();
+      if (s[0] !== "#") return [128, 128, 128];
+      if (s.length === 4) s = "#" + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+      return [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
+    }
+    function grid(W, H, f) { const a = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) a[y * W + x] = f(x, y); return { W, H, a }; }
+    /* 彩色图：{W,H,rgb:[R,G,B]}，每个通道取值 0–1 */
+    function rgbGrid(W, H, f) { const R = new Float32Array(W * H), G = new Float32Array(W * H), B = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const c = f(x, y), i = y * W + x; R[i] = c[0]; G[i] = c[1]; B[i] = c[2]; } return { W, H, rgb: [R, G, B] }; }
+    const chan = (m, c) => ({ W: m.W, H: m.H, a: m.rgb[c] });
+    const fromChans = (ch) => ({ W: ch[0].W, H: ch[0].H, rgb: ch.map((c) => c.a) });
+    const gray = (m) => (m.rgb ? grid(m.W, m.H, (x, y) => { const i = y * m.W + x; return 0.299 * m.rgb[0][i] + 0.587 * m.rgb[1][i] + 0.114 * m.rgb[2][i]; }) : m);
+    function at(m, x, y) { return m.a[y * m.W + x]; }
+    function atClamp(m, x, y) { x = x < 0 ? 0 : x >= m.W ? m.W - 1 : x; y = y < 0 ? 0 : y >= m.H ? m.H - 1 : y; return m.a[y * m.W + x]; }
+    function atZero(m, x, y) { return x < 0 || y < 0 || x >= m.W || y >= m.H ? 0 : m.a[y * m.W + x]; }
+    /* padding='same'：边界外按 0 补 */
+    function conv(m, k) { const n = k.length, r = (n - 1) / 2; return grid(m.W, m.H, (x, y) => { let s = 0; for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) s += k[j][i] * atZero(m, x + i - r, y + j - r); return s; }); }
+    function map(m, f) { if (m.rgb) return { W: m.W, H: m.H, rgb: m.rgb.map((a) => { const o = new Float32Array(a.length); for (let i = 0; i < a.length; i++) o[i] = f(a[i], i); return o; }) }; const o = { W: m.W, H: m.H, a: new Float32Array(m.a.length) }; for (let i = 0; i < m.a.length; i++) o.a[i] = f(m.a[i], i); return o; }
+    const relu = (m) => map(m, (v) => (v > 0 ? v : 0));
+    function pool(m, s) { s = s || 2; const W = Math.ceil(m.W / s), H = Math.ceil(m.H / s); return grid(W, H, (x, y) => { let b = -Infinity; for (let j = 0; j < s; j++) for (let i = 0; i < s; i++) { const xx = x * s + i, yy = y * s + j; if (xx < m.W && yy < m.H) b = Math.max(b, at(m, xx, yy)); } return b; }); }
+    function range(m) { let lo = Infinity, hi = -Infinity; for (const v of m.a) { if (v < lo) lo = v; if (v > hi) hi = v; } return [lo, hi]; }
+    /* 可分离高斯模糊（边界用最近像素），彩色图逐通道做 */
+    function blur(m, sigma) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => blur(chan(m, c), sigma)));
+      if (sigma <= 0.01) return m;
+      const r = Math.max(1, Math.ceil(sigma * 3)), w = [];
+      let s = 0;
+      for (let i = -r; i <= r; i++) { const v = Math.exp((-i * i) / (2 * sigma * sigma)); w.push(v); s += v; }
+      for (let i = 0; i < w.length; i++) w[i] /= s;
+      const t = grid(m.W, m.H, (x, y) => { let a = 0; for (let i = -r; i <= r; i++) a += w[i + r] * atClamp(m, x + i, y); return a; });
+      return grid(m.W, m.H, (x, y) => { let a = 0; for (let i = -r; i <= r; i++) a += w[i + r] * atClamp(t, x, y + i); return a; });
+    }
+    function bilinear(m, x, y) {
+      const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+      return (atClamp(m, x0, y0) * (1 - fx) + atClamp(m, x0 + 1, y0) * fx) * (1 - fy) + (atClamp(m, x0, y0 + 1) * (1 - fx) + atClamp(m, x0 + 1, y0 + 1) * fx) * fy;
+    }
+    /* 绕中心旋转/缩放/平移/翻转；fill：'nearest' 用最近像素，数字表示边界外填这个值 */
+    function affine(m, p) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => affine(chan(m, c), p)));
+      const th = ((p.rot || 0) * Math.PI) / 180, c = Math.cos(th), s = Math.sin(th), z = p.zoom || 1;
+      const cx = (m.W - 1) / 2, cy = (m.H - 1) / 2, tx = (p.tx || 0) * m.W, ty = (p.ty || 0) * m.H;
+      return grid(m.W, m.H, (x, y) => {
+        let u = x - cx - tx, v = y - cy - ty;
+        if (p.flip) u = -u;
+        if (p.vflip) v = -v;
+        const a = (c * u + s * v) / z + cx, b = (-s * u + c * v) / z + cy;
+        if (p.fill != null && p.fill !== "nearest" && (a < -0.5 || b < -0.5 || a > m.W - 0.5 || b > m.H - 0.5)) return p.fill;
+        return bilinear(m, a, b);
+      });
+    }
+    function resize(m, W, H) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => resize(chan(m, c), W, H)));
+      return grid(W, H, (x, y) => bilinear(m, ((x + 0.5) * m.W) / W - 0.5, ((y + 0.5) * m.H) / H - 0.5));
+    }
+    function toURL(m, mode, lo, hi) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      if (m.rgb) {
+        for (let i = 0; i < m.W * m.H; i++) { for (let c = 0; c < 3; c++) d[i * 4 + c] = Math.max(0, Math.min(1, m.rgb[c][i])) * 255; d[i * 4 + 3] = 255; }
+      } else {
+        const P = rgbOf("--panel", "#ffffff"), A = rgbOf("--c1"), B = rgbOf("--c6");
+        if (lo == null || hi == null) { const r = range(m); if (lo == null) lo = r[0]; if (hi == null) hi = r[1]; }
+        const span = hi - lo || 1, amax = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+        for (let i = 0; i < m.a.length; i++) {
+          const v = m.a[i]; let r, gg, b;
+          if (mode === "div") { const t = Math.max(-1, Math.min(1, v / amax)), C = t >= 0 ? B : A, k = Math.abs(t); r = P[0] + (C[0] - P[0]) * k; gg = P[1] + (C[1] - P[1]) * k; b = P[2] + (C[2] - P[2]) * k; }
+          else if (mode === "heat") { const k = Math.max(0, Math.min(1, (v - lo) / span)); r = P[0] + (B[0] - P[0]) * k; gg = P[1] + (B[1] - P[1]) * k; b = P[2] + (B[2] - P[2]) * k; }
+          else { const k = Math.max(0, Math.min(1, (v - lo) / span)) * 255; r = gg = b = k; }
+          d[i * 4] = r; d[i * 4 + 1] = gg; d[i * 4 + 2] = b; d[i * 4 + 3] = 255;
+        }
+      }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    function draw(svg, x, y, w, h, m, mode, lo, hi, smooth) {
+      const e = K.svg(svg, "image", { x, y, width: w, height: h, preserveAspectRatio: "none" });
+      if (!smooth) e.style.imageRendering = "pixelated";
+      e.setAttribute("href", toURL(m, mode, lo, hi));
+      K.svg(svg, "rect", { x, y, width: w, height: h, fill: "none", stroke: "var(--line)" });
+      return e;
+    }
+    function update(e, m, mode, lo, hi) { e.setAttribute("href", toURL(m, mode, lo, hi)); }
+    function lines(svg, x, y, w, h, W, H, op) {
+      const g = K.svg(svg, "g");
+      for (let i = 0; i <= W; i++) K.svg(g, "line", { x1: x + (w * i) / W, x2: x + (w * i) / W, y1: y, y2: y + h, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      for (let j = 0; j <= H; j++) K.svg(g, "line", { y1: y + (h * j) / H, y2: y + (h * j) / H, x1: x, x2: x + w, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      return g;
+    }
+    const smooth = (e0, e1, x) => { const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+    const blob = (x, y, cx, cy, sx, sy) => Math.exp(-(((x - cx) * (x - cx)) / (2 * sx * sx) + ((y - cy) * (y - cy)) / (2 * sy * sy)));
+    /* 平滑噪声：几层不同频率的随机网格插值叠加，用来做纹理 */
+    function noise(W, H, seed, cells) {
+      const r = K.rng(seed || 1), n = cells || 6, g0 = grid(n + 1, n + 1, () => r());
+      return grid(W, H, (x, y) => bilinear(g0, (x / W) * n, (y / H) * n));
+    }
+    return { grid, rgbGrid, chan, fromChans, gray, at, atClamp, conv, map, relu, pool, range, blur, bilinear, affine, resize, toURL, draw, update, lines, smooth, blob, noise, rgbOf };
+  })();
+
+  /* ===== 用代码画一颗示意“痣”（RGB 0–1）。mal=true：边界不规则、颜色不均、更大（ABCD 法则的示意） ===== */
+  function lesion(N, mal, seed) {
+    const r = K.rng(seed || 1), tex = PX.noise(N, N, (seed || 1) + 7, 7), tex2 = PX.noise(N, N, (seed || 1) + 19, 4);
+    const R = (mal ? 0.27 : 0.2) + r() * 0.06, cx = 0.5 + (r() - 0.5) * 0.12, cy = 0.5 + (r() - 0.5) * 0.12;
+    const harm = []; for (let k = 2; k <= 7; k++) harm.push([k, (mal ? 0.16 : 0.035) * (r() + 0.3) / (k * 0.5), r() * 6.28]);
+    const skin = [0.88 + r() * 0.05, 0.7 + r() * 0.06, 0.6 + r() * 0.06];
+    return PX.rgbGrid(N, N, (x, y) => {
+      const u = x / N - cx, v = y / N - cy, a = Math.atan2(v, u), d = Math.hypot(u, v);
+      let rr = R; harm.forEach(([k, amp, ph]) => (rr *= 1 + amp * Math.sin(k * a + ph)));
+      const t = tex.a[y * N + x], t2 = tex2.a[y * N + x];
+      const edge = PX.smooth(rr + (mal ? 0.012 : 0.03), rr - (mal ? 0.012 : 0.03), d);
+      let c;
+      if (mal) {
+        const k1 = PX.smooth(0.35, 0.65, t), k2 = PX.smooth(0.55, 0.8, t2);
+        c = [0.42 - 0.28 * k1 + 0.1 * k2, 0.26 - 0.16 * k1 + 0.08 * k2, 0.18 - 0.08 * k1 + 0.2 * k2];
+      } else c = [0.5 - 0.06 * t, 0.32 - 0.05 * t, 0.22 - 0.04 * t];
+      const s = [skin[0] - 0.04 * t2, skin[1] - 0.04 * t2, skin[2] - 0.03 * t2];
+      return [0, 1, 2].map((i) => s[i] * (1 - edge) + c[i] * edge);
+    });
+  }
+  /* ===== 作者第 13 格的变换：目标像素 → 3×3 矩阵 → 源像素（取整、夹到边界，最近邻） ===== */
+  function mat3(a, b) { const o = []; for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) { let s = 0; for (let k = 0; k < 3; k++) s += a[i * 3 + k] * b[k * 3 + j]; o.push(s); } return o; }
+  function getMat(rot, shr, hz, wz, hs, ws) {
+    rot = (Math.PI * rot) / 180; shr = (Math.PI * shr) / 180;
+    const R = [Math.cos(rot), Math.sin(rot), 0, -Math.sin(rot), Math.cos(rot), 0, 0, 0, 1];
+    const S = [1, Math.sin(shr), 0, 0, Math.cos(shr), 0, 0, 0, 1];
+    const Z = [1 / hz, 0, 0, 0, 1 / wz, 0, 0, 0, 1];
+    const T = [1, 0, hs, 0, 1, ws, 0, 0, 1];
+    return mat3(mat3(R, S), mat3(Z, T));
+  }
+  function deotte(img, p) {
+    const D = img.W, m = getMat(p.rot, p.shr, p.hz, p.wz, p.hs, p.ws), H = D >> 1, XD = D % 2;
+    const out = img.rgb.map(() => new Float32Array(D * D));
+    for (let rI = 0; rI < D; rI++) for (let cI = 0; cI < D; cI++) {
+      const x = H - rI, y = cI - H;
+      let x2 = Math.trunc(m[0] * x + m[1] * y + m[2]), y2 = Math.trunc(m[3] * x + m[4] * y + m[5]);
+      x2 = K.clamp(x2, -H + XD + 1, H); y2 = K.clamp(y2, -H + XD + 1, H);
+      const sr = H - x2, sc = K.clamp(H - 1 + y2, 0, D - 1);
+      for (let ch = 0; ch < 3; ch++) out[ch][rI * D + cI] = img.rgb[ch][K.clamp(sr, 0, D - 1) * D + sc];
+    }
+    return { W: D, H: D, rgb: out };
+  }
+  function colorJit(img, o) {
+    let m = img;
+    if (o.flip) { const W = m.W; m = PX.fromChans([0, 1, 2].map((c) => PX.grid(W, m.H, (x, y) => m.rgb[c][y * W + (W - 1 - x)]))); }
+    return PX.fromChans([0, 1, 2].map((c) => PX.grid(m.W, m.H, (x, y) => {
+      const i = y * m.W + x, g = 0.299 * m.rgb[0][i] + 0.587 * m.rgb[1][i] + 0.114 * m.rgb[2][i];
+      let v = g + (m.rgb[c][i] - g) * (o.sat || 1);
+      v = 0.62 + (v - 0.62) * (o.con || 1) + (o.bri || 0);
+      return K.clamp(v, 0, 1);
+    })));
+  }
+  function aucOf(scores, labels) {
+    const idx = scores.map((s, i) => i).sort((a, b) => scores[a] - scores[b]);
+    let rank = 0, sumPos = 0, nP = 0;
+    idx.forEach((i, k) => { rank = k + 1; if (labels[i]) { sumPos += rank; nP++; } });
+    const nN = labels.length - nP;
+    return (sumPos - (nP * (nP + 1)) / 2) / (nP * nN);
+  }
+  function lrfn(ep, o) {
+    const start = 0.000005, max = 0.00000125 * o.rep * o.bs, min = 0.000001;
+    if (ep < o.ramp) return ((max - start) / o.ramp) * ep + start;
+    if (ep < o.ramp + o.sus) return max;
+    return (max - min) * Math.pow(o.decay, ep - o.ramp - o.sus) + min;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "作者的五步计划", kicker: "第 0 格 · 总览",
+      html: `<p>作者 Chris Deotte 是 Kaggle 上很有名的选手。他开门见山：这是一个给黑色素瘤比赛准备的<b>入门框架</b>，按他在“用 GPU 打比赛”讲座里的五步来写：预处理、数据增强、搭模型、训练计划、后处理。</p><p>框架里有很多“旋钮”（配置变量），改一改就能做新实验：换图片大小、换模型大小、加不加外部数据、TPU 还是 GPU。<span data-cell="0">出处</span></p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        const names = ["① 预处理\nTFRecord", "② 数据增强\n几何 + 颜色", "③ 搭模型\nEfficientNet", "④ 训练计划\n学习率曲线", "⑤ 后处理\nOOF / 提交"];
+        const nodes = names.map((n, i) => { const g = K.node(svg, 18 + i * 140, 120, 120, 70, n, { fill: "color-mix(in srgb, var(--c" + (i + 1) + ") 14%, var(--panel))", stroke: "var(--c" + (i + 1) + ")" }); g.style.opacity = 0; return g; });
+        const arr = names.slice(1).map((n, i) => { const a = K.arrow(svg, 140 + i * 140, 155, 156 + i * 140, 155); a.style.opacity = 0; return a; });
+        K.svg(svg, "text", { x: 360, y: 60, "text-anchor": "middle", "font-size": 15, "font-weight": 700 }, "一套可以反复改配置做实验的比赛框架");
+        const knob = K.svg(svg, "text", { x: 360, y: 250, "text-anchor": "middle", "font-size": 13, class: "muted" }, "旋钮：DEVICE · FOLDS · IMG_SIZES · INC2018/2019 · EFF_NETS · EPOCHS · TTA");
+        knob.style.opacity = 0;
+        (async () => {
+          for (let i = 0; i < 5; i++) { if (!(await ctx.tween(380, (t) => { nodes[i].style.opacity = t; if (i) arr[i - 1].style.opacity = t; }))) return; }
+          await ctx.tween(500, (t) => (knob.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "看图：你能分出哪颗是黑色素瘤吗？", kicker: "第 1–5 格 · 认识任务",
+      html: `<p>作者先随机抽 10 张“有黑色素瘤”和 10 张“没有”的照片并排展示，然后问读者：你能看出区别吗？他的意思是：<b>非常难</b>。<span data-cell="1">出处</span></p><p>动画里的痣是用代码画的示意图。皮肤科医生有个口诀叫 ABCD：不对称（A）、边界不规则（B）、颜色不均（C）、直径偏大（D）。示意图故意把这些特点画得很明显，真实照片远没这么好分。</p><p>接下来两格是安装 <code>efficientnet</code> 包和导入 TensorFlow。</p>`,
+      cells: [2],
+      draw(svg, ctx) {
+        const N = 56, imgs = [];
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, "font-weight": 700, fill: "var(--c6)" }, "示意：有黑色素瘤");
+        K.svg(svg, "text", { x: 20, y: 186, "font-size": 13, "font-weight": 700, fill: "var(--c3)" }, "示意：没有黑色素瘤");
+        for (let row = 0; row < 2; row++) for (let i = 0; i < 5; i++) {
+          const e = PX.draw(svg, 20 + i * 112, 40 + row * 156, 100, 100, lesion(N, row === 0, 11 + i * 7 + row * 101), null, null, null, true);
+          e.style.opacity = 0; imgs.push(e);
+        }
+        const tips = ["A 不对称", "B 边界不规则", "C 颜色不均", "D 直径偏大"].map((t, i) => { const e = K.svg(svg, "text", { x: 600, y: 70 + i * 24, "font-size": 13, fill: "var(--c6)" }, t); e.style.opacity = 0; return e; });
+        (async () => {
+          for (let k = 0; k < 10; k++) if (!(await ctx.tween(110, (t) => (imgs[k].style.opacity = t)))) return;
+          for (const t0 of tips) if (!(await ctx.tween(300, (t) => (t0.style.opacity = t)))) return;
+        })();
+      },
+    },
+    {
+      title: "一张配置表管住所有实验", kicker: "第 6–8 格 · 配置",
+      html: `<p>第 7 格是一张“遥控器”：5 折、每折图片边长 384、每折用 EfficientNet-B6、加入 2018 和 2017 年的往届数据、每批 32 张、最多 12 轮、测试时每张图增强 11 次。<span data-cell="7">出处</span></p><p>作者特别提醒：这些都是“每一折一个值”的列表。如果每折配置不一样，就相当于做了 5 个不同实验，最后合起来的 CV 分数<b>没有意义</b>；想要可靠的分数，5 折必须用同一套配置。<span data-cell="6">出处</span></p><p>第 8 格检测有没有 TPU（谷歌的专用加速芯片），没有就用 GPU。</p>`,
+      cells: [7], highlight: ["IMG_SIZES", "EFF_NETS", "TTA = 11", "INC2018"],
+      draw(svg, ctx) {
+        const cols = ["折", "图片边长", "模型", "加 2018 数据", "轮数"], xs = [60, 170, 300, 440, 580];
+        cols.forEach((c, i) => K.svg(svg, "text", { x: xs[i], y: 40, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, c));
+        const rows = [];
+        for (let f = 0; f < 5; f++) {
+          const g = K.svg(svg, "g"); g.style.opacity = 0;
+          K.svg(g, "rect", { x: 20, y: 52 + f * 44, width: 620, height: 36, rx: 6, fill: "var(--panel-2)", stroke: "var(--line)" });
+          ["第 " + (f + 1) + " 折", "384", "B6", "是", "12"].forEach((v, i) => K.svg(g, "text", { x: xs[i], y: 75 + f * 44, "text-anchor": "middle", "font-size": 13 }, v));
+          rows.push(g);
+        }
+        const ok = K.svg(svg, "text", { x: 330, y: 300, "text-anchor": "middle", "font-size": 14, fill: "var(--good)", "font-weight": 700 }, "5 折配置一样 → 整体 CV 分数才可信");
+        ok.style.opacity = 0;
+        (async () => {
+          for (let f = 0; f < 5; f++) if (!(await ctx.tween(260, (t) => (rows[f].style.opacity = t)))) return;
+          await ctx.tween(500, (t) => (ok.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "预处理：照片提前打包成 TFRecord", kicker: "第 9–10 格 · 预处理",
+      html: `<p>几万张照片一张一张读太慢。作者提前把它们缩放好，每 2000 多张打包成一个 <b>TFRecord</b> 文件（TensorFlow 的一种连续存储格式），训练时成批地从云端存储读取。<span data-cell="9">出处</span></p><p>第 10 格只是找到这些文件的位置：<code>train*.tfrec</code> 是训练集，<code>test*.tfrec</code> 是测试集。文件名里的数字就是张数，例如 <code>train00-2182.tfrec</code>。</p>`,
+      cells: [10], highlight: ["tfrec"],
+      draw(svg, ctx) {
+        const tiles = [], r = K.rng(4);
+        for (let i = 0; i < 60; i++) tiles.push(K.svg(svg, "rect", { x: 30 + (i % 10) * 22, y: 60 + Math.floor(i / 10) * 30, width: 16, height: 22, rx: 2, fill: "var(--c" + (1 + (i % 3)) + ")", opacity: 0.7 }));
+        K.svg(svg, "text", { x: 30, y: 44, "font-size": 13, class: "muted" }, "一张张 JPEG（示意）");
+        const files = [];
+        for (let k = 0; k < 15; k++) {
+          const x = 330 + (k % 5) * 76, y = 60 + Math.floor(k / 5) * 82;
+          const g = K.node(svg, x, y, 68, 60, "train" + String(k).padStart(2, "0") + "\n.tfrec", { fs: 11 });
+          files.push({ x, y, g });
+        }
+        K.svg(svg, "text", { x: 330, y: 44, "font-size": 13, class: "muted" }, "15 个训练 TFRecord（每个 2000 多张）");
+        ctx.wait(400).then((ok) => ok && ctx.tween(1800, (t) => tiles.forEach((e, i) => {
+          const f = files[i % 15], tt = K.clamp(t * 1.6 - (i / 60) * 0.6, 0, 1);
+          e.setAttribute("x", K.lerp(30 + (i % 10) * 22, f.x + 26, tt)); e.setAttribute("y", K.lerp(60 + Math.floor(i / 10) * 30, f.y + 20, tt));
+          e.style.opacity = 0.7 * (1 - tt * 0.9);
+        })));
+      },
+    },
+    {
+      title: "几何增强：一个 3×3 矩阵搞定旋转、剪切、缩放、平移", kicker: "第 11–13 格 · 数据增强",
+      html: `<p>照片太少，模型容易“背答案”。<b>数据增强</b>就是每次训练时把图片随机变一变，让模型每一轮看到的都是“新”照片。</p><p>作者把四种变化写成四个 3×3 矩阵再乘在一起：旋转（标准差 180°）、剪切（2°）、缩放（约 ±1/8）、平移（8 像素）。<span data-cell="12">出处</span> 然后对<b>输出图的每个像素</b>，用矩阵算出它应该从原图哪个位置取颜色；超出边界的就取边缘像素。<span data-cell="13">出处</span></p><p>动画里网格依次被旋转、剪切、缩放、平移。下面的实验 A 用的就是作者这套公式。</p>`,
+      cells: [12, 13], highlight: ["rotation_matrix", "shear_matrix", "zoom_matrix", "shift_matrix", "ROT_ = 180.0"],
+      draw(svg, ctx) {
+        const N = 64, base = lesion(N, true, 5);
+        const gridImg = PX.fromChans([0, 1, 2].map((c) => PX.grid(N, N, (x, y) => (x % 8 === 0 || y % 8 === 0 ? [0.2, 0.4, 0.9][c] : base.rgb[c][y * N + x]))));
+        PX.draw(svg, 40, 70, 200, 200, gridImg, null, null, null, false);
+        K.svg(svg, "text", { x: 140, y: 58, "text-anchor": "middle", "font-size": 13 }, "原图（加了网格便于观察）");
+        const out = PX.draw(svg, 440, 70, 200, 200, gridImg, null, null, null, false);
+        const lab = K.svg(svg, "text", { x: 540, y: 58, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "");
+        K.arrow(svg, 260, 170, 420, 170);
+        K.svg(svg, "text", { x: 340, y: 160, "text-anchor": "middle", "font-size": 12, class: "muted" }, "M = 旋转·剪切·缩放·平移");
+        K.svg(svg, "text", { x: 360, y: 310, "text-anchor": "middle", "font-size": 12, class: "muted" }, "超出原图的位置取边缘像素（作者代码里的 clip），所以角落会出现“拉丝”");
+        const P = { rot: 0, shr: 0, hz: 1, wz: 1, hs: 0, ws: 0 };
+        const seq = [["旋转 35°", (t) => (P.rot = 35 * t)], ["再剪切 12°", (t) => (P.shr = 12 * t)], ["再放大 1.25 倍", (t) => { P.hz = P.wz = 1 / (1 + 0.25 * t); }], ["再平移 6 像素", (t) => { P.hs = 6 * t; P.ws = -4 * t; }]];
+        (async () => {
+          for (const [name, f] of seq) {
+            lab.textContent = name;
+            if (!(await ctx.tween(900, (t) => { f(t); PX.update(out, deotte(gridImg, P)); }))) return;
+            if (!(await ctx.wait(300))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "颜色增强与读取 TFRecord", kicker: "第 14 格 · 数据增强",
+      html: `<p>第 14 格做三件事：①说明 TFRecord 里每张图带哪些字段，训练时只取出 <code>image</code> 和 <code>target</code>；②把 JPEG 解码、除以 255 变成 0～1 的小数；③训练时再加一层随机变化：左右翻转、饱和度 0.7～1.3 倍、对比度 0.8～1.2 倍、亮度 ±0.1。<span data-cell="14">出处</span></p><p>颜色扰动模拟的是不同医院、不同相机、不同灯光拍出来的差别。动画里同一颗痣变出了 6 个“兄弟”。</p>`,
+      cells: [14], highlight: ["random_flip_left_right", "random_saturation", "random_contrast", "random_brightness"],
+      draw(svg, ctx) {
+        const base = lesion(64, false, 23), r = K.rng(8), ims = [];
+        PX.draw(svg, 30, 100, 150, 150, base, null, null, null, true);
+        K.svg(svg, "text", { x: 105, y: 88, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "原图");
+        for (let i = 0; i < 6; i++) {
+          const o = { flip: r() < 0.5, sat: 0.7 + r() * 0.6, con: 0.8 + r() * 0.4, bri: (r() - 0.5) * 0.2 };
+          const x = 240 + (i % 3) * 152, y = 30 + Math.floor(i / 3) * 150;
+          const e = PX.draw(svg, x, y, 120, 120, colorJit(base, o), null, null, null, true); e.style.opacity = 0;
+          const t = K.svg(svg, "text", { x: x + 60, y: y + 136, "text-anchor": "middle", "font-size": 11, class: "muted" }, `${o.flip ? "翻转 " : ""}饱和${o.sat.toFixed(2)} 对比${o.con.toFixed(2)}`); t.style.opacity = 0;
+          ims.push([e, t]);
+        }
+        (async () => { for (const [e, t] of ims) if (!(await ctx.tween(300, (k) => { e.style.opacity = k; t.style.opacity = k; }))) return; })();
+      },
+    },
+    {
+      title: "tf.data 流水线：一边读一边喂", kicker: "第 15 格 · 数据管道",
+      html: `<p><code>get_dataset</code> 把前面几步串成一条流水线：读文件 → 缓存 → 重复 → 打乱 → 解析字段 → 解码并增强 → 打包成批 → 预取。<span data-cell="15">出处</span></p><p>“预取”的意思是：显卡在算这一批的时候，CPU 已经在准备下一批了，两边都不闲着。验证和测试时不打乱、不重复。</p>`,
+      cells: [15], highlight: ["ds.cache()", "ds.shuffle", "ds.batch", "ds.prefetch"],
+      draw(svg, ctx) {
+        const st = ["读 TFRecord", "cache", "repeat", "shuffle", "解析字段", "解码+增强", "batch", "prefetch"];
+        st.forEach((s, i) => K.node(svg, 10 + i * 88, 140, 80, 50, s, { fs: 12, fill: i === 5 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 5 ? "var(--accent)" : "var(--line)" }));
+        K.svg(svg, "line", { x1: 10, y1: 210, x2: 710, y2: 210, stroke: "var(--ink-3)", "stroke-dasharray": "4 4" });
+        const items = [];
+        for (let i = 0; i < 8; i++) items.push(K.svg(svg, "rect", { x: 0, y: 100, width: 14, height: 14, rx: 2, fill: "var(--c" + (1 + (i % 5)) + ")" }));
+        const gpu = K.node(svg, 600, 250, 110, 50, "显卡在训练", { fill: "color-mix(in srgb, var(--c3) 16%, var(--panel))", stroke: "var(--c3)" });
+        K.svg(svg, "text", { x: 20, y: 270, "font-size": 12, class: "muted" }, "小方块 = 一张图片，从左往右流过每一站（示意）");
+        ctx.tween(4200, (t) => items.forEach((e, i) => { const p = K.clamp(t * 1.8 - i * 0.1, 0, 1); e.setAttribute("x", 20 + p * 660); e.setAttribute("y", 100 + Math.sin(p * 30) * 3); }));
+        void gpu;
+      },
+    },
+    {
+      title: "模型：EfficientNet 主干 + 一个输出", kicker: "第 16–17 格 · 搭模型",
+      html: `<p>模型很简洁：用在 ImageNet（上百万张日常照片）上<b>预训练</b>好的 EfficientNet 当主干，去掉原来的分类头，接一个全局平均池化，再接一个 sigmoid 输出“是黑色素瘤的概率”。<span data-cell="17">出处</span></p><p>EfficientNet 是一族模型，B0 最小、B6 很大，越大的模型同时加深、加宽、配更大的输入图片。作者默认用 B6。</p><p>损失函数用了<b>标签平滑 0.05</b>：把答案“1”改成 0.975、“0”改成 0.025，让模型别把话说死，减少过度自信。评价指标是 AUC。</p>`,
+      cells: [17], highlight: ["include_top=False", "GlobalAveragePooling2D", "label_smoothing=0.05", "sigmoid"],
+      draw(svg, ctx) {
+        PX.draw(svg, 20, 120, 90, 90, lesion(48, true, 9), null, null, null, true);
+        const blocks = [];
+        for (let i = 0; i < 7; i++) {
+          const h = 150 - i * 16, w = 20 + i * 4;
+          blocks.push(K.svg(svg, "rect", { x: 140 + i * 42, y: 165 - h / 2, width: w, height: h, rx: 3, fill: "color-mix(in srgb, var(--c1) " + (20 + i * 10) + "%, var(--panel))", stroke: "var(--c1)", opacity: 0 }));
+        }
+        K.svg(svg, "text", { x: 270, y: 270, "text-anchor": "middle", "font-size": 13 }, "EfficientNet-B6 主干（预训练，整体一起微调）");
+        const gap = K.node(svg, 460, 140, 100, 50, "全局平均池化", { fs: 12 }); gap.style.opacity = 0;
+        const out = K.node(svg, 590, 140, 110, 50, "sigmoid → 概率", { fs: 12, fill: "var(--accent-soft)", stroke: "var(--accent)" }); out.style.opacity = 0;
+        const ls = K.svg(svg, "text", { x: 470, y: 250, "font-size": 13, fill: "var(--warn)" }, "标签平滑：1 → 0.975，0 → 0.025"); ls.style.opacity = 0;
+        (async () => {
+          for (const b of blocks) if (!(await ctx.tween(160, (t) => (b.style.opacity = t)))) return;
+          if (!(await ctx.tween(300, (t) => (gap.style.opacity = t)))) return;
+          if (!(await ctx.tween(300, (t) => (out.style.opacity = t)))) return;
+          await ctx.tween(400, (t) => (ls.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "学习率：先热身，再慢慢降", kicker: "第 18–19 格 · 训练计划",
+      html: `<p><b>学习率</b>是模型每次改参数时“步子迈多大”。作者用的是迁移学习常用的计划：从接近 0 开始，用 5 轮线性升到最大值，然后每轮乘 0.8 慢慢降下来。<span data-cell="19">出处</span></p><p>为什么先热身？预训练好的主干已经很有本事，一开始步子太大会把学到的东西“踩坏”。作者还提醒：批量越大，最大学习率也应该越大，代码里写成 <code>lr_max = 0.00000125 × 芯片数 × 批量</code>。<span data-cell="18">出处</span></p>`,
+      cells: [19], highlight: ["lr_ramp_ep", "lr_decay", "lr_max"],
+      draw(svg, ctx) {
+        const o = { rep: 8, bs: 32, ramp: 5, sus: 0, decay: 0.8 };
+        const ys = []; for (let e = 0; e < 12; e++) ys.push(lrfn(e, o));
+        const ax = K.axes(svg, { x: 70, y: 30, w: 600, h: 250 }, [0, 11], [0, Math.max(...ys) * 1.1], { xticks: 11, yfmt: (v) => (v * 1e4).toFixed(1), xlabel: "轮次 epoch", ylabel: "学习率（×10⁻⁴）" });
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const dot = K.svg(svg, "circle", { r: 5, fill: "var(--c6)" });
+        K.svg(svg, "text", { x: ax.sx(2), y: ax.sy(ys[5]) + 30, "font-size": 12, fill: "var(--c1)" }, "热身 5 轮");
+        K.svg(svg, "text", { x: ax.sx(7), y: ax.sy(ys[7]) - 14, "font-size": 12, fill: "var(--c1)" }, "每轮 ×0.8");
+        K.svg(svg, "text", { x: 480, y: 26, "font-size": 12, class: "muted" }, "按 8 个 TPU 核 × 批量 32 计算");
+        ctx.tween(2200, (t) => {
+          const upto = t * 11; let d = "";
+          for (let e = 0; e <= upto + 1e-9; e += 0.05) { const ee = Math.min(e, upto); d += (d ? "L" : "M") + ax.sx(ee) + "," + ax.sy(lrfn(Math.floor(ee) + (ee % 1 < 0.999 ? 0 : 1), o) * (1 - (ee % 1)) + lrfn(Math.floor(ee) + 1, o) * (ee % 1)); }
+          path.setAttribute("d", d); dot.setAttribute("cx", ax.sx(upto)); dot.setAttribute("cy", ax.sy(lrfn(Math.floor(upto), o) * (1 - (upto % 1)) + lrfn(Math.floor(upto) + 1, o) * (upto % 1)));
+        });
+      },
+    },
+    {
+      title: "五折训练：每一折换一批“考官”", kicker: "第 20–21 格 · 训练",
+      html: `<p>15 个训练文件被分成 5 组，每组 3 个。第 1 折用 12 个文件训练、3 个文件验证；第 2 折换另外 3 个做验证……一共训练 5 个模型。<span data-cell="21">出处</span></p><p>“<b>三重分层</b>”在制作这 15 个文件时就做好了（作者在第 0 格给了讨论帖链接）：同一个病人的照片只在一个文件里，避免同一个人既当学生又当考官；每个文件里黑色素瘤的比例相近；每个文件里“拍照多的病人”和“拍照少的病人”也分布得差不多。</p><p>每折训练 12 轮，只保存<b>验证损失最低</b>的那一轮；再用它对验证集和测试集各做 11 次增强预测取平均（TTA）。</p>`,
+      cells: [21], highlight: ["skf.split(np.arange(15))", "save_best_only=True", "TTA", "WGTS[fold]"],
+      draw(svg, ctx) {
+        const boxes = [];
+        for (let k = 0; k < 15; k++) boxes.push(K.svg(svg, "rect", { x: 40 + k * 42, y: 60, width: 36, height: 40, rx: 4, fill: "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: "var(--c1)" }));
+        for (let k = 0; k < 15; k++) K.svg(svg, "text", { x: 58 + k * 42, y: 85, "text-anchor": "middle", "font-size": 11 }, String(k).padStart(2, "0"));
+        const lab = K.svg(svg, "text", { x: 40, y: 40, "font-size": 14, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 40, y: 130, "font-size": 12, class: "muted" }, "蓝 = 训练文件　橙 = 验证文件（每折 3 个，作者的 KFold 打乱后分组，这里按示意画）");
+        const perm = [3, 11, 7, 0, 13, 5, 9, 1, 14, 6, 2, 10, 8, 4, 12];
+        const models = [];
+        for (let f = 0; f < 5; f++) { const g = K.node(svg, 40 + f * 130, 220, 110, 56, "模型 " + (f + 1) + "\n最好的一轮", { fs: 12 }); g.style.opacity = 0.15; models.push(g); }
+        const avg = K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "var(--good)" }, "测试集预测 = 5 个模型 × 各 1/5 权重相加"); avg.style.opacity = 0;
+        (async () => {
+          for (let f = 0; f < 5; f++) {
+            lab.textContent = "第 " + (f + 1) + " 折";
+            const val = perm.slice(f * 3, f * 3 + 3);
+            boxes.forEach((b, k) => K.set(b, { fill: val.includes(k) ? "color-mix(in srgb, var(--c2) 40%, var(--panel))" : "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: val.includes(k) ? "var(--c2)" : "var(--c1)" }));
+            if (!(await ctx.tween(600, (t) => (models[f].style.opacity = 0.15 + 0.85 * t)))) return;
+            if (!(await ctx.wait(350))) return;
+          }
+          await ctx.tween(500, (t) => (avg.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "拼出 OOF，算总 AUC", kicker: "第 22–25 格 · 评估",
+      html: `<p>每个模型只给“自己没见过的那 3 个文件”打分。5 折跑完，每张训练图都恰好被打过一次分，这些分数合起来叫 <b>OOF（折外预测）</b>。用它算出的 AUC 就是整体 CV 分数。<span data-cell="23">出处</span></p><p><b>AUC</b> 可以理解成：随便抽一张有病的、一张没病的，模型给有病那张打分更高的概率。0.5 等于瞎猜，1 是完美。它只看排序，不用先定阈值。</p><p>作者把 OOF 存成 <code>oof.csv</code>，以后融合多个模型时可以用它来挑权重。<span data-cell="22">出处</span> 第 24 格提到还可以用“同一病人的其他痣”来修正预测，但没有实现。</p>`,
+      cells: [23], highlight: ["roc_auc_score", "oof.csv"],
+      draw(svg, ctx) {
+        const cols = [];
+        for (let f = 0; f < 5; f++) {
+          const g = K.svg(svg, "g"); g.style.opacity = 0;
+          K.svg(g, "rect", { x: 40, y: 40 + f * 52, width: 250, height: 40, rx: 5, fill: "color-mix(in srgb, var(--c" + (f + 1) + ") 22%, var(--panel))", stroke: "var(--c" + (f + 1) + ")" });
+          K.svg(g, "text", { x: 165, y: 65 + f * 52, "text-anchor": "middle", "font-size": 12 }, "第 " + (f + 1) + " 折模型给它的验证文件打分");
+          cols.push(g);
+        }
+        const ax = K.axes(svg, { x: 400, y: 40, w: 260, h: 240 }, [0, 1], [0, 1], { xticks: 2, yticks: 2, xlabel: "误报率", ylabel: "检出率" });
+        K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0), x2: ax.sx(1), y2: ax.sy(1), stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+        const roc = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 530, y: 30, "text-anchor": "middle", "font-size": 12, class: "muted" }, "ROC 曲线（示意），曲线下面积 = AUC");
+        (async () => {
+          for (const c of cols) if (!(await ctx.tween(260, (t) => (c.style.opacity = t)))) return;
+          await ctx.tween(1400, (t) => { let d = ""; for (let x = 0; x <= t + 1e-9; x += 0.02) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(1 - Math.pow(1 - x, 3.2)); roc.setAttribute("d", d); });
+        })();
+      },
+    },
+    {
+      title: "测试集：五个模型取平均，写提交文件", kicker: "第 26–28 格 · 提交",
+      html: `<p>测试集的预测在训练循环里已经算好了：每折模型做 11 次 TTA 取平均，再乘以权重 1/5 加起来。<span data-cell="21">出处</span> 最后三格只是按图片名对齐、排序，写出 <code>submission.csv</code>，并画出预测概率的直方图。<span data-cell="27">出处</span></p><p>因为黑色素瘤很少见，大多数预测值都挤在 0 附近，只有一小撮比较高。动画里的直方图是示意形状。</p>`,
+      cells: [26, 27], highlight: ["submission.csv"],
+      draw(svg, ctx) {
+        const r = K.rng(31), bins = new Array(25).fill(0);
+        for (let i = 0; i < 3000; i++) { let p = Math.pow(r(), 6); if (r() < 0.03) p = 0.3 + r() * 0.7; bins[Math.min(24, Math.floor(p * 25))]++; }
+        const ax = K.axes(svg, { x: 70, y: 30, w: 600, h: 250 }, [0, 1], [0, Math.max(...bins)], { xticks: 5, yticks: 0, xlabel: "预测为黑色素瘤的概率（示意）" });
+        const bars = bins.map((b, i) => K.svg(svg, "rect", { x: ax.sx(i / 25) + 1, y: ax.sy(0), width: 600 / 25 - 2, height: 0, fill: i < 4 ? "var(--c1)" : "var(--c6)" }));
+        ctx.tween(1500, (t) => bars.forEach((e, i) => { const h = (ax.sy(0) - ax.sy(bins[i])) * t; e.setAttribute("y", ax.sy(0) - h); e.setAttribute("height", h); }));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：作者的仿射增强 ---------- */
+  let seedA = 0;
+  K.lab(document.getElementById("labA"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "rot", label: "旋转角度", min: -180, max: 180, step: 1, value: 30, fmt: (v) => v + "°" },
+      { id: "shr", label: "剪切角度", min: -30, max: 30, step: 1, value: 0, fmt: (v) => v + "°" },
+      { id: "zoom", label: "缩放（>1 放大）", min: 0.6, max: 1.6, step: 0.01, value: 1, fmt: (v) => v.toFixed(2) + " 倍" },
+      { id: "sh", label: "平移（像素，64 像素小图上）", min: -16, max: 16, step: 1, value: 0 },
+      { id: "flip", label: "左右翻转", value: "0", options: [["0", "不翻转"], ["1", "翻转"]] },
+      { id: "rand", label: "按作者的随机分布抽一组", button: true },
+    ],
+    note: "每次拖动都在浏览器里用作者第 13 格的公式重新算 64×64 张图的每个像素。点“抽一组”时，旋转、剪切、缩放、平移按作者的正态分布随机取（平移按 384 像素图的 8 像素换算到这张 64 像素小图上），所以每次看到的都不一样，这正是训练时模型看到的效果。",
+    render(svg, v) {
+      const base = lesion(64, true, 5);
+      let p = { rot: v.rot, shr: v.shr, hz: 1 / v.zoom, wz: 1 / v.zoom, hs: v.sh, ws: v.sh };
+      if (v.rand > seedA) {
+        seedA = v.rand;
+        const r = K.rng(1000 + v.rand);
+        p = { rot: 180 * K.randn(r), shr: 2 * K.randn(r), hz: 1 + K.randn(r) / 8, wz: 1 + K.randn(r) / 8, hs: (8 * K.randn(r) * 64) / 384, ws: (8 * K.randn(r) * 64) / 384 };
+      }
+      let out = deotte(base, p);
+      if (v.flip === "1") out = colorJit(out, { flip: true });
+      PX.draw(svg, 20, 30, 240, 240, base, null, null, null, false);
+      PX.draw(svg, 380, 30, 240, 240, out, null, null, null, false);
+      K.svg(svg, "text", { x: 140, y: 20, "text-anchor": "middle", "font-size": 13 }, "原图（示意痣）");
+      K.svg(svg, "text", { x: 500, y: 20, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "增强后（模型看到的）");
+      K.arrow(svg, 275, 150, 365, 150);
+      return { readout: [
+        { k: "旋转", v: p.rot.toFixed(0) + "°" },
+        { k: "剪切", v: p.shr.toFixed(1) + "°" },
+        { k: "纵 / 横缩放", v: (1 / p.hz).toFixed(2) + " / " + (1 / p.wz).toFixed(2) },
+        { k: "平移（像素）", v: p.hs.toFixed(1) + " , " + p.ws.toFixed(1) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：学习率计划 ---------- */
+  K.lab(document.getElementById("labB"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "bs", label: "每个芯片的批量 batch_size", min: 8, max: 64, step: 8, value: 32 },
+      { id: "rep", label: "芯片数（TPU 有 8 个核，单 GPU 是 1）", value: "8", options: [["8", "8（TPU）"], ["1", "1（单 GPU）"]] },
+      { id: "ramp", label: "热身轮数 lr_ramp_ep", min: 1, max: 8, step: 1, value: 5 },
+      { id: "decay", label: "热身后每轮乘以 lr_decay", min: 0.5, max: 0.99, step: 0.01, value: 0.8, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "这里直接运行作者第 19 格 lrfn 的公式，画出 12 轮里每一轮的学习率。试试把芯片数改成 1：最大学习率一下子小了 8 倍，这就是作者说的“批量越大，学习率越大”。",
+    render(svg, v) {
+      const o = { rep: +v.rep, bs: v.bs, ramp: v.ramp, sus: 0, decay: v.decay };
+      const ys = []; for (let e = 0; e < 12; e++) ys.push(lrfn(e, o));
+      const top = Math.max(...ys) * 1.15;
+      const ax = K.axes(svg, { x: 70, y: 20, w: 540, h: 230 }, [0, 11], [0, top], { xticks: 11, yfmt: (x) => (x * 1e5).toFixed(1), xlabel: "轮次 epoch", ylabel: "学习率 ×10⁻⁵" });
+      let d = ""; ys.forEach((y, e) => (d += (e ? "L" : "M") + ax.sx(e) + "," + ax.sy(y)));
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+      ys.forEach((y, e) => K.svg(svg, "circle", { cx: ax.sx(e), cy: ax.sy(y), r: 4, fill: e < o.ramp ? "var(--c2)" : "var(--c1)" }));
+      return { readout: [
+        { k: "最大学习率", v: (0.00000125 * o.rep * o.bs).toExponential(2) },
+        { k: "第 12 轮学习率", v: ys[11].toExponential(2) },
+        { k: "最大值出现在", v: "第 " + (ys.indexOf(Math.max(...ys)) + 1) + " 轮" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：TTA 与 AUC ---------- */
+  K.lab(document.getElementById("labC"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "d", label: "模型区分能力（有病 / 没病的“真实得分”相差几个标准差）", min: 0.3, max: 3, step: 0.1, value: 1.2, fmt: (v) => v.toFixed(1) },
+      { id: "noise", label: "每次增强带来的随机抖动", min: 0, max: 2.5, step: 0.1, value: 1.2, fmt: (v) => v.toFixed(1) },
+      { id: "tta", label: "TTA 次数（作者用 11）", min: 1, max: 21, step: 1, value: 11 },
+      { id: "seed", label: "换一批模拟图片", button: true },
+    ],
+    note: "模拟 600 张没病、60 张有病的图片。每张图有一个“真实得分”，模型每看一次增强后的图片，打分都会多一点随机抖动。TTA 就是把同一张图增强 k 次的分数取平均。下面两条 ROC 曲线和 AUC 都是在浏览器里现场按排序算出来的。",
+    render(svg, v) {
+      const r = K.rng(77 + v.seed * 13), nN = 600, nP = 60, base = [], lab = [];
+      for (let i = 0; i < nN + nP; i++) { const y = i >= nN ? 1 : 0; lab.push(y); base.push(K.randn(r) + v.d * y); }
+      const one = base.map((b) => b + K.randn(r) * v.noise);
+      const avg = base.map((b) => { let s = 0; for (let k = 0; k < v.tta; k++) s += b + K.randn(r) * v.noise; return s / v.tta; });
+      const a1 = aucOf(one, lab), ak = aucOf(avg, lab);
+      const ax = K.axes(svg, { x: 60, y: 14, w: 280, h: 260 }, [0, 1], [0, 1], { xticks: 2, yticks: 2, xlabel: "误报率", ylabel: "检出率" });
+      K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0), x2: ax.sx(1), y2: ax.sy(1), stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+      const rocPath = (sc, color) => {
+        const idx = sc.map((s, i) => i).sort((a, b) => sc[b] - sc[a]);
+        let tp = 0, fp = 0, d = "M" + ax.sx(0) + "," + ax.sy(0);
+        idx.forEach((i) => { if (lab[i]) tp++; else fp++; d += "L" + ax.sx(fp / nN) + "," + ax.sy(tp / nP); });
+        K.svg(svg, "path", { d, fill: "none", stroke: color, "stroke-width": 2 });
+      };
+      rocPath(one, "var(--c2)"); rocPath(avg, "var(--c1)");
+      K.svg(svg, "text", { x: 380, y: 40, "font-size": 13, fill: "var(--c2)" }, "■ 只预测 1 次");
+      K.svg(svg, "text", { x: 380, y: 64, "font-size": 13, fill: "var(--c1)" }, `■ TTA：增强 ${v.tta} 次取平均`);
+      K.svg(svg, "text", { x: 380, y: 110, "font-size": 12, class: "muted" }, "抖动越大，TTA 的好处越明显；");
+      K.svg(svg, "text", { x: 380, y: 130, "font-size": 12, class: "muted" }, "抖动为 0 时，两条线重合。");
+      K.svg(svg, "text", { x: 380, y: 150, "font-size": 12, class: "muted" }, "但 TTA 再多也超不过“真实得分”");
+      K.svg(svg, "text", { x: 380, y: 170, "font-size": 12, class: "muted" }, "本身的区分能力。");
+      return { readout: [
+        { k: "AUC（预测 1 次）", v: a1.toFixed(3), color: "var(--c2)" },
+        { k: `AUC（TTA ${v.tta} 次）`, v: ak.toFixed(3), color: "var(--c1)" },
+        { k: "上限（没有抖动）", v: aucOf(base, lab).toFixed(3), color: "var(--ink-3)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

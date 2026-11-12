@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>肺功能分层贝叶斯</title>
+<meta name="description" content="Kaggle 案例拆解：OSIC 肺纤维化比赛中用 PyMC3 分层贝叶斯模型给每个病人一条带不确定性的肺功能下降线，讲清先验、后验、部分合并与 MCMC。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">医学表格数据 · 纵向追踪 · 分层贝叶斯</div>
+  <h1>每个病人一条线，但互相借点经验：用分层贝叶斯预测肺功能下降</h1>
+  <p class="en">Probabilistic Machine Learning: A Different Approach</p>
+  <div class="tags">
+    <span class="tag st">统计分析</span><span class="tag ml">机器学习</span>
+    <span class="tag method">分层贝叶斯模型</span><span class="tag method">部分合并</span><span class="tag method">贝叶斯网络</span>
+    <span class="tag method">PyMC3 概率编程</span><span class="tag method">MCMC（NUTS）采样</span><span class="tag method">后验预测</span><span class="tag method">拉普拉斯对数似然</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Carlos Souza</b></span>
+    <span>Kaggle 点赞 <b>180</b>（2026-11 抓取）</span>
+    <span>数据 <b>Kaggle 比赛 osic-pulmonary-fibrosis-progression</b></span>
+    <span><a href="https://www.kaggle.com/code/carlossouza/probabilistic-machine-learning-a-diff-approach" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">肺纤维化病人的多次肺功能测量</div><p>每个病人在不同周测了几次 FVC（用力肺活量，一口气能呼出多少毫升气），外加年龄、性别、吸烟情况。本 notebook 只用表格，不用 CT 图像。<span data-cell="1">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">之后每一周的 FVC，以及“有多确定”</div><p>比赛要求每个预测都附一个置信度（标准差），评分同时奖励准、惩罚过度自信。<span data-cell="6">出处</span> <span data-cell="37">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">分层贝叶斯线性回归</div><p>每个病人有自己的截距和下降斜率，但这些参数来自同一个“总体分布”，病人之间互相借信息；用 PyMC3 做 MCMC 采样。<span data-cell="5">出处</span> <span data-cell="14">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">每个点 4000 个预测</div><p>采样得到每位病人 4000 组参数、4000 条可能的线，均值当预测，标准差当置信度。作者估算了比赛指标，数值在运行输出里。<span data-cell="17">出处</span> <span data-cell="31">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据来自 Kaggle 比赛 OSIC Pulmonary Fibrosis Progression（开放源影像联盟举办）。比赛原本提供 CT 图像、表格元数据和基线 FVC，这份 notebook <b>只用了 train.csv / test.csv 两张表</b>。病人总数作者没写，这里不列。<span data-cell="1">出处</span></p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">预测的周范围</div><div class="v">−12 ~ 133 周</div></div>
+        <div class="stat-tile"><div class="k">病人分组</div><div class="v">6 类</div></div>
+        <div class="stat-tile"><div class="k">测试病人</div><div class="v">5 位</div></div>
+        <div class="stat-tile"><div class="k">每个参数的采样数</div><div class="v">4,000</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">周范围见第 6 格 <span data-cell="6">出处</span>、第 27 格 <span data-cell="27">出处</span>；6 类 = 性别 × 吸烟状况，见第 9 格 <span data-cell="9">出处</span>；5 位测试病人见第 31 格 <span data-cell="31">出处</span>；4000 个采样见第 17 格 <span data-cell="17">出处</span>。</p>
+      <p class="callout">这是真实病人的医疗数据（已用编号匿名）。比赛数据只能按规则用于研究和学习；即使匿名，年龄、性别、吸烟史加上测量记录也有被重新识别的风险，使用时要遵守数据协议。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>白话含义</th><th>类型</th></tr>
+        <tr><td><code>Patient</code></td><td>病人编号（匿名）</td><td>文本</td></tr>
+        <tr><td><code>Weeks</code></td><td>相对于做 CT 那天的周数，可以是负数</td><td>整数</td></tr>
+        <tr><td><code>FVC</code></td><td><b>要预测的答案</b>：用力肺活量（毫升）</td><td>数值</td></tr>
+        <tr><td><code>Age</code></td><td>年龄</td><td>数值</td></tr>
+        <tr><td><code>Sex</code></td><td>性别 Male / Female</td><td>类别</td></tr>
+        <tr><td><code>SmokingStatus</code></td><td>正在吸烟 / 已戒烟 / 从不吸烟</td><td>类别</td></tr>
+        <tr><td><code>Percent</code></td><td>FVC 占同类健康人的百分比；作者说暂时不用</td><td>数值</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">列名来自第 4、9、14 格代码；Percent 的取舍见第 6 格 <span data-cell="6">出处</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="14">
+    <h3>实验 A · 各算各的、全部合并、部分合并 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labA"></div>
+  </div>
+  <div data-at="16">
+    <h3>实验 B · 亲手跑一次 MCMC：给一个病人的下降速度采样 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labB"></div>
+  </div>
+  <div data-at="37">
+    <h3>实验 C · 比赛指标：置信度报多少最划算 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labC"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>肺功能下降很明显，但不同病人差别很大，适合“每人一个模型、再用层级把模型连起来”</td><td><span data-cell="5">第 5 格</span></td></tr>
+        <tr><td>采样得到 4000 组可以解释数据的参数</td><td><span data-cell="17">第 17 格</span></td></tr>
+        <tr><td>模型为每个病人学到了个性化的截距和斜率</td><td><span data-cell="20">第 20 格</span></td></tr>
+        <tr><td>预测新病人时，用第一个模型学到的分布当第二个模型的先验，“不断用新数据更新”</td><td><span data-cell="28">第 28 格</span></td></tr>
+        <tr><td>5 位测试病人的参数差别明显，不确定程度也各不相同</td><td><span data-cell="33">第 33 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">比赛指标的估算值（第 37 格 <code>metric.mean()</code>）和所有图都在运行输出里，源码不带输出，作者文字里也没写分数，这里不列。</p>
+      <p class="callout warn"><b>原文值得注意的地方：</b>①第 6 格公式写每个病人有自己的噪声 σ<sub>i</sub>，第 14 格代码却只有一个所有人共用的 <code>sigma</code>；均值写成 α<sub>i</sub> + β<sub>i</sub> i，应为 α<sub>i</sub> + β<sub>i</sub> j（j 是周）；②第 36–37 格用来估算指标的 5 位测试病人，他们的完整记录也在训练集里，第一个模型训练时已经见过，估出来的分数偏乐观；③第 22 格画的是前 100 个采样（来自同一条链开头），黄线是 ±1 个标准差，不是 95% 区间；④开头说要用 CT 图像训练变分自编码器，这份 notebook 里没有做（作者说放到下一个 notebook）。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一位新病人的基线 FVC、测量周、年龄、性别、吸烟状况，画出他之后每周 FVC 的预测线和不确定范围。</li>
+        <li><b>同类问题：</b>“很多小数据集”的场景：每个学生的成绩轨迹、每家门店的销量、每台设备的磨损、每个地区的发病率。每个个体数据少，但个体之间相似。</li>
+        <li><b>可迁移的套路：</b>先画贝叶斯网络写清谁影响谁 → 个体参数来自共同的上层分布 → 用 MCMC 采样 → 看每个个体的后验线 → 用后验当新个体的先验。</li>
+        <li><b>提醒：</b>模型里的“吸烟 → 下降更快”只是统计关联，这份数据是观察数据，不能直接得出“戒烟会让下降变慢”的因果结论。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>性别 × 吸烟 6 分类 <span data-cell="9">第 9 格</span>、基线 FVC 与基线周 <span data-cell="10">第 10 格</span></li>
+        <li>PyMC3 分层模型：超先验 → 个人截距、斜率 → 似然 <span data-cell="14">第 14 格</span></li>
+        <li>NUTS 采样 2000 次 + 预热 2000 次 <span data-cell="16">第 16 格</span></li>
+        <li>迹图检查 <span data-cell="19">第 19 格</span>、每人 100 条后验线 <span data-cell="22">第 22 格</span></li>
+        <li>用后验当先验预测新病人 <span data-cell="29">第 29 格</span></li>
+        <li>拉普拉斯对数似然指标（σ 下限 70、误差上限 1000、只看最后 3 次）<span data-cell="36">第 36 格</span>、<span data-cell="37">第 37 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>一个病人只测了 2 次，另一个测了 9 次。分层模型会更相信谁自己的数据？为什么这样做是合理的？</li>
+      <li>模型发现“正在吸烟的男性”下降更快。这能说明吸烟导致肺功能下降更快吗？还可能有哪些混杂因素（比如年龄、病程）？</li>
+      <li>比赛指标为什么要惩罚“过度自信”？如果医生拿到一个很确定但错了的预测，会有什么后果？</li>
+      <li>作者用训练集里也出现过的病人去估算比赛分数。这样估出来的分数会偏高还是偏低？应该怎么改？</li>
+      <li>用匿名的医疗数据做研究，还需要注意哪些隐私和伦理问题？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Carlos Souza，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意，不含任何真实病人数据。数据：Kaggle 比赛 OSIC Pulmonary Fibrosis Progression，使用须遵守比赛规则。
+</footer>
+</main>
+
+<script src="nb/osic-bayesian-hierarchical.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const fade = (els, ctx, ms) => ctx.tween(ms || 500, (t) => els.forEach((e) => (e.style.opacity = t)));
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+  function line(svg, ax, xs, ys, attrs) {
+    let d = ""; xs.forEach((x, i) => { if (!isFinite(ys[i])) return; d += (d ? "L" : "M") + ax.sx(x).toFixed(1) + "," + ax.sy(ys[i]).toFixed(1); });
+    return K.svg(svg, "path", Object.assign({ d, fill: "none", stroke: "var(--c1)", "stroke-width": 2 }, attrs || {}));
+  }
+  // 模拟病人：基线 FVC、斜率（毫升/周）、若干次测量
+  function patients(seed, n, tau, noise) {
+    const r = K.rng(seed), P = [], mu = -5;
+    for (let i = 0; i < n; i++) {
+      const b0 = 2000 + r() * 1800, slope = mu + K.randn(r) * tau, m = 1 + Math.floor(Math.pow(r(), 1.4) * 9), ws = [];
+      let w = 0; for (let k = 0; k < m; k++) { ws.push(w); w += 4 + Math.floor(r() * 14); }
+      P.push({ b0, slope, t: ws, y: ws.map((w) => b0 + slope * w + K.randn(r) * noise) });
+    }
+    return { P, mu };
+  }
+  // 截距固定为第一次测量（基线），只估斜率：y - y0 = β (t - t0)
+  function slopeOLS(p) {
+    let sxx = 0, sxy = 0; for (let k = 1; k < p.t.length; k++) { const dt = p.t[k] - p.t[0]; sxx += dt * dt; sxy += dt * (p.y[k] - p.y[0]); }
+    return sxx > 0 ? { b: sxy / sxx, sxx } : { b: NaN, sxx: 0 };
+  }
+
+  const steps = [
+    {
+      at: 0, title: "手里不能只有一把锤子", kicker: "第 0 格 · 开场",
+      html: `<p>作者说自己参加这个比赛时先学了自编码器，效果不好，一路追问下去，接触到了<b>概率机器学习、贝叶斯推断、概率编程</b>，发现这道题“简直在喊着要用概率方法”，而一味套深度学习就像“手里只有锤子，看什么都像钉子”。<span data-cell="0">出处</span></p><p>他把问题拆成三步：①先用表格数据做一个简单的概率模型（本 notebook）；②再用变分自编码器从 CT 里学特征；③把两者合起来。</p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        const a = K.node(svg, 40, 60, 280, 90, "确定性模型\n“第 50 周 FVC = 2400 毫升”", { bold: true });
+        const b = K.node(svg, 400, 60, 280, 90, "概率模型\n“大概 2400，可能在 2200–2600”", { bold: true, stroke: "var(--accent)", sw: 2 });
+        const ax = K.axes(svg, { x: 430, y: 190, w: 220, h: 100 }, [1900, 2900], [0, 1], { xticks: 0, yticks: 0 });
+        let d = ""; for (let x = 1900; x <= 2900; x += 10) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(Math.exp(-0.5 * Math.pow((x - 2400) / 110, 2)));
+        const c = K.svg(svg, "path", { d, fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        const pin = K.svg(svg, "line", { x1: 180, x2: 180, y1: 190, y2: 290, stroke: "var(--ink)", "stroke-width": 3 });
+        K.svg(svg, "text", { x: 360, y: 326, "text-anchor": "middle", "font-size": 12, class: "muted" }, "左：只有一个数；右：一个分布（数字为示意）");
+        hide([b, c, pin]);
+        (async () => { if (!(await fade([pin], ctx))) return; await ctx.wait(400); if (!(await fade([b], ctx))) return; fade([c], ctx, 800); })();
+      },
+    },
+    {
+      title: "每个病人一条下降线，但斜率各不相同", kicker: "第 1–5 格 · 看数据",
+      html: `<p>作者读入表格，挑 3 个病人画出 FVC 随周数的变化，各配一条回归直线。<span data-cell="4">出处</span> 结论：肺功能下降很明显，但<b>病人之间差别很大</b>。<span data-cell="5">出处</span></p><p>他引用 Ghahramani（2015）的话：很多大数据集其实是<b>许多小数据集</b>的集合。每个病人数据很少，要给每个人定制预测，就要给每人建一个模型，再用层级把它们连起来，让病人之间<b>互相借用信息</b>。</p>`,
+      cells: [1, 3, 4, 5], highlight: ["regplot"],
+      draw(svg, ctx) {
+        const r = K.rng(11), cols = ["var(--c1)", "var(--c3)", "var(--c6)"];
+        for (let k = 0; k < 3; k++) {
+          const ax = K.axes(svg, { x: 30 + k * 235, y: 30, w: 200, h: 240 }, [0, 60], [1500, 3800], { xticks: 3, yticks: k ? 0 : 3, xlabel: "周" });
+          const b0 = 3300 - k * 500, s = [-6, -14, -2][k], ws = [0, 7, 15, 26, 38, 52].slice(0, 4 + k), pts = ws.map((w) => [w, b0 + s * w + K.randn(r) * 90]);
+          const dots = pts.map((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 0, fill: cols[k] }));
+          const ln = line(svg, ax, [0, 60], [b0, b0 + s * 60], { stroke: cols[k], "stroke-width": 2.5, opacity: 0 });
+          K.svg(svg, "text", { x: 130 + k * 235, y: 24, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "病人 " + "ABC"[k]);
+          ctx.wait(300 + k * 500).then((ok) => ok && ctx.tween(500, (t) => dots.forEach((d) => d.setAttribute("r", 5 * t)))).then((ok) => ok && ctx.tween(500, (t) => (ln.style.opacity = t)));
+        }
+        K.svg(svg, "text", { x: 360, y: 326, "text-anchor": "middle", "font-size": 12, class: "muted" }, "示意数据：都在下降，但快慢不同，测量次数也不同");
+      },
+    },
+    {
+      title: "画出模型：一张分层的贝叶斯网络", kicker: "第 6 格 · 建模假设",
+      html: `<p>作者先选最简单的模型：<b>线性回归</b>，但加了层次：<span data-cell="6">出处</span></p><ul class="tight"><li>病人 i 在第 j 周的 FVC ~ 正态（α<sub>i</sub> + β<sub>i</sub> j，σ）。</li><li><b>截距 α<sub>i</sub></b> 取决于这个人的基线 FVC 和基线周。</li><li><b>斜率 β<sub>i</sub></b>（每周下降多少）取决于年龄，以及性别 × 吸烟的 6 个类别。</li><li>最上层的参数（超先验）一无所知，用宽的正态、半正态分布。</li></ul><p>关键在于：每个病人的 α、β 不是各自独立乱猜，而是从同一个“总体分布”里抽出来的。</p>`,
+      cells: [6],
+      draw(svg, ctx) {
+        const top = [["超先验\nβ_int, σ_int", 140, 30], ["超先验\nα_s, β_cs, σ_s", 520, 30]];
+        const mid = [["截距 α_i", 140, 140], ["斜率 β_i", 520, 140]];
+        const side = [["基线 FVC、基线周", 140, 230, 0], ["年龄、性别 × 吸烟", 520, 230, 1]];
+        const nodes = [];
+        top.forEach((n) => nodes.push(K.node(svg, n[1] - 90, n[2], 180, 50, n[0], { fill: "var(--panel)", stroke: "var(--ink-3)" })));
+        mid.forEach((n) => nodes.push(K.node(svg, n[1] - 80, n[2], 160, 46, n[0], { stroke: "var(--accent)", sw: 2, bold: true })));
+        const obs = K.node(svg, 260, 260, 200, 56, "观测 FVC_ij\n（第 j 周的肺活量）", { fill: "color-mix(in srgb, var(--c3) 18%, var(--panel))", stroke: "var(--c3)", bold: true });
+        side.forEach((n) => K.svg(svg, "text", { x: n[3] ? 640 : 20, y: 200, "font-size": 12, class: "muted" }, n[0]));
+        const ar = [K.arrow(svg, 140, 80, 140, 138), K.arrow(svg, 520, 80, 520, 138), K.arrow(svg, 160, 186, 300, 258), K.arrow(svg, 500, 186, 420, 258), K.arrow(svg, 80, 205, 110, 160), K.arrow(svg, 650, 205, 590, 160)];
+        K.svg(svg, "text", { x: 360, y: 120, "text-anchor": "middle", "font-size": 12, class: "muted" }, "每个病人一份 α_i、β_i");
+        const all = nodes.concat(ar, [obs]); hide(all);
+        (async () => { for (const e of [nodes[0], nodes[1], ar[0], ar[1], nodes[2], nodes[3], ar[4], ar[5], ar[2], ar[3], obs]) { if (!(await fade([e], ctx, 260))) return; } })();
+      },
+    },
+    {
+      title: "按性别 × 吸烟分成 6 类", kicker: "第 7–9 格 · 数据准备 1",
+      html: `<p>导入 PyMC3（概率编程库）、ArviZ（画后验的工具）。<span data-cell="7">出处</span> 然后把每个病人按<b>性别 × 吸烟状况</b>编成 0–5 共 6 类：男性正在吸烟 = 0、男性已戒烟 = 1、男性从不吸烟 = 2，女性依次为 3、4、5。<span data-cell="9">出处</span></p><p>每一类会有自己的系数 β<sub>c</sub><sup>s</sup>，决定“年龄每大一岁，下降速度变化多少”。</p>`,
+      cells: [7, 9], highlight: ["patient_class", "return 0", "return 5"],
+      draw(svg, ctx) {
+        const rows = ["男", "女"], colsN = ["正在吸烟", "已戒烟", "从不吸烟"];
+        colsN.forEach((c, j) => K.svg(svg, "text", { x: 250 + j * 150, y: 60, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, c));
+        rows.forEach((rw, i) => K.svg(svg, "text", { x: 150, y: 120 + i * 100, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, rw));
+        const cells = [];
+        for (let i = 0; i < 2; i++) for (let j = 0; j < 3; j++) {
+          const g = K.node(svg, 185 + j * 150, 80 + i * 100, 130, 76, "类别 " + (i * 3 + j), { fill: `color-mix(in srgb, ${K.colors[i * 3 + j]} 20%, var(--panel))`, stroke: K.colors[i * 3 + j], bold: true });
+          g.style.opacity = 0; cells.push(g);
+        }
+        K.svg(svg, "text", { x: 360, y: 310, "text-anchor": "middle", "font-size": 13 }, "每一类有自己的“年龄 → 下降速度”系数");
+        (async () => { for (const c of cells) { if (!(await fade([c], ctx, 300))) return; } })();
+      },
+    },
+    {
+      title: "基线：每个病人的第一次测量", kicker: "第 10–12 格 · 数据准备 2",
+      html: `<p>对每个病人找出<b>最早那一周</b>的测量，记为基线周 <code>Weeks_base</code> 和基线 FVC <code>FVC_base</code>，合并回表里。<span data-cell="10">出处</span> 再给每个病人编一个从 0 开始的整数编号 <code>PatientID</code>，方便模型里按编号取各自的参数；病人信息表和测量表分开放。<span data-cell="11">出处</span></p>`,
+      cells: [10, 11, 12], highlight: ["min()", "_base", "LabelEncoder"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [-12, 70], [1800, 3200], { xticks: 4, yticks: 0, xlabel: "周（示意）" });
+        const ws = [-4, 6, 13, 25, 40, 58], ys = ws.map((w, i) => 2900 - 8 * (w + 4) + [0, 60, -40, 30, -50, 20][i]);
+        const dots = ws.map((w, i) => K.svg(svg, "circle", { cx: ax.sx(w), cy: ax.sy(ys[i]), r: 6, fill: "var(--c1)" }));
+        const ring = K.svg(svg, "circle", { cx: ax.sx(ws[0]), cy: ax.sy(ys[0]), r: 0, fill: "none", stroke: "var(--warn)", "stroke-width": 3 });
+        const lab = K.svg(svg, "text", { x: ax.sx(ws[0]) + 18, y: ax.sy(ys[0]) - 14, "font-size": 14, "font-weight": 700, fill: "var(--warn)" }, "最早一次 = 基线（周 −4，FVC 2900）");
+        lab.style.opacity = 0;
+        ctx.wait(600).then((ok) => ok && ctx.tween(700, (t) => { ring.setAttribute("r", 14 * t); lab.style.opacity = t; }));
+      },
+    },
+    {
+      title: "用 PyMC3 把模型写成代码", kicker: "第 13–14 格 · 概率编程",
+      html: `<p>这一格把第 6 格的网络逐行翻译成 PyMC3：<span data-cell="14">出处</span></p><ul class="tight"><li><code>beta_int</code>、<code>sigma_int</code>：截距的超先验；个人截距 <code>alpha</code> ~ 正态（基线 FVC + beta_int × 基线周，sigma_int）。</li><li><code>alpha_s</code>、6 个 <code>beta_cs</code>、<code>sigma_s</code>：斜率的超先验；个人斜率 <code>beta</code> ~ 正态（alpha_s + 年龄 × beta_cs[类别]，sigma_s）。</li><li>噪声 <code>sigma</code> ~ 半正态（200），似然：观测 FVC ~ 正态（alpha + beta × 周，sigma）。</li></ul><p>“概率编程”的意思是：只描述数据是怎么生成的，推断交给库去做。</p><p class="callout warn">第 6 格写的是每个病人一个 σ<sub>i</sub>，这里实际只有一个共用的 <code>sigma</code>。</p>`,
+      cells: [13, 14], highlight: ["pm.Normal", "pm.HalfNormal", "beta_cs[patient_class]", "observed=FVC_obs"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 230 }, [-14, 2], [0, 1], { xticks: 4, yticks: 0, xlabel: "斜率：每周下降多少毫升（示意）" });
+        const mu = -5, tau = 3, g = (x) => Math.exp(-0.5 * Math.pow((x - mu) / tau, 2));
+        let d = ""; for (let x = -14; x <= 2; x += 0.1) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(0.9 * g(x));
+        K.svg(svg, "path", { d, fill: "var(--c2)", "fill-opacity": 0.15, stroke: "var(--c2)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: ax.sx(mu), y: 52, "text-anchor": "middle", "font-size": 13, fill: "var(--c2)", "font-weight": 700 }, "总体分布：大家的斜率从这里抽出来");
+        const r = K.rng(5), drops = [];
+        for (let i = 0; i < 12; i++) drops.push(K.clamp(mu + K.randn(r) * tau, -13.5, 1.5));
+        const dots = drops.map((x) => K.svg(svg, "circle", { cx: ax.sx(x), cy: 40, r: 6, fill: "var(--c6)", opacity: 0 }));
+        (async () => { for (let i = 0; i < dots.length; i++) { const dd = dots[i]; dd.style.opacity = 1; if (!(await ctx.tween(260, (t) => dd.setAttribute("cy", K.lerp(60, ax.sy(0) - 8 - (i % 3) * 12, t))))) return; } })();
+        K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 12, class: "muted" }, "红点 = 每个病人的斜率 β_i，各不相同，但都围着同一个中心");
+      },
+    },
+    {
+      title: "按下“推断按钮”：MCMC 采样", kicker: "第 15–17 格 · 拟合",
+      html: `<p>一行 <code>pm.sample(2000, tune=2000, target_accept=.9)</code>：先“预热”2000 步调好步子，再正式采样 2000 步。<span data-cell="16">出处</span> PyMC3 默认用 NUTS，一种很聪明的马尔可夫链蒙特卡洛（MCMC）方法。</p><p>作者说“我们刚采到了 4000 个能解释数据的模型”。<span data-cell="17">出处</span>（按 2000 次乘以链的条数算出来，原文没写链数。）</p><p>MCMC 的思路：后验分布太复杂没法直接算，就派一个“随机漫步者”在参数空间里走，走到后验概率高的地方多停留。走够了，它停留过的位置就是后验的样本。</p>`,
+      cells: [15, 16, 17], highlight: ["pm.sample(2000, tune=2000, target_accept=.9)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 20, w: 400, h: 260 }, [-12, 2], [-12, 2], { xticks: 0, yticks: 0, xlabel: "参数 1", ylabel: "参数 2" });
+        for (let k = 1; k <= 4; k++) K.svg(svg, "ellipse", { cx: ax.sx(-5), cy: ax.sy(-5), rx: k * 34, ry: k * 22, fill: "none", stroke: "var(--line)", transform: `rotate(-30 ${ax.sx(-5)} ${ax.sy(-5)})` });
+        const r = K.rng(3), logp = (a, b) => { const u = (a + 5) * Math.cos(0.52) - (b + 5) * Math.sin(0.52), v = (a + 5) * Math.sin(0.52) + (b + 5) * Math.cos(0.52); return -0.5 * (u * u / 4 + v * v / 1.6); };
+        let x = [0, -11], lp = logp(...x);
+        const hist = new Array(20).fill(0);
+        const bars = hist.map((_, i) => K.svg(svg, "rect", { x: 500 + i * 10, y: 280, width: 8, height: 0, fill: "var(--c1)" }));
+        K.svg(svg, "text", { x: 600, y: 300, "text-anchor": "middle", "font-size": 12 }, "参数 1 的样本直方图");
+        const dot = K.svg(svg, "circle", { cx: ax.sx(x[0]), cy: ax.sy(x[1]), r: 6, fill: "var(--c6)" });
+        (async () => {
+          for (let s = 0; s < 160; s++) {
+            const y = [x[0] + K.randn(r) * 1.1, x[1] + K.randn(r) * 1.1], ly = logp(...y);
+            const acc = Math.log(r()) < ly - lp;
+            if (acc) { K.svg(svg, "line", { x1: ax.sx(x[0]), y1: ax.sy(x[1]), x2: ax.sx(y[0]), y2: ax.sy(y[1]), stroke: "var(--c6)", opacity: 0.35 }); x = y; lp = ly; }
+            K.svg(svg, "circle", { cx: ax.sx(x[0]), cy: ax.sy(x[1]), r: 2, fill: "var(--c6)", opacity: s < 30 ? 0.25 : 0.6 });
+            K.set(dot, { cx: ax.sx(x[0]), cy: ax.sy(x[1]) });
+            if (s >= 30) { const bi = K.clamp(Math.floor((x[0] + 12) / 14 * 20), 0, 19); hist[bi]++; bars.forEach((b, i) => K.set(b, { y: 280 - hist[i] * 4, height: hist[i] * 4 })); }
+            if (!(await ctx.wait(50))) return;
+          }
+        })();
+        K.svg(svg, "text", { x: 470, y: 30, "font-size": 12, class: "muted" }, "示意：先从远处走进来（预热），再来回游荡");
+      },
+    },
+    {
+      title: "检查：每个病人 100 条可能的线", kicker: "第 18–23 格 · 看后验",
+      html: `<p>先用迹图（traceplot）看每个参数的采样过程和后验分布，作者看到每个病人都学到了个性化的 α 和 β。<span data-cell="19">出处</span> <span data-cell="20">出处</span></p><p>然后对之前那 3 个病人，从采样里取 100 组 (α, β, σ)，各画一条绿线和上下 ±σ 两条黄线。<span data-cell="22">出处</span> 一大把线挤在一起的地方，就是模型最有把握的地方；线散开的地方，就是没把握的地方。</p><p class="callout warn">代码取的是<b>前</b> 100 个采样，黄线是 ±1 个 σ，不是 95% 区间。</p>`,
+      cells: [18, 19, 20, 21, 22, 23], highlight: ["range(100)", "trace['alpha']", "trace['beta']"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 24, w: 600, h: 250 }, [-12, 133], [1200, 3400], { xticks: 5, yticks: 4, xlabel: "周（示意病人）" });
+        const pts = [[0, 3000], [8, 2960], [20, 2830], [33, 2790], [50, 2640]];
+        const r = K.rng(8), lines = [];
+        for (let k = 0; k < 60; k++) { const a = 3000 + K.randn(r) * 50, b = -7 + K.randn(r) * 1.6; lines.push(line(svg, ax, [-12, 133], [a - 12 * b, a + 133 * b], { stroke: "var(--c3)", "stroke-width": 0.8, opacity: 0 })); }
+        pts.forEach((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 5, fill: "var(--c1)" }));
+        K.svg(svg, "text", { x: ax.sx(60), y: ax.sy(3250), "font-size": 13, fill: "var(--c3)", "font-weight": 700 }, "每条绿线 = 一组采样出的 (α, β)");
+        K.svg(svg, "text", { x: ax.sx(85), y: ax.sy(1500), "font-size": 12, class: "muted" }, "离数据越远，线越散 → 越没把握");
+        (async () => { for (const l of lines) { l.style.opacity = 0.5; if (!(await ctx.wait(35))) return; } })();
+      },
+    },
+    {
+      title: "准备测试病人和要预测的每一周", kicker: "第 24–27 格 · 预测准备",
+      html: `<p>测试集的病人做同样的 6 类编码，并把他们仅有的那次测量改名为基线 FVC、基线周。<span data-cell="26">出处</span></p><p>然后为每位测试病人生成第 −12 到 133 周的每一行，FVC 先填 0 占位，等着模型来预测。<span data-cell="27">出处</span></p>`,
+      cells: [24, 25, 26, 27], highlight: ["np.arange(-12, 134)", "rename"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 220 }, [-12, 133], [0, 5], { xticks: 5, yticks: 0, xlabel: "周" });
+        for (let p = 0; p < 5; p++) {
+          K.svg(svg, "text", { x: 52, y: ax.sy(p + 0.5) + 4, "text-anchor": "end", "font-size": 12 }, "病人 " + (p + 1));
+          const base = [-3, 5, 0, 12, 2][p];
+          K.svg(svg, "circle", { cx: ax.sx(base), cy: ax.sy(p + 0.5), r: 6, fill: "var(--c1)" });
+        }
+        const slots = [];
+        for (let p = 0; p < 5; p++) for (let w = -12; w <= 133; w += 5) slots.push(K.svg(svg, "rect", { x: ax.sx(w) - 2, y: ax.sy(p + 0.5) - 6, width: 4, height: 12, fill: "var(--ink-3)", opacity: 0 }));
+        K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 13 }, "蓝点 = 唯一的一次测量；灰格 = 第 −12 到 133 周每周都要预测（示意）");
+        ctx.tween(1500, (t) => slots.forEach((s, i) => (s.style.opacity = i / slots.length < t ? 0.5 : 0)));
+      },
+    },
+    {
+      title: "第二个模型：把学到的分布当先验", kicker: "第 28–30 格 · 后验预测",
+      html: `<p>怎样预测从没见过的新病人？作者先试了 <code>theano.shared</code>，本地能跑，提交时却报错，于是换了第二种办法：<b>新建一个模型，用第一个模型学到的后验分布当先验</b>。<span data-cell="28">出处</span></p><p>具体做法：每个超参数用第一次采样的均值和标准差做成正态（σ 类参数用截断在 0 的正态），6 个类别系数用对角协方差的多元正态；新病人的 α、β 照样从这些分布里来；再让 <code>FVC_est</code> 作为一个随机变量被采样。<span data-cell="29">出处</span> <span data-cell="30">出处</span></p><p>作者说这正是贝叶斯的精神：看到新数据就更新。</p>`,
+      cells: [28, 29, 30], highlight: ["trace['beta_int'].mean()", "TruncatedNormal", "MvNormal", "FVC_est"],
+      draw(svg, ctx) {
+        const ax1 = K.axes(svg, { x: 40, y: 50, w: 260, h: 180 }, [-20, 10], [0, 1], { xticks: 0, yticks: 0, xlabel: "第一次：宽先验" });
+        const ax2 = K.axes(svg, { x: 420, y: 50, w: 260, h: 180 }, [-20, 10], [0, 1], { xticks: 0, yticks: 0, xlabel: "第二次：拿第一次的后验当先验" });
+        const g = (m, s) => (x) => Math.exp(-0.5 * Math.pow((x - m) / s, 2));
+        const curve = (ax, f, col) => { let d = ""; for (let x = -20; x <= 10; x += 0.2) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(0.9 * f(x)); return K.svg(svg, "path", { d, fill: "none", stroke: col, "stroke-width": 2.5 }); };
+        curve(ax1, g(0, 12), "var(--ink-3)");
+        const post = curve(ax1, g(-5, 2), "var(--c6)"); post.style.opacity = 0;
+        const arr = K.arrow(svg, 310, 140, 410, 140, { color: "var(--accent)", sw: 2.5 }); arr.style.opacity = 0;
+        const prior2 = curve(ax2, g(-5, 2), "var(--c6)"); prior2.style.opacity = 0;
+        K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 13 }, "灰 = 什么都不知道；红 = 看过训练病人之后的认识（示意）");
+        (async () => { await ctx.wait(400); if (!(await fade([post], ctx, 700))) return; if (!(await fade([arr], ctx))) return; fade([prior2], ctx, 700); })();
+      },
+    },
+    {
+      title: "5 位测试病人：参数各不相同，把握也不同", kicker: "第 31–33 格 · 看新病人",
+      html: `<p>第二次采样后，每个预测点都有 4000 个值。<span data-cell="31">出处</span> 作者用迹图看 5 位测试病人的参数：α、β 差别明显，而且<b>不确定程度各不相同</b>，这正是他想要的。<span data-cell="33">出处</span></p><p>动画示意：每位病人一条“斜率的后验分布”，有的窄（有把握），有的宽（没把握）。</p>`,
+      cells: [31, 32, 33], highlight: ["traceplot(trace2)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 120, y: 20, w: 540, h: 260 }, [-16, 4], [0, 5], { xticks: 5, yticks: 0, xlabel: "斜率 β（毫升/周，示意）" });
+        const P = [[-4, 1.2], [-9, 2.5], [-2, 0.8], [-6, 3.5], [-11, 1.8]];
+        const paths = P.map((p, i) => {
+          K.svg(svg, "text", { x: 112, y: ax.sy(i + 0.3), "text-anchor": "end", "font-size": 12 }, "测试病人 " + (i + 1));
+          return K.svg(svg, "path", { d: "", fill: K.colors[i], "fill-opacity": 0.3, stroke: K.colors[i], "stroke-width": 1.5 });
+        });
+        ctx.tween(1400, (t) => paths.forEach((pa, i) => {
+          const [m, s] = P[i]; let d = "M" + ax.sx(-16) + "," + ax.sy(i);
+          for (let x = -16; x <= 4; x += 0.1) d += "L" + ax.sx(x) + "," + ax.sy(i + 0.9 * t * Math.exp(-0.5 * Math.pow((x - m) / s, 2)));
+          pa.setAttribute("d", d + "L" + ax.sx(4) + "," + ax.sy(i) + "Z");
+        }));
+      },
+    },
+    {
+      title: "比赛指标：准，而且不能瞎自信", kicker: "第 34–37 格 · 拉普拉斯对数似然",
+      html: `<p>4000 个预测取<b>平均值</b>当 FVC 预测，取<b>标准差</b>当置信度 Confidence。<span data-cell="35">出处</span> 然后照比赛规则估算分数：只看每个病人<b>最后 3 次</b>测量（最不确定的），置信度最低按 70 算，误差最多按 1000 算：<span data-cell="36">出处</span> <span data-cell="37">出处</span></p><p class="callout">得分 = −√2 × 误差 / 置信度 − ln(√2 × 置信度)，越接近 0 越好。</p><p>第一项惩罚“报得太自信却错了”，第二项惩罚“报得太含糊”。</p><p class="callout warn">这 5 位测试病人在训练集里也有完整记录，第一个模型已经见过他们，估出来的分数会偏乐观。</p>`,
+      cells: [34, 35, 36, 37], highlight: ["mean(axis=1)", "std(axis=1)", "tail(3)", "max(s, 70)", "1000"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 24, w: 580, h: 240 }, [70, 800], [-12, -5], { xticks: 4, yticks: 4, xlabel: "报出的置信度 σ（毫升）", ylabel: "得分" });
+        const score = (d, s) => -Math.SQRT2 * Math.min(d, 1000) / Math.max(s, 70) - Math.log(Math.SQRT2 * Math.max(s, 70));
+        [[100, "var(--c3)"], [250, "var(--c1)"], [500, "var(--c6)"]].forEach(([d, c], i) => {
+          const xs = []; for (let s = 70; s <= 800; s += 5) xs.push(s);
+          const p = line(svg, ax, xs, xs.map((s) => K.clamp(score(d, s), -12, -5)), { stroke: c });
+          const L = p.getTotalLength(); p.style.strokeDasharray = L; p.style.strokeDashoffset = L;
+          ctx.wait(i * 500).then((ok) => ok && ctx.tween(900, (t) => (p.style.strokeDashoffset = L * (1 - t))));
+          K.svg(svg, "text", { x: 520, y: 200 + i * 20, "font-size": 12, fill: c, "font-weight": 700 }, "实际误差 " + d + " 毫升");
+        });
+        K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 12, class: "muted" }, "每条曲线都有一个最高点：置信度 ≈ √2 × 误差时得分最高（照比赛公式现场算）");
+      },
+    },
+    {
+      title: "生成提交文件", kicker: "第 38–39 格 · 收尾",
+      html: `<p>最后只保留比赛要求的三列：<code>Patient_Week</code>（病人编号_周）、<code>FVC</code>、<code>Confidence</code>，写成 submission.csv。<span data-cell="39">出处</span></p><p>作者在第 24 格说“迭代就留给读者当练习了”。<span data-cell="24">出处</span> 开头计划的 CT 图像部分（变分自编码器）也留到了下一个 notebook。</p>`,
+      cells: [38, 39], highlight: ["Patient_Week", "Confidence"],
+      draw(svg, ctx) {
+        const head = ["Patient_Week", "FVC", "Confidence"];
+        const rows = [["ID…_−12", "2810", "185"], ["ID…_−11", "2806", "185"], ["ID…_−10", "2801", "186"], ["…", "…", "…"]];
+        head.forEach((h, j) => K.svg(svg, "text", { x: 160 + j * 170, y: 70, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, h));
+        const els = [];
+        rows.forEach((r, i) => r.forEach((v, j) => { const t = K.svg(svg, "text", { x: 160 + j * 170, y: 110 + i * 34, "text-anchor": "middle", "font-size": 14, "font-family": "var(--mono)" }, v); t.style.opacity = 0; els.push(t); }));
+        K.svg(svg, "text", { x: 360, y: 290, "text-anchor": "middle", "font-size": 12, class: "muted" }, "格式示意，数字不是原文结果");
+        (async () => { for (const e of els) { if (!(await fade([e], ctx, 150))) return; } })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：三种合并方式 ---------- */
+  K.lab(document.getElementById("labA"), {
+    width: 660, height: 400,
+    controls: [
+      { id: "tau", label: "病人之间斜率差别有多大（总体标准差）", min: 0.5, max: 8, step: 0.5, value: 5, fmt: (v) => v + " 毫升/周" },
+      { id: "noise", label: "每次测量的随机误差", min: 30, max: 300, step: 10, value: 150, fmt: (v) => "±" + v + " 毫升" },
+      { id: "pick", label: "上方显示第几位病人", min: 1, max: 14, step: 1, value: 1 },
+      { id: "seed", label: "换一批病人", button: true },
+    ],
+    note: "现场模拟 14 位病人，测量次数 1–9 次不等。截距固定为第一次测量，只估斜率：各算各的 = 每人单独回归；全部合并 = 所有人共用一个斜率；部分合并 = 按经验贝叶斯把每人的斜率往总体均值拉，数据越少拉得越狠（和分层模型同一思路）。",
+    render(svg, v) {
+      const D = patients(70 + v.seed * 13, 14, v.tau, v.noise), P = D.P;
+      const est = P.map(slopeOLS);
+      // 全部合并
+      let sxx = 0, sxy = 0; P.forEach((p) => { for (let k = 1; k < p.t.length; k++) { const dt = p.t[k] - p.t[0]; sxx += dt * dt; sxy += dt * (p.y[k] - p.y[0]); } });
+      const pooled = sxy / sxx;
+      // 部分合并：b_i ~ N(μ, τ² + v_i)，用边际似然在网格上估 μ、τ（经验贝叶斯），再把每人往 μ 拉
+      const vi = P.map((p) => { let sx = 0, sxx2 = 0; for (let k = 1; k < p.t.length; k++) { const dt = p.t[k] - p.t[0]; sx += dt; sxx2 += dt * dt; } return sxx2 > 0 ? v.noise * v.noise * (1 / sxx2 + sx * sx / (sxx2 * sxx2)) : Infinity; });
+      let best = { ll: -Infinity, mu: pooled, tau2: 1 };
+      for (let tau = 0.2; tau <= 15; tau += 0.2) {
+        const t2 = tau * tau; let sw = 0, swb = 0;
+        est.forEach((e, i) => { if (isFinite(vi[i])) { const w = 1 / (t2 + vi[i]); sw += w; swb += w * e.b; } });
+        const mu = swb / sw; let ll = 0;
+        est.forEach((e, i) => { if (isFinite(vi[i])) ll += -0.5 * Math.log(t2 + vi[i]) - 0.5 * (e.b - mu) ** 2 / (t2 + vi[i]); });
+        if (ll > best.ll) best = { ll, mu, tau2: t2 };
+      }
+      const mu = best.mu, tau2 = best.tau2;
+      const part = est.map((e, i) => (isFinite(vi[i]) ? (tau2 * e.b + vi[i] * mu) / (tau2 + vi[i]) : mu));
+      const rmse = (arr) => Math.sqrt(P.reduce((s, p, i) => s + (isFinite(arr[i]) ? (arr[i] - p.slope) ** 2 : 0), 0) / P.filter((_, i) => isFinite(arr[i])).length);
+      const no = est.map((e) => e.b);
+      // 上：选中病人
+      const i0 = v.pick - 1, p = P[i0];
+      const ax = K.axes(svg, { x: 60, y: 14, w: 560, h: 150 }, [0, 100], [p.b0 - 900, p.b0 + 400], { xticks: 5, yticks: 2, xlabel: "" });
+      const ln = (b, c, dash) => line(svg, ax, [p.t[0], 100], [p.y[0], p.y[0] + b * (100 - p.t[0])], { stroke: c, "stroke-dasharray": dash || null, "stroke-width": 2 });
+      ln(p.slope, "var(--ink-3)", "3 3");
+      if (isFinite(no[i0])) ln(no[i0], "var(--c1)");
+      ln(pooled, "var(--c4)", "6 4"); ln(part[i0], "var(--c6)");
+      p.t.forEach((t, k) => K.svg(svg, "circle", { cx: ax.sx(t), cy: ax.sy(p.y[k]), r: 5, fill: "var(--ink)" }));
+      K.svg(svg, "text", { x: 70, y: 30, "font-size": 12, "font-weight": 700 }, `病人 ${v.pick}：测了 ${p.t.length} 次${p.t.length < 2 ? "（只有 1 次，没法单独估斜率）" : ""}`);
+      // 下：所有病人的斜率
+      const all = P.map((q) => q.slope).concat(no.filter(isFinite), part, [pooled]);
+      const lo = Math.min(...all) - 1, hi = Math.max(...all) + 1;
+      const bx = K.axes(svg, { x: 60, y: 214, w: 560, h: 140 }, [lo, hi], [0, 14], { xticks: 5, yticks: 0, xlabel: "斜率（毫升/周）：灰竖=真值 蓝=各算各的 红=部分合并 虚线=全部合并", xfmt: (q) => q.toFixed(0) });
+      K.svg(svg, "line", { x1: bx.sx(pooled), x2: bx.sx(pooled), y1: 214, y2: 354, stroke: "var(--c4)", "stroke-dasharray": "6 4", "stroke-width": 2 });
+      P.forEach((q, i) => {
+        const y = bx.sy(i + 0.5);
+        if (isFinite(no[i])) { K.svg(svg, "line", { x1: bx.sx(K.clamp(no[i], lo, hi)), x2: bx.sx(part[i]), y1: y, y2: y, stroke: "var(--ink-3)", opacity: 0.6 }); K.svg(svg, "circle", { cx: bx.sx(K.clamp(no[i], lo, hi)), cy: y, r: 3.5, fill: "var(--c1)" }); }
+        K.svg(svg, "circle", { cx: bx.sx(part[i]), cy: y, r: 3.5, fill: "var(--c6)" });
+        K.svg(svg, "rect", { x: bx.sx(q.slope) - 1, y: y - 4, width: 2, height: 8, fill: "var(--ink-3)" });
+        if (i === i0) K.svg(svg, "rect", { x: 60, y: y - 5, width: 560, height: 10, fill: "var(--accent)", opacity: 0.12 });
+      });
+      return { readout: [
+        { k: "各算各的：斜率误差", v: rmse(no).toFixed(2) + " 毫升/周", color: "var(--c1)" },
+        { k: "全部合并：斜率误差", v: rmse(P.map(() => pooled)).toFixed(2) + " 毫升/周", color: "var(--c4)" },
+        { k: "部分合并：斜率误差", v: rmse(part).toFixed(2) + " 毫升/周", color: "var(--c6)" },
+        { k: "只测 1 次、没法单独估的病人", v: no.filter((b) => !isFinite(b)).length + " 位" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：Metropolis 采样一个斜率 ---------- */
+  K.lab(document.getElementById("labB"), {
+    width: 660, height: 360,
+    controls: [
+      { id: "step", label: "每一步跨多大（提议步长）", min: 0.1, max: 20, step: 0.1, value: 2, fmt: (v) => v.toFixed(1) },
+      { id: "n", label: "走多少步", min: 100, max: 6000, step: 100, value: 2000 },
+      { id: "prior", label: "先验", value: "hier", options: [["hier", "分层先验：总体均值 −5、标准差 3"], ["flat", "几乎没有先验（标准差 100）"]] },
+      { id: "m", label: "这个病人测了几次", min: 2, max: 9, step: 1, value: 3 },
+      { id: "seed", label: "重新走一遍", button: true },
+    ],
+    note: "现场用最简单的 MCMC（Metropolis：随机提一步，概率高就接受，概率低就按比例偶尔接受）给一位模拟病人的斜率采样，前 20% 当预热丢掉。红线是这道题能精确算出的后验（正态），用来检验采样对不对。PyMC3 用的 NUTS 更聪明，但思想一样。",
+    render(svg, v) {
+      const r = K.rng(900 + v.seed * 7), sig = 150, b0 = 2900, trueB = -9;
+      const ts = []; let w = 0; for (let k = 0; k < v.m; k++) { ts.push(w); w += 6 + Math.floor(r() * 8); }
+      const ys = ts.map((t) => b0 + trueB * t + (t ? K.randn(r) * sig : 0));
+      const pm = v.prior === "hier" ? -5 : 0, ps = v.prior === "hier" ? 3 : 100;
+      const logp = (b) => -0.5 * ((b - pm) / ps) ** 2 - ts.reduce((s, t, k) => s + 0.5 * ((ys[k] - b0 - b * t) / sig) ** 2, 0);
+      let sxx = 0, sxy = 0; ts.forEach((t, k) => { sxx += t * t; sxy += t * (ys[k] - b0); });
+      const prec = 1 / ps ** 2 + sxx / sig ** 2, aMean = (pm / ps ** 2 + sxy / sig ** 2) / prec, aSd = Math.sqrt(1 / prec);
+      let b = 5, lp = logp(b), acc = 0; const chain = [];
+      for (let i = 0; i < v.n; i++) { const c = b + K.randn(r) * v.step, lc = logp(c); if (Math.log(r()) < lc - lp) { b = c; lp = lc; acc++; } chain.push(b); }
+      const burn = Math.floor(v.n * 0.2), S = chain.slice(burn);
+      const m = S.reduce((s, x) => s + x, 0) / S.length, sd = Math.sqrt(S.reduce((s, x) => s + (x - m) ** 2, 0) / S.length);
+      const lo = Math.min(-20, aMean - 5 * aSd), hi = Math.max(8, aMean + 5 * aSd);
+      const ax = K.axes(svg, { x: 50, y: 14, w: 330, h: 290 }, [0, v.n], [lo, hi], { xticks: 2, yticks: 4, xlabel: "第几步", ylabel: "斜率" });
+      K.svg(svg, "rect", { x: ax.sx(0), y: 14, width: ax.sx(burn) - ax.sx(0), height: 290, fill: "var(--ink-3)", opacity: 0.12 });
+      const stride = Math.max(1, Math.floor(v.n / 600)), xs = [], yv = [];
+      for (let i = 0; i < v.n; i += stride) { xs.push(i); yv.push(chain[i]); }
+      line(svg, ax, xs, yv, { stroke: "var(--c1)", "stroke-width": 1 });
+      K.svg(svg, "text", { x: ax.sx(burn / 2), y: 30, "text-anchor": "middle", "font-size": 11, class: "muted" }, "预热");
+      // 直方图
+      const bx = K.axes(svg, { x: 420, y: 14, w: 220, h: 290 }, [0, 1], [lo, hi], { xticks: 0, yticks: 0, xlabel: "样本分布" });
+      const nb = 40, H = new Array(nb).fill(0); S.forEach((x) => { const i = Math.floor((x - lo) / (hi - lo) * nb); if (i >= 0 && i < nb) H[i]++; });
+      const hm = Math.max(...H, 1), dens = (x) => Math.exp(-0.5 * ((x - aMean) / aSd) ** 2);
+      H.forEach((h, i) => { const y1 = lo + (i + 1) * (hi - lo) / nb, y0 = lo + i * (hi - lo) / nb; K.svg(svg, "rect", { x: bx.sx(0), y: bx.sy(y1), width: bx.sx(h / hm * 0.95) - bx.sx(0), height: Math.max(1, bx.sy(y0) - bx.sy(y1) - 0.5), fill: "var(--c1)", opacity: 0.7 }); });
+      let d = ""; for (let y = lo; y <= hi; y += (hi - lo) / 200) d += (d ? "L" : "M") + bx.sx(0.95 * dens(y)) + "," + bx.sy(y); K.svg(svg, "path", { d, fill: "none", stroke: "var(--c6)", "stroke-width": 2 });
+      K.svg(svg, "line", { x1: ax.sx(0), x2: bx.sx(1), y1: ax.sy(trueB), y2: ax.sy(trueB), stroke: "var(--good)", "stroke-dasharray": "4 3" });
+      K.svg(svg, "text", { x: 60, y: 354, "font-size": 12, fill: "var(--good)" }, "绿虚线 = 模拟设定的真斜率 −9；红线 = 精确后验");
+      const ar = acc / v.n;
+      return { readout: [
+        { k: "接受率", v: (ar * 100).toFixed(0) + "%", color: ar < 0.15 || ar > 0.85 ? "var(--bad)" : "var(--good)" },
+        { k: "采样均值 ± 标准差", v: m.toFixed(2) + " ± " + sd.toFixed(2) },
+        { k: "精确后验", v: aMean.toFixed(2) + " ± " + aSd.toFixed(2) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：拉普拉斯对数似然 ---------- */
+  K.lab(document.getElementById("labC"), {
+    width: 640, height: 345,
+    controls: [
+      { id: "s", label: "模型真实的误差大小（误差的标准差）", min: 20, max: 600, step: 10, value: 200, fmt: (v) => v + " 毫升" },
+      { id: "c", label: "你报出的置信度 Confidence", min: 10, max: 1200, step: 10, value: 200, fmt: (v) => v + " 毫升" },
+    ],
+    note: "现场模拟 5000 个预测：误差服从正态分布，按第 37 格的公式（σ 不低于 70、误差不超过 1000）算平均得分。曲线是报不同置信度时的平均得分，竖线是你现在报的值。",
+    render(svg, v) {
+      const r = K.rng(42), errs = []; for (let i = 0; i < 5000; i++) errs.push(Math.abs(K.randn(r) * v.s));
+      const score = (c) => { const sc = Math.max(c, 70); return errs.reduce((s, e) => s - Math.SQRT2 * Math.min(e, 1000) / sc - Math.log(Math.SQRT2 * sc), 0) / errs.length; };
+      const cs = []; for (let c = 10; c <= 1200; c += 10) cs.push(c);
+      const sv = cs.map(score), best = cs[sv.indexOf(Math.max(...sv))];
+      const yl = Math.max(...sv) + 0.3, ym = Math.max(Math.min(...sv), Math.max(...sv) - 6);
+      const ax = K.axes(svg, { x: 60, y: 14, w: 550, h: 260 }, [0, 1200], [ym, yl], { xticks: 6, yticks: 4, xlabel: "报出的置信度（毫升）", ylabel: "平均得分" });
+      line(svg, ax, cs, sv.map((y) => Math.max(y, ym)), { stroke: "var(--c1)", "stroke-width": 2.5 });
+      K.svg(svg, "rect", { x: ax.sx(0), y: 14, width: ax.sx(70) - ax.sx(0), height: 260, fill: "var(--ink-3)", opacity: 0.12 });
+      K.svg(svg, "text", { x: ax.sx(35), y: 46, "text-anchor": "middle", "font-size": 10, class: "muted" }, "<70");
+      K.svg(svg, "line", { x1: ax.sx(v.c), x2: ax.sx(v.c), y1: 14, y2: 274, stroke: "var(--c6)", "stroke-width": 2 });
+      K.svg(svg, "line", { x1: ax.sx(best), x2: ax.sx(best), y1: 14, y2: 274, stroke: "var(--good)", "stroke-dasharray": "5 4" });
+      K.svg(svg, "text", { x: 70, y: 338, "font-size": 12, class: "muted" }, "红线 = 你报的值；绿虚线 = 最佳置信度。报太小：被“自信却错了”狠罚；报太大：被“太含糊”扣分。");
+      const cur = score(v.c);
+      return { readout: [
+        { k: "你的平均得分", v: cur.toFixed(3) },
+        { k: "最佳置信度", v: best + " 毫升" },
+        { k: "最佳得分", v: Math.max(...sv).toFixed(3), color: "var(--good)" },
+        { k: "比最佳少了", v: (Math.max(...sv) - cur).toFixed(3), color: Math.max(...sv) - cur > 0.1 ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

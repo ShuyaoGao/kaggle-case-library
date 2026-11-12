@@ -1,0 +1,586 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>用 Python 处理视频</title>
+<meta name="description" content="Kaggle 案例拆解：视频就是一叠快速翻过的图片。用 OpenCV 读出帧、看帧率和分辨率，把多目标跟踪标签画回行车记录仪视频。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">视频 · 数据处理入门 · 多目标跟踪标签</div>
+  <h1>视频到底是什么：用 Python 拆开一段行车记录仪视频</h1>
+  <p class="en">Working with Video in Python [Youtube Tutorial]</p>
+  <div class="tags">
+    <span class="tag method">OpenCV 读视频</span><span class="tag method">帧率与分辨率</span><span class="tag method">ffmpeg 转码</span>
+    <span class="tag method">BGR ↔ RGB</span><span class="tag method">跟踪标签对齐</span><span class="tag method">画框与写视频</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Rob Mulla</b>（robikscube）</span>
+    <span>Kaggle 点赞 <b>910</b>（2026-11 抓取）</span>
+    <span>数据集 <b>robikscube/driving-video-with-object-tracking</b>（BDD100K 子集）</span>
+    <span><a href="https://www.kaggle.com/code/robikscube/working-with-video-in-python-youtube-tutorial" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">行车记录仪视频 + 每一帧里的物体框</div><p>BDD100K 驾驶数据集的一个子集：1000 段行车视频，以及多目标跟踪标签（每个框的位置、类别、编号）。<span data-cell="25">出处</span></p></div>
+    <div class="card panel"><h3>要做什么</h3><div class="big">不是训练模型，而是学会“拆视频”</div><p>打开视频、读出总帧数 / 分辨率 / 帧率，把某一帧取成图片，再把标注框画回画面，输出一段带框的新视频。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">OpenCV + ffmpeg + pandas</div><p><code>cv2.VideoCapture</code> 逐帧读取，<code>cv2.rectangle</code> 画框，<code>cv2.VideoWriter</code> 写回，ffmpeg 负责格式转换和压缩。全部是经典图像处理，没有神经网络。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一段按类别着色的标注视频</div><p>汽车、行人、自行车用不同颜色的框标出来，整段视频逐帧写出后再压成浏览器能播的 mp4。<span data-cell="42">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>Driving Video with Object Tracking</b>，由作者从伯克利的 BDD100K 驾驶数据集中截取。数据集说明写的是“1000 段行车视频 + 多目标跟踪标签”。本 notebook 只用了其中 <b>1 段</b> 视频 <code>026c7465-309f6d33</code>。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">视频段数（数据集说明）</div><div class="v">1,000</div></div>
+        <div class="stat-tile"><div class="k">本 notebook 用到</div><div class="v">1 段</div></div>
+        <div class="stat-tile"><div class="k">作者写出视频用的尺寸</div><div class="v">1280×720</div></div>
+        <div class="stat-tile"><div class="k">作者写出视频用的帧率</div><div class="v">59.94 fps</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">尺寸和帧率是作者在第 37 格写死的数值 <span data-cell="37">出处</span>，实际读出的数值在运行输出里（第 14、15 格），源码不带输出。原视频是 .mov 格式，作者先转成 .mp4 <span data-cell="7">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">标签表 mot_labels.csv 里用到的列</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>videoName</code></td><td>这一行属于哪段视频</td><td>文本</td></tr>
+        <tr><td><code>frameIndex</code></td><td>标签自己的帧编号（不是视频的帧号，要换算）</td><td>整数</td></tr>
+        <tr><td><code>category</code></td><td>物体类别：car、pedestrian、bicycle、truck…（第 31 格列了 10 种）</td><td>类别</td></tr>
+        <tr><td><code>box2d.x1</code> <code>y1</code> <code>x2</code> <code>y2</code></td><td>框的左上角和右下角坐标（像素）</td><td>数值</td></tr>
+      </table></div>
+      <p class="note">这是“多目标跟踪”（MOT）标签：每一帧里每个物体一行。本 notebook 只用到位置和类别，没有用到跟踪编号。列名来自第 25、29、31 格代码。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="20">
+    <h3>动手试试 A · OpenCV 的 BGR 颜色顺序 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="23">
+    <h3>动手试试 B · 帧率与“车轮倒转” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="37">
+    <h3>动手试试 C · 稀疏标签对齐到每一帧 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者做出的东西</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>产出</th><th>出处</th></tr>
+        <tr><td>把 .mov 转成 .mp4，并在 notebook 里直接播放</td><td><span data-cell="7">第 7 格</span> <span data-cell="10">第 10 格</span></td></tr>
+        <tr><td>读出视频的总帧数、宽高和帧率</td><td><span data-cell="13">第 13–15 格</span></td></tr>
+        <tr><td>每隔 100 帧取一张，拼成 5×5 的缩略图墙</td><td><span data-cell="23">第 23 格</span></td></tr>
+        <tr><td>第 1035 帧上画出所有标注框，按类别着色并写上类别名</td><td><span data-cell="33">第 33 格</span></td></tr>
+        <tr><td>整段视频逐帧加框后写出，再用 ffmpeg 压成 H.264 mp4 播放</td><td><span data-cell="37">第 37 格</span> <span data-cell="40">第 40 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">这份 notebook 是教程，不训练模型，所以没有准确率之类的分数。帧数、帧率等实际读出的数字在运行输出里，Kaggle 下载的源码不带输出，这里不列。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>是所有视频 AI 的第一步：</b>动作识别、目标跟踪、手语识别，都要先把视频拆成帧、对齐标签。</li>
+        <li><b>同类问题：</b>体育比赛回放加标注、监控录像抽帧检查、给自动驾驶数据做可视化质检。</li>
+        <li><b>可迁移的套路：</b>读元数据 → 抽帧看样子 → 对齐标签和帧号 → 画回去人工核对 → 再交给模型。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>格式转换：ffmpeg <code>-qscale 0</code> <span data-cell="7">第 7 格</span></li>
+        <li>读视频：<code>cv2.VideoCapture</code>、<code>CAP_PROP_*</code> <span data-cell="13">第 13 格</span></li>
+        <li>颜色顺序：<code>cv2.cvtColor(img, cv2.COLOR_BGR2RGB)</code> <span data-cell="19">第 19 格</span></li>
+        <li>标签对齐：<code>frameIndex × 11.9</code> <span data-cell="25">第 25 格</span></li>
+        <li>画框、写字：<code>cv2.rectangle</code>、<code>cv2.putText</code> <span data-cell="33">第 33 格</span></li>
+        <li>写视频：<code>cv2.VideoWriter</code> + mp4v 编码 <span data-cell="37">第 37 格</span>；再压成 libx264 <span data-cell="40">第 40 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者把标签帧号乘以 11.9 换成视频帧号（第 25 格），原文没有解释这个数从哪来。如果视频是 59.94 帧/秒、标签是每秒 5 帧，倍数应该是多少？差一点点，到视频末尾会错开几帧？</li>
+      <li>第 35 格在两次标签之间一直沿用“上一次的框”。车开得快时框会落后多少？有没有更好的办法（比如插值）？</li>
+      <li>OpenCV 为什么用 BGR 而不是 RGB？在你自己的项目里，怎样防止颜色顺序出错？</li>
+      <li>一段 1 分钟、60 帧/秒的 1280×720 彩色视频，不压缩要占多少字节？为什么视频必须压缩？</li>
+      <li>如果要训练一个“识别行人”的模型，你会把每一帧都拿来训练吗？相邻两帧几乎一样，会带来什么问题？</li>
+      <li>行车记录仪会拍到路人的脸和车牌。公开这样的数据集，需要注意哪些隐私问题？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Rob Mulla（robikscube），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：BDD100K（UC Berkeley）子集，由 robikscube 整理上传。
+</footer>
+</main>
+
+<script src="nb/video-python-basics.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* 画一帧示意的“道路画面”：天空、路面、车道线、一辆车，x 为车的位置 */
+  function roadFrame(g, x0, y0, w, h, carX, opt) {
+    opt = opt || {};
+    K.svg(g, "rect", { x: x0, y: y0, width: w, height: h * 0.45, fill: opt.sky || "color-mix(in srgb, var(--c1) 30%, var(--panel))" });
+    K.svg(g, "rect", { x: x0, y: y0 + h * 0.45, width: w, height: h * 0.55, fill: "color-mix(in srgb, var(--ink-3) 35%, var(--panel))" });
+    K.svg(g, "path", { d: `M${x0 + w * 0.5},${y0 + h * 0.45} L${x0 + w * 0.42},${y0 + h} M${x0 + w * 0.5},${y0 + h * 0.45} L${x0 + w * 0.58},${y0 + h}`, stroke: "var(--panel)", "stroke-width": 2, "stroke-dasharray": "6 5", fill: "none" });
+    const cw = w * 0.16, ch = h * 0.16, cx = x0 + carX * (w - cw), cy = y0 + h * 0.62;
+    K.svg(g, "rect", { x: cx, y: cy, width: cw, height: ch, rx: 3, fill: opt.car || "var(--c6)" });
+    K.svg(g, "rect", { x: cx + cw * 0.2, y: cy - ch * 0.45, width: cw * 0.6, height: ch * 0.5, rx: 2, fill: opt.car || "var(--c6)", opacity: 0.8 });
+    return { cx, cy, cw, ch };
+  }
+
+  const steps = [
+    {
+      title: "视频是一叠快速翻过的图片", kicker: "第 0–1 格 · 什么是视频",
+      html: `<p>作者开门见山：视频就是<b>一张接一张的图片</b>，翻得够快，人眼就看成了连续的运动，和翻页动画本一样。<span data-cell="1">出处</span></p><p>动画里一叠“帧”依次翻过，每一帧里的车只挪了一点点。之后所有操作，都是在这一叠图片上做文章。</p>`,
+      cells: [0, 1],
+      draw(svg, ctx) {
+        const N = 8, frames = [];
+        for (let i = 0; i < N; i++) {
+          const g = K.svg(svg, "g");
+          const x = 40 + i * 22, y = 40 + i * 12;
+          K.svg(g, "rect", { x: x - 2, y: y - 2, width: 244, height: 144, fill: "var(--panel)", stroke: "var(--line)" });
+          roadFrame(g, x, y, 240, 140, i / (N - 1));
+          K.svg(g, "text", { x: x + 6, y: y + 16, "font-size": 11, fill: "var(--ink)" }, "帧 " + i);
+          frames.push(g);
+        }
+        K.svg(svg, "text", { x: 30, y: 320, "font-size": 13, class: "muted" }, "一叠帧（示意）：每帧里的车只往右挪一点");
+        const play = K.svg(svg, "g");
+        K.svg(play, "rect", { x: 460, y: 80, width: 244, height: 144, fill: "var(--panel)", stroke: "var(--accent)", "stroke-width": 2 });
+        const screen = K.svg(play, "g");
+        roadFrame(screen, 462, 82, 240, 140, 0);
+        K.svg(svg, "text", { x: 582, y: 250, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "快速翻过 → 看起来在动");
+        const lab = K.svg(svg, "text", { x: 582, y: 272, "text-anchor": "middle", "font-size": 12, class: "muted" }, "正在播放第 0 帧");
+        (async () => {
+          for (let round = 0; round < 3; round++) for (let i = 0; i < N; i++) {
+            if (!(await ctx.wait(round === 0 ? 260 : 120))) return;
+            screen.innerHTML = ""; roadFrame(screen, 462, 82, 240, 140, i / (N - 1));
+            frames.forEach((f, j) => (f.style.opacity = j === i ? 1 : 0.35));
+            lab.textContent = "正在播放第 " + i + " 帧";
+          }
+        })();
+      },
+    },
+    {
+      title: "分辨率和帧率", kicker: "第 2–3 格 · 两个基本参数",
+      html: `<p><b>分辨率</b> = 每一帧有多少个像素（宽 × 高），决定画面有多清楚；<b>帧率</b>（fps，frames per second）= 每秒放多少帧，决定动作有多顺。<span data-cell="2">出处</span> <span data-cell="3">出处</span></p><p>两者相乘再乘以 3 个颜色通道，就是每秒的原始数据量。动画下方现场算一下 1280×720、60 帧/秒不压缩时每秒有多少字节。</p>`,
+      cells: [2, 3],
+      draw(svg, ctx) {
+        const sizes = [["640×360", 640, 360], ["1280×720", 1280, 720], ["1920×1080", 1920, 1080]];
+        const sc = 0.16;
+        sizes.forEach((s, i) => {
+          const r = K.svg(svg, "rect", { x: 30, y: 300 - s[2] * sc, width: s[1] * sc, height: s[2] * sc, fill: "none", stroke: K.colors[i], "stroke-width": 2 });
+          K.svg(svg, "text", { x: 34 + s[1] * sc - 4, y: 300 - s[2] * sc + 16, "text-anchor": "end", "font-size": 12, fill: K.colors[i] }, s[0]);
+          r.style.opacity = 0;
+          ctx.wait(300 + i * 400).then((ok) => ok && ctx.tween(400, (t) => (r.style.opacity = t)));
+        });
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "分辨率：同一比例下画面的像素尺寸");
+        // 帧率时间轴
+        K.svg(svg, "text", { x: 380, y: 30, "font-size": 13, class: "muted" }, "帧率：1 秒内放几帧");
+        [[10, "10 fps"], [30, "30 fps"], [60, "60 fps"]].forEach(([f, lab], k) => {
+          const y = 70 + k * 50;
+          K.svg(svg, "line", { x1: 440, x2: 700, y1: y, y2: y, stroke: "var(--line)" });
+          K.svg(svg, "text", { x: 380, y: y + 4, "font-size": 12 }, lab);
+          const ticks = [];
+          for (let i = 0; i < f; i++) ticks.push(K.svg(svg, "line", { x1: 440 + (i * 260) / f, x2: 440 + (i * 260) / f, y1: y - 10, y2: y + 10, stroke: K.colors[k], "stroke-width": 2, opacity: 0 }));
+          ctx.tween(1200, (t) => ticks.forEach((e, i) => (e.style.opacity = i / f <= t ? 1 : 0)));
+        });
+        const bytes = 1280 * 720 * 3 * 60;
+        K.svg(svg, "text", { x: 380, y: 250, "font-size": 13 }, "1280 × 720 像素 × 3 色 × 60 帧/秒");
+        K.svg(svg, "text", { x: 380, y: 276, "font-size": 18, "font-weight": 700, fill: "var(--warn)" }, "≈ " + (bytes / 1e6).toFixed(0) + " MB / 秒（不压缩）");
+        K.svg(svg, "text", { x: 380, y: 300, "font-size": 12, class: "muted" }, "所以视频文件一定要压缩（见最后一章）");
+      },
+    },
+    {
+      title: "准备工具，用 ffmpeg 转格式", kicker: "第 4–10 格 · 环境与转码",
+      html: `<p>需要三样工具：<b>OpenCV</b>（<code>cv2</code>，读写视频和画图）、<b>matplotlib</b>（在 notebook 里显示图片）、<b>ffmpeg</b>（命令行的视频“万能转换器”）。<span data-cell="4">出处</span></p><p>原视频是苹果的 .mov 格式，作者用 ffmpeg 转成 .mp4，<code>-qscale 0</code> 表示尽量保持原画质。<span data-cell="7">出处</span> 视频文件 = “外包装”（容器，如 mov、mp4）+ “压缩方法”（编码器，如 H.264），换容器不等于换内容。</p>`,
+      cells: [5, 7], highlight: ["ffmpeg", "-qscale"],
+      draw(svg, ctx) {
+        const a = K.node(svg, 40, 120, 170, 90, "026c7465.mov\n（苹果 QuickTime 容器）", { fill: "color-mix(in srgb, var(--c4) 16%, var(--panel))", stroke: "var(--c4)" });
+        const f = K.node(svg, 280, 130, 150, 70, "ffmpeg\n-qscale 0", { fill: "var(--accent-soft)", stroke: "var(--accent)", bold: true });
+        const b = K.node(svg, 500, 120, 170, 90, "026c7465.mp4\n（通用 MP4 容器）", { fill: "color-mix(in srgb, var(--c3) 16%, var(--panel))", stroke: "var(--c3)" });
+        const a1 = K.arrow(svg, 212, 165, 278, 165), a2 = K.arrow(svg, 432, 165, 498, 165);
+        [f, b, a1, a2].forEach((e) => (e.style.opacity = 0));
+        // 里面的帧像小方块从左流到右
+        const blocks = [];
+        for (let i = 0; i < 6; i++) blocks.push(K.svg(svg, "rect", { x: 60 + i * 22, y: 240, width: 16, height: 12, rx: 2, fill: "var(--c1)" }));
+        K.svg(svg, "text", { x: 40, y: 290, "font-size": 12, class: "muted" }, "里面的画面（帧）基本不变，只是换了一个“盒子”装");
+        K.svg(svg, "text", { x: 40, y: 40, "font-size": 13, class: "muted" }, "容器（盒子） ≠ 编码（压缩方法）");
+        ctx.tween(500, (t) => { a1.style.opacity = f.style.opacity = t; })
+          .then((ok) => ok && ctx.tween(500, (t) => { a2.style.opacity = b.style.opacity = t; }))
+          .then((ok) => ok && ctx.tween(1400, (t) => blocks.forEach((e, i) => e.setAttribute("x", K.lerp(60 + i * 22, 520 + i * 22, t)))));
+      },
+    },
+    {
+      title: "打开视频，读出“身份证”", kicker: "第 11–16 格 · 元数据",
+      html: `<p><code>cv2.VideoCapture</code> 打开视频后先不读画面，而是问它三个问题：一共多少帧（<code>CAP_PROP_FRAME_COUNT</code>）、多宽多高（<code>FRAME_WIDTH / HEIGHT</code>）、每秒几帧（<code>CAP_PROP_FPS</code>）。<span data-cell="13">出处</span> <span data-cell="15">出处</span></p><p>知道这三个数，就能算出视频时长 = 总帧数 ÷ 帧率。用完记得 <code>cap.release()</code> 关掉文件。<span data-cell="16">出处</span></p>`,
+      cells: [12, 13, 14, 15], highlight: ["CAP_PROP_FRAME_COUNT", "CAP_PROP_FPS", "CAP_PROP_FRAME_HEIGHT"],
+      draw(svg, ctx) {
+        K.node(svg, 40, 110, 180, 110, "VideoCapture\n('026c7465.mp4')", { fill: "var(--accent-soft)", stroke: "var(--accent)", bold: true });
+        const qs = [["总帧数 FRAME_COUNT", "N 帧"], ["宽 × 高", "W × H 像素"], ["帧率 FPS", "f 帧/秒"], ["时长 = 总帧数 ÷ 帧率", "N / f 秒"]];
+        const rows = qs.map((q, i) => {
+          const g = K.svg(svg, "g");
+          K.arrow(g, 222, 165, 300, 60 + i * 66);
+          K.node(g, 302, 36 + i * 66, 220, 48, q[0], { fill: "var(--panel-2)" });
+          K.svg(g, "text", { x: 540, y: 66 + i * 66, "font-size": 14, "font-weight": 700, fill: K.colors[i] }, q[1]);
+          g.style.opacity = 0;
+          return g;
+        });
+        K.svg(svg, "text", { x: 40, y: 320, "font-size": 12, class: "muted" }, "具体数值在作者的运行输出里（源码不带），这里用字母代替");
+        (async () => { for (const r of rows) if (!(await ctx.tween(450, (t) => (r.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "取出一帧：注意 BGR 颜色顺序", kicker: "第 17–21 格 · 从视频到图片",
+      html: `<p><code>cap.read()</code> 每调用一次就“翻”一页，返回两样东西：<code>ret</code>（读成功没有）和 <code>img</code>（这一帧，是一个 高 × 宽 × 3 的数字数组）。<span data-cell="18">出处</span></p><p>坑在这里：OpenCV 存颜色的顺序是 <b>B、G、R</b>（蓝绿红），而 matplotlib 按 <b>R、G、B</b> 显示。不转换就会红蓝颠倒，所以作者写了 <code>display_cv2_img</code>，先 <code>cvtColor(BGR2RGB)</code> 再显示。<span data-cell="19">出处</span></p>`,
+      cells: [18, 19], highlight: ["COLOR_BGR2RGB", "cap.read()"],
+      draw(svg, ctx) {
+        const px = [[210, 60, 50], [40, 120, 220], [60, 170, 80]];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "同一个像素的三个数字，按不同顺序理解，颜色就不同");
+        px.forEach((p, i) => {
+          const y = 60 + i * 90;
+          const rgb = `rgb(${p[0]},${p[1]},${p[2]})`, bgrAsRgb = `rgb(${p[2]},${p[1]},${p[0]})`;
+          K.svg(svg, "text", { x: 30, y: y + 32, "font-size": 13, "font-family": "var(--mono)" }, `[${p[2]}, ${p[1]}, ${p[0]}]`);
+          K.svg(svg, "text", { x: 30, y: y + 52, "font-size": 11, class: "muted" }, "OpenCV 存成 B,G,R");
+          K.arrow(svg, 170, y + 35, 230, y + 35);
+          const wrong = K.svg(svg, "rect", { x: 240, y: y + 10, width: 70, height: 50, rx: 6, fill: bgrAsRgb });
+          K.svg(svg, "text", { x: 320, y: y + 40, "font-size": 12 }, "直接按 RGB 显示：错");
+          const right = K.svg(svg, "rect", { x: 470, y: y + 10, width: 70, height: 50, rx: 6, fill: rgb, opacity: 0 });
+          const tx = K.svg(svg, "text", { x: 550, y: y + 40, "font-size": 12, fill: "var(--good)", opacity: 0 }, "BGR2RGB 后：对");
+          ctx.wait(600 + i * 400).then((ok) => ok && ctx.tween(500, (t) => { right.style.opacity = t; tx.style.opacity = t; }));
+        });
+      },
+    },
+    {
+      title: "每隔 100 帧看一眼", kicker: "第 22–23 格 · 抽帧缩略图",
+      html: `<p>一段视频有成百上千帧，一张张看不现实。作者从头读到尾，<b>每到 100 的倍数</b>（第 0、100、200……帧）就把这一帧放进 5×5 的格子里，一共最多 25 张。<span data-cell="23">出处</span></p><p>这叫<b>抽帧</b>：快速了解视频内容（白天还是夜晚、堵不堵车），也是很多视频模型的第一步：不看全部帧，只均匀挑几张。</p>`,
+      cells: [23], highlight: ["frame % 100 == 0"],
+      draw(svg, ctx) {
+        K.svg(svg, "line", { x1: 30, x2: 690, y1: 60, y2: 60, stroke: "var(--line)", "stroke-width": 6 });
+        K.svg(svg, "text", { x: 30, y: 40, "font-size": 12, class: "muted" }, "时间轴：每个小竖线是 1 帧（示意，按比例缩小）");
+        const total = 220, picks = [];
+        for (let i = 0; i < total; i++) {
+          const x = 30 + (i * 660) / total;
+          K.svg(svg, "line", { x1: x, x2: x, y1: 54, y2: 66, stroke: "var(--ink-3)", "stroke-width": 0.6 });
+        }
+        const head = K.svg(svg, "rect", { x: 28, y: 48, width: 4, height: 24, fill: "var(--accent)" });
+        const cnt = K.svg(svg, "text", { x: 30, y: 92, "font-size": 13, "font-family": "var(--mono)" }, "frame = 0");
+        for (let k = 0; k < 10; k++) {
+          const g = K.svg(svg, "g");
+          const gx = 40 + (k % 5) * 130, gy = 120 + Math.floor(k / 5) * 100;
+          K.svg(g, "rect", { x: gx - 2, y: gy - 2, width: 124, height: 74, fill: "none", stroke: "var(--line)" });
+          roadFrame(g, gx, gy, 120, 70, (k * 0.13) % 1, { sky: k > 6 ? "color-mix(in srgb, var(--ink) 40%, var(--panel))" : null });
+          K.svg(g, "text", { x: gx + 4, y: gy + 13, "font-size": 10, fill: "var(--ink)" }, "Frame: " + k * 100);
+          g.style.opacity = 0.12;
+          picks.push(g);
+        }
+        ctx.tween(3200, (t) => {
+          const f = Math.floor(t * 999);
+          head.setAttribute("x", 28 + (f / 1000) * 660);
+          cnt.textContent = "frame = " + f + (f % 100 < 8 ? "   ← 100 的倍数，保存！" : "");
+          picks.forEach((p, k) => (p.style.opacity = f >= k * 100 ? 1 : 0.12));
+        });
+      },
+    },
+    {
+      title: "读入跟踪标签，换算帧号", kicker: "第 24–26 格 · 标签对齐",
+      html: `<p>标签表 <code>mot_labels.csv</code> 里每一行是“某一帧里的一个物体框”。作者先筛出这段视频的行，再做关键的一步：<b>把标签的帧号乘以 11.9</b>，四舍五入后当作视频的帧号。<span data-cell="25">出处</span></p><p>为什么要乘？因为标签不是每一帧都标，而是隔一段才标一次，两者的“钟”走得不一样快。原文没解释 11.9 的来历；如果视频每秒 59.94 帧、标签每秒 5 帧，比例应约为 11.99。这种微小误差在长视频里会慢慢累积，课堂讨论第 1 题会再算一算。<code>value_counts()</code> 则数了每类物体出现多少次。<span data-cell="26">出处</span></p>`,
+      cells: [25, 26], highlight: ["11.9"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 40, "font-size": 13 }, "视频帧（每秒约 60 帧）");
+        K.svg(svg, "text", { x: 30, y: 170, "font-size": 13 }, "标签帧 frameIndex（隔一段才标一次）");
+        const W = 640, x0 = 40, nV = 120;
+        for (let i = 0; i <= nV; i++) K.svg(svg, "line", { x1: x0 + (i * W) / nV, x2: x0 + (i * W) / nV, y1: 60, y2: 80, stroke: "var(--ink-3)", "stroke-width": 0.7 });
+        const lines = [];
+        for (let j = 0; j <= 10; j++) {
+          const xv = x0 + ((j * 11.9) * W) / nV;
+          K.svg(svg, "circle", { cx: x0 + (j * W) / 10, cy: 200, r: 6, fill: "var(--c2)" });
+          K.svg(svg, "text", { x: x0 + (j * W) / 10, y: 225, "text-anchor": "middle", "font-size": 11 }, j);
+          const ln = K.svg(svg, "line", { x1: x0 + (j * W) / 10, y1: 194, x2: x0 + (j * W) / 10, y2: 194, stroke: "var(--c2)", "stroke-width": 1.5, "stroke-dasharray": "4 3" });
+          lines.push([ln, xv, j]);
+        }
+        K.svg(svg, "text", { x: 30, y: 275, "font-size": 14, "font-family": "var(--mono)" }, 'video_frame = round(frameIndex × 11.9)');
+        const ex = K.svg(svg, "text", { x: 30, y: 302, "font-size": 13, class: "muted" }, "");
+        (async () => {
+          for (const [ln, xv, j] of lines) {
+            if (!(await ctx.tween(200, (t) => { ln.setAttribute("x2", K.lerp(+ln.getAttribute("x1"), xv, t)); ln.setAttribute("y2", K.lerp(194, 82, t)); }))) return;
+            ex.textContent = `标签第 ${j} 帧 → 视频第 ${Math.round(j * 11.9)} 帧`;
+          }
+        })();
+      },
+    },
+    {
+      title: "在第 1035 帧上画框", kicker: "第 27–29 格 · 画标注框",
+      html: `<p>作者从头读到第 1035 帧停下（<code>cap.read()</code> 只能一帧一帧往后翻），再从标签里挑出 <code>video_frame == 1035</code> 的所有行。<span data-cell="27">出处</span></p><p>每一行有左上角 <code>(x1, y1)</code> 和右下角 <code>(x2, y2)</code> 两个点，<code>cv2.rectangle</code> 用这两个点画出一个红框（OpenCV 里 <code>(0, 0, 255)</code> 是红色，因为顺序是 BGR）。<span data-cell="29">出处</span></p>`,
+      cells: [27, 29], highlight: ["cv2.rectangle", "video_frame == 1035"],
+      draw(svg, ctx) {
+        const g = K.svg(svg, "g");
+        roadFrame(g, 40, 30, 420, 260, 0.3);
+        const boxes = [[150, 170, 225, 222], [300, 160, 360, 205], [400, 150, 440, 230]];
+        K.svg(svg, "text", { x: 40, y: 318, "font-size": 12, class: "muted" }, "示意画面；坐标系原点在左上角，y 向下增大");
+        boxes.forEach((b, i) => {
+          const p1 = K.svg(svg, "circle", { cx: b[0], cy: b[1], r: 0, fill: "var(--c4)" });
+          const p2 = K.svg(svg, "circle", { cx: b[2], cy: b[3], r: 0, fill: "var(--c4)" });
+          const r = K.svg(svg, "rect", { x: b[0], y: b[1], width: 0, height: 0, fill: "none", stroke: "var(--c6)", "stroke-width": 3 });
+          const row = K.svg(svg, "text", { x: 490, y: 80 + i * 60, "font-size": 12, "font-family": "var(--mono)", opacity: 0 }, `x1=${b[0]} y1=${b[1]}`);
+          const row2 = K.svg(svg, "text", { x: 490, y: 98 + i * 60, "font-size": 12, "font-family": "var(--mono)", opacity: 0 }, `x2=${b[2]} y2=${b[3]}`);
+          ctx.wait(300 + i * 900).then((ok) => ok && ctx.tween(300, (t) => { row.style.opacity = row2.style.opacity = t; p1.setAttribute("r", 4 * t); p2.setAttribute("r", 4 * t); }))
+            .then((ok) => ok && ctx.tween(500, (t) => { r.setAttribute("width", (b[2] - b[0]) * t); r.setAttribute("height", (b[3] - b[1]) * t); }));
+        });
+        K.svg(svg, "text", { x: 490, y: 50, "font-size": 13, "font-weight": 700 }, "标签表里的一行行坐标");
+      },
+    },
+    {
+      title: "按类别着色、写上类别名", kicker: "第 30–33 格 · 让标注一眼可读",
+      html: `<p>全是红框分不清谁是谁。作者建了一个 <code>color_map</code>：汽车、卡车偏红，行人偏蓝，自行车、摩托偏绿……<span data-cell="31">出处</span> 再用 <code>cv2.putText</code> 在框的左上角写上类别名。<span data-cell="33">出处</span></p><p>注意 <code>color_map</code> 里的三元组同样是 <b>BGR</b>：<code>(0, 0, 255)</code> 是红，<code>(255, 0, 0)</code> 是蓝。这一格结尾的 <code>cap.release()</code> 释放了视频文件。</p>`,
+      cells: [31, 33], highlight: ["color_map", "cv2.putText"],
+      draw(svg, ctx) {
+        const g = K.svg(svg, "g");
+        roadFrame(g, 40, 30, 420, 260, 0.3, { car: "var(--ink-3)" });
+        const items = [["car", [150, 170, 225, 222], [0, 0, 255]], ["pedestrian", [100, 140, 125, 215], [255, 0, 0]], ["bicycle", [330, 165, 365, 215], [0, 255, 0]], ["truck", [390, 120, 450, 230], [0, 0, 100]]];
+        items.forEach((it, i) => {
+          const [name, b, bgr] = it, col = `rgb(${bgr[2]},${bgr[1]},${bgr[0]})`;
+          const r = K.svg(svg, "rect", { x: b[0], y: b[1], width: b[2] - b[0], height: b[3] - b[1], fill: "none", stroke: col, "stroke-width": 3, opacity: 0 });
+          const t = K.svg(svg, "text", { x: b[0] + 3, y: b[1] - 4, "font-size": 11, fill: col, "font-weight": 700, opacity: 0 }, name);
+          K.svg(svg, "text", { x: 490, y: 70 + i * 50, "font-size": 12, "font-family": "var(--mono)" }, `"${name}": (${bgr.join(", ")})`);
+          K.svg(svg, "rect", { x: 680, y: 58 + i * 50, width: 20, height: 16, fill: col });
+          ctx.wait(400 + i * 500).then((ok) => ok && ctx.tween(400, (k) => { r.style.opacity = k; t.style.opacity = k; }));
+        });
+        K.svg(svg, "text", { x: 490, y: 290, "font-size": 12, class: "muted" }, "左边是 BGR 三元组，右边色块是它真正的颜色");
+      },
+    },
+    {
+      title: "逐帧加框，写出一段新视频", kicker: "第 34–38 格 · 读 → 画 → 写",
+      html: `<p>把前面的操作包成函数 <code>add_annotations</code>：对视频的第 <code>frame</code> 帧，找“不晚于这一帧的最近一次标签”，把那一次的框画上去。<span data-cell="35">出处</span></p><p>然后用 <code>cv2.VideoWriter</code> 开一个新视频（mp4v 编码、59.94 帧/秒、1280×720），从头到尾<b>读一帧、画框、写一帧</b>。<span data-cell="37">出处</span> 因为标签是隔约 12 帧才有一次，中间的帧都沿用上一次的框，所以框会“一跳一跳”地跟着车走。下面的实验 C 可以亲手比较这种做法和插值。</p>`,
+      cells: [35, 37], highlight: ["video_frame <= @frame", "cv2.VideoWriter", "out.write"],
+      draw(svg, ctx) {
+        const nodes = [["cap.read()\n读一帧", 30], ["add_annotations\n画上最近的框", 230], ["out.write()\n写进新视频", 470]];
+        nodes.forEach(([t, x], i) => { K.node(svg, x, 30, 190, 60, t, { fill: i === 1 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 1 ? "var(--accent)" : "var(--line)" }); if (i < 2) K.arrow(svg, x + 192, 60, x + 238 - (i ? 0 : 0) + (i ? 0 : 0), 60); });
+        K.arrow(svg, 565, 92, 565, 112); K.svg(svg, "path", { d: "M565,112 L565,118 L125,118 L125,94", fill: "none", stroke: "var(--ink-3)", "stroke-width": 1.5, "stroke-dasharray": "4 3" });
+        K.svg(svg, "text", { x: 300, y: 134, "text-anchor": "middle", "font-size": 12, class: "muted" }, "循环：直到读完所有帧");
+        // 时间轴：真实位置 vs 沿用上一次标签的框
+        const ax = K.axes(svg, { x: 60, y: 160, w: 620, h: 140 }, [0, 48], [0, 1], { yticks: 0, xlabel: "视频帧号（示意）" });
+        K.svg(svg, "text", { x: 66, y: 172, "font-size": 12, fill: "var(--c1)" }, "— 车的真实位置");
+        K.svg(svg, "text", { x: 200, y: 172, "font-size": 12, fill: "var(--c6)" }, "— 画出来的框（沿用上一次标签）");
+        const pos = (f) => 0.1 + 0.8 * (f / 48) + 0.04 * Math.sin(f / 5);
+        let d1 = "", d2 = "";
+        for (let f = 0; f <= 48; f += 0.5) {
+          d1 += (d1 ? "L" : "M") + ax.sx(f) + "," + ax.sy(pos(f));
+          const lf = Math.floor(f / 12) * 12;
+          d2 += (d2 ? "L" : "M") + ax.sx(f) + "," + ax.sy(pos(lf));
+        }
+        const p1 = K.svg(svg, "path", { d: d1, fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+        const p2 = K.svg(svg, "path", { d: d2, fill: "none", stroke: "var(--c6)", "stroke-width": 2 });
+        [0, 12, 24, 36, 48].forEach((f) => K.svg(svg, "circle", { cx: ax.sx(f), cy: ax.sy(pos(f)), r: 4, fill: "var(--c6)" }));
+        const L = p2.getTotalLength ? p2.getTotalLength() : 1000;
+        p2.style.strokeDasharray = L; p2.style.strokeDashoffset = L;
+        ctx.tween(2200, (t) => (p2.style.strokeDashoffset = L * (1 - t)));
+      },
+    },
+    {
+      title: "压缩成浏览器能播的 mp4", kicker: "第 39–43 格 · 再次转码与播放",
+      html: `<p>OpenCV 用 mp4v 编码写出的文件很大，浏览器也不一定能播。作者最后再调用一次 ffmpeg，换成 <b>H.264（libx264）</b>编码：<code>-crf 18</code> 控制画质（数字越小越清楚、文件越大），<code>-preset veryfast</code> 控制压缩速度。<span data-cell="40">出处</span> 用 <code>ls</code> 对比两个文件的大小，再在 notebook 里播放。<span data-cell="41">出处</span> <span data-cell="42">出处</span></p><p>视频能压得很小，关键是<b>相邻帧几乎一样</b>：只需要偶尔存一张完整的“关键帧”，其余帧只存“和上一帧哪里不同”。</p>`,
+      cells: [40], highlight: ["libx264", "-crf"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 34, "font-size": 13, class: "muted" }, "关键帧存完整画面，其余帧只存变化的部分（示意）");
+        const cells = [];
+        for (let i = 0; i < 8; i++) {
+          const x = 30 + i * 84, key = i % 4 === 0;
+          const g = K.svg(svg, "g");
+          K.svg(g, "rect", { x, y: 60, width: 76, height: 50, fill: "none", stroke: "var(--line)" });
+          if (key) roadFrame(g, x + 1, 61, 74, 48, i / 7);
+          else {
+            const cw = 74 * 0.16;
+            K.svg(g, "rect", { x: x + 1 + (i / 7) * (74 - cw) - 4, y: 88, width: cw + 8, height: 14, fill: "var(--c6)", opacity: 0.85 });
+          }
+          K.svg(g, "text", { x: x + 38, y: 126, "text-anchor": "middle", "font-size": 11, fill: key ? "var(--accent)" : "var(--ink-3)" }, key ? "关键帧" : "只存变化");
+          cells.push(g); g.style.opacity = 0;
+        }
+        const ax = K.axes(svg, { x: 120, y: 170, w: 500, h: 120 }, [0, 1], [0, 1], { xticks: 0, yticks: 0 });
+        const bars = [["mp4v 输出", 1, "var(--c4)"], ["libx264 crf=18", 0.25, "var(--c3)"]];
+        const rs = bars.map((b, i) => {
+          K.svg(svg, "text", { x: 110, y: 205 + i * 50, "text-anchor": "end", "font-size": 12 }, b[0]);
+          return [K.svg(svg, "rect", { x: 120, y: 188 + i * 50, width: 0, height: 28, rx: 3, fill: b[2] }), b[1]];
+        });
+        K.svg(svg, "text", { x: 120, y: 318, "font-size": 12, class: "muted" }, "文件大小对比（长短为示意，实际大小见作者第 41 格的输出）");
+        (async () => {
+          for (const c of cells) if (!(await ctx.tween(160, (t) => (c.style.opacity = t)))) return;
+          await ctx.tween(900, (t) => rs.forEach(([r, v]) => r.setAttribute("width", 480 * v * t)));
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：BGR 与 RGB ---------- */
+  // 用代码生成一幅 32×18 的小“路况图”，每个像素都按 (R,G,B) 存；再按 OpenCV 的 BGR 存储，选择不同的显示方式
+  function makeScene() {
+    const W = 32, H = 18, px = [];
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      let c;
+      if (y < 7) c = [120 + y * 8, 170 + y * 6, 235];                 // 天空：蓝
+      else if (y < 9 && (x < 6 || x > 25)) c = [40, 140, 60];          // 路边树：绿
+      else c = [95, 95, 100];                                           // 路面：灰
+      if (y >= 10 && y <= 13 && x >= 9 && x <= 15) c = [215, 40, 40];   // 红车
+      if (y >= 9 && y <= 10 && x >= 10 && x <= 14) c = [190, 30, 30];
+      if (y >= 11 && y <= 14 && x >= 21 && x <= 23) c = [245, 200, 30]; // 黄色出租车
+      if (y >= 6 && y <= 13 && x === 18) c = [30, 60, 200];             // 穿蓝衣服的行人
+      if (y >= 15 && (x === 15 || x === 16) && y % 2) c = [240, 240, 240];
+      px.push(c);
+    }
+    return { W, H, px };
+  }
+  const scene = makeScene();
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "mode", label: "OpenCV 读到的数组（B,G,R 顺序）怎么显示", value: "raw", options: [["raw", "直接交给 matplotlib（当成 R,G,B）"], ["fix", "先 cvtColor(BGR2RGB) 再显示"]] },
+      { id: "px", label: "查看第几列的像素（0–31）", min: 0, max: 31, step: 1, value: 12 },
+    ],
+    note: "左边是“真实画面”，右边是 notebook 里显示出来的样子。图是代码生成的 32×18 小图，每一个像素都现场按选择的顺序重新解释。",
+    render(svg, v) {
+      const cs = 9;
+      const draw = (x0, swap) => {
+        scene.px.forEach((c, i) => {
+          const x = i % scene.W, y = Math.floor(i / scene.W);
+          const stored = [c[2], c[1], c[0]];                 // OpenCV 数组：B,G,R
+          const shown = swap ? [stored[2], stored[1], stored[0]] : stored; // matplotlib 按 R,G,B 理解
+          K.svg(svg, "rect", { x: x0 + x * cs, y: 30 + y * cs, width: cs + 0.4, height: cs + 0.4, fill: `rgb(${shown[0]},${shown[1]},${shown[2]})` });
+        });
+        K.svg(svg, "rect", { x: x0 + v.px * cs, y: 30, width: cs, height: scene.H * cs, fill: "none", stroke: "var(--ink)", "stroke-width": 1.5 });
+      };
+      K.svg(svg, "text", { x: 20, y: 20, "font-size": 12, "font-weight": 700 }, "真实画面（相机看到的）");
+      draw(20, true);
+      K.svg(svg, "text", { x: 330, y: 20, "font-size": 12, "font-weight": 700 }, "notebook 里显示的");
+      draw(330, v.mode === "fix");
+      const c = scene.px[12 * scene.W + v.px];
+      K.svg(svg, "text", { x: 20, y: 222, "font-size": 12, "font-family": "var(--mono)" }, `第 12 行、第 ${v.px} 列：真实颜色 R,G,B = (${c.join(", ")})`);
+      K.svg(svg, "text", { x: 20, y: 244, "font-size": 12, "font-family": "var(--mono)" }, `OpenCV 数组里存成       B,G,R = (${[c[2], c[1], c[0]].join(", ")})`);
+      const shown = v.mode === "fix" ? c : [c[2], c[1], c[0]];
+      K.svg(svg, "text", { x: 20, y: 266, "font-size": 12, "font-family": "var(--mono)" }, `matplotlib 当成      R,G,B = (${shown.join(", ")})`);
+      K.svg(svg, "rect", { x: 560, y: 230, width: 30, height: 30, fill: `rgb(${c.join(",")})` });
+      K.svg(svg, "rect", { x: 600, y: 230, width: 30, height: 30, fill: `rgb(${shown.join(",")})` });
+      K.svg(svg, "text", { x: 560, y: 278, "font-size": 10, class: "muted" }, "真实");
+      K.svg(svg, "text", { x: 600, y: 278, "font-size": 10, class: "muted" }, "显示");
+      let wrong = 0;
+      scene.px.forEach((p) => { const s = v.mode === "fix" ? p : [p[2], p[1], p[0]]; if (Math.abs(s[0] - p[0]) + Math.abs(s[2] - p[2]) > 30) wrong++; });
+      return { readout: [
+        { k: "颜色显示错的像素", v: wrong + " / " + scene.px.length, color: wrong ? "var(--bad)" : "var(--good)" },
+        { k: "红车看起来是", v: v.mode === "fix" ? "红色" : "蓝色", color: v.mode === "fix" ? "var(--good)" : "var(--bad)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：帧率与车轮倒转 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "rps", label: "车轮真实转速（圈/秒）", min: 0, max: 30, step: 0.5, value: 9 },
+      { id: "fps", label: "摄像机帧率（帧/秒）", min: 5, max: 60, step: 1, value: 10 },
+    ],
+    note: "车轮有 4 根辐条，所以每转 1/4 圈画面就和原来一模一样。电脑按帧率现场算出前 6 帧里辐条的位置，再算“看起来”每帧转了多少。",
+    render(svg, v) {
+      const step = 360 * v.rps / v.fps;                        // 每帧真实转过的角度
+      const sym = 90;                                           // 4 根辐条的对称角
+      let app = ((step % sym) + sym) % sym; if (app > sym / 2) app -= sym; // 人眼选择最小的转动解释
+      const appRps = (app * v.fps) / 360;
+      for (let k = 0; k < 6; k++) {
+        const cx = 60 + k * 104, cy = 110, R = 42, ang = (k * step) * Math.PI / 180;
+        K.svg(svg, "circle", { cx, cy, r: R, fill: "var(--panel-2)", stroke: "var(--ink-3)", "stroke-width": 3 });
+        for (let s = 0; s < 4; s++) {
+          const a = ang + s * Math.PI / 2;
+          K.svg(svg, "line", { x1: cx, y1: cy, x2: cx + R * Math.cos(a), y2: cy + R * Math.sin(a), stroke: s === 0 ? "var(--c6)" : "var(--ink-3)", "stroke-width": s === 0 ? 3 : 2 });
+        }
+        K.svg(svg, "text", { x: cx, y: cy + 62, "text-anchor": "middle", "font-size": 11, class: "muted" }, "第 " + k + " 帧");
+      }
+      K.svg(svg, "text", { x: 20, y: 30, "font-size": 12, class: "muted" }, "红色辐条只是为了让你看清真实转了多少；真实车轮四根辐条一模一样");
+      K.svg(svg, "text", { x: 20, y: 220, "font-size": 13 }, `两帧之间真实转过 ${step.toFixed(1)}°；四根辐条一样，人眼会按最小的转动来理解：${app.toFixed(1)}°`);
+      const dir = Math.abs(appRps) < 0.05 ? "看起来静止不动" : app > 0 ? "看起来顺时针转" : "看起来倒着转！";
+      K.svg(svg, "text", { x: 20, y: 250, "font-size": 15, "font-weight": 700, fill: app < 0 ? "var(--bad)" : "var(--ink)" }, dir);
+      K.svg(svg, "text", { x: 20, y: 280, "font-size": 12, class: "muted" }, "试试：转速 10、帧率 40 → 静止；转速 9、帧率 40 → 慢慢倒转。");
+      return { readout: [
+        { k: "真实转速", v: v.rps.toFixed(1) + " 圈/秒" },
+        { k: "看起来的转速", v: appRps.toFixed(2) + " 圈/秒", color: app < 0 ? "var(--bad)" : "var(--good)" },
+        { k: "1 秒的帧数", v: v.fps + " 帧" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：标签稀疏时怎么补中间帧 ---------- */
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "mode", label: "两次标签之间的帧怎么画框", value: "hold", options: [["hold", "沿用上一次标签（作者第 35 格的做法）"], ["lerp", "在前后两次标签之间线性插值"]] },
+      { id: "speed", label: "车的横向速度（像素/帧）", min: 0, max: 8, step: 0.5, value: 3 },
+      { id: "mult", label: "帧号换算倍数（作者用 11.9）", min: 11.5, max: 12.5, step: 0.01, value: 11.9 },
+    ],
+    note: "模拟假设（原 notebook 没写标签频率）：视频每秒 59.94 帧，标签每秒 5 帧，那么真实倍数约是 11.99。车左右往返行驶，每一帧都现场算画出来的框和真实框的重叠程度 IoU（交并比，1 = 完全重合）。",
+    render(svg, v) {
+      const trueMult = 59.94 / 5, W = 60, H = 40, nF = 600;
+      const truthX = (f) => 300 + Math.sin(f * v.speed / 140) * 240;      // 往返运动
+      const labelAt = (j) => truthX(j * trueMult);                       // 第 j 次标签记录的真实位置
+      const drawnX = (f) => {
+        const jf = f / v.mult;                                           // 按作者的倍数换算回标签帧
+        const j0 = Math.floor(jf), j1 = j0 + 1;
+        if (v.mode === "hold") return labelAt(j0);
+        return K.lerp(labelAt(j0), labelAt(j1), jf - j0);
+      };
+      const iou = (a, b) => { const ov = Math.max(0, W - Math.abs(a - b)); return ov * H / (2 * W * H - ov * H); };
+      let sum = 0, worst = 1;
+      const ax = K.axes(svg, { x: 50, y: 20, w: 560, h: 200 }, [0, nF], [0, 1], { xlabel: "视频帧号", yfmt: (x) => x.toFixed(1) });
+      let d = "";
+      for (let f = 0; f < nF; f++) {
+        const s = iou(truthX(f), drawnX(f)); sum += s; worst = Math.min(worst, s);
+        d += (d ? "L" : "M") + ax.sx(f) + "," + ax.sy(s);
+      }
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--c1)", "stroke-width": 1.5 });
+      K.svg(svg, "text", { x: 56, y: 34, "font-size": 12, fill: "var(--c1)" }, "每一帧的 IoU");
+      // 一帧的示意：真实框与画出来的框
+      const f0 = 300, bx = truthX(f0), dx = drawnX(f0), sx = (x) => 50 + (x / 600) * 560;
+      K.svg(svg, "line", { x1: 50, x2: 610, y1: 290, y2: 290, stroke: "var(--line)" });
+      K.svg(svg, "rect", { x: sx(bx - W / 2), y: 266, width: (W / 600) * 560, height: 22, fill: "none", stroke: "var(--c3)", "stroke-width": 2 });
+      K.svg(svg, "rect", { x: sx(dx - W / 2), y: 268, width: (W / 600) * 560, height: 18, fill: "none", stroke: "var(--c6)", "stroke-width": 2, "stroke-dasharray": "4 2" });
+      K.svg(svg, "text", { x: 50, y: 318, "font-size": 12, class: "muted" }, "第 300 帧：绿框 = 真实位置，红虚线 = 画出来的框");
+      const mean = sum / nF;
+      return { readout: [
+        { k: "平均 IoU", v: mean.toFixed(3), color: mean > 0.8 ? "var(--good)" : "var(--bad)" },
+        { k: "最差一帧 IoU", v: worst.toFixed(3), color: worst > 0.5 ? "var(--good)" : "var(--bad)" },
+        { k: "第 600 帧的错位", v: Math.abs(600 / v.mult - 600 / trueMult).toFixed(2) + " 个标签帧" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

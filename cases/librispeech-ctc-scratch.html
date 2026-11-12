@@ -1,0 +1,737 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>从零搭语音识别</title>
+<meta name="description" content="Kaggle 案例拆解：在 LibriSpeech 上从零搭一个 DeepSpeech2 风格的语音识别模型——梅尔频谱、残差 CNN、双向 GRU、CTC 损失、贪心解码、WER/CER，以及代码里几个值得学习的错误。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">音频 · 语音转文字 · 从零训练 CNN + RNN + CTC</div>
+  <h1>不借大模型，从零搭一个“听写机”</h1>
+  <p class="en">Speech To Text From Scratch</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">128 梅尔频谱</span><span class="tag method">频率 / 时间遮挡</span><span class="tag method">残差 CNN</span>
+    <span class="tag method">双向 GRU</span><span class="tag method">CTC 损失</span><span class="tag method">OneCycle 学习率</span><span class="tag method">贪心解码</span><span class="tag method">WER / CER</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Hakim11</b></span>
+    <span>Kaggle 点赞 <b>306</b>（2026-11 抓取）</span>
+    <span>数据 <b>LibriSpeech</b>（train-clean-100 / test-clean）</span>
+    <span><a href="https://www.kaggle.com/code/hakim11/speech-to-text-from-scratch" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">有声书朗读录音 + 对应文字</div><p>torchaudio 自带的 LibriSpeech 读取器，每条给出波形、采样率、文字、说话人编号等。<span data-cell="1">出处</span> <span data-cell="2">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">一个字母一个字母地写出说的话</div><p>输出是 26 个字母 + 空格 + 撇号，再加 1 个 CTC 空白，共 29 类。<span data-cell="10">出处</span> <span data-cell="20">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">CNN 看频谱 + 双向 GRU 读顺序 + CTC</div><p>注释写“受 DeepSpeech 2 启发”：卷积层提取局部声音花纹，5 层双向 GRU 前后文一起看，每帧输出字母概率，用 CTC 损失训练。<span data-cell="25">出处</span> <span data-cell="26">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">只训练 1 轮，指标在输出里</div><p>作者在测试集上打印验证损失、平均 WER 和 CER，源码不带输出，这里不列。<span data-cell="20">出处</span> <span data-cell="32">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">LibriSpeech 是公开的英语有声书语料（志愿者朗读的公版书）。作者用了其中的 <b>train-clean-100</b>（较干净的训练子集，名字里的 100 指大约 100 小时）训练、<b>test-clean</b> 测试。具体条数在运行输出里，源码不带。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">采样率</div><div class="v">16,000 Hz</div></div>
+        <div class="stat-tile"><div class="k">输入特征</div><div class="v">128 梅尔带</div></div>
+        <div class="stat-tile"><div class="k">输出类别</div><div class="v">29</div></div>
+        <div class="stat-tile"><div class="k">训练轮数</div><div class="v">1</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">采样率与梅尔带数见第 15 格 <span data-cell="15">出处</span>；29 类、1 轮、批大小 10 见第 20 格 <span data-cell="20">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每条样本里有什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>字段</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>waveform</code></td><td>录音波形</td><td>数值张量</td></tr>
+        <tr><td><code>sample_rate</code></td><td>采样率</td><td>整数</td></tr>
+        <tr><td><code>utterance</code></td><td><b>要预测的答案</b>：这句话的文字（大写英文）</td><td>文本</td></tr>
+        <tr><td><code>speaker_id</code> / <code>chapter_id</code> / <code>utterance_id</code></td><td>说话人、书的章节、句子编号</td><td>整数</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">字段顺序见第 2 格 <span data-cell="2">出处</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="8">
+    <h3>动手试试 A · 编辑距离表：WER 和 CER 是怎么算出来的 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="26">
+    <h3>动手试试 B · 在浏览器里用 CTC 训练一个迷你听写模型 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="32">
+    <h3>动手试试 C · 补齐的标签没截掉，WER 会被算高多少 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的内容</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>自己实现编辑距离、WER、CER，并用 “Hello My Name is Hakim / Hello My Neim is Hakim” 举例</td><td><span data-cell="8">第 8 格</span></td></tr>
+        <tr><td>模型结构：1 层卷积（步长 2）+ 3 个残差 CNN + 全连接 + 5 层双向 GRU（512）+ 分类器（29 类）</td><td><span data-cell="25">第 25 格</span></td></tr>
+        <tr><td>训练：AdamW、学习率 5e-4、OneCycle、CTC 损失（空白 = 28）、批 10、1 轮</td><td><span data-cell="20">第 20 格</span> <span data-cell="26">第 26 格</span></td></tr>
+        <tr><td>在 test-clean 上打印验证损失、平均 WER、平均 CER</td><td><span data-cell="32">第 32 格</span> <span data-cell="33">第 33 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">作者没有写文字结论，损失、WER、CER 和最后一条录音的转写结果都在运行输出里，Kaggle 下载的源码不带，这里不列分数。只训练 1 轮的从零模型，转写质量通常还很有限。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li><b>后几层 GRU 把批次当成了时间</b>：第 25 格 <code>batch_first=i==0</code> 只让第 1 层 GRU 按（批, 时间, 特征）读数据，第 2–5 层却按（时间, 批, 特征）理解同一个张量，于是在“同一批的不同句子之间”做循环，而不是沿时间。<span data-cell="25">第 25 格</span></li>
+        <li><b>参考答案混进了补齐符号</b>：第 32 格用 <code>int_to_text(label.tolist())</code> 还原参考文字，没有按 <code>label_lengths</code> 截断；补齐用的 0 在字符表里恰好是撇号 <code>''</code>，短句的参考答案后面会多出一串撇号，WER/CER 被算高。<span data-cell="13">第 13 格</span> <span data-cell="32">第 32 格</span>（见实验 C）</li>
+        <li><b>第一个解码函数写错了</b>：第 29 格把字符加进了列表 <code>transcriptions</code> 而不是字符串 <code>transcription</code>；跳过的是“空格”而不是 CTC 空白；也没有合并重复。后面改用第 31 格正确的 <code>greedy_decoder</code>。<span data-cell="29">第 29 格</span></li>
+        <li><b>撇号映射不对</b>：字符表里撇号写成两个字符 <code>"''"</code>，真正的单个撇号 <code>'</code> 查不到，会被当成空格。<span data-cell="10">第 10 格</span></li>
+        <li>第 34 格 <code>load_model</code> 只是读了参数字典，没有用到；最后转写的录音路径来自另一份 LibriSpeech 数据集的 dev-clean。<span data-cell="34">第 34 格</span> <span data-cell="36">第 36 格</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>给一段英语录音，逐字母输出文字。数据和算力足够时，这种 CNN + RNN + CTC 结构可以做成可用的听写系统。</li>
+        <li><b>同类问题：</b>手写文字识别（CRNN + CTC）、验证码识别、手语识别、车牌识别——凡是“输入一长串、输出一短串、但不知道谁对谁”的问题都能用 CTC。</li>
+        <li><b>可迁移的套路：</b>频谱 + SpecAugment → 卷积降采样 → 双向循环网络 → 每帧分类 → CTC 损失 → 贪心或束搜索解码 → WER/CER 评估。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>编辑距离 / WER / CER（手写实现）<span data-cell="5">第 5 格</span></li>
+        <li>字符 ↔ 数字映射 <span data-cell="10">第 10 格</span></li>
+        <li>MelSpectrogram(128) + FrequencyMasking(30) + TimeMasking(100) <span data-cell="15">第 15 格</span></li>
+        <li><code>pad_sequence</code> 组批、<code>input_lengths = 帧数 // 2</code> <span data-cell="19">第 19 格</span></li>
+        <li>残差 CNN（层归一化 + GELU）、双向 GRU <span data-cell="23">第 23 格</span></li>
+        <li><code>nn.CTCLoss(blank=28)</code>、AdamW、OneCycleLR <span data-cell="26">第 26 格</span></li>
+        <li>贪心解码（合并重复、去空白）<span data-cell="31">第 31 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>为什么作者要把 <code>input_lengths</code> 设成“频谱帧数 ÷ 2”？如果不除以 2，CTC 会出什么问题？</li>
+      <li>字母级识别会写出 “nite” 这样的拼写错误。为什么 CER 很低时 WER 仍然可能很高？</li>
+      <li>只训练 1 轮、从零开始的模型，和上一个案例用预训练 wav2vec2 微调相比，你觉得差距会有多大？为什么预训练这么重要？</li>
+      <li>“后几层 GRU 把批次当成时间”这种错误为什么代码照样能跑、损失也会下降？我们该怎样发现这类“不报错的 bug”？</li>
+      <li>有声书语料都是朗读的标准发音。用它训练的模型去听方言、听小孩说话，会遇到什么问题？这公平吗？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Hakim11，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。LibriSpeech 由 Vassil Panayotov 等整理发布（CC BY 4.0）。本页为教学解读，动画与实验中的声音、句子、概率与训练过程都是浏览器内的合成示意，不是作者模型的输出。
+</footer>
+</main>
+
+<script src="nb/librispeech-ctc-scratch.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* ===== 本页专用：浏览器内的小型音频工具（合成示意声音、FFT、频谱图、梅尔滤波、MFCC） ===== */
+  const AK = {};
+  AK.SR = 16000;
+  // 原地基 2 FFT
+  AK.fft = function (re, im) {
+    const n = re.length;
+    for (let i = 1, j = 0; i < n; i++) {
+      let bit = n >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
+    }
+    for (let len = 2; len <= n; len <<= 1) {
+      const ang = (-2 * Math.PI) / len, wr = Math.cos(ang), wi = Math.sin(ang);
+      for (let i = 0; i < n; i += len) {
+        let cr = 1, ci = 0;
+        for (let k = 0; k < len / 2; k++) {
+          const a = i + k, b = a + len / 2;
+          const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
+          re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+          const nr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = nr;
+        }
+      }
+    }
+  };
+  AK.pow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
+  // 短时傅里叶变换：返回 [帧][频点] 的功率谱
+  AK.stft = function (x, win, hop, nfft) {
+    nfft = nfft || AK.pow2(win);
+    const frames = [], w = new Float32Array(win);
+    for (let i = 0; i < win; i++) w[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (win - 1));
+    for (let s = 0; s + win <= x.length; s += hop) {
+      const re = new Float32Array(nfft), im = new Float32Array(nfft);
+      for (let i = 0; i < win; i++) re[i] = x[s + i] * w[i];
+      AK.fft(re, im);
+      const p = new Float32Array(nfft / 2 + 1);
+      for (let k = 0; k <= nfft / 2; k++) p[k] = (re[k] * re[k] + im[k] * im[k]) / win;
+      frames.push(p);
+    }
+    return frames;
+  };
+  AK.spectrum = function (x) { // 整段 FFT 幅度（取前一半）
+    const n = AK.pow2(x.length), re = new Float32Array(n), im = new Float32Array(n);
+    re.set(x);
+    AK.fft(re, im);
+    const out = new Float32Array(n / 2);
+    for (let k = 0; k < n / 2; k++) out[k] = (2 / x.length) * Math.hypot(re[k], im[k]);
+    return out;
+  };
+  AK.hz2mel = (f) => 2595 * Math.log10(1 + f / 700);
+  AK.mel2hz = (m) => 700 * (Math.pow(10, m / 2595) - 1);
+  // 三角形梅尔滤波器组：返回 nMels 个 {lo, c, hi, w: Float32Array(nBins)}
+  AK.melFB = function (nMels, nfft, sr, fmin, fmax) {
+    fmin = fmin || 0; fmax = fmax || sr / 2;
+    const nb = nfft / 2 + 1, m0 = AK.hz2mel(fmin), m1 = AK.hz2mel(fmax), pts = [];
+    for (let i = 0; i < nMels + 2; i++) pts.push(AK.mel2hz(m0 + ((m1 - m0) * i) / (nMels + 1)));
+    const fb = [];
+    for (let m = 0; m < nMels; m++) {
+      const lo = pts[m], c = pts[m + 1], hi = pts[m + 2], w = new Float32Array(nb);
+      for (let k = 0; k < nb; k++) {
+        const f = (k * sr) / nfft;
+        w[k] = f < lo || f > hi ? 0 : f <= c ? (f - lo) / (c - lo) : (hi - f) / (hi - c);
+      }
+      fb.push({ lo, c, hi, w });
+    }
+    return fb;
+  };
+  AK.applyFB = function (frames, fb) {
+    return frames.map((p) => Float32Array.from(fb, (f) => { let s = 0; for (let k = 0; k < p.length; k++) s += p[k] * f.w[k]; return s; }));
+  };
+  AK.log = (frames, eps) => frames.map((p) => Float32Array.from(p, (v) => Math.log(v + (eps || 1e-10))));
+  AK.db = (frames) => { let mx = 1e-12; frames.forEach((p) => p.forEach((v) => (mx = Math.max(mx, v)))); return frames.map((p) => Float32Array.from(p, (v) => Math.max(-80, 10 * Math.log10((v + 1e-12) / mx)))); };
+  AK.dct = function (v, n) { // DCT-II，取前 n 个系数
+    const N = v.length, out = new Float32Array(n);
+    for (let k = 0; k < n; k++) { let s = 0; for (let i = 0; i < N; i++) s += v[i] * Math.cos((Math.PI * k * (2 * i + 1)) / (2 * N)); out[k] = s * Math.sqrt((k ? 2 : 1) / N); }
+    return out;
+  };
+  // ---- 合成示意声音 ----
+  const VOW = { a: [730, 1090, 2440], e: [530, 1840, 2480], i: [270, 2290, 3010], o: [570, 840, 2410], u: [300, 870, 2240], n: [250, 1700, 2600], l: [360, 1300, 2700], r: [420, 1300, 1600], w: [300, 700, 2200] };
+  function voiced(out, s0, n, f0, F, amp, sr, f0end) {
+    const nh = Math.floor(3800 / f0);
+    const amps = [];
+    for (let k = 1; k <= nh; k++) { let a = 0; F.forEach((f, j) => (a += Math.exp(-Math.pow((k * f0 - f) / (90 + 40 * j), 2)) / (1 + j * 0.6))); amps.push((a + 0.02) / Math.sqrt(k)); }
+    let ph = 0;
+    for (let i = 0; i < n; i++) {
+      const t = i / n, env = Math.min(1, t * 12, (1 - t) * 10), f = f0 + ((f0end || f0) - f0) * t;
+      ph += (2 * Math.PI * f) / sr;
+      let v = 0;
+      for (let k = 1; k <= amps.length; k++) if (k * f < sr / 2) v += amps[k - 1] * Math.sin(k * ph);
+      out[s0 + i] += amp * env * v * 0.35;
+    }
+  }
+  function noiseBand(out, s0, n, lo, hi, amp, r, sr) {
+    const comps = [];
+    for (let j = 0; j < 70; j++) comps.push([lo + r() * (hi - lo), r() * 6.283]);
+    for (let i = 0; i < n; i++) {
+      const t = i / n, env = Math.min(1, t * 6, (1 - t) * 6);
+      let v = 0;
+      for (const c of comps) v += Math.sin((2 * Math.PI * c[0] * i) / sr + c[1]);
+      out[s0 + i] += (amp * env * v) / 9;
+    }
+  }
+  // 一个音段：[类型, 时长秒, 参数]；类型：v 元音/浊音（参数=VOW 键）, f 擦音（[lo,hi]）, b 爆破（[lo,hi]）, s 静音
+  AK.WORDS = {
+    yes: [["v", 0.07, "i"], ["v", 0.2, "e"], ["f", 0.22, [4200, 7600]]],
+    no: [["v", 0.09, "n"], ["v", 0.32, "o"], ["v", 0.08, "u"]],
+    up: [["v", 0.24, "a"], ["s", 0.06], ["b", 0.03, [600, 3000]]],
+    down: [["b", 0.025, [2500, 5000]], ["v", 0.18, "a"], ["v", 0.12, "u"], ["v", 0.09, "n"]],
+    left: [["v", 0.07, "l"], ["v", 0.17, "e"], ["f", 0.11, [1500, 6500]], ["b", 0.03, [3500, 7000]]],
+    right: [["v", 0.07, "r"], ["v", 0.16, "a"], ["v", 0.1, "i"], ["s", 0.04], ["b", 0.03, [3500, 7000]]],
+    on: [["v", 0.28, "o"], ["v", 0.12, "n"]],
+    off: [["v", 0.26, "o"], ["f", 0.17, [1200, 6500]]],
+    stop: [["f", 0.16, [4200, 7600]], ["b", 0.02, [3500, 7000]], ["v", 0.2, "o"], ["s", 0.05], ["b", 0.03, [600, 3000]]],
+    go: [["b", 0.02, [1200, 3000]], ["v", 0.32, "o"], ["v", 0.08, "u"]],
+  };
+  // 合成一个词：opt {sr, dur, f0, start, noise, seed}；返回 {x, segs:[{name,t0,t1}]}
+  AK.word = function (name, opt) {
+    opt = Object.assign({ sr: AK.SR, dur: 1, f0: 130, start: 0.22, noise: 0.004, seed: 1 }, opt || {});
+    const sr = opt.sr, N = Math.round(sr * opt.dur), x = new Float32Array(N), r = K.rng(opt.seed);
+    let t = opt.start;
+    const segs = [];
+    (AK.WORDS[name] || AK.WORDS.yes).forEach((sg, j) => {
+      const n = Math.round(sg[1] * sr), s0 = Math.round(t * sr);
+      if (s0 + n < N) {
+        if (sg[0] === "v") voiced(x, s0, n, opt.f0 * (1 + 0.04 * Math.sin(j)), VOW[sg[2]], sg[2] === "n" ? 0.5 : 1, sr, opt.f0 * (j % 2 ? 0.93 : 1.02));
+        else if (sg[0] === "f") noiseBand(x, s0, n, sg[2][0], Math.min(sg[2][1], sr / 2 - 100), 0.16, r, sr);
+        else if (sg[0] === "b") noiseBand(x, s0, n, sg[2][0], Math.min(sg[2][1], sr / 2 - 100), 0.35, r, sr);
+      }
+      segs.push({ name: sg[0] === "v" ? sg[2] : sg[0] === "f" ? "擦音" : sg[0] === "b" ? "爆破" : "停顿", t0: t, t1: t + sg[1] });
+      t += sg[1];
+    });
+    for (let i = 0; i < N; i++) x[i] += opt.noise * K.randn(r);
+    return { x, segs, sr };
+  };
+  // 环境声 / 其他示意声音
+  AK.sound = function (kind, opt) {
+    opt = Object.assign({ sr: AK.SR, dur: 1, seed: 1 }, opt || {});
+    const sr = opt.sr, N = Math.round(sr * opt.dur), x = new Float32Array(N), r = K.rng(opt.seed);
+    const add = (f, a, s0, n, decay) => { for (let i = 0; i < n && s0 + i < N; i++) x[s0 + i] += a * Math.sin((2 * Math.PI * f * i) / sr) * (decay ? Math.exp(-i / (decay * sr)) : 1); };
+    if (kind === "siren") { let ph = 0; for (let i = 0; i < N; i++) { const f = 900 + 400 * Math.sin((2 * Math.PI * 1.5 * i) / sr); ph += (2 * Math.PI * f) / sr; x[i] = 0.4 * Math.sin(ph) + 0.15 * Math.sin(2 * ph); } }
+    else if (kind === "dog") { [0.1, 0.45].forEach((t0) => { const s0 = Math.round(t0 * sr), n = Math.round(0.18 * sr); voiced(x, s0, n, 420, [800, 1500, 2600], 1.4, sr, 330); noiseBand(x, s0, Math.round(0.05 * sr), 500, 4000, 0.6, r, sr); }); }
+    else if (kind === "rain") { for (let i = 0; i < N; i++) x[i] = 0.12 * K.randn(r); for (let k = 0; k < 40; k++) { const s0 = Math.floor(r() * N); for (let i = 0; i < 120 && s0 + i < N; i++) x[s0 + i] += 0.5 * K.randn(r) * Math.exp(-i / 25); } }
+    else if (kind === "clock") { for (let t0 = 0.05; t0 < opt.dur; t0 += 0.25) { const s0 = Math.round(t0 * sr); add(3000, 0.6, s0, 400, 0.004); add(5200, 0.4, s0, 300, 0.003); } }
+    else if (kind === "engine") { let ph = 0; for (let i = 0; i < N; i++) { ph += (2 * Math.PI * 55) / sr; let v = 0; for (let k = 1; k < 12; k++) v += Math.sin(k * ph + k) / k; x[i] = 0.25 * v * (1 + 0.3 * Math.sin((2 * Math.PI * 8 * i) / sr)) + 0.03 * K.randn(r); } }
+    else if (kind === "bird") { for (let t0 = 0.08; t0 < opt.dur - 0.15; t0 += 0.3) { const s0 = Math.round(t0 * sr), n = Math.round(0.12 * sr); let ph = 0; for (let i = 0; i < n && s0 + i < N; i++) { const f = 3200 + 1600 * (i / n) + 300 * Math.sin(i / 40); ph += (2 * Math.PI * f) / sr; x[s0 + i] += 0.45 * Math.sin(ph) * Math.sin((Math.PI * i) / n); } } }
+    else if (kind === "crying") { [0, 0.5].forEach((t0) => voiced(x, Math.round((t0 + 0.05) * sr), Math.round(0.4 * sr), 450, [1000, 2500, 3500], 1.2, sr, 380)); }
+    else if (kind === "glass") { const s0 = Math.round(0.2 * sr); noiseBand(x, s0, Math.round(0.04 * sr), 2000, 7500, 1.2, r, sr); [2800, 4100, 5600, 6900].forEach((f, j) => add(f, 0.3, s0, Math.round(0.6 * sr), 0.15 + j * 0.03)); }
+    else if (kind === "noise") { for (let i = 0; i < N; i++) x[i] = 0.2 * K.randn(r); }
+    for (let i = 0; i < N; i++) x[i] += 0.003 * K.randn(r);
+    return { x, sr };
+  };
+  // ---- 画图 ----
+  AK.drawWave = function (svg, box, x, opt) {
+    opt = opt || {};
+    K.svg(svg, "rect", { x: box.x, y: box.y, width: box.w, height: box.h, fill: "var(--panel-2)", rx: 4 });
+    let mx = 1e-9; for (let i = 0; i < x.length; i++) mx = Math.max(mx, Math.abs(x[i]));
+    const cols = Math.min(box.w, 600), step = x.length / cols, mid = box.y + box.h / 2, sc = (box.h / 2 - 3) / (opt.max || mx);
+    let d = "";
+    for (let c = 0; c < cols; c++) {
+      let lo = 0, hi = 0;
+      for (let i = Math.floor(c * step); i < Math.floor((c + 1) * step); i++) { lo = Math.min(lo, x[i]); hi = Math.max(hi, x[i]); }
+      const px = box.x + (c / cols) * box.w;
+      d += `M${px.toFixed(1)},${(mid - hi * sc).toFixed(1)}V${(mid - lo * sc + 0.5).toFixed(1)}`;
+    }
+    return K.svg(svg, "path", { d, stroke: opt.color || "var(--c1)", "stroke-width": Math.max(1, box.w / cols) * 0.9, fill: "none" });
+  };
+  AK.color = function (t) { // 频谱图色带：底色 → 蓝 → 橙
+    t = K.clamp(t, 0, 1);
+    return t < 0.55 ? `color-mix(in srgb, var(--c1) ${Math.round((t / 0.55) * 100)}%, var(--panel-2))` : `color-mix(in srgb, var(--warn) ${Math.round(((t - 0.55) / 0.45) * 100)}%, var(--c1))`;
+  };
+  // frames: [时间][频率]，画成热力图；opt {lo, hi, maxT, maxF, fmax(频点上限)}
+  AK.drawSpec = function (svg, box, frames, opt) {
+    opt = opt || {};
+    const g = K.svg(svg, "g");
+    const T = frames.length, Fall = frames[0].length, F = opt.fmax ? Math.min(Fall, opt.fmax) : Fall;
+    let lo = opt.lo, hi = opt.hi;
+    if (lo == null || hi == null) { const v = []; frames.forEach((p) => { for (let k = 0; k < F; k++) v.push(p[k]); }); v.sort((a, b) => a - b); if (lo == null) lo = v[Math.floor(v.length * 0.05)]; if (hi == null) hi = v[Math.floor(v.length * 0.995)]; }
+    const nt = Math.min(T, opt.maxT || 90), nf = Math.min(F, opt.maxF || 64);
+    const cw = box.w / nt, ch = box.h / nf;
+    for (let a = 0; a < nt; a++) for (let b = 0; b < nf; b++) {
+      const t0 = Math.floor((a * T) / nt), t1 = Math.max(t0 + 1, Math.floor(((a + 1) * T) / nt)), f0 = Math.floor((b * F) / nf), f1 = Math.max(f0 + 1, Math.floor(((b + 1) * F) / nf));
+      let s = -Infinity;
+      for (let t = t0; t < t1; t++) for (let f = f0; f < f1; f++) s = Math.max(s, frames[t][f]);
+      K.svg(g, "rect", { x: (box.x + a * cw).toFixed(1), y: (box.y + box.h - (b + 1) * ch).toFixed(1), width: (cw + 0.6).toFixed(1), height: (ch + 0.6).toFixed(1), fill: AK.color((s - lo) / (hi - lo || 1)) });
+    }
+    return g;
+  };
+  // 用 WebAudio 播放（课堂上可以真的听到合成声音）
+  AK.play = function (x, sr) {
+    try {
+      const C = window.AudioContext || window.webkitAudioContext; if (!C) return;
+      const ac = AK._ac || (AK._ac = new C());
+      let mx = 1e-9; for (let i = 0; i < x.length; i++) mx = Math.max(mx, Math.abs(x[i]));
+      const buf = ac.createBuffer(1, x.length, sr), ch = buf.getChannelData(0);
+      for (let i = 0; i < x.length; i++) ch[i] = (0.8 * x[i]) / mx;
+      const src = ac.createBufferSource(); src.buffer = buf; src.connect(ac.destination); src.start();
+    } catch (e) { /* 没有声卡也不影响页面 */ }
+  };
+  // 在实验面板外加一个“播放”按钮
+  AK.playBtn = function (labEl, label, getter) {
+    const b = K.el("button", { class: "btn ghost", style: "margin-top:8px" }, label || "▶ 播放合成声音");
+    b.onclick = () => { const s = getter(); if (s) AK.play(s.x, s.sr); };
+    const ctrl = labEl.querySelector(".ctrl"); (ctrl || labEl).appendChild(b);
+    return b;
+  };
+  /* ===== 音频工具结束 ===== */
+
+
+  const SR = 16000;
+  function editTable(a, b) {
+    const D = [];
+    for (let i = 0; i <= a.length; i++) { D.push(new Array(b.length + 1).fill(0)); D[i][0] = i; }
+    for (let j = 0; j <= b.length; j++) D[0][j] = j;
+    for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) D[i][j] = Math.min(D[i - 1][j] + 1, D[i][j - 1] + 1, D[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    const path = []; let i = a.length, j = b.length;
+    while (i > 0 || j > 0) { path.push([i, j]); if (i > 0 && j > 0 && D[i][j] === D[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)) { i--; j--; } else if (i > 0 && D[i][j] === D[i - 1][j] + 1) i--; else j--; }
+    path.push([0, 0]);
+    return { D, path };
+  }
+  const CHARS = ["''", " ", ..."abcdefghijklmnopqrstuvwxyz".split("")];
+
+  const steps = [
+    {
+      at: 0, title: "开场：读入 LibriSpeech", kicker: "第 0–3 格 · 数据",
+      html: `<p>作者直接用 <code>torchaudio.datasets.LIBRISPEECH</code> 读取 Kaggle 上已经下载好的 LibriSpeech：<code>train-clean-100</code> 训练，<code>test-clean</code> 测试。每条样本是一个六元组：波形、采样率、文字、说话人、章节、句子编号。</p><p>画出第一条的波形，标题里写上它的文字，再播放出来听。这份 notebook 几乎没有文字说明，我们主要从代码里读它在做什么。</p>`,
+      cells: [1, 2], highlight: ["url=\"train-clean-100\"", "url=\"test-clean\"", "train_dataset[0]"],
+      draw(svg, ctx) {
+        const words = ["go", "left", "stop", "no", "yes"], segs = [];
+        let t = 0.1; const N = Math.round(3.4 * SR), x = new Float32Array(N);
+        words.forEach((w, i) => { const y = AK.word(w, { seed: 4 + i, start: 0, dur: 0.6, f0: 115, sr: SR }).x; x.set(y.subarray(0, Math.min(y.length, N - Math.round(t * SR))), Math.round(t * SR)); segs.push([w, t]); t += 0.62; });
+        AK.drawWave(svg, { x: 30, y: 60, w: 660, h: 140 }, x);
+        K.svg(svg, "text", { x: 30, y: 40, "font-size": 13, "font-weight": 700 }, "一条样本 = 波形 + 采样率 + 文字 + 说话人 + 章节 + 句子编号");
+        const lab = K.svg(svg, "text", { x: 30, y: 250, "font-size": 18, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12, class: "muted" }, "示意：合成声音和一句编出来的文字，不是数据集内容");
+        (async () => { let s = ""; for (const [w] of segs) { s += (s ? " " : "") + w.toUpperCase(); lab.textContent = "utterance: \"" + s + "\""; if (!(await ctx.wait(350))) return; } })();
+      },
+    },
+    {
+      at: 4, title: "评估指标：手写编辑距离、WER、CER", kicker: "第 4–8 格 · ASR 指标",
+      html: `<p>作者自己实现了<b>编辑距离</b>（Levenshtein 距离）：把一个序列改成另一个，最少要几次插入、删除、替换。用一行一行滚动更新的动态规划算，只占两行内存。</p><ul class="tight"><li><b>WER</b>（词错误率）= 按空格切成单词后的编辑距离 ÷ 参考答案的单词数；</li><li><b>CER</b>（字符错误率）= 按字符算的编辑距离 ÷ 参考答案的字符数。</li></ul><p>作者的例子：参考 “Hello My Name is Hakim”，预测 “Hello My Neim is Hakim”——只错一个词，但这个词里错了好几个字母。</p>`,
+      cells: [5, 8], highlight: ["def levenshtein_distance", "def wer", "def cer", "Hello My Neim is Hakim"],
+      draw(svg, ctx) {
+        const a = "Hello My Name is Hakim".split(" "), b = "Hello My Neim is Hakim".split(" ");
+        a.forEach((w, i) => { K.node(svg, 30 + i * 130, 50, 118, 40, w, { fill: "var(--panel-2)" }); });
+        const bn = b.map((w, i) => K.node(svg, 30 + i * 130, 130, 118, 40, w, { fill: w === a[i] ? "var(--panel-2)" : "color-mix(in srgb, var(--warn) 25%, var(--panel))", stroke: w === a[i] ? "var(--line)" : "var(--warn)" }));
+        K.svg(svg, "text", { x: 30, y: 40, "font-size": 12 }, "参考答案");
+        K.svg(svg, "text", { x: 30, y: 120, "font-size": 12 }, "模型输出");
+        const t1 = K.svg(svg, "text", { x: 30, y: 230, "font-size": 15 }, ""), t2 = K.svg(svg, "text", { x: 30, y: 265, "font-size": 15 }, "");
+        const wd = editTable(a, b).D[a.length][b.length], cd = editTable("Hello My Name is Hakim".split(""), "Hello My Neim is Hakim".split("")).D[22][22];
+        ctx.wait(600).then((o) => { if (!o) return; t1.textContent = `WER = ${wd} 个词错 ÷ 5 个词 = ${(wd / 5).toFixed(2)}`; return ctx.wait(700); }).then((o) => { if (o) t2.textContent = `CER = ${cd} 个字符要改 ÷ 22 个字符 = ${(cd / 22).toFixed(3)}`; });
+        K.svg(svg, "text", { x: 30, y: 310, "font-size": 12, class: "muted" }, "数字由浏览器按作者第 5 格的定义现场计算（区分大小写、空格也算字符）");
+      },
+    },
+    {
+      at: 9, title: "字符表：文字和数字互相翻译", kicker: "第 9–11 格 · TextTransform",
+      html: `<p>模型只认数字，所以要把文字变成数字序列。<code>TextTransform</code> 的字符表：0 号是撇号（代码里写成了两个字符 <code>"''"</code>），1 号是 <code>&lt;SPACE&gt;</code>（空格），2–27 号是 a–z。<code>text_to_int</code> 先转小写，查不到的字符一律当空格。</p><p><code>int_to_text_remove_pad</code> 从末尾去掉所有 0（补齐用的），再翻译回文字。加上 CTC 空白（28 号），一共 <b>29 类</b>。</p>`,
+      cells: [10, 11], highlight: ["additional_chars = [\"''\", '<SPACE>']", "self.char_map.get(c, self.char_map['<SPACE>'])", "dropwhile(lambda x: x == 0"],
+      draw(svg, ctx) {
+        CHARS.forEach((c, i) => { const g = K.node(svg, 22 + (i % 14) * 49, 30 + Math.floor(i / 14) * 58, 44, 48, (c === " " ? "空格" : c) + "\n" + i, { fs: 11, fill: i < 2 ? "color-mix(in srgb, var(--warn) 20%, var(--panel))" : "var(--panel-2)" }); g.style.opacity = 0; ctx.wait(i * 30).then((o) => o && ctx.tween(200, (t) => (g.style.opacity = t))); });
+        K.node(svg, 22, 150, 93, 48, "CTC 空白\n28", { fs: 11, fill: "var(--accent-soft)", stroke: "var(--accent)", bold: true });
+        const s = "this is hakim", ids = s.split("").map((c) => (c === " " ? 1 : CHARS.indexOf(c)));
+        const tx = K.svg(svg, "text", { x: 22, y: 250, "font-size": 15, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 22, y: 230, "font-size": 12 }, "“This is Hakim” → 小写 → 编号：");
+        (async () => { await ctx.wait(1200); for (let i = 1; i <= ids.length; i++) { tx.textContent = "[" + ids.slice(0, i).join(", ") + "]"; if (!(await ctx.wait(120))) return; } })();
+        K.svg(svg, "text", { x: 22, y: 300, "font-size": 12, class: "muted" }, "橙色：0 号撇号（补齐也用 0）、1 号空格；蓝框：CTC 空白");
+      },
+    },
+    {
+      at: 12, title: "一批里的标签要补成一样长", kicker: "第 12–13 格 · pad_sequence",
+      html: `<p>一批里有长句也有短句，张量必须是方方正正的，所以用 <code>nn.utils.rnn.pad_sequence</code> 在短句后面补 <b>0</b>。例子：“Hello world” 和 “My name is Hakim” 补成同样长。</p><p>注意：0 在字符表里恰好是撇号。训练时 CTC 损失会用 <code>label_lengths</code> 只看真实长度，补的 0 不影响；但后面还原参考文字时如果忘了截断，就会多出一串“撇号”。</p>`,
+      cells: [13], highlight: ["pad_sequence(labels, batch_first=True)"],
+      draw(svg, ctx) {
+        const A = "hello world", B = "my name is hakim", L = B.length;
+        const row = (s, y) => s.split("").map((c, i) => K.node(svg, 30 + i * 40, y, 36, 36, c === " " ? "␣" : c, { fs: 13, fill: "var(--panel-2)" }));
+        K.svg(svg, "text", { x: 30, y: 60, "font-size": 12 }, "句子 1");
+        K.svg(svg, "text", { x: 30, y: 150, "font-size": 12 }, "句子 2");
+        row(A, 70); row(B, 160);
+        const pads = []; for (let i = A.length; i < L; i++) { const g = K.node(svg, 30 + i * 40, 70, 36, 36, "0", { fs: 13, fill: "color-mix(in srgb, var(--warn) 25%, var(--panel))", stroke: "var(--warn)" }); g.style.opacity = 0; pads.push(g); }
+        K.svg(svg, "text", { x: 30, y: 250, "font-size": 13 }, "补的 0 = 字符表里的撇号 '' → 训练时靠 label_lengths 忽略，还原文字时要记得截掉");
+        (async () => { await ctx.wait(400); for (const p of pads) if (!(await ctx.tween(150, (t) => (p.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      at: 14, title: "声音变成 128 梅尔频谱 + 遮挡增强", kicker: "第 14–15 格 · 音频变换",
+      html: `<p>训练时的音频变换是三步连在一起的 <code>nn.Sequential</code>：</p><ul class="tight"><li><code>MelSpectrogram(16000, n_mels=128)</code>：变成 128 个梅尔带的频谱；</li><li><code>FrequencyMasking(30)</code>：随机遮住最多 30 个相邻的频带；</li><li><code>TimeMasking(100)</code>：随机遮住最多 100 个相邻的时间帧。</li></ul><p>这就是 SpecAugment：故意让模型“听不全”，逼它学会根据上下文补全。验证时只算梅尔频谱，不遮挡。最后转置成（时间, 频率）。</p>`,
+      cells: [15], highlight: ["MelSpectrogram(sample_rate = 16000, n_mels = 128)", "FrequencyMasking(freq_mask_param=30)", "TimeMasking(time_mask_param=100)"],
+      draw(svg, ctx) {
+        const x = AK.word("left", { seed: 9, start: 0.15, sr: SR }).x;
+        const m = AK.log(AK.applyFB(AK.stft(x, 400, 200, 512), AK.melFB(64, 512, SR, 0, 8000)));
+        const box = { x: 40, y: 30, w: 640, h: 230 };
+        AK.drawSpec(svg, box, m, { maxT: 80, maxF: 64 });
+        const fm = K.svg(svg, "rect", { x: box.x, y: box.y + 70, width: 0, height: 40, fill: "var(--panel)", opacity: 0.95 });
+        const tm = K.svg(svg, "rect", { x: box.x + 300, y: box.y, width: 110, height: 0, fill: "var(--panel)", opacity: 0.95 });
+        K.svg(svg, "text", { x: 40, y: 22, "font-size": 12, class: "muted" }, "梅尔频谱（合成“left”，示意）→ 遮住一段频率带 + 一段时间");
+        K.svg(svg, "text", { x: 40, y: 290, "font-size": 12 }, "横条 = FrequencyMasking　竖条 = TimeMasking　（只在训练时做）");
+        ctx.wait(500).then((o) => o && ctx.tween(800, (t) => fm.setAttribute("width", box.w * t))).then((o) => o && ctx.tween(800, (t) => tm.setAttribute("height", box.h * t)));
+      },
+    },
+    {
+      at: 16, title: "长短不一的频谱拼成一批", kicker: "第 16–17 格 · 频谱组批",
+      html: `<p>频谱的时间长度也各不相同。作者对两条样本演示：分别算频谱，用 <code>pad_sequence</code> 沿时间补零，再 <code>unsqueeze(1)</code> 加一个“通道”维、<code>transpose(2, 3)</code> 调成（批, 通道, 频率, 时间），这正是二维卷积要的形状，就像一批单通道的灰度图。</p>`,
+      cells: [17], highlight: [".unsqueeze(1).transpose(2, 3)"],
+      draw(svg, ctx) {
+        const lens = [0.9, 0.55, 0.75];
+        lens.forEach((l, i) => {
+          const y = 40 + i * 90;
+          K.svg(svg, "text", { x: 30, y: y + 40, "font-size": 12 }, `第 ${i + 1} 条`);
+          const x = AK.word(["go", "no", "stop"][i], { seed: 3 + i, start: 0.05, dur: l, sr: SR }).x;
+          AK.drawSpec(svg, { x: 100, y, w: 560 * l, h: 70 }, AK.log(AK.applyFB(AK.stft(x, 400, 200, 512), AK.melFB(32, 512, SR, 0, 8000))), { maxT: 60, maxF: 32 });
+          const p = K.svg(svg, "rect", { x: 100 + 560 * l, y, width: 0, height: 70, fill: "var(--panel-2)", stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+          ctx.wait(400).then((o) => o && ctx.tween(700, (t) => p.setAttribute("width", 560 * (0.9 - l) * t)));
+        });
+        K.svg(svg, "text", { x: 100, y: 325, "font-size": 12, class: "muted" }, "虚线 = 补零；拼好后形状是（批, 1, 128 频率, 最长帧数）");
+      },
+    },
+    {
+      at: 18, title: "完整的数据加载", kicker: "第 18–21 格 · DataLoader",
+      html: `<p><code>data_processing</code> 把一批样本处理成四样东西：频谱、标签、<code>input_lengths</code>、<code>label_lengths</code>。其中 <code>input_lengths = 帧数 // 2</code>，因为模型第一层卷积的步长是 2，时间会缩短一半，CTC 需要知道模型<b>实际输出</b>了多少帧。</p><p>超参数：批大小 10、<b>只训练 1 轮</b>、学习率 5e-4、3 个残差 CNN、5 层 GRU、隐藏维度 512、29 类、128 个特征、步长 2、dropout 0.1。训练和测试的 <code>DataLoader</code> 都用 <code>collate_fn</code> 调用这个函数。</p>`,
+      cells: [19, 20], highlight: ["input_lengths.append(spec.shape[0] // 2)", "'epochs': 1", "'n_class': 29", "collate_fn"],
+      draw(svg, ctx) {
+        const items = [["spectrograms", "（批, 1, 128, 时间）"], ["labels", "字母编号，补 0"], ["input_lengths", "帧数 ÷ 2"], ["label_lengths", "字母个数"]];
+        items.forEach((d, i) => { const g = K.node(svg, 40 + i * 165, 100, 150, 70, d[0] + "\n" + d[1], { fs: 12, fill: i === 2 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 2 ? "var(--accent)" : "var(--line)", bold: i === 2 }); g.style.opacity = 0; ctx.wait(i * 300).then((o) => o && ctx.tween(300, (t) => (g.style.opacity = t))); });
+        K.svg(svg, "text", { x: 40, y: 70, "font-size": 13, "font-weight": 700 }, "collate_fn：每次把 10 条样本整理成四样东西");
+        K.svg(svg, "text", { x: 40, y: 230, "font-size": 13 }, "为什么要 ÷ 2？第一层卷积步长 2：输入 400 帧 → 模型输出 200 帧");
+        K.svg(svg, "text", { x: 40, y: 260, "font-size": 13 }, "CTC 需要知道“模型说了多少帧”，才能算所有对齐方式");
+      },
+    },
+    {
+      at: 22, title: "积木：残差 CNN 和双向 GRU", kicker: "第 22–23 格 · 模块",
+      html: `<p><b>残差 CNN</b>：层归一化 → GELU → dropout → 3×3 卷积，做两遍，再把输入直接加回来（残差连接）。“加回来”让信息有一条捷径，网络深了也好训练。</p><p><b>双向 GRU</b>：GRU 是一种循环神经网络，一帧一帧往后读，同时用“门”决定记住什么、忘掉什么；“双向”就是再从后往前读一遍，两个方向的结果拼起来，每一帧都同时知道前文和后文。</p><p>注意第 25 格里 <code>batch_first=i==0</code>：只有第 1 层 GRU 按“批在前”读数据。</p>`,
+      cells: [23], highlight: ["class ResidualCNN", "x += residual", "class BidirectionalGRU", "bidirectional=True"],
+      draw(svg, ctx) {
+        // 双向 GRU 动画
+        const T = 8, y1 = 120, y2 = 200;
+        for (let i = 0; i < T; i++) K.node(svg, 40 + i * 80, 260, 60, 34, `帧 ${i + 1}`, { fs: 11, fill: "var(--panel-2)" });
+        const f = [], b = [];
+        for (let i = 0; i < T; i++) { f.push(K.svg(svg, "circle", { cx: 70 + i * 80, cy: y1, r: 14, fill: "var(--panel-2)", stroke: "var(--c1)", "stroke-width": 2 })); b.push(K.svg(svg, "circle", { cx: 70 + i * 80, cy: y2, r: 14, fill: "var(--panel-2)", stroke: "var(--c6)", "stroke-width": 2 })); }
+        for (let i = 0; i < T - 1; i++) { K.arrow(svg, 86 + i * 80, y1, 134 + i * 80, y1, { color: "var(--c1)" }); K.arrow(svg, 134 + i * 80, y2, 86 + i * 80, y2, { color: "var(--c6)" }); }
+        K.svg(svg, "text", { x: 40, y: 90, "font-size": 12, fill: "var(--c1)", "font-weight": 700 }, "正向 GRU：从前往后读");
+        K.svg(svg, "text", { x: 40, y: 240, "font-size": 12, fill: "var(--c6)", "font-weight": 700 }, "反向 GRU：从后往前读");
+        K.svg(svg, "text", { x: 40, y: 40, "font-size": 13 }, "每一帧的输出 = 正向记忆 + 反向记忆（拼在一起，所以维度 ×2）");
+        (async () => {
+          for (let i = 0; i < T; i++) { f[i].style.fill = "color-mix(in srgb, var(--c1) 50%, var(--panel))"; b[T - 1 - i].style.fill = "color-mix(in srgb, var(--c6) 50%, var(--panel))"; if (!(await ctx.wait(220))) return; }
+        })();
+      },
+    },
+    {
+      at: 24, title: "整体模型：DeepSpeech 2 风格", kicker: "第 24–25 格 · SpeechRecognitionModel",
+      html: `<p>整条流水线（注释说“受 DeepSpeech 2 启发”）：</p><ol class="tight"><li>3×3 卷积、步长 2、32 个通道：时间和频率都减半（128 → 64）；</li><li>3 个残差 CNN 块；</li><li>把（通道 32 × 频率 64）压平成每帧 2048 个数，全连接降到 512；</li><li>5 层双向 GRU，每层输出 1024；</li><li>分类器：1024 → 512 → GELU → 29 类。</li></ol><p>这里有个不报错的 bug：第 2–5 层 GRU 的 <code>batch_first=False</code>，但送进去的张量仍是（批, 时间, 特征），它们会把“批”当成时间轴来循环，也就是在同一批的 10 句话之间传递记忆，而不是沿着一句话的时间。</p>`,
+      cells: [25], highlight: ["nn.Conv2d(1, 32, 3, stride=stride", "batch_first=i==0", "nn.Linear(n_feats*32, rnn_dim)", "nn.Linear(rnn_dim, n_class)"],
+      draw(svg, ctx) {
+        const L = [["频谱\n128×T", 60, "var(--panel-2)"], ["卷积 /2\n32×64×T/2", 64, "var(--c1)"], ["残差 CNN\n×3", 64, "var(--c1)"], ["展平+全连接\nT/2 × 512", 54, "var(--c2)"], ["双向 GRU\n×5", 70, "var(--c4)"], ["分类器\n29 类/帧", 50, "var(--c3)"]];
+        const ns = L.map((l, i) => { const g = K.node(svg, 20 + i * 117, 90 - l[1] / 2 + 30, 105, l[1] + 30, l[0], { fs: 11, fill: `color-mix(in srgb, ${l[2]} 20%, var(--panel))`, stroke: l[2] }); g.style.opacity = 0; return g; });
+        for (let i = 0; i < 5; i++) K.arrow(svg, 125 + i * 117, 120, 135 + i * 117, 120);
+        // batch_first 错误示意
+        K.svg(svg, "text", { x: 20, y: 215, "font-size": 12, "font-weight": 700, fill: "var(--bad)" }, "第 2–5 层 GRU（batch_first=False）实际沿哪个方向循环：");
+        const grid = []; for (let bq = 0; bq < 4; bq++) for (let t = 0; t < 10; t++) grid.push(K.svg(svg, "rect", { x: 160 + t * 34, y: 228 + bq * 22, width: 30, height: 18, rx: 2, fill: "var(--panel-2)" }));
+        K.svg(svg, "text", { x: 20, y: 245, "font-size": 11 }, "句子 1…4（批）");
+        K.svg(svg, "text", { x: 520, y: 245, "font-size": 11 }, "→ 时间");
+        const arr = K.svg(svg, "line", { x1: 0, y1: 0, x2: 0, y2: 0, stroke: "var(--bad)", "stroke-width": 3 });
+        (async () => {
+          for (const g of ns) if (!(await ctx.tween(200, (t) => (g.style.opacity = t)))) return;
+          for (let t = 0; t < 10; t++) { arr.setAttribute("x1", 175 + t * 34); arr.setAttribute("x2", 175 + t * 34); arr.setAttribute("y1", 228); arr.setAttribute("y2", 312); for (let bq = 0; bq < 4; bq++) grid[bq * 10 + t].style.fill = "color-mix(in srgb, var(--bad) 35%, var(--panel))"; if (!(await ctx.wait(160))) return; }
+        })();
+        K.svg(svg, "text", { x: 520, y: 275, "font-size": 11, fill: "var(--bad)" }, "红线：记忆在“不同句子”");
+        K.svg(svg, "text", { x: 520, y: 292, "font-size": 11, fill: "var(--bad)" }, "之间传递，而不是沿时间");
+      },
+    },
+    {
+      at: 26, title: "用 CTC 损失训练一轮", kicker: "第 26–27 格 · 训练",
+      html: `<p>优化器 AdamW，学习率 5e-4，<b>OneCycle</b> 调度（学习率先升后降，一轮之内走完）。损失是 <code>nn.CTCLoss(blank=28)</code>：模型输出先做 <code>log_softmax</code>，再转成（时间, 批, 类别），连同 <code>input_lengths</code> 和 <code>label_lengths</code> 一起交给 CTC。</p><p><b>CTC 在对齐什么？</b>模型每帧（梅尔频谱默认每 200 个采样点一帧，即 12.5 毫秒，再经步长 2 的卷积，约 25 毫秒）输出一个字母或空白，一句话几百帧，文字只有几十个字母，没人告诉模型“第几帧是 h”。CTC 把所有“合并重复、删空白后等于正确文字”的逐帧写法的概率加起来，最大化这个总和。训练一轮后保存模型参数。</p>`,
+      cells: [26, 27], highlight: ["nn.CTCLoss(blank=28)", "F.log_softmax(output, dim=2)", "OneCycleLR", "criterion(output, labels, input_lengths, label_lengths)"],
+      draw(svg, ctx) {
+        const word = "hello", T = 16;
+        const paths = [["h", "h", "_", "e", "_", "l", "l", "_", "l", "o", "o", "_", "_", "_", "_", "_"], ["_", "h", "e", "e", "l", "_", "_", "l", "o", "_", "_", "_", "_", "_", "_", "_"], ["_", "_", "_", "h", "h", "e", "l", "l", "_", "l", "l", "o", "o", "o", "_", "_"]];
+        const cw = 40;
+        K.svg(svg, "text", { x: 30, y: 25, "font-size": 13 }, `目标 “${word}” 的几种合法逐帧写法（CTC 把它们的概率全部加起来）：`);
+        const rows = paths.map((p, r) => p.map((c, i) => { const g = K.node(svg, 30 + i * cw, 45 + r * 60, cw - 4, 34, c === "_" ? "·" : c, { fs: 13, fill: c === "_" ? "var(--panel-2)" : "var(--accent-soft)", stroke: c === "_" ? "var(--line)" : "var(--accent)" }); g.style.opacity = 0; return g; }));
+        K.svg(svg, "text", { x: 30, y: 245, "font-size": 12 }, "注意 “l l” 中间必须隔一个空白 ·，否则会被合并成一个 l");
+        const sum = K.svg(svg, "text", { x: 30, y: 290, "font-size": 15, "font-weight": 700, fill: "var(--good)" }, "");
+        (async () => {
+          for (const r of rows) { for (const g of r) if (!(await ctx.tween(30, (t) => (g.style.opacity = t)))) return; if (!(await ctx.wait(200))) return; }
+          sum.textContent = "P(hello) = P(写法 1) + P(写法 2) + P(写法 3) + …　损失 = −log P(hello)";
+        })();
+      },
+    },
+    {
+      at: 28, title: "第一个解码函数：三个错误", kicker: "第 28–29 格 · greedy_decode（有问题的版本）",
+      html: `<p>训练完要把每帧概率变回文字。作者先写了一个 <code>greedy_decode</code>：每帧取最大概率的编号，跳过某个符号，其余翻译成字符。但它有三处问题：</p><ul class="tight"><li>跳过的是 <b>空格</b>（1 号），而不是 CTC <b>空白</b>（28 号）；</li><li>没有<b>合并连续重复</b>的字母；</li><li><code>transcriptions += character</code> 把字符加进了结果列表，而不是这一句的字符串 <code>transcription</code>。</li></ul><p>这个函数后面没有被用到，作者在下一格重写了一个正确的版本。</p>`,
+      cells: [29], highlight: ["text_transform.char_map['<SPACE>']", "transcriptions += character"],
+      draw(svg, ctx) {
+        const fr = ["_", "h", "h", "_", "e", "l", "l", "_", "l", "o", " ", " ", "w", "o", "_", "r", "l", "d", "d", "_"];
+        const cw = 33;
+        fr.forEach((c, i) => K.node(svg, 20 + i * cw, 40, cw - 3, 32, c === "_" ? "·" : c === " " ? "␣" : c, { fs: 12, fill: c === "_" ? "var(--panel-2)" : "var(--accent-soft)", stroke: c === "_" ? "var(--line)" : "var(--accent)" }));
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 12, class: "muted" }, "逐帧最大概率（示意，· = 空白 28 号，␣ = 空格 1 号）");
+        const right = fr.filter((c, i) => i === 0 || c !== fr[i - 1]).filter((c) => c !== "_").join("");
+        const wrong = fr.filter((c) => c !== " ").map((c) => (c === "_" ? "·" : c)).join("");
+        const a = K.svg(svg, "text", { x: 20, y: 140, "font-size": 15, "font-family": "var(--mono)" }, ""), b = K.svg(svg, "text", { x: 20, y: 220, "font-size": 15, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 20, y: 115, "font-size": 12, "font-weight": 700, fill: "var(--bad)" }, "✗ 第 29 格：去掉空格、保留空白、不合并");
+        K.svg(svg, "text", { x: 20, y: 195, "font-size": 12, "font-weight": 700, fill: "var(--good)" }, "✓ 第 31 格：合并重复、去掉空白");
+        ctx.wait(500).then((o) => { if (o) a.textContent = wrong; return o && ctx.wait(600); }).then((o) => { if (o) b.textContent = "“" + right + "”"; });
+        K.svg(svg, "text", { x: 20, y: 290, "font-size": 12, class: "muted" }, "（第 29 格里 · 会被翻译成 index_map[28]，而字符表里没有 28 号，实际运行会报错）");
+      },
+    },
+    {
+      at: 30, title: "贪心解码与验证", kicker: "第 30–33 格 · greedy_decoder、validate",
+      html: `<p>新的 <code>greedy_decoder</code> 是标准的 CTC 贪心解码：逐帧取最大概率；如果和上一帧不同、并且不是空白 28，就保留。用随机数据演示一遍，再写一个 <code>pad_sequences</code> 把结果补齐。</p><p><code>validate</code> 在测试集上：算 CTC 损失，贪心解码得到预测文字，把标签翻译回参考文字，算每句的 WER、CER 再取平均。问题在于参考文字是从<b>补齐过的</b>标签直接翻译的，没有用 <code>label_lengths</code> 截掉补的 0，短句后面会多出一串撇号（见实验 C）。</p>`,
+      cells: [31, 32, 33], highlight: ["label_index != previous and label_index != blank_label", "text_transform.int_to_text(label.tolist())", "np.mean([wer(ref, hyp)"],
+      draw(svg, ctx) {
+        const T = 14, cls = ["·", "c", "a", "t"], r = K.rng(4);
+        const truth = ["·", "c", "c", "·", "a", "a", "a", "·", "t", "t", "·", "·", "·", "·"];
+        const P = truth.map((c) => { const k = cls.indexOf(c); return cls.map((_, j) => (j === k ? 0.55 + 0.3 * r() : 0.05 + 0.1 * r())); }).map((p) => { const s = p.reduce((a, b) => a + b); return p.map((x) => x / s); });
+        const cw = 44;
+        cls.forEach((c, j) => K.svg(svg, "text", { x: 30, y: 60 + j * 34, "font-size": 13, "font-family": "var(--mono)" }, c === "·" ? "空白" : c));
+        P.forEach((p, i) => p.forEach((q, j) => { K.svg(svg, "rect", { x: 80 + i * cw, y: 42 + j * 34, width: cw - 3, height: 30, rx: 3, fill: AK.color(q) }); }));
+        const hl = []; P.forEach((p, i) => { const j = p.indexOf(Math.max(...p)); const h = K.svg(svg, "rect", { x: 80 + i * cw, y: 42 + j * 34, width: cw - 3, height: 30, rx: 3, fill: "none", stroke: "var(--warn)", "stroke-width": 2.5 }); h.style.opacity = 0; hl.push(h); });
+        const out = K.svg(svg, "text", { x: 80, y: 220, "font-size": 18, "font-family": "var(--mono)", "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 12, class: "muted" }, "每帧 4 个符号的概率（示意），橙框 = 最大概率");
+        (async () => { let prev = -1, s = ""; for (let i = 0; i < T; i++) { hl[i].style.opacity = 1; const j = P[i].indexOf(Math.max(...P[i])); if (j !== prev && j !== 0) s += cls[j]; prev = j; out.textContent = "解码：" + s; if (!(await ctx.wait(160))) return; } })();
+        K.svg(svg, "text", { x: 80, y: 260, "font-size": 12 }, "规则：和上一帧相同 → 跳过；是空白 → 跳过；其他 → 写下");
+      },
+    },
+    {
+      at: 34, title: "保存、加载，转写一条新录音", kicker: "第 34–36 格 · 推理",
+      html: `<p><code>speech_to_text</code> 把一条录音读进来 → 梅尔频谱 → 加上批和通道维度 → 模型 → log_softmax → 贪心解码 → 文字。作者再保存一次参数（.pt），重新建一个同结构的模型、加载参数，拿一条 dev-clean 的录音试一试，打印预测文字（在运行输出里）。</p><p>只训练了 1 轮、从零开始的模型，转写通常还会有很多拼写错误；想要实用，需要训练更多轮、更大的数据，或者像上一个案例那样从预训练模型出发。</p>`,
+      cells: [34, 36], highlight: ["def speech_to_text", "model.load_state_dict", "greedy_decoder(output)"],
+      draw(svg, ctx) {
+        const st = ["录音", "梅尔频谱", "CNN + GRU", "每帧概率", "贪心解码", "文字"];
+        const ns = st.map((s, i) => { const g = K.node(svg, 20 + i * 117, 120, 100, 60, s, { fill: i === 5 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 5 ? "var(--accent)" : "var(--line)", bold: i === 5 }); g.style.opacity = 0; return g; });
+        for (let i = 0; i < 5; i++) K.arrow(svg, 120 + i * 117, 150, 135 + i * 117, 150);
+        (async () => { for (const g of ns) if (!(await ctx.tween(250, (t) => (g.style.opacity = t)))) return; })();
+        K.svg(svg, "text", { x: 20, y: 240, "font-size": 12, class: "muted" }, "预测文字在原 notebook 的运行输出里");
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：编辑距离表 ---------- */
+  const HYP = [["neim", "Hello My Neim is Hakim（作者的例子）"], ["miss", "Hello My Name Hakim（漏一个词）"], ["split", "Hello My Na me is Hakim（一个词被拆开）"], ["case", "hello my name is hakim（全部小写）"], ["swap", "My Hello Name is Hakim（两个词换位置）"]];
+  const HTXT = { neim: "Hello My Neim is Hakim", miss: "Hello My Name Hakim", split: "Hello My Na me is Hakim", case: "hello my name is hakim", swap: "My Hello Name is Hakim" };
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "h", label: "模型的输出（参考：Hello My Name is Hakim）", value: "neim", options: HYP },
+      { id: "lvl", label: "画哪一层的编辑距离表", value: "word", options: [["word", "单词层（WER）"], ["char", "字符层（CER，只画前 14 个字符）"]] },
+      { id: "ic", label: "忽略大小写（作者函数里的 ignore_case）", value: "no", options: [["no", "不忽略（作者默认）"], ["yes", "忽略"]] },
+    ],
+    note: "照作者第 5 格的定义现场计算：表格第 i 行第 j 列 = 把参考的前 i 个单位改成预测的前 j 个单位最少要几步。右下角就是编辑距离。橙色格子是一条最省步数的路线：斜走 = 相同或替换，横走 = 插入，竖走 = 删除。",
+    render(svg, v) {
+      let ref = "Hello My Name is Hakim", hyp = HTXT[v.h];
+      if (v.ic === "yes") { ref = ref.toLowerCase(); hyp = hyp.toLowerCase(); }
+      const wd = editTable(ref.split(" "), hyp.split(" ")).D, cdT = editTable(ref.split(""), hyp.split(""));
+      const W = wd[ref.split(" ").length][hyp.split(" ").length], C = cdT.D[ref.length][hyp.length];
+      const a = v.lvl === "word" ? ref.split(" ") : ref.split("").slice(0, 14), b = v.lvl === "word" ? hyp.split(" ") : hyp.split("").slice(0, 14);
+      const t = editTable(a, b), cs = Math.min(40, 300 / (a.length + 1)), ox = 120, oy = 40;
+      const onPath = new Set(t.path.map((p) => p[0] + "," + p[1]));
+      b.forEach((c, j) => K.svg(svg, "text", { x: ox + (j + 1) * cs + cs / 2, y: oy - 8, "text-anchor": "middle", "font-size": v.lvl === "word" ? 11 : 13, "font-family": "var(--mono)" }, c === " " ? "␣" : c));
+      a.forEach((c, i) => K.svg(svg, "text", { x: ox - 6, y: oy + (i + 1) * cs + cs / 2 + 4, "text-anchor": "end", "font-size": v.lvl === "word" ? 11 : 13, "font-family": "var(--mono)" }, c === " " ? "␣" : c));
+      for (let i = 0; i <= a.length; i++) for (let j = 0; j <= b.length; j++) {
+        const on = onPath.has(i + "," + j);
+        K.svg(svg, "rect", { x: ox + j * cs, y: oy + i * cs, width: cs - 2, height: cs - 2, rx: 3, fill: on ? "color-mix(in srgb, var(--warn) 35%, var(--panel))" : "var(--panel-2)" });
+        K.svg(svg, "text", { x: ox + j * cs + cs / 2 - 1, y: oy + i * cs + cs / 2 + 4, "text-anchor": "middle", "font-size": 11 }, String(t.D[i][j]));
+      }
+      K.svg(svg, "text", { x: 20, y: 30, "font-size": 11, class: "muted" }, "行 = 参考，列 = 预测");
+      return { readout: [
+        { k: "单词层编辑距离", v: String(W) },
+        { k: "WER", v: (W / ref.split(" ").length).toFixed(2) },
+        { k: "字符层编辑距离", v: String(C) },
+        { k: "CER", v: (C / ref.length).toFixed(3) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：浏览器里训练迷你 CTC 模型 ---------- */
+  // 字母表：0 = 空白，1..4 = a b c d；每帧特征 = 6 维（4 个字母 + 静音 + 常数项），带噪声；模型 = 每帧一个线性 softmax
+  const ALPHA = ["·", "a", "b", "c", "d"], NC = 5, NF = 6;
+  function makeSeq(r, noise) {
+    const L = 2 + Math.floor(r() * 3), lab = [];
+    for (let i = 0; i < L; i++) { let c; do { c = 1 + Math.floor(r() * 4); } while (lab.length && c === lab[lab.length - 1] && r() < 0.7); lab.push(c); }
+    const fr = [];
+    const sil = () => { const n = Math.floor(r() * 3); for (let k = 0; k < n; k++) fr.push(0); };
+    sil(); lab.forEach((c, i) => { const n = 1 + Math.floor(r() * 3); for (let k = 0; k < n; k++) fr.push(c); if (i < L - 1 && (lab[i + 1] === c || r() < 0.4)) fr.push(0); }); sil();
+    const X = fr.map((c) => { const f = new Array(NF).fill(0); f[c === 0 ? 4 : c - 1] = 1; f[5] = 1; for (let j = 0; j < 5; j++) f[j] += noise * K.randn(r); return f; });
+    return { X, lab, fr };
+  }
+  function ctcGrad(P, lab) { // P: T×NC 概率；返回 {loss, G: T×NC 对 logits 的梯度}
+    const T = P.length, ext = [0]; lab.forEach((c) => ext.push(c, 0)); const S = ext.length;
+    const A = Array.from({ length: T }, () => new Float64Array(S)), B = Array.from({ length: T }, () => new Float64Array(S));
+    A[0][0] = P[0][0]; if (S > 1) A[0][1] = P[0][ext[1]];
+    for (let t = 1; t < T; t++) for (let s = 0; s < S; s++) { let a = A[t - 1][s] + (s > 0 ? A[t - 1][s - 1] : 0); if (s > 1 && ext[s] !== 0 && ext[s] !== ext[s - 2]) a += A[t - 1][s - 2]; A[t][s] = a * P[t][ext[s]]; }
+    B[T - 1][S - 1] = P[T - 1][ext[S - 1]]; B[T - 1][S - 2] = P[T - 1][ext[S - 2]];
+    for (let t = T - 2; t >= 0; t--) for (let s = S - 1; s >= 0; s--) { let b = B[t + 1][s] + (s < S - 1 ? B[t + 1][s + 1] : 0); if (s < S - 2 && ext[s] !== 0 && ext[s] !== ext[s + 2]) b += B[t + 1][s + 2]; B[t][s] = b * P[t][ext[s]]; }
+    const Z = A[T - 1][S - 1] + A[T - 1][S - 2];
+    if (!(Z > 0)) return { loss: 30, G: null };
+    const G = P.map((p) => Array.from(p));
+    for (let t = 0; t < T; t++) { const acc = new Float64Array(NC); for (let s = 0; s < S; s++) acc[ext[s]] += (A[t][s] * B[t][s]) / P[t][ext[s]]; for (let k = 0; k < NC; k++) G[t][k] = P[t][k] - acc[k] / Z; }
+    return { loss: -Math.log(Z), G };
+  }
+  const softmax = (z) => { const m = Math.max(...z), e = z.map((x) => Math.exp(x - m)), s = e.reduce((a, b) => a + b); return e.map((x) => x / s); };
+  const fwd = (Wt, X) => X.map((x) => softmax(Wt.map((w) => w.reduce((s, wi, j) => s + wi * x[j], 0))));
+  const decode = (P) => { const ids = P.map((p) => p.indexOf(Math.max(...p))); return ids.filter((c, i) => (i === 0 || c !== ids[i - 1]) && c !== 0); };
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "steps", label: "训练轮数（全部样本过一遍算一轮）", min: 0, max: 120, step: 1, value: 12 },
+      { id: "lr", label: "学习率", min: 0.05, max: 4, step: 0.05, value: 0.3, fmt: (x) => x.toFixed(2) },
+      { id: "noise", label: "特征里的噪声（越大越难）", min: 0, max: 0.8, step: 0.05, value: 0.3, fmt: (x) => x.toFixed(2) },
+    ],
+    note: "浏览器现场训练：60 条合成“录音”，每条的标签是 2–4 个字母（a–d），每个字母持续 1–3 帧，前后有静音。模型只是“每帧一个线性 softmax”，训练时只给它字母序列，不告诉它哪一帧是哪个字母；CTC 前向-后向算法算出梯度，用梯度下降更新。拖动“训练轮数”看损失下降、逐帧输出慢慢对齐。",
+    render(svg, v) {
+      const r = K.rng(7), data = []; for (let i = 0; i < 60; i++) data.push(makeSeq(r, v.noise));
+      const test = []; const r2 = K.rng(99); for (let i = 0; i < 30; i++) test.push(makeSeq(r2, v.noise));
+      let Wt = Array.from({ length: NC }, (_, k) => Array.from({ length: NF }, (_, j) => 0.01 * Math.sin(k * 7 + j * 3)));
+      const hist = [];
+      const evalLoss = () => data.reduce((s, d) => s + ctcGrad(fwd(Wt, d.X), d.lab).loss, 0) / data.length;
+      hist.push(evalLoss());
+      for (let ep = 0; ep < v.steps; ep++) {
+        const g = Array.from({ length: NC }, () => new Array(NF).fill(0));
+        data.forEach((d) => { const P = fwd(Wt, d.X), res = ctcGrad(P, d.lab); if (!res.G) return; res.G.forEach((gt, t) => gt.forEach((gk, k) => d.X[t].forEach((x, j) => (g[k][j] += gk * x)))); });
+        Wt = Wt.map((w, k) => w.map((wi, j) => wi - (v.lr * g[k][j]) / data.length));
+        hist.push(evalLoss());
+      }
+      // 损失曲线
+      const ax = K.axes(svg, { x: 50, y: 20, w: 250, h: 150 }, [0, Math.max(1, v.steps)], [0, Math.max(...hist) * 1.05], { xlabel: "训练轮数", ylabel: "CTC 损失" });
+      let d = ""; hist.forEach((h, i) => (d += (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(h))); K.svg(svg, "path", { d, fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+      // 一条测试样本的逐帧概率
+      const ex = test[0], P = fwd(Wt, ex.X), T = P.length, cw = Math.min(26, 300 / T);
+      K.svg(svg, "text", { x: 330, y: 22, "font-size": 12 }, "一条测试样本的逐帧概率（行 = 符号）");
+      ALPHA.forEach((c, k) => { K.svg(svg, "text", { x: 330, y: 48 + k * 24, "font-size": 12, "font-family": "var(--mono)" }, c); P.forEach((p, t) => K.svg(svg, "rect", { x: 350 + t * cw, y: 34 + k * 24, width: cw - 2, height: 21, rx: 2, fill: AK.color(p[k]) })); });
+      ex.fr.forEach((c, t) => K.svg(svg, "text", { x: 350 + t * cw + cw / 2 - 1, y: 172, "text-anchor": "middle", "font-size": 11, fill: "var(--ink-3)", "font-family": "var(--mono)" }, ALPHA[c]));
+      K.svg(svg, "text", { x: 330, y: 190, "font-size": 11, class: "muted" }, "最下一行灰字 = 真实的逐帧内容（模型训练时看不到）");
+      // 测试集解码
+      let ok = 0, cerSum = 0, chars = 0; const lines = [];
+      test.forEach((tq, i) => { const out = decode(fwd(Wt, tq.X)); const e = editTable(tq.lab, out).D[tq.lab.length][out.length]; cerSum += e; chars += tq.lab.length; if (e === 0) ok++; if (i < 6) lines.push([tq.lab.map((c) => ALPHA[c]).join(""), out.map((c) => ALPHA[c]).join("") || "（空）", e === 0]); });
+      K.svg(svg, "text", { x: 50, y: 225, "font-size": 12, "font-weight": 700 }, "测试样本：正确答案 → 模型贪心解码");
+      lines.forEach((l, i) => K.svg(svg, "text", { x: 50 + (i % 3) * 200, y: 255 + Math.floor(i / 3) * 28, "font-size": 15, "font-family": "var(--mono)", fill: l[2] ? "var(--good)" : "var(--bad)" }, `${l[0]} → ${l[1]}`));
+      K.svg(svg, "text", { x: 50, y: 330, "font-size": 11, class: "muted" }, "绿 = 完全正确，红 = 有错");
+      return { readout: [
+        { k: "训练损失", v: hist[hist.length - 1].toFixed(2) },
+        { k: "测试整句全对", v: `${ok} / ${test.length}`, color: ok > 20 ? "var(--good)" : "var(--warn)" },
+        { k: "测试 CER", v: ((cerSum / chars) * 100).toFixed(1) + "%" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：补齐标签没截掉 ---------- */
+  const SENTS = ["the cat sat", "a dog ran far away", "we read books every night", "go", "she sells sea shells by the shore"];
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "fix", label: "还原参考文字时", value: "bug", options: [["bug", "直接翻译补齐后的标签（第 32 格的写法）"], ["fix", "按 label_lengths 截断后再翻译"]] },
+      { id: "acc", label: "假设模型每句只错一个字母", value: "one", options: [["perfect", "模型完全正确"], ["one", "每句错一个字母"]] },
+    ],
+    note: "一批 5 句（我们编的示意句子），按最长的一句补 0。0 号在字符表里是撇号（两个字符 ''）。浏览器现场按作者第 5 格的 wer/cer 定义计算每句的错误率再取平均。",
+    render(svg, v) {
+      const L = Math.max(...SENTS.map((s) => s.length));
+      let werS = 0, cerS = 0;
+      SENTS.forEach((s, i) => {
+        let ref = s;
+        if (v.fix === "bug") ref = s + "''".repeat(L - s.length);
+        let hyp = s;
+        if (v.acc === "one") { const k = Math.floor(s.length / 2); hyp = s.slice(0, k) + (s[k] === "x" ? "y" : "x") + s.slice(k + 1); }
+        const rw = ref.split(" "), hw = hyp.split(" ");
+        const w = editTable(rw, hw).D[rw.length][hw.length] / rw.length, c = editTable(ref.split(""), hyp.split("")).D[ref.length][hyp.length] / ref.length;
+        werS += w; cerS += c;
+        const y = 30 + i * 44;
+        K.svg(svg, "text", { x: 20, y, "font-size": 12, "font-family": "var(--mono)" }, "参考：" + (ref.length > 60 ? ref.slice(0, 60) + "…" : ref));
+        K.svg(svg, "text", { x: 20, y: y + 17, "font-size": 12, "font-family": "var(--mono)", fill: "var(--ink-3)" }, "预测：" + hyp + `　WER ${w.toFixed(2)}　CER ${c.toFixed(2)}`);
+      });
+      K.svg(svg, "text", { x: 20, y: 270, "font-size": 12, class: "muted" }, "补齐的撇号让短句的参考答案变长，最后一个“词”也变了，WER 和 CER 都被抬高");
+      return { readout: [
+        { k: "平均 WER", v: (werS / SENTS.length).toFixed(3), color: v.fix === "bug" ? "var(--bad)" : "var(--good)" },
+        { k: "平均 CER", v: (cerS / SENTS.length).toFixed(3), color: v.fix === "bug" ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

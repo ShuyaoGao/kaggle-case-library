@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>股价分析与 LSTM</title>
+<meta name="description" content="Kaggle 案例拆解：科技股行情分析（移动平均、日收益率、相关性、风险收益）与用 60 天滑动窗口 + 两层 LSTM 预测苹果公司收盘价。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">时间序列 · 回归预测 · 股票行情</div>
+  <h1>用过去 60 天预测明天：科技股行情分析与 LSTM 股价预测</h1>
+  <p class="en">Stock Market Analysis + Prediction using LSTM</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span><span class="tag dl">深度学习</span>
+    <span class="tag method">移动平均</span><span class="tag method">日收益率</span><span class="tag method">相关性分析</span>
+    <span class="tag method">风险-收益图</span><span class="tag method">MinMax 缩放</span><span class="tag method">滑动窗口</span><span class="tag method">两层 LSTM</span><span class="tag method">RMSE</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Fares Sayah</b></span>
+    <span>Kaggle 点赞 <b>13,293</b>（2026-11 抓取）</span>
+    <span>数据 <b>运行时用 yfinance 从雅虎财经下载</b></span>
+    <span><a href="https://www.kaggle.com/code/faressayah/stock-market-analysis-prediction-using-lstm" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">苹果、谷歌、微软、亚马逊的日线行情</div><p>用 <code>yfinance</code> 现场下载最近一年的开盘、最高、最低、收盘、调整后收盘价和成交量；周末不交易，所以一年只有约 255 条。<span data-cell="4">出处</span> <span data-cell="8">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">苹果公司（AAPL）下一个交易日的收盘价</div><p>前半部分是行情分析：涨跌、均线、收益率、相关性、风险。最后一节才做预测，数据换成 2012 年至今的 AAPL 收盘价。<span data-cell="42">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">60 天滑动窗口 + 两层 LSTM</div><p>收盘价缩放到 0–1，每 60 天的价格作为一个样本的输入、第 61 天的价格作为标签；网络是 LSTM(128) → LSTM(64) → Dense(25) → Dense(1)。<span data-cell="46">出处</span> <span data-cell="47">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一条贴着真实走势的预测曲线（需要谨慎解读）</div><p>作者在最后 5% 的数据上算 RMSE 并画出预测。<span data-cell="48">出处</span> 本页实验会告诉你：对随机游走一样的股价，“明天 = 今天”这个朴素基线往往同样贴合。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">这份 notebook 没有用 Kaggle 上的现成数据集，而是在运行时用 <code>yfinance</code> 从雅虎财经下载日线行情。下载到的表格结构是固定的，见下表；具体价格随运行日期而变。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">分析部分的股票</div><div class="v">4 只</div></div>
+        <div class="stat-tile"><div class="k">每只一年的行数</div><div class="v">约 255 行</div></div>
+        <div class="stat-tile"><div class="k">预测部分</div><div class="v">AAPL，2012 年至今</div></div>
+        <div class="stat-tile"><div class="k">训练 / 测试</div><div class="v">前 95% / 后 5%</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">四只股票见第 4 格 <span data-cell="4">出处</span>；255 行见作者第 8 格说明 <span data-cell="8">出处</span>；AAPL 起始日期见第 42 格 <span data-cell="42">出处</span>；95% 见第 44 格 <span data-cell="44">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>Date</code>（索引）</td><td>交易日期；周末和节假日没有</td><td>日期</td></tr>
+        <tr><td><code>Open</code> / <code>High</code> / <code>Low</code></td><td>当天开盘价 / 最高价 / 最低价</td><td>数值</td></tr>
+        <tr><td><code>Close</code></td><td>收盘价。<b>预测部分要猜的答案</b>：下一个交易日的收盘价</td><td>数值</td></tr>
+        <tr><td><code>Adj Close</code></td><td>调整后收盘价：把分红、拆股的影响算进去，前后可比</td><td>数值</td></tr>
+        <tr><td><code>Volume</code></td><td>成交量：当天成交了多少股</td><td>整数</td></tr>
+        <tr><td><code>company_name</code></td><td>作者自己加的一列公司名，方便画图</td><td>文字</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead">按原 notebook 的顺序，从上往下一章一章讲。每章先看动画和讲解，再看作者的代码。动画里的价格曲线是随机生成的示意数据，不是真实行情。</p>
+  <div id="pipe"></div>
+  <div data-at="48">
+    <h3>动手试试 · 滑动窗口 + LSTM，和“明天 = 今天”比一比 <span class="sim-badge">浏览器内模拟</span></h3>
+    <p>浏览器生成一段模拟股价，按作者的方式切滑动窗口，现场训练三种模型做“预测下一天”：朴素法（明天 = 今天）、窗口线性回归、一个小型 LSTM（真的在浏览器里做反向传播）。数字都是模拟结果。</p>
+    <div id="lab1"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>周末不交易，一年只有 255 条记录</td><td><span data-cell="8">第 8 格</span></td></tr>
+        <tr><td>10 天和 20 天均线最合适：既能看出趋势，又不太受噪声影响</td><td><span data-cell="18">第 18 格</span></td></tr>
+        <tr><td>日收益率相关性最强的是微软和亚马逊；几家科技公司之间都是正相关</td><td><span data-cell="37">第 37 格</span></td></tr>
+        <tr><td>用“期望收益 vs 收益标准差”的散点图衡量每只股票的风险</td><td><span data-cell="40">第 40 格</span></td></tr>
+        <tr><td>LSTM：95% 数据训练，batch_size=1，只训练 1 轮；在剩下的 5% 上算 RMSE</td><td><span data-cell="44">第 44 格</span> <span data-cell="47">第 47 格</span> <span data-cell="48">第 48 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">原 notebook 的 RMSE、相关系数等具体数值都在运行输出里。Kaggle 下载的源码不带输出，作者的文字里也没写具体分数；而且数据是运行当天现场下载的，每次运行结果都会不同。所以这里不列分数。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给出最近 60 个交易日的收盘价，输出下一个交易日收盘价的估计。注意它只能一步一步往前推，每一步都要用真实的前 60 天。</li>
+        <li><b>同类问题：</b>传感器读数、网站访问量、气温、电量等“用过去一段窗口预测下一个值”的问题，滑动窗口 + LSTM 的写法完全一样；这些序列往往比股价更有规律，LSTM 更能发挥作用。</li>
+        <li><b>可迁移的套路：</b>按时间切分 → 只用训练段拟合缩放器 → 滑动窗口造样本 → 先和朴素基线比 → 再上深度模型。</li>
+        <li><b>要警惕：</b>股价接近随机游走。模型曲线“看起来很贴”，往往只是把昨天的价格平移了一天。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>数据获取：<code>yf.download</code> <span data-cell="4">第 4 格</span></li>
+        <li>移动平均：<code>rolling(ma).mean()</code> <span data-cell="17">第 17 格</span></li>
+        <li>日收益率：<code>pct_change()</code> <span data-cell="21">第 21 格</span></li>
+        <li>相关性：<code>pairplot</code>、<code>PairGrid</code>、相关热力图 <span data-cell="31">第 31 格</span> <span data-cell="36">第 36 格</span></li>
+        <li>缩放：<code>MinMaxScaler(feature_range=(0,1))</code> <span data-cell="45">第 45 格</span></li>
+        <li>滑动窗口：60 天 → 下一天 <span data-cell="46">第 46 格</span></li>
+        <li>模型：Keras <code>LSTM(128)</code> + <code>LSTM(64)</code> + <code>Dense</code>，Adam，MSE <span data-cell="47">第 47 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>第 45 格的 <code>MinMaxScaler</code> 是在<b>全部</b>数据（含测试段）上 <code>fit</code> 的。测试段的最高价、最低价因此“泄漏”给了训练过程，应该怎么改？</li>
+      <li>如果模型的预测曲线和真实曲线几乎重合，但整体向右错开一天，这说明模型学到了什么？怎么用“方向正确率”（预测涨跌对不对）来检验？</li>
+      <li>作者只训练了 1 轮、<code>batch_size=1</code>。这对一个有十几万参数的两层 LSTM 来说够不够？你会怎么判断它是欠拟合还是过拟合？</li>
+      <li>直接预测“价格”和预测“日收益率”有什么区别？为什么金融里更常预测收益率？</li>
+      <li>第 36 格同时画了“日收益率”和“收盘价”的相关热力图。两只都在上涨的股票，收盘价的相关系数会很高，这能说明它们真的同涨同跌吗？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Fares Sayah，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。行情数据由原 notebook 运行时从雅虎财经下载，本页不包含任何真实行情。
+</footer>
+</main>
+
+<script src="nb/stock-lstm-forecast.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---- 页面辅助 ---- */
+  function pathOf(ax, xs, ys) {
+    let d = "";
+    for (let i = 0; i < ys.length; i++) { if (ys[i] == null || !isFinite(ys[i])) continue; d += (d ? "L" : "M") + ax.sx(xs[i]).toFixed(1) + "," + ax.sy(ys[i]).toFixed(1); }
+    return d;
+  }
+  function line(svg, ax, xs, ys, color, opt) {
+    opt = opt || {};
+    return K.svg(svg, "path", { d: pathOf(ax, xs, ys), fill: "none", stroke: color, "stroke-width": opt.sw || 1.8, "stroke-dasharray": opt.dash || null, opacity: opt.opacity == null ? 1 : opt.opacity });
+  }
+  function drawOn(ctx, p, ms) {
+    const L = p.getTotalLength();
+    p.style.strokeDasharray = L; p.style.strokeDashoffset = L;
+    return ctx.tween(ms, (t) => (p.style.strokeDashoffset = L * (1 - t)));
+  }
+  const range = (n) => Array.from({ length: n }, (_, i) => i);
+  const mean = (a) => a.reduce((s, v) => s + v, 0) / (a.length || 1);
+  const std = (a) => { const m = mean(a); return Math.sqrt(mean(a.map((v) => (v - m) ** 2))); };
+  function gbm(seed, n, mu, sig, p0, common, beta) { // 几何随机游走，可叠加共同因子
+    const r = K.rng(seed), p = [p0];
+    for (let i = 1; i < n; i++) p.push(p[i - 1] * Math.exp(mu + (common ? beta * common[i] : 0) + sig * K.randn(r)));
+    return p;
+  }
+  const rollMean = (a, w) => a.map((_, i) => (i + 1 < w ? null : mean(a.slice(i + 1 - w, i + 1))));
+
+  const steps = [
+    {
+      at: 4, title: "下载四只科技股一年的行情", kicker: "第 4–8 格 · 获取数据",
+      html: `<p>作者用 <code>yfinance</code> 从雅虎财经下载 AAPL、GOOG、MSFT、AMZN 最近一年的日线数据，并用 <code>describe()</code>、<code>info()</code> 看一眼。</p><p>股票只在工作日交易，周末和节假日没有记录，所以作者发现一年只有 <b>255 条</b>（<span data-cell="8">第 8 格</span>）。时间序列里“日期不连续”是常态，后面构造窗口时一个样本代表的是 60 个<b>交易日</b>，不是 60 个自然日。</p>`,
+      cells: [4], highlight: ["yf.download", "tech_list"],
+      draw(svg, ctx) {
+        const days = ["一", "二", "三", "四", "五", "六", "日"], cw = 62, ch = 30, x0 = 60, y0 = 40;
+        days.forEach((d, j) => K.svg(svg, "text", { x: x0 + j * cw + cw / 2, y: y0 - 10, "text-anchor": "middle", "font-size": 13, fill: j >= 5 ? "var(--ink-3)" : "var(--ink)" }, "周" + d));
+        const cells = [], hol = { 17: 1, 38: 1 };
+        for (let w = 0; w < 8; w++) for (let j = 0; j < 7; j++) {
+          const k = w * 7 + j, closed = j >= 5 || hol[k];
+          cells.push({ closed, e: K.svg(svg, "rect", { x: x0 + j * cw + 2, y: y0 + w * ch + 2, width: cw - 4, height: ch - 4, rx: 4, fill: closed ? "var(--panel-2)" : "var(--c1)", opacity: 0, stroke: "var(--line)" }) });
+          if (closed) K.svg(svg, "text", { x: x0 + j * cw + cw / 2, y: y0 + w * ch + 19, "text-anchor": "middle", "font-size": 11, fill: "var(--ink-3)" }, hol[k] ? "节假日" : "休市");
+        }
+        const cnt = K.svg(svg, "text", { x: 520, y: 90, "font-size": 15, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 520, y: 130, "font-size": 13 }, "一年 ≈ 52 周 × 5 天");
+        K.svg(svg, "text", { x: 520, y: 152, "font-size": 13 }, "再减去节假日");
+        K.svg(svg, "text", { x: 520, y: 186, "font-size": 15, "font-weight": 700, fill: "var(--accent)" }, "→ 作者：255 条");
+        K.svg(svg, "text", { x: 520, y: 206, "font-size": 11, class: "muted" }, "（第 8 格）");
+        ctx.tween(2200, (t) => { let n = 0; cells.forEach((c, i) => { const on = K.clamp(t * cells.length - i, 0, 1); c.e.style.opacity = c.closed ? 0.6 * on : 0.75 * on; if (!c.closed && on > 0.5) n++; }); cnt.textContent = `交易日：${n} 天`; });
+      },
+    },
+    {
+      at: 11, title: "收盘价和成交量随时间的变化", kicker: "第 12–14 格 · 看走势",
+      html: `<p>四只股票各画一张小图：调整后收盘价（<code>Adj Close</code>，已考虑分红、拆股的价格）和每天的成交量。</p><p>这一步回答的是“价格这一年怎么走的”，是所有后续分析的起点。</p>`,
+      cells: [12], highlight: ["Adj Close"],
+      draw(svg, ctx) {
+        const names = ["AAPL", "GOOG", "MSFT", "AMZN"], common = range(255).map((i) => K.randn(K.rng(i + 900)) * 0.01);
+        const paths = names.map((nm, k) => {
+          const bx = 50 + (k % 2) * 340, by = 26 + Math.floor(k / 2) * 158;
+          const p = gbm(30 + k, 255, 0.0005, 0.012, 100, common, 1);
+          const ax = K.axes(svg, { x: bx, y: by, w: 290, h: 110 }, [0, 254], [Math.min(...p) * 0.97, Math.max(...p) * 1.03], { xticks: 0, yticks: 2 });
+          K.svg(svg, "text", { x: bx + 8, y: by + 14, "font-size": 13, "font-weight": 700, fill: K.colors[k] }, nm + "（示意）");
+          return line(svg, ax, range(255), p, K.colors[k], { sw: 1.6 });
+        });
+        paths.forEach((p) => drawOn(ctx, p, 1800));
+      },
+    },
+    {
+      at: 16, title: "移动平均：一个窗口沿时间滑过去", kicker: "第 16–18 格 · 平滑",
+      html: `<p>移动平均（MA）= 最近 N 天价格的平均，窗口每天往前挪一格。<code>rolling(10).mean()</code> 就是 10 日均线。</p><p>作者画了 10、20、50 日三条均线，结论是 10 日和 20 日最合适：能看出趋势，又不被每天的噪声带着跑（<span data-cell="18">第 18 格</span>）。窗口越长越平滑，但对转折的反应也越慢。</p>`,
+      cells: [17], highlight: ["rolling(ma).mean()", "ma_day = [10, 20, 50]"],
+      draw(svg, ctx) {
+        const n = 160, p = gbm(7, n, 0.0008, 0.016, 100);
+        const ax = K.axes(svg, { x: 60, y: 30, w: 630, h: 260 }, [0, n - 1], [Math.min(...p) * 0.97, Math.max(...p) * 1.03], { xticks: 4, yticks: 4, xlabel: "交易日" });
+        line(svg, ax, range(n), p, "var(--ink-3)", { sw: 1.2, opacity: 0.8 });
+        const ma = { 10: rollMean(p, 10), 20: rollMean(p, 20), 50: rollMean(p, 50) };
+        const cols = { 10: "var(--c1)", 20: "var(--c2)", 50: "var(--c4)" };
+        const win = K.svg(svg, "rect", { x: 0, y: 30, width: ax.sx(9) - ax.sx(0), height: 260, fill: "var(--c1)", "fill-opacity": 0.12, stroke: "var(--c1)" });
+        const pm = K.svg(svg, "path", { d: "", fill: "none", stroke: cols[10], "stroke-width": 2.4 });
+        const lab = K.svg(svg, "text", { x: 70, y: 24, "font-size": 12, fill: "var(--c1)", "font-weight": 700 }, "10 日窗口 → 窗口里的平均值落在窗口右端");
+        (async () => {
+          if (!(await ctx.tween(2600, (t) => {
+            const e = Math.round(K.lerp(9, n - 1, t));
+            win.setAttribute("x", ax.sx(e - 9));
+            pm.setAttribute("d", pathOf(ax, range(e + 1), ma[10].slice(0, e + 1)));
+          }))) return;
+          win.style.opacity = 0;
+          for (const w of [20, 50]) { const q = line(svg, ax, range(n), ma[w], cols[w], { sw: 2.2 }); if (!(await drawOn(ctx, q, 900))) return; }
+          lab.textContent = "";
+          [10, 20, 50].forEach((w, i) => K.svg(svg, "text", { x: 70 + i * 110, y: 24, "font-size": 12, fill: cols[w], "font-weight": 700 }, `— MA ${w}`));
+        })();
+      },
+    },
+    {
+      at: 19, title: "从价格到日收益率", kicker: "第 19–23 格 · 收益率",
+      html: `<p>分析风险时，比起价格本身，更关心“每天涨跌了百分之几”。<code>pct_change()</code> 算的是日收益率：(今天 − 昨天) / 昨天。</p><p>价格有趋势、会一直往上走；收益率则围绕 0 上下波动，更“平稳”。作者把每只股票的日收益率画成折线和直方图，看它的分布宽窄。</p>`,
+      cells: [21, 23], highlight: ["pct_change()"],
+      draw(svg, ctx) {
+        const n = 90, p = gbm(17, n + 1, 0.001, 0.018, 100), ret = range(n).map((i) => p[i + 1] / p[i] - 1);
+        const ax1 = K.axes(svg, { x: 60, y: 20, w: 400, h: 120 }, [0, n], [Math.min(...p) * 0.97, Math.max(...p) * 1.03], { xticks: 0, yticks: 2 });
+        line(svg, ax1, range(n + 1), p, "var(--c1)", { sw: 1.6 });
+        K.svg(svg, "text", { x: 66, y: 34, "font-size": 12, fill: "var(--c1)" }, "价格（有趋势）");
+        const ax2 = K.axes(svg, { x: 60, y: 170, w: 400, h: 140 }, [0, n], [-0.06, 0.06], { xticks: 0, yticks: 2, yfmt: (v) => (v * 100).toFixed(0) + "%" });
+        K.svg(svg, "text", { x: 66, y: 184, "font-size": 12, fill: "var(--c2)" }, "日收益率（围绕 0 波动）");
+        const bw = 400 / n;
+        const bars = ret.map((r, i) => K.svg(svg, "rect", { x: ax2.sx(i) + 0.5, y: ax2.sy(Math.max(0, r)), width: bw - 1, height: 0, fill: r >= 0 ? "var(--c3)" : "var(--c6)" }));
+        const bins = 12, hc = new Array(bins).fill(0), bx0 = 520, bwid = 170;
+        K.svg(svg, "text", { x: bx0, y: 34, "font-size": 12, class: "muted" }, "收益率直方图");
+        const hbars = range(bins).map((b) => K.svg(svg, "rect", { x: bx0 + (b * bwid) / bins, y: 300, width: bwid / bins - 2, height: 0, fill: "var(--c2)" }));
+        K.svg(svg, "line", { x1: bx0, x2: bx0 + bwid, y1: 300, y2: 300, stroke: "var(--ink-3)" });
+        K.svg(svg, "text", { x: bx0, y: 316, "font-size": 11 }, "−6%"); K.svg(svg, "text", { x: bx0 + bwid, y: 316, "font-size": 11, "text-anchor": "end" }, "+6%");
+        const dot = K.svg(svg, "circle", { r: 5, fill: "var(--warn)", cx: -10, cy: -10 });
+        let done = 0;
+        ctx.tween(3000, (t) => {
+          const k = Math.floor(t * n);
+          while (done < k) {
+            const r = ret[done];
+            bars[done].setAttribute("height", Math.abs(ax2.sy(r) - ax2.sy(0)));
+            const b = K.clamp(Math.floor(((r + 0.06) / 0.12) * bins), 0, bins - 1); hc[b]++;
+            hbars[b].setAttribute("height", hc[b] * 9); hbars[b].setAttribute("y", 300 - hc[b] * 9);
+            dot.setAttribute("cx", ax1.sx(done + 1)); dot.setAttribute("cy", ax1.sy(p[done + 1]));
+            done++;
+          }
+        });
+      },
+    },
+    {
+      at: 24, notes: {26: "一次性下载四只股票的调整后收盘价，再算出日收益率"}, title: "几只股票是不是一起涨跌？", kicker: "第 24–37 格 · 相关性",
+      html: `<p>把四只股票的日收益率放进一张表，用 <code>pairplot</code> / <code>PairGrid</code> 两两画散点，再用 <code>corr()</code> 画相关热力图。相关系数在 −1 到 1 之间，越接近 1 越“同涨同跌”。</p><p>作者的结论：几家科技公司之间都是<b>正相关</b>，日收益率相关性最强的是<b>微软和亚马逊</b>（<span data-cell="37">第 37 格</span>）。热力图颜色是示意，具体系数见原输出。</p>`,
+      cells: [36], highlight: ["corr()"],
+      draw(svg, ctx) {
+        const names = ["AAPL", "GOOG", "MSFT", "AMZN"];
+        // 示意：按作者结论设定颜色深浅（MSFT-AMZN 最深）
+        const C = [[1, 0.6, 0.62, 0.55], [0.6, 1, 0.66, 0.68], [0.62, 0.66, 1, 0.78], [0.55, 0.68, 0.78, 1]];
+        const x0 = 90, y0 = 50, s = 60;
+        names.forEach((n, i) => { K.svg(svg, "text", { x: x0 - 8, y: y0 + i * s + s / 2 + 4, "text-anchor": "end", "font-size": 13 }, n); K.svg(svg, "text", { x: x0 + i * s + s / 2, y: y0 - 10, "text-anchor": "middle", "font-size": 13 }, n); });
+        const cells = [];
+        for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) cells.push(K.svg(svg, "rect", { x: x0 + j * s + 1, y: y0 + i * s + 1, width: s - 2, height: s - 2, rx: 4, fill: K.heat(C[i][j]), opacity: 0 }));
+        const ring = K.svg(svg, "rect", { x: x0 + 3 * s - 1, y: y0 + 2 * s - 1, width: s + 2, height: s + 2, rx: 5, fill: "none", stroke: "var(--warn)", "stroke-width": 3, opacity: 0 });
+        K.svg(svg, "text", { x: x0, y: y0 + 4 * s + 26, "font-size": 12, class: "muted" }, "颜色越深越相关（示意）");
+        // 右：两只股票收益率散点
+        const r = K.rng(8), pts = range(80).map(() => { const f = K.randn(r); return [0.85 * f + 0.5 * K.randn(r), 0.85 * f + 0.5 * K.randn(r)]; });
+        const ax = K.axes(svg, { x: 430, y: 40, w: 250, h: 230 }, [-3, 3], [-3, 3], { xticks: 0, yticks: 0, xlabel: "MSFT 日收益率", ylabel: "AMZN 日收益率" });
+        const dots = pts.map((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 0, fill: "var(--c4)", opacity: 0.7 }));
+        (async () => {
+          if (!(await ctx.tween(1600, (t) => cells.forEach((c, i) => (c.style.opacity = K.clamp(t * 16 - i, 0, 1)))))) return;
+          ring.style.opacity = 1;
+          await ctx.tween(1400, (t) => dots.forEach((d, i) => d.setAttribute("r", K.clamp(t * 80 - i, 0, 1) * 3.5)));
+        })();
+      },
+    },
+    {
+      at: 38, title: "风险与收益：一张散点图", kicker: "第 38–40 格 · 风险",
+      html: `<p>最朴素的风险度量：横轴是日收益率的平均值（期望收益），纵轴是日收益率的标准差（波动越大风险越高）。每只股票是图上一个点。</p><p>理想的股票在<b>右下角</b>：收益高、波动小。这张图的位置是示意，真实位置随下载日期而变。</p>`,
+      cells: [40], highlight: ["rets.mean()", "rets.std()"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 90, y: 30, w: 560, h: 250 }, [-0.0005, 0.002], [0.008, 0.026], { xticks: 5, yticks: 4, xfmt: (v) => (v * 100).toFixed(2) + "%", yfmt: (v) => (v * 100).toFixed(1) + "%", xlabel: "期望收益（日均收益率）", ylabel: "风险（收益率标准差）" });
+        const names = ["AAPL", "GOOG", "MSFT", "AMZN"];
+        const pts = names.map((n, k) => { const p = gbm(60 + k, 256, 0.0006 + k * 0.0002, 0.012 + k * 0.003, 100); const ret = range(255).map((i) => p[i + 1] / p[i] - 1); return { n, m: mean(ret), s: std(ret), k }; });
+        K.svg(svg, "rect", { x: ax.sx(0.0012), y: ax.sy(0.014), width: ax.sx(0.002) - ax.sx(0.0012), height: ax.sy(0.008) - ax.sy(0.014), fill: "var(--good)", "fill-opacity": 0.1 });
+        K.svg(svg, "text", { x: ax.sx(0.0016), y: ax.sy(0.0095), "text-anchor": "middle", "font-size": 12, fill: "var(--good)" }, "高收益、低风险");
+        const g = pts.map((p) => { const c = K.svg(svg, "circle", { cx: ax.sx(0.00075), cy: ax.sy(0.017), r: 9, fill: K.colors[p.k], opacity: 0.85 }); const t = K.svg(svg, "text", { x: 0, y: 0, "font-size": 12, "font-weight": 700, fill: K.colors[p.k] }, p.n); return { c, t, p }; });
+        ctx.tween(1600, (t) => g.forEach(({ c, t: tx, p }) => {
+          const x = ax.sx(K.lerp(0.00075, K.clamp(p.m, -0.0004, 0.0019), t)), y = ax.sy(K.lerp(0.017, K.clamp(p.s, 0.009, 0.025), t));
+          c.setAttribute("cx", x); c.setAttribute("cy", y); tx.setAttribute("x", x + 12); tx.setAttribute("y", y - 8);
+        }));
+      },
+    },
+    {
+      at: 41, title: "换成 AAPL 长期数据，前 95% 用来训练", kicker: "第 41–44 格 · 准备预测",
+      html: `<p>预测部分换了数据：从 2012 年至今的 AAPL 日线，只保留 <code>Close</code> 一列。</p><p><code>training_data_len = ceil(len × 0.95)</code>：前 95% 的交易日用来训练，<b>最后 5% 留作测试</b>。仍然是按时间先后切，而不是随机抽。</p>`,
+      cells: [44], highlight: [".95", "training_data_len"],
+      draw(svg, ctx) {
+        const n = 400, p = gbm(91, n, 0.0012, 0.016, 15);
+        const ax = K.axes(svg, { x: 60, y: 30, w: 630, h: 240 }, [0, n - 1], [0, Math.max(...p) * 1.05], { xticks: 0, yticks: 4, ylabel: "收盘价（示意）" });
+        const cut = Math.ceil(n * 0.95);
+        const pa = line(svg, ax, range(n), p, "var(--c1)", { sw: 1.6 });
+        const shade = K.svg(svg, "rect", { x: ax.sx(cut), y: 30, width: ax.sx(n - 1) - ax.sx(cut), height: 240, fill: "var(--c2)", "fill-opacity": 0.15, opacity: 0 });
+        const t1 = K.svg(svg, "text", { x: ax.sx(cut / 2), y: 300, "text-anchor": "middle", "font-size": 13, fill: "var(--c1)", "font-weight": 700 }, "训练：前 95%");
+        const t2 = K.svg(svg, "text", { x: ax.sx(cut) - 4, y: 300, "text-anchor": "end", "font-size": 13, fill: "var(--c2)", "font-weight": 700 }, "测试：最后 5% →");
+        t1.style.opacity = t2.style.opacity = 0;
+        drawOn(ctx, pa, 1800).then((ok) => ok && ctx.tween(700, (t) => { shade.style.opacity = t; t1.style.opacity = t2.style.opacity = t; }));
+      },
+    },
+    {
+      title: "MinMaxScaler：把价格压到 0–1", kicker: "第 45 格 · 缩放",
+      html: `<p>神经网络对输入尺度敏感，价格从几十涨到几百，直接喂进去训练会很不稳定。<code>MinMaxScaler</code> 用 (x − 最小值) / (最大值 − 最小值) 把所有价格压到 0–1。</p><p>注意：作者在<b>全部数据</b>上 <code>fit_transform</code>，最小值、最大值包含了测试段。更严谨的做法是只用训练段来 <code>fit</code>，再去 <code>transform</code> 测试段。</p>`,
+      cells: [45], highlight: ["MinMaxScaler", "fit_transform"],
+      draw(svg, ctx) {
+        const n = 120, p = gbm(55, n, 0.004, 0.02, 40), lo = Math.min(...p), hi = Math.max(...p);
+        const ax = K.axes(svg, { x: 70, y: 30, w: 420, h: 250 }, [0, n - 1], [0, hi * 1.1], { xticks: 0, yticks: 4, ylabel: "原始价格" });
+        const ax2 = K.axes(svg, { x: 560, y: 30, w: 120, h: 250 }, [0, 1], [0, 1], { xticks: 0, yticks: 2, yfmt: (v) => v.toFixed(1) });
+        K.svg(svg, "text", { x: 620, y: 300, "text-anchor": "middle", "font-size": 12 }, "缩放后 0–1");
+        const dots = p.map((v, i) => K.svg(svg, "circle", { cx: ax.sx(i), cy: ax.sy(v), r: 2.4, fill: i >= n * 0.95 ? "var(--c2)" : "var(--c1)" }));
+        const im = p.indexOf(hi);
+        const warn = K.svg(svg, "text", { x: 70, y: 22, "font-size": 12, fill: "var(--bad)" }, "");
+        ctx.wait(700).then((ok) => ok && ctx.tween(1800, (t) => dots.forEach((d, i) => {
+          const z = (p[i] - lo) / (hi - lo);
+          d.setAttribute("cx", K.lerp(ax.sx(i), ax2.sx(i / (n - 1)), t)); d.setAttribute("cy", K.lerp(ax.sy(p[i]), ax2.sy(z), t));
+        }))).then((ok) => { if (ok && im >= n * 0.95) warn.textContent = "最大值来自测试段（橙色）：缩放时已经“看见”了未来的最高价"; else if (ok) warn.textContent = "最大值、最小值若来自测试段，就等于提前看见了未来"; });
+      },
+    },
+    {
+      title: "滑动窗口：60 天一组，预测第 61 天", kicker: "第 46 格 · 构造样本",
+      html: `<p>这是把时间序列变成监督学习的关键一步。对训练段从第 60 天开始循环：<code>x_train.append(train_data[i-60:i])</code>，<code>y_train.append(train_data[i])</code>。窗口每次右移一天，就多一个样本。</p><p>最后 <code>reshape</code> 成 (样本数, 60, 1)：60 个时间步，每步 1 个特征（收盘价）。动画为了看得清，用 8 格代表 60 天。</p>`,
+      cells: [46], highlight: ["i-60:i", "x_train.append", "y_train.append", "np.reshape"],
+      draw(svg, ctx) {
+        const n = 22, W = 8, p = gbm(3, n, 0.004, 0.03, 50), lo = Math.min(...p), hi = Math.max(...p);
+        const z = p.map((v) => (v - lo) / (hi - lo)), cw = 30, x0 = 20, base = 110;
+        const bars = z.map((v, i) => { K.svg(svg, "rect", { x: x0 + i * cw + 2, y: base - 12 - v * 70, width: cw - 4, height: 12 + v * 70, rx: 3, fill: "var(--c1)", opacity: 0.35 }); return K.svg(svg, "text", { x: x0 + i * cw + cw / 2, y: base + 14, "text-anchor": "middle", "font-size": 10, class: "muted" }, "t" + (i + 1)); });
+        const win = K.svg(svg, "rect", { x: x0, y: 16, width: W * cw, height: base - 10, rx: 6, fill: "var(--c1)", "fill-opacity": 0.1, stroke: "var(--c1)", "stroke-width": 2 });
+        const tgt = K.svg(svg, "rect", { x: x0 + W * cw, y: 16, width: cw, height: base - 10, rx: 6, fill: "var(--c2)", "fill-opacity": 0.18, stroke: "var(--c2)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: x0, y: 12, "font-size": 12, fill: "var(--c1)" }, "x：窗口里的 60 天（示意 8 格）");
+        K.svg(svg, "text", { x: x0 + 250, y: 12, "font-size": 12, fill: "var(--c2)" }, "y：下一天");
+        // 下：样本矩阵
+        K.svg(svg, "text", { x: x0, y: 150, "font-size": 12, "font-weight": 700 }, "x_train（每行一个样本）");
+        K.svg(svg, "text", { x: x0 + W * 26 + 40, y: 150, "font-size": 12, "font-weight": 700, fill: "var(--c2)" }, "y_train");
+        const rowsG = K.svg(svg, "g");
+        const shape = K.svg(svg, "text", { x: 470, y: 230, "font-size": 15, "font-weight": 700, fill: "var(--accent)" }, "");
+        (async () => {
+          const R = Math.min(n - W, 6);
+          for (let k = 0; k < R; k++) {
+            if (!(await ctx.tween(380, (t) => { const x = x0 + K.lerp(k === 0 ? 0 : k - 1, k, t) * cw; win.setAttribute("x", x); tgt.setAttribute("x", x + W * cw); }))) return;
+            const y = 160 + k * 26;
+            for (let j = 0; j < W; j++) K.svg(rowsG, "rect", { x: x0 + j * 26, y, width: 24, height: 22, rx: 3, fill: K.heat(z[k + j]) , stroke: "var(--line)" });
+            K.svg(rowsG, "rect", { x: x0 + W * 26 + 40, y, width: 24, height: 22, rx: 3, fill: `color-mix(in srgb, var(--c2) ${Math.round(20 + z[k + W] * 70)}%, var(--panel))`, stroke: "var(--c2)" });
+            K.arrow(rowsG, x0 + W * 26 + 4, y + 11, x0 + W * 26 + 36, y + 11, { color: "var(--ink-3)" });
+            if (!(await ctx.wait(220))) return;
+          }
+          shape.textContent = "reshape → (样本数, 60, 1)";
+          K.svg(svg, "text", { x: 470, y: 254, "font-size": 12, class: "muted" }, "样本数 = 训练天数 − 60");
+        })();
+      },
+    },
+    {
+      title: "两层 LSTM：沿时间一步步读完 60 天", kicker: "第 47 格 · 建模",
+      html: `<p>LSTM（长短期记忆网络）每读入一天的价格，就更新两样东西：<b>隐藏状态 h</b>（这一步的输出）和<b>细胞状态 c</b>（长期记忆）。三个“门”决定忘掉多少旧记忆、写入多少新信息、输出多少。</p><p>第一层 <code>LSTM(128, return_sequences=True)</code> 把每一步的 h 都交给第二层；第二层 <code>LSTM(64)</code> 只把最后一步的 h 交给 <code>Dense(25)</code> → <code>Dense(1)</code> 输出明天的价格。损失是均方误差，优化器 Adam；作者只训练了 <code>epochs=1</code>、<code>batch_size=1</code>。</p>`,
+      cells: [47], highlight: ["LSTM(128, return_sequences=True)", "LSTM(64, return_sequences=False)", "Dense(25)", "Dense(1)", "epochs=1"],
+      draw(svg, ctx) {
+        const T = 6, x0 = 70, dx = 95, y1 = 222, y2 = 140;
+        const in1 = [], c1 = [], c2 = [], hArr1 = [], hArr2 = [], up = [];
+        for (let t = 0; t < T; t++) {
+          const x = x0 + t * dx;
+          in1.push(K.node(svg, x - 22, 290, 44, 30, t < T - 1 ? "x" + (t + 1) : "x60", { fs: 12 }));
+          c1.push(K.node(svg, x - 32, y1 - 22, 64, 44, "LSTM\n128", { fs: 11, fill: "var(--panel-2)" }));
+          c2.push(K.node(svg, x - 32, y2 - 22, 64, 44, "LSTM\n64", { fs: 11, fill: "var(--panel-2)" }));
+          up.push(K.arrow(svg, x, 290, x, y1 + 23));
+          up.push(K.arrow(svg, x, y1 - 22, x, y2 + 23));
+          if (t < T - 1) { hArr1.push(K.arrow(svg, x + 32, y1, x + dx - 33, y1)); hArr2.push(K.arrow(svg, x + 32, y2, x + dx - 33, y2)); }
+        }
+        K.svg(svg, "text", { x: x0 + 2.5 * dx, y: y1 + 2, "text-anchor": "middle", "font-size": 16, fill: "var(--ink-3)" }, "");
+        K.svg(svg, "text", { x: 14, y: y1 + 4, "font-size": 11, class: "muted" }, "第1层");
+        K.svg(svg, "text", { x: 14, y: y2 + 4, "font-size": 11, class: "muted" }, "第2层");
+        const last = x0 + (T - 1) * dx;
+        const d25 = K.node(svg, last + 50, 62, 74, 32, "Dense 25", { fs: 12 }), d1 = K.node(svg, last + 50, 14, 74, 30, "明天价格", { fs: 12, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        K.arrow(svg, last + 32, y2 - 10, last + 70, 96); K.arrow(svg, last + 87, 62, last + 87, 45);
+        K.svg(svg, "text", { x: x0 + 1.4 * dx, y: y1 - 30, "text-anchor": "middle", "font-size": 11, fill: "var(--c2)" }, "h, c 传给下一步 →");
+        const pulse1 = K.svg(svg, "circle", { r: 7, fill: "var(--c2)", cx: x0, cy: y1 }), pulse2 = K.svg(svg, "circle", { r: 7, fill: "var(--c4)", cx: x0, cy: y2 });
+        const rectOf = (g) => g.querySelector("rect");
+        (async () => {
+          for (let rep = 0; rep < 3; rep++) {
+            for (let t = 0; t < T; t++) {
+              [c1, c2].forEach((arr) => arr.forEach((g, j) => (rectOf(g).style.fill = j === t ? "color-mix(in srgb, var(--accent) 25%, var(--panel))" : j < t ? "color-mix(in srgb, var(--accent) 8%, var(--panel))" : "var(--panel-2)")));
+              const ok = await ctx.tween(420, (u) => { const x = x0 + (t + u) * dx; pulse1.setAttribute("cx", Math.min(x, last)); pulse2.setAttribute("cx", Math.min(x - dx * 0.3, last)); });
+              if (!ok) return;
+            }
+            rectOf(d25).style.fill = "color-mix(in srgb, var(--accent) 25%, var(--panel))";
+            if (!(await ctx.wait(600))) return;
+            rectOf(d25).style.fill = "var(--panel-2)";
+          }
+        })();
+      },
+    },
+    {
+      title: "在最后 5% 上预测，算 RMSE", kicker: "第 48–50 格 · 预测与评估",
+      html: `<p>测试窗口从 <code>training_data_len − 60</code> 开始取，保证测试段第一天也有完整的前 60 天。模型输出的是 0–1 之间的数，用 <code>scaler.inverse_transform</code> 还原成美元，再和真实收盘价算 RMSE。</p><p>注意这是<b>一步预测</b>：每预测一天，用的都是真实的前 60 天，而不是模型自己前面的预测。所以预测曲线天然会紧跟真实曲线；判断模型好不好，要和“明天 = 今天”比。</p>`,
+      cells: [48, 49], highlight: ["training_data_len - 60", "inverse_transform", "rmse"],
+      draw(svg, ctx) {
+        const n = 140, p = gbm(42, n, 0.002, 0.016, 100), cut = 100;
+        const ax = K.axes(svg, { x: 60, y: 30, w: 630, h: 250 }, [60, n - 1], [Math.min(...p.slice(60)) * 0.96, Math.max(...p) * 1.04], { xticks: 0, yticks: 4, ylabel: "收盘价（示意）" });
+        line(svg, ax, range(cut + 1).slice(60), p.slice(60, cut + 1), "var(--c1)", { sw: 1.8 });
+        const val = line(svg, ax, range(n).slice(cut), p.slice(cut), "var(--c2)", { sw: 1.8 });
+        const r = K.rng(4), pred = range(n).map((i) => (i <= cut ? null : p[i - 1] * (1 + K.randn(r) * 0.004)));
+        const pp = line(svg, ax, range(n), pred, "var(--c3)", { sw: 2 });
+        K.svg(svg, "text", { x: 70, y: 24, "font-size": 12, fill: "var(--c1)" }, "— 训练段");
+        K.svg(svg, "text", { x: 140, y: 24, "font-size": 12, fill: "var(--c2)" }, "— 测试段真实值");
+        K.svg(svg, "text", { x: 250, y: 24, "font-size": 12, fill: "var(--c3)" }, "— 预测（示意：近似“昨天的价格”）");
+        const note = K.svg(svg, "text", { x: 60, y: 312, "font-size": 12, fill: "var(--warn)" }, "绿色线几乎是橙色线右移一天：看起来贴合，其实没有预测出“明天的变化”");
+        note.style.opacity = 0;
+        drawOn(ctx, val, 900).then((ok) => ok && drawOn(ctx, pp, 1400)).then((ok) => ok && ctx.tween(500, (t) => (note.style.opacity = t)));
+      },
+    },
+    {
+      at: 0, title: "开场：这份 notebook 要回答哪些问题", kicker: "第 0–3 格 · 准备",
+      html: `<p>作者在开头列出 6 个问题：股价怎么变、日收益率多少、移动平均、股票之间的相关性、投资风险有多大、怎样预测未来股价（用 LSTM 预测苹果收盘价）。第 3 格安装 <code>yfinance</code>。</p>`,
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验：浏览器内的小 LSTM ---------- */
+  function makeLSTM(H, seed) {
+    const r = K.rng(seed), s = 1 / Math.sqrt(H + 1), rnd = () => (r() * 2 - 1) * s;
+    const P = { Wx: Float64Array.from({ length: 4 * H }, rnd), Wh: Float64Array.from({ length: 4 * H * H }, rnd), b: new Float64Array(4 * H), Wy: Float64Array.from({ length: H }, rnd), by: new Float64Array(1) };
+    for (let j = H; j < 2 * H; j++) P.b[j] = 1; // 遗忘门偏置初始化为 1
+    return P;
+  }
+  const sig = (z) => 1 / (1 + Math.exp(-z));
+  function lstmForward(P, H, xs, keep) {
+    const T = xs.length; let h = new Float64Array(H), c = new Float64Array(H);
+    const cache = keep ? [] : null;
+    for (let t = 0; t < T; t++) {
+      const z = new Float64Array(4 * H);
+      for (let k = 0; k < 4 * H; k++) { let s = P.b[k] + P.Wx[k] * xs[t]; const row = k * H; for (let j = 0; j < H; j++) s += P.Wh[row + j] * h[j]; z[k] = s; }
+      const i = new Float64Array(H), f = new Float64Array(H), g = new Float64Array(H), o = new Float64Array(H), cn = new Float64Array(H), hn = new Float64Array(H);
+      for (let j = 0; j < H; j++) { i[j] = sig(z[j]); f[j] = sig(z[H + j]); g[j] = Math.tanh(z[2 * H + j]); o[j] = sig(z[3 * H + j]); cn[j] = f[j] * c[j] + i[j] * g[j]; hn[j] = o[j] * Math.tanh(cn[j]); }
+      if (keep) cache.push({ x: xs[t], hp: h, cp: c, i, f, g, o, c: cn, h: hn });
+      h = hn; c = cn;
+    }
+    let y = P.by[0]; for (let j = 0; j < H; j++) y += P.Wy[j] * h[j];
+    return { y, cache, h };
+  }
+  function lstmTrain(P, H, X, Y, epochs, lr, seed) {
+    const names = ["Wx", "Wh", "b", "Wy", "by"], m = {}, v = {}; names.forEach((k) => { m[k] = new Float64Array(P[k].length); v[k] = new Float64Array(P[k].length); });
+    let step = 0; const r = K.rng(seed), B = 16, b1 = 0.9, b2 = 0.999;
+    const idx = range(X.length), losses = [];
+    for (let ep = 0; ep < epochs; ep++) {
+      for (let i = idx.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [idx[i], idx[j]] = [idx[j], idx[i]]; }
+      let tot = 0;
+      for (let s0 = 0; s0 < idx.length; s0 += B) {
+        const G = {}; names.forEach((k) => (G[k] = new Float64Array(P[k].length)));
+        const bs = Math.min(B, idx.length - s0);
+        for (let q = s0; q < s0 + bs; q++) {
+          const n = idx[q], fw = lstmForward(P, H, X[n], true), dy = fw.y - Y[n];
+          tot += dy * dy;
+          for (let j = 0; j < H; j++) G.Wy[j] += dy * fw.h[j];
+          G.by[0] += dy;
+          let dh = Float64Array.from(P.Wy, (w) => w * dy), dc = new Float64Array(H);
+          for (let t = fw.cache.length - 1; t >= 0; t--) {
+            const C = fw.cache[t], dz = new Float64Array(4 * H);
+            for (let j = 0; j < H; j++) {
+              const tc = Math.tanh(C.c[j]);
+              const dO = dh[j] * tc; const dcj = dc[j] + dh[j] * C.o[j] * (1 - tc * tc);
+              dz[j] = dcj * C.g[j] * C.i[j] * (1 - C.i[j]);
+              dz[H + j] = dcj * C.cp[j] * C.f[j] * (1 - C.f[j]);
+              dz[2 * H + j] = dcj * C.i[j] * (1 - C.g[j] * C.g[j]);
+              dz[3 * H + j] = dO * C.o[j] * (1 - C.o[j]);
+              dc[j] = dcj * C.f[j];
+            }
+            const dhp = new Float64Array(H);
+            for (let k = 0; k < 4 * H; k++) {
+              const d = dz[k]; if (d === 0) continue;
+              G.b[k] += d; G.Wx[k] += d * C.x;
+              const row = k * H;
+              for (let j = 0; j < H; j++) { G.Wh[row + j] += d * C.hp[j]; dhp[j] += P.Wh[row + j] * d; }
+            }
+            dh = dhp;
+          }
+        }
+        step++;
+        names.forEach((k) => { const p = P[k], g = G[k], mm = m[k], vv = v[k]; for (let j = 0; j < p.length; j++) { const gj = K.clamp(g[j] / bs, -1, 1); mm[j] = b1 * mm[j] + (1 - b1) * gj; vv[j] = b2 * vv[j] + (1 - b2) * gj * gj; p[j] -= (lr * (mm[j] / (1 - Math.pow(b1, step)))) / (Math.sqrt(vv[j] / (1 - Math.pow(b2, step))) + 1e-8); } });
+      }
+      losses.push(tot / idx.length);
+    }
+    return losses;
+  }
+  function solve(A, b) { // 高斯消元
+    const n = b.length, M = A.map((r, i) => r.concat([b[i]]));
+    for (let c = 0; c < n; c++) {
+      let p = c; for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+      [M[c], M[p]] = [M[p], M[c]];
+      const d = M[c][c] || 1e-12;
+      for (let r = 0; r < n; r++) if (r !== c) { const f = M[r][c] / d; if (f) for (let k = c; k <= n; k++) M[r][k] -= f * M[c][k]; }
+    }
+    return M.map((r, i) => r[n] / (r[i] || 1e-12));
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "kind", label: "模拟序列", value: "rw", options: [["rw", "随机游走（像真实股价）"], ["cyc", "随机游走 + 20 天周期（有规律可学）"]] },
+      { id: "model", label: "预测模型", value: "lstm", options: [["naive", "朴素法：明天 = 今天"], ["lin", "窗口线性回归"], ["lstm", "小型 LSTM（浏览器内训练）"]] },
+      { id: "W", label: "窗口长度（天）", min: 5, max: 40, step: 1, value: 20 },
+      { id: "H", label: "LSTM 隐藏单元数", min: 2, max: 12, step: 1, value: 6 },
+      { id: "ep", label: "训练轮数 epochs", min: 1, max: 12, step: 1, value: 6 },
+      { id: "seed", label: "换一段模拟行情", button: true },
+    ],
+    note: "序列长 420 天，前 85% 训练、后 15% 测试（作者用的是 95% / 5%，这里多留一些测试天数便于观察）。缩放器只用训练段拟合。所有模型都是一步预测：每天用真实的前 W 天。LSTM 用 Adam、批大小 16 现场训练，轮数大时要等一两秒。",
+    render(svg, v) {
+      const n = 420, r = K.rng(500 + v.seed * 31);
+      const p = [100];
+      for (let i = 1; i < n; i++) p.push(p[i - 1] * Math.exp(0.0006 + 0.016 * K.randn(r)));
+      if (v.kind === "cyc") for (let i = 0; i < n; i++) p[i] *= 1 + 0.06 * Math.sin((2 * Math.PI * i) / 20);
+      const cut = Math.floor(n * 0.85), tr = p.slice(0, cut), lo = Math.min(...tr), hi = Math.max(...tr);
+      const z = p.map((x) => (x - lo) / (hi - lo)), W = v.W;
+      const X = [], Y = [], Xt = [], Yt = [];
+      for (let i = W; i < n; i++) { (i < cut ? X : Xt).push(z.slice(i - W, i)); (i < cut ? Y : Yt).push(z[i]); }
+      let predZ, extra = "";
+      if (v.model === "naive") predZ = Xt.map((x) => x[W - 1]);
+      else if (v.model === "lin") {
+        const d = W + 1, A = range(d).map(() => new Array(d).fill(0)), b = new Array(d).fill(0);
+        X.forEach((x, k) => { const f = x.concat([1]); for (let a = 0; a < d; a++) { b[a] += f[a] * Y[k]; for (let c = 0; c < d; c++) A[a][c] += f[a] * f[c]; } });
+        for (let a = 0; a < d; a++) A[a][a] += 1e-4;
+        const w = solve(A, b);
+        predZ = Xt.map((x) => x.reduce((s, xi, j) => s + xi * w[j], w[W]));
+      } else {
+        const P = makeLSTM(v.H, 7 + v.seed);
+        const losses = lstmTrain(P, v.H, X, Y, v.ep, 0.01, 11 + v.seed);
+        predZ = Xt.map((x) => lstmForward(P, v.H, x, false).y);
+        extra = losses[losses.length - 1].toExponential(1);
+      }
+      const pred = predZ.map((q) => q * (hi - lo) + lo), truth = Yt.map((q) => q * (hi - lo) + lo), today = Xt.map((x) => x[W - 1] * (hi - lo) + lo);
+      const rm = (a, b) => Math.sqrt(mean(a.map((x, i) => (x - b[i]) ** 2)));
+      const rmse = rm(pred, truth), naive = rm(today, truth);
+      let dirOk = 0; pred.forEach((q, i) => { if (Math.sign(q - today[i]) === Math.sign(truth[i] - today[i])) dirOk++; });
+      // 画图：最后 120 天
+      const s0 = n - 120, ax = K.axes(svg, { x: 56, y: 26, w: 570, h: 285 }, [s0, n - 1], [Math.min(...p.slice(s0)) * 0.97, Math.max(...p.slice(s0)) * 1.03], { xticks: 4, yticks: 4, xlabel: "交易日" });
+      K.svg(svg, "rect", { x: ax.sx(cut), y: 26, width: ax.sx(n - 1) - ax.sx(cut), height: 285, fill: "var(--c2)", "fill-opacity": 0.07 });
+      line(svg, ax, range(n).slice(s0, cut), p.slice(s0, cut), "var(--c1)", { sw: 1.6 });
+      line(svg, ax, range(n).slice(cut), p.slice(cut), "var(--c2)", { sw: 1.8 });
+      line(svg, ax, range(n - cut).map((i) => cut + i), pred, "var(--c3)", { sw: 2 });
+      K.svg(svg, "text", { x: 62, y: 18, "font-size": 12, fill: "var(--c1)" }, "— 训练段");
+      K.svg(svg, "text", { x: 132, y: 18, "font-size": 12, fill: "var(--c2)" }, "— 测试段真实值");
+      K.svg(svg, "text", { x: 240, y: 18, "font-size": 12, fill: "var(--c3)" }, "— 模型一步预测");
+      K.svg(svg, "text", { x: 56, y: 372, "font-size": 12, class: "muted" }, `训练样本 ${X.length} 个，测试样本 ${Xt.length} 个` + (extra ? `，最后一轮训练损失 ${extra}` : ""));
+      return { readout: [
+        { k: "模型测试 RMSE", v: rmse.toFixed(2) },
+        { k: "朴素法 RMSE（明天=今天）", v: naive.toFixed(2), color: "var(--ink-3)" },
+        { k: "模型 / 朴素", v: (rmse / naive).toFixed(2), color: rmse < naive * 0.97 ? "var(--good)" : "var(--bad)" },
+        { k: "涨跌方向猜对", v: v.model === "naive" ? "—" : ((dirOk / pred.length) * 100).toFixed(0) + "%" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

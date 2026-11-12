@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>足球 AI 卷积 DQN</title>
+<meta name="description" content="Kaggle 案例拆解：Google Research Football 比赛，把球场画成 4 张小地图，用帧差表示运动，四路卷积网络估计 19 个动作的 Q 值，再用经验回放和 ε-贪心训练 DQN。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">问题</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">球场画面 · 11 对 11 · 深度强化学习</div>
+  <h1>让卷积网络看懂球场：足球 AI 的 DQN 起步</h1>
+  <p class="en">Convolutional Deep-Q learner</p>
+  <div class="tags">
+    <span class="tag rl">强化学习</span><span class="tag dl">深度学习</span>
+    <span class="tag method">DQN</span><span class="tag method">SMM 小地图观察</span><span class="tag method">帧差</span>
+    <span class="tag method">多分支卷积网络</span><span class="tag method">经验回放</span><span class="tag method">ε 线性衰减</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Gareth Jones</b></span>
+    <span>Kaggle 点赞 <b>223</b>（2026-11 抓取）</span>
+    <span>比赛 <b>Google Research Football（GFootball）</b></span>
+    <span><a href="https://www.kaggle.com/code/garethjns/convolutional-deep-q-learner" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">一场 11 对 11 足球赛的“小地图”</div><p>每一帧是 4 张 72×96 的图：我方位置、对方位置、球的位置、当前控制的球员。<span data-cell="7">出处</span></p></div>
+    <div class="card panel"><h3>要决定什么</h3><div class="big">当前球员这一刻做 19 个动作里的哪一个</div><p>网络输出 19 个数，每个是“做这个动作以后能拿多少分”的估计，选最大的。<span data-cell="18">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">帧差 + 四路卷积 + DQN</div><p>用相邻两帧相减表示谁在动，4 张图各走一路卷积再合并，配经验回放和 ε-贪心训练。<span data-cell="16">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一套能跑通的起步代码</div><p>作者明说模型还没好好测过，提交时还会间歇超时。<span data-cell="28">出处</span> 没有比赛成绩。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>问题长什么样</h2>
+  <p class="lead">环境是 Google Research Football 的 <code>11_vs_11_kaggle</code> 场景：我们控制左边球队里“当前持球或离球最近”的那名球员，对手是内置 AI。下面的数字都来自 notebook 代码。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">观察和动作</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">每张小地图</div><div class="v">72 × 96</div></div>
+        <div class="stat-tile"><div class="k">图层数</div><div class="v">4</div></div>
+        <div class="stat-tile"><div class="k">像素取值</div><div class="v">0–255</div></div>
+        <div class="stat-tile"><div class="k">动作数</div><div class="v">19</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">形状和取值见 <span data-cell="7">第 7 格</span>的说明；动作数见 <span data-cell="18">第 18 格</span>的 <code>n_actions=19</code>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">4 个图层分别是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>图层</th><th>白话含义</th></tr>
+        <tr><td>第 1 层</td><td>我方（team 1）每名球员的位置</td></tr>
+        <tr><td>第 2 层</td><td>对方（team 2）每名球员的位置</td></tr>
+        <tr><td>第 3 层</td><td>球的位置</td></tr>
+        <tr><td>第 4 层</td><td>当前由我们控制的那名球员的位置</td></tr>
+        <tr><td>奖励</td><td>比赛进球得分（环境给出，notebook 里用 <code>reward</code> 累加计算比分）</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">见 <span data-cell="7">第 7 格</span>注释“team 1 pos, team 2 pos, ball pos, active player pos”和 <span data-cell="27">第 27 格</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="11">
+    <h3>动手试试 A · 帧差：动的球员留下，静止的消失 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="16">
+    <h3>动手试试 B · 卷积网络有多大：算一算每层尺寸和参数 <span class="sim-badge">浏览器内计算</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="18">
+    <h3>动手试试 C · 迷你射门场：ε 衰减与经验回放 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者写明的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>静止的帧只有位置、没有方向和速度，所以用相邻两帧的差来加入时间信息</td><td><span data-cell="6">第 6 格</span></td></tr>
+        <tr><td>帧差的缺点：不动的球员会“隐身”</td><td><span data-cell="12">第 12 格</span></td></tr>
+        <tr><td>回放池填满、开始训练模型后，训练会变得非常慢，GPU 上会快很多</td><td><span data-cell="19">第 19 格</span></td></tr>
+        <tr><td>模型还没有好好测过，应该能学到东西，但需要大量调参和训练时间</td><td><span data-cell="28">第 28 格</span></td></tr>
+        <tr><td>球和当前球员不必用整张图，可以只用 [上一帧 x, y, 这一帧 x, y] 4 个数</td><td><span data-cell="28">第 28 格</span></td></tr>
+        <tr><td>提交在 notebook 里会间歇超时，提交后部分对局显示 [Err]，可能也是超时导致</td><td><span data-cell="28">第 28 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">notebook 里的训练只是演示：<code>n_episodes=2, max_episode_steps=100</code>（<span data-cell="18">第 18 格</span>），没有给出比赛得分。第 27 格打印的比分在运行输出里，源码不带，这里不列。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>智能体只能“看画面”时，用卷积网络从画面估计每个动作的长期价值，再选最好的动作。</li>
+        <li><b>同类问题：</b>Atari 游戏（Pong、打砖块）、机器人看摄像头抓取、无人机避障、自动驾驶的简化仿真。</li>
+        <li><b>可迁移的套路：</b>把原始观察整理成固定大小的“图像”→ 用帧差或叠帧加入时间信息 → 卷积提特征 → 全连接输出每个动作的 Q 值 → 经验回放 + ε-贪心训练 → 部署时只保留网络，按 argmax 选动作。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>SMM 观察环境 <span data-cell="5">第 5 格</span></li>
+        <li>帧预处理包装器（缩放、帧差）<span data-cell="7">第 7 格</span></li>
+        <li>自定义拆分层 SplitLayer <span data-cell="14">第 14 格</span></li>
+        <li>四分支卷积 + 两层全连接 <span data-cell="16">第 16 格</span></li>
+        <li>DeepQAgent：回放池 300、ε 0.5 线性衰减到 0.01 <span data-cell="18">第 18 格</span></li>
+        <li>保存模型、写 main.py、打包提交 <span data-cell="24">第 24 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>帧差能看出“谁在动”，却让静止的球员消失。守门员站着不动时，网络还知道他在哪吗？有没有既保留位置又保留运动的办法？</li>
+      <li>训练时网络看到的是“缩放到 0–1 后的两帧之差”。仔细看第 24 格 main.py：<code>tf_mod.predict(obs)</code> 喂进去的是哪个数组？和训练时一样吗？这会造成什么后果？</li>
+      <li>第 7 格的 <code>reset()</code> 把第一帧放进缓冲区时，没有像 <code>step()</code> 那样除以 255。这会让每局开头第一帧有什么问题？</li>
+      <li>回放池只有 300 条，一场比赛却有成千上万步。回放池太小会怎样？为什么 DQN 需要回放池？</li>
+      <li>四个分支加起来，第一层全连接就有七百多万个参数，而球和当前球员各只是一个点。作者建议把它们换成 4 个数，参数会少多少？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Gareth Jones，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。比赛：Kaggle Google Research Football with Manchester City F.C.。
+</footer>
+</main>
+
+<script src="nb/gfootball-conv-dqn.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 公共：缩小的“小地图”球场（24×32，相当于 72×96 缩小 3 倍，仅示意） ---------- */
+  const H = 24, Wd = 32;
+  function makeScene(r, moveFrac) {
+    const pl = [];
+    for (let t = 0; t < 2; t++) for (let i = 0; i < 6; i++) {
+      const x = t ? 17 + r() * 13 : 2 + r() * 13, y = 2 + r() * 20, mv = r() < moveFrac;
+      pl.push({ t, x, y, vx: mv ? (r() - 0.5) * 4 : 0, vy: mv ? (r() - 0.5) * 4 : 0 });
+    }
+    const ball = { x: 12 + r() * 8, y: 8 + r() * 8, vx: (r() - 0.5) * 5, vy: (r() - 0.5) * 3 };
+    return { pl, ball, active: 2 };
+  }
+  function raster(sc, dt) { // 4 层 H×Wd，值 0–255
+    const L = [0, 1, 2, 3].map(() => new Float32Array(H * Wd));
+    const put = (lay, x, y) => { const c = Math.round(x + 0), rr = Math.round(y); for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) { const yy = rr + dy, xx = c + dx; if (yy >= 0 && yy < H && xx >= 0 && xx < Wd) L[lay][yy * Wd + xx] = 255; } };
+    sc.pl.forEach((p, i) => { const x = p.x + p.vx * dt, y = p.y + p.vy * dt; put(p.t, x, y); if (i === sc.active) put(3, x, y); });
+    put(2, sc.ball.x + sc.ball.vx * dt, sc.ball.y + sc.ball.vy * dt);
+    return L;
+  }
+  function drawLayer(svg, x0, y0, cs, arr, mode, color) {
+    K.svg(svg, "rect", { x: x0, y: y0, width: Wd * cs, height: H * cs, fill: "var(--panel-2)", stroke: "var(--line)" });
+    for (let i = 0; i < H * Wd; i++) {
+      const v = arr[i]; if (!v) continue;
+      const fill = mode === "diff" ? (v > 0 ? "var(--good)" : "var(--bad)") : color;
+      K.svg(svg, "rect", { x: x0 + (i % Wd) * cs, y: y0 + Math.floor(i / Wd) * cs, width: cs, height: cs, fill, opacity: Math.min(1, Math.abs(v) / 255 + 0.15) });
+    }
+  }
+  const LCOL = ["var(--c1)", "var(--c6)", "var(--warn)", "var(--c3)"], LNAME = ["我方球员", "对方球员", "球", "当前球员"];
+
+  const steps = [
+    {
+      title: "开场：用 DQN 踢足球", at: 0, kicker: "第 0–3 格 · 开场",
+      html: `<p>这是作者“深度 Q 学习入门代码”的续篇：上一篇用的是全连接网络，这一篇换成<b>卷积网络</b>，直接看球场的“小地图”。<span data-cell="0">出处</span></p><p>开头标着“Work in progress”，作者坦白还有不清楚和 bug 的地方。准备工作包括安装 GFootball 引擎、作者自己的 <code>reinforcement-learning-keras</code> 包和辅助代码，并且关掉 TensorFlow 的 eager 模式，避免在循环里训练 Keras 模型时内存泄漏、速度变慢。<span data-cell="3">第 3 格</span></p>`,
+      draw(svg, ctx) {
+        K.svg(svg, "rect", { x: 40, y: 30, width: 480, height: 280, rx: 6, fill: "color-mix(in srgb, var(--good) 22%, var(--panel))", stroke: "var(--good)" });
+        K.svg(svg, "line", { x1: 280, y1: 30, x2: 280, y2: 310, stroke: "var(--good)" });
+        K.svg(svg, "circle", { cx: 280, cy: 170, r: 40, fill: "none", stroke: "var(--good)" });
+        K.svg(svg, "rect", { x: 40, y: 130, width: 14, height: 80, fill: "none", stroke: "var(--ink-2)" }); K.svg(svg, "rect", { x: 506, y: 130, width: 14, height: 80, fill: "none", stroke: "var(--ink-2)" });
+        const r = K.rng(3), P = [];
+        for (let t = 0; t < 2; t++) for (let i = 0; i < 11; i++) P.push({ t, x: t ? 300 + r() * 200 : 60 + r() * 200, y: 50 + r() * 240, vx: (r() - 0.5) * 2, vy: (r() - 0.5) * 2 });
+        const dots = P.map((p) => K.svg(svg, "circle", { cx: p.x, cy: p.y, r: 7, fill: p.t ? "var(--c6)" : "var(--c1)" }));
+        const ball = K.svg(svg, "circle", { cx: 280, cy: 170, r: 5, fill: "var(--warn)" });
+        K.svg(svg, "circle", { cx: P[3].x, cy: P[3].y, r: 11, fill: "none", stroke: "var(--ink)", "stroke-width": 2 }).setAttribute("id", "");
+        K.svg(svg, "text", { x: 545, y: 70, "font-size": 14, "font-weight": 700 }, "11 对 11");
+        K.svg(svg, "text", { x: 545, y: 96, "font-size": 13 }, "我们每一刻只控制");
+        K.svg(svg, "text", { x: 545, y: 116, "font-size": 13 }, "一名球员（黑圈）");
+        K.svg(svg, "text", { x: 545, y: 160, "font-size": 13 }, "可选 19 个动作：");
+        K.svg(svg, "text", { x: 545, y: 180, "font-size": 12, class: "muted" }, "跑向 8 个方向、传球、");
+        K.svg(svg, "text", { x: 545, y: 198, "font-size": 12, class: "muted" }, "射门、冲刺……");
+        const ring = svg.lastChild;
+        ctx.tween(4000, (t) => {
+          P.forEach((p, i) => { dots[i].setAttribute("cx", p.x + p.vx * t * 40); dots[i].setAttribute("cy", p.y + p.vy * t * 40); });
+          ball.setAttribute("cx", 280 + Math.sin(t * 6) * 60); ball.setAttribute("cy", 170 + Math.cos(t * 4) * 40);
+        });
+      },
+    },
+    {
+      title: "SMM 观察：4 张 72×96 的小地图", kicker: "第 4–5 格 · 环境",
+      html: `<p>GFootball 有好几种“观察方式”。作者选的 <code>GFootball-11_vs_11_kaggle-SMM-v0</code> 用 <b>SMM（Super Mini Map，超级小地图）</b>：不给真实画面，而是 4 张黑底小图，有东西的位置亮起来。<span data-cell="4">第 4 格</span></p><p>第 5 格打印了 <code>reset()</code> 返回的形状，并把前 500 步做成 GIF 来看。动画把四张图叠成一块 72×96×4 的“数据砖”。</p>`,
+      cells: [5], highlight: ["GFootball-11_vs_11_kaggle-SMM-v0", "generate_gif(smm_env, n_steps=500"],
+      draw(svg, ctx) {
+        const sc = makeScene(K.rng(5), 1), L = raster(sc, 0), cs = 4.2;
+        const gs = [0, 1, 2, 3].map((k) => { const g = K.svg(svg, "g"); drawLayer(g, 0, 0, cs, L[k], "raw", LCOL[k]); K.svg(g, "text", { x: 0, y: H * cs + 16, "font-size": 12 }, `第 ${k + 1} 层：${LNAME[k]}`); return g; });
+        const pos = (k, t) => [K.lerp(20 + (k % 2) * 170, 430 + k * 14, t), K.lerp(20 + Math.floor(k / 2) * 150, 60 + k * 14, t)];
+        gs.forEach((g, k) => { const [x, y] = pos(k, 0); g.setAttribute("transform", `translate(${x},${y})`); });
+        const lab = K.svg(svg, "text", { x: 430, y: 270, "font-size": 15, "font-weight": 700, "font-family": "var(--mono)" }, "");
+        ctx.wait(1200).then((ok) => ok && ctx.tween(1500, (t) => { gs.forEach((g, k) => { const [x, y] = pos(k, t); g.setAttribute("transform", `translate(${x},${y})`); }); if (t > 0.95) lab.textContent = "形状 (72, 96, 4)"; }));
+      },
+    },
+    {
+      title: "预处理①：缩放到 0–1，记住上一帧", kicker: "第 6–7 格 · 帧处理包装器",
+      html: `<p>这些小图要先处理三件事才好喂给卷积网络：<span data-cell="6">第 6 格</span></p><ul class="tight"><li><b>整理形状</b>：卷积层习惯 (None, 高, 宽, 通道)，之后要把 4 层拆开</li><li><b>缩放</b>：0–255 除以 255，变成 0–1</li><li><b>加入时间</b>：单张图只有位置，看不出谁往哪跑、跑多快</li></ul><p>作者写了一个 gym 包装器 <code>SMMFrameProcessWrapper</code>：用一个长度为 2 的队列记住“上一帧”和“这一帧”，每走一步把新帧（除以 255 后）塞进去。<span data-cell="7">第 7 格</span></p><p>细节：<code>reset()</code> 塞进第一帧时<b>没有</b>除以 255，和 <code>step()</code> 不一致。</p>`,
+      cells: [7], highlight: ["frame / 255.0", "maxlen=self._buffer_length", "self._obs_buffer.append(obs)"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 40, "font-size": 13, class: "muted" }, "长度为 2 的队列：新帧从右边进，最老的从左边挤出去");
+        const slots = [0, 1].map((i) => K.svg(svg, "rect", { x: 200 + i * 160, y: 70, width: 140, height: 100, rx: 8, fill: "none", stroke: "var(--ink-3)", "stroke-dasharray": "5 4" }));
+        K.svg(svg, "text", { x: 270, y: 190, "text-anchor": "middle", "font-size": 12 }, "上一帧 [0]"); K.svg(svg, "text", { x: 430, y: 190, "text-anchor": "middle", "font-size": 12 }, "这一帧 [1]");
+        const frames = [];
+        const lab = K.svg(svg, "text", { x: 30, y: 250, "font-size": 14 }, "");
+        const scale = K.svg(svg, "text", { x: 30, y: 280, "font-size": 13, "font-family": "var(--mono)" }, "");
+        (async () => {
+          for (let k = 0; k < 5; k++) {
+            const g = K.node(svg, 560, 70, 140, 100, `第 ${k} 步\n像素 0–255`, { stroke: "var(--c1)" });
+            frames.push(g);
+            lab.textContent = k === 0 ? "reset()：第一帧直接放进队列（没有除以 255）" : `step()：第 ${k} 步的新帧先除以 255，再放进队列`;
+            scale.textContent = k === 0 ? "255 → 255" : "255 → 255 / 255 = 1.0";
+            if (!(await ctx.tween(600, (t) => frames.forEach((f, j) => { const pos = k - j; f.setAttribute("transform", `translate(${(pos === 0 ? K.lerp(0, -200, t) : pos === 1 ? K.lerp(-200, -360, t) : K.lerp(-360, -560, t))},0)`); f.style.opacity = pos >= 2 ? 1 - t : 1; })))) return;
+            if (!(await ctx.wait(700))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "预处理②：两帧相减，只留下“变化”", kicker: "第 8–12 格 · 帧差",
+      html: `<p><code>build_buffered_obs</code> 对 4 个图层分别算“这一帧 − 上一帧”。<span data-cell="7">第 7 格</span> 球员从 A 点跑到 B 点，结果图上 B 点是 +1、A 点是 −1，网络就能看出<b>方向</b>和<b>速度</b>。输出仍是 (72, 96, 4)，取值范围变成 −1 到 1。<span data-cell="9">第 9 格</span></p><p>作者也指出代价：<b>不动的球员会消失</b>。<span data-cell="12">第 12 格</span> 另一种做法是把最近 n 帧叠在一起给网络（解 Pong 常用），但维度会变高。</p>`,
+      cells: [9, 11], highlight: ["SMMFrameProcessWrapper(smm_env)", "expected_min=-1, expected_max=1"],
+      draw(svg, ctx) {
+        const sc = makeScene(K.rng(8), 0.5), A = raster(sc, 0)[0], B = raster(sc, 1)[0], D = A.map((v, i) => (B[i] - v));
+        const cs = 6;
+        K.svg(svg, "text", { x: 20, y: 22, "font-size": 13 }, "上一帧（我方）"); drawLayer(svg, 20, 30, cs, A, "raw", "var(--c1)");
+        K.svg(svg, "text", { x: 250, y: 22, "font-size": 13 }, "这一帧"); drawLayer(svg, 250, 30, cs, B, "raw", "var(--c1)");
+        const g = K.svg(svg, "g"); g.style.opacity = 0;
+        K.svg(g, "text", { x: 480, y: 22, "font-size": 13 }, "相减（绿 +，红 −）"); drawLayer(g, 480, 30, cs, D, "diff");
+        K.svg(svg, "text", { x: 232, y: 110, "font-size": 20 }, "→"); K.svg(svg, "text", { x: 462, y: 110, "font-size": 20 }, "−");
+        K.svg(svg, "text", { x: 20, y: 205, "font-size": 12, class: "muted" }, "示意：一半球员在动、一半站着不动；相减后站着的那几个完全消失");
+        ctx.wait(800).then((ok) => ok && ctx.tween(900, (t) => (g.style.opacity = t)));
+      },
+      height: 220,
+    },
+    {
+      title: "拆分层：把 4 个图层分开走", kicker: "第 13–14 格 · 自定义层",
+      html: `<p>解 Pong 这类游戏时，输入通常就是一张画面。这里不一样：输入是 4 张<b>互相独立</b>的图。作者的选择是让每张图走自己的卷积分支。<span data-cell="13">第 13 格</span></p><p>为此写了一个自定义 Keras 层 <code>SplitLayer</code>：沿最后一维把 (72, 96, 4) 切成 4 个 (72, 96, 1)。<span data-cell="14">第 14 格</span></p>`,
+      cells: [14], highlight: ["tf.expand_dims(inputs[..., i], self.split_dim)"],
+      draw(svg, ctx) {
+        const base = K.node(svg, 40, 110, 150, 110, "输入\n(72, 96, 4)", { fill: "var(--accent-soft)", stroke: "var(--accent)", bold: true });
+        const outs = [0, 1, 2, 3].map((k) => { const g = K.node(svg, 340, 20 + k * 78, 160, 60, `(72, 96, 1)\n${LNAME[k]}`, { stroke: LCOL[k], sw: 2 }); g.style.opacity = 0; return g; });
+        const arr = [0, 1, 2, 3].map((k) => { const a = K.arrow(svg, 192, 165, 338, 50 + k * 78, { color: LCOL[k] }); a.style.opacity = 0; return a; });
+        K.node(svg, 230, 140, 80, 50, "SplitLayer", { fs: 12 });
+        (async () => { for (let k = 0; k < 4; k++) if (!(await ctx.tween(400, (t) => { outs[k].style.opacity = t; arr[k].style.opacity = t; }))) return; })();
+        K.svg(svg, "text", { x: 530, y: 170, "font-size": 12, class: "muted" }, "每一路接一个");
+        K.svg(svg, "text", { x: 530, y: 188, "font-size": 12, class: "muted" }, "独立的卷积分支 →");
+      },
+    },
+    {
+      title: "四路卷积 + 全连接 → 19 个 Q 值", kicker: "第 15–16 格 · 网络结构",
+      html: `<p>每一路分支是三层卷积：<span data-cell="16">第 16 格</span></p><ul class="tight"><li>16 个 8×8 卷积核，步长 4 → 18×24×16</li><li>24 个 4×4 卷积核，步长 2 → 9×12×24</li><li>32 个 3×3 卷积核，步长 1 → 9×12×32，再拉平成 3456 个数</li></ul><p>四路拼起来（13824 个数）→ 全连接 512 → 全连接 256 → 输出 19 个数。输出层<b>不加激活函数</b>，因为它要估计的是“价值”，可正可负。损失用均方误差，优化器 Adam，学习率 0.0001。尺寸是本页按 <code>padding='same'</code> 推算的，见实验 B。</p>`,
+      cells: [16], highlight: ["Conv2D(16, kernel_size=(8, 8), strides=(4, 4)", "n_units = 512", "activation=self.output_activation"],
+      draw(svg, ctx) {
+        const L = [["72×96", 46, 62], ["18×24×16", 36, 46], ["9×12×24", 28, 34], ["9×12×32", 28, 34]];
+        const g = K.svg(svg, "g");
+        for (let b = 0; b < 4; b++) L.forEach((l, i) => {
+          const x = 20 + i * 100, y = 20 + b * 74, w = l[1], h = l[2] * 0.9;
+          const rc = K.svg(g, "rect", { x, y: y + (60 - h) / 2, width: w, height: h, rx: 3, fill: `color-mix(in srgb, ${LCOL[b]} ${30 + i * 15}%, var(--panel))`, stroke: LCOL[b] });
+          rc.style.opacity = 0; rc.dataset.i = i;
+          if (b === 0) K.svg(svg, "text", { x: x + w / 2, y: 316, "text-anchor": "middle", "font-size": 11 }, l[0]);
+        });
+        const fc = [["拼接 13824", 440, 70, 220], ["512", 530, 100, 160], ["256", 600, 120, 120]].map((d) => { const n = K.node(svg, d[1], d[2], 54, d[3], d[0].split(" ").join("\n"), { fs: 11 }); n.style.opacity = 0; return n; });
+        const qs = Array.from({ length: 19 }, (_, i) => { const r = K.svg(svg, "rect", { x: 670, y: 30 + i * 14, width: 0, height: 11, fill: i === 6 ? "var(--good)" : "var(--c4)" }); return r; });
+        K.svg(svg, "text", { x: 652, y: 22, "font-size": 11 }, "19 个 Q 值");
+        const r = K.rng(4), qv = qs.map((_, i) => (i === 6 ? 1 : 0.2 + r() * 0.6));
+        (async () => {
+          for (let i = 0; i < 4; i++) if (!(await ctx.tween(350, (t) => g.querySelectorAll(`rect[data-i="${i}"]`).forEach((e) => (e.style.opacity = t))))) return;
+          for (const n of fc) if (!(await ctx.tween(300, (t) => (n.style.opacity = t)))) return;
+          await ctx.tween(700, (t) => qs.forEach((q, i) => q.setAttribute("width", qv[i] * 40 * t)));
+        })();
+      },
+    },
+    {
+      title: "DQN 智能体：回放池 + ε 线性衰减", kicker: "第 17–19 格 · 训练",
+      html: `<p>网络搭好后，训练部分直接用作者自己的包 <code>reinforcement-learning-keras</code> 里的 <code>DeepQAgent</code>。<span data-cell="17">第 17 格</span> 关键设置：<span data-cell="18">第 18 格</span></p><ul class="tight"><li><b>经验回放池</b> 300 条：把最近的 (状态, 动作, 奖励, 下一状态) 存起来，训练时随机抽一批，打乱相邻帧之间的相关性</li><li><b>ε-贪心</b>：从 0.5 开始，每次减 0.001（线性），最低 0.01</li><li>演示训练只跑了 <b>2 局、每局最多 100 步</b></li></ul><p>作者提醒：回放池填满、真正开始训练模型后，速度会变得非常慢，GPU 上会好很多。<span data-cell="19">第 19 格</span></p>`,
+      cells: [18], highlight: ["ContinuousBuffer(buffer_size=300)", "eps_initial=0.5", "n_episodes=2, max_episode_steps=100"],
+      draw(svg, ctx) {
+        const envN = K.node(svg, 30, 40, 130, 60, "足球环境", { stroke: "var(--good)", bold: true });
+        const agN = K.node(svg, 30, 220, 130, 60, "Q 网络\n+ ε-贪心", { stroke: "var(--accent)", bold: true });
+        K.arrow(svg, 95, 102, 95, 218, { color: "var(--ink-3)" }); K.svg(svg, "text", { x: 102, y: 165, "font-size": 11 }, "观察");
+        K.arrow(svg, 60, 218, 60, 102, { color: "var(--ink-3)" }); K.svg(svg, "text", { x: 10, y: 165, "font-size": 11 }, "动作");
+        K.svg(svg, "text", { x: 230, y: 34, "font-size": 13, "font-weight": 700 }, "回放池（最多 300 条，示意 24 格）");
+        const slots = Array.from({ length: 24 }, (_, i) => K.svg(svg, "rect", { x: 230 + (i % 12) * 34, y: 46 + Math.floor(i / 12) * 34, width: 30, height: 30, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" }));
+        K.svg(svg, "text", { x: 230, y: 150, "font-size": 12, class: "muted" }, "每走一步存一条；满了以后最老的被挤掉");
+        const batchT = K.svg(svg, "text", { x: 230, y: 180, "font-size": 12, fill: "var(--accent)" }, "");
+        const ax = K.axes(svg, { x: 260, y: 200, w: 400, h: 100 }, [0, 600], [0, 0.5], { yticks: 2, xticks: 3, xlabel: "更新次数" });
+        K.svg(svg, "path", { d: `M${ax.sx(0)},${ax.sy(0.5)}L${ax.sx(490)},${ax.sy(0.01)}L${ax.sx(600)},${ax.sy(0.01)}`, fill: "none", stroke: "var(--warn)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 600, y: ax.sy(0.5) + 4, "font-size": 11, fill: "var(--warn)" }, "ε");
+        const r = K.rng(2);
+        (async () => {
+          let n = 0;
+          for (let s = 0; s < 40; s++) {
+            const i = n % 24; n++;
+            K.set(slots[i], { fill: "color-mix(in srgb, var(--c1) 45%, var(--panel))", stroke: "var(--c1)" });
+            if (n > 8) {
+              slots.forEach((sl) => K.set(sl, { "stroke-width": 1 }));
+              const pick = []; for (let k = 0; k < 4; k++) pick.push(Math.floor(r() * Math.min(n, 24)));
+              pick.forEach((p) => K.set(slots[p], { stroke: "var(--accent)", "stroke-width": 3 }));
+              batchT.textContent = "随机抽一批（亮框）→ 拿去训练 Q 网络";
+            }
+            if (!(await ctx.wait(260))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "部署：保存权重，写 main.py", kicker: "第 20–24 格 · 生成提交",
+      html: `<p>提交只需要训练好的网络本身：<code>agent._action_model.save</code> 存权重 <span data-cell="22">第 22 格</span>，然后写一个 main.py，里面重新定义网络结构、自定义层和帧处理包装器，再定义 <code>agent(obs)</code>：<span data-cell="23">第 23 格</span></p><ol class="tight"><li>从原始观察生成 SMM 小地图</li><li>放进帧缓冲区</li><li>让网络预测 19 个 Q 值，取最大的那个动作（部署时不再需要回放池和 ε）</li></ol><p>但仔细看第 24 格：新帧放进了缓冲区，<code>predict</code> 却直接用了原始的 <code>obs</code>，既没有除以 255，也没有做帧差，<b>和训练时网络看到的输入不一样</b>。</p>`,
+      cells: [22, 24], highlight: ["agent._action_model.save", "obs_buffer._obs_buffer.append(obs)", "actions = tf_mod.predict(obs)"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, "font-weight": 700, fill: "var(--good)" }, "训练时（第 7 格）");
+        K.svg(svg, "text", { x: 20, y: 190, "font-size": 13, "font-weight": 700, fill: "var(--bad)" }, "提交时（第 24 格 main.py）");
+        const row = (y, items, bad) => items.map((t, i) => { const g = K.node(svg, 20 + i * 140, y, 124, 54, t, { stroke: bad && i === items.length - 2 ? "var(--bad)" : "var(--line)", sw: bad && i === items.length - 2 ? 2.5 : 1.2, fs: 12 }); if (i) K.arrow(svg, 20 + i * 140 - 16, y + 27, 20 + i * 140 - 2, y + 27); g.style.opacity = 0; return g; });
+        const a = row(44, ["原始观察", "SMM 小地图", "÷255，入队", "两帧相减", "Q 网络"]);
+        const b = row(204, ["原始观察", "SMM 小地图", "入队（没用上）", "原始 0–255 帧", "Q 网络"], true);
+        const warn = K.svg(svg, "text", { x: 20, y: 300, "font-size": 13, fill: "var(--bad)" }, "网络训练时见的是 −1~1 的“变化图”，上场时却看到 0~255 的“位置图”");
+        warn.style.opacity = 0;
+        (async () => {
+          for (const n of a) if (!(await ctx.tween(250, (t) => (n.style.opacity = t)))) return;
+          for (const n of b) if (!(await ctx.tween(250, (t) => (n.style.opacity = t)))) return;
+          await ctx.tween(500, (t) => (warn.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "打包与试赛", kicker: "第 25–27 格 · 测试提交",
+      html: `<p>main.py 和 saved_model 打包成 <code>submission.tar.gz</code> <span data-cell="25">第 25 格</span>。然后用 kaggle_environments 的 football 环境让 main.py 和内置的 <code>run_right</code> 对手踢一场，打印比分，并保存视频回放。<span data-cell="27">第 27 格</span></p><p>比分把每一步的 <code>reward</code> 加起来得到。具体比分在运行输出里，源码不带。</p>`,
+      cells: [25, 27], highlight: ["tar -czvf submission.tar.gz main.py saved_model", "right_player = \"run_right\""],
+      draw(svg, ctx) {
+        const files = [["main.py", 60], ["saved_model/", 170]].map((f) => K.node(svg, 40, f[1] - 20, 140, 46, f[0], { fs: 13 }));
+        const tar = K.node(svg, 260, 100, 160, 70, "submission\n.tar.gz", { stroke: "var(--accent)", bold: true });
+        tar.style.opacity = 0;
+        const a = [K.arrow(svg, 182, 63, 258, 125), K.arrow(svg, 182, 173, 258, 150)];
+        const env = K.node(svg, 480, 60, 200, 150, "football 环境\nmain.py  vs  run_right", { stroke: "var(--good)" });
+        env.style.opacity = 0;
+        const sc = K.svg(svg, "text", { x: 580, y: 250, "text-anchor": "middle", "font-size": 22, "font-weight": 700, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 480, y: 290, "font-size": 12, class: "muted" }, "比分 = 每步 reward 之和");
+        (async () => {
+          if (!(await ctx.tween(500, (t) => (tar.style.opacity = t)))) return;
+          if (!(await ctx.tween(500, (t) => (env.style.opacity = t)))) return;
+          sc.textContent = "? : ?";
+        })();
+      },
+    },
+    {
+      title: "结论与下一步：能跑通，还远没练好", kicker: "第 28 格 · 作者总结",
+      html: `<p>作者的总结很坦诚：<span data-cell="28">第 28 格</span></p><ul class="tight"><li>这套代码够用来起步，但和上一篇的全连接模型一样，<b>还没有好好测过</b>，大概能学到点东西，但需要大量调参和训练时间</li><li>优化方向：球和当前球员没必要用整张 72×96 的图，用 [上一帧 x, y, 这一帧 x, y] 4 个数就够</li><li>提交还有问题：notebook 里会间歇超时直接判负，提交后有些对局显示 [Err]，可能也是超时</li></ul><p>动画对比作者建议的改法能省下多少输入：两张整图 vs 两组 4 个数。</p>`,
+      cells: [28],
+      draw(svg, ctx) {
+        const full = 72 * 96 * 2, small = 4 * 2;
+        K.svg(svg, "text", { x: 40, y: 40, "font-size": 14, "font-weight": 700 }, "球和当前球员这两层的输入数");
+        const b1 = K.svg(svg, "rect", { x: 40, y: 70, width: 0, height: 50, fill: "var(--c1)" });
+        const b2 = K.svg(svg, "rect", { x: 40, y: 160, width: 0, height: 50, fill: "var(--good)" });
+        K.svg(svg, "text", { x: 40, y: 140, "font-size": 13 }, `现在：2 张 72×96 图 = ${full.toLocaleString()} 个数`);
+        K.svg(svg, "text", { x: 40, y: 230, "font-size": 13 }, `作者建议：2 组 [x, y, x, y] = ${small} 个数`);
+        K.svg(svg, "text", { x: 40, y: 290, "font-size": 12, class: "muted" }, "两个分支的卷积和它们连到第一层全连接的约 354 万个权重都可以省掉（按第 16 格结构推算）");
+        ctx.tween(1400, (t) => { b1.setAttribute("width", 620 * t); b2.setAttribute("width", Math.max(2, 620 * (small / full)) * t); });
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+  if (/[?&]fold/.test(location.search)) document.querySelectorAll(".ch-cells > .cell, .cell-note").forEach((e) => (e.style.display = "none"));  // 自查截图用
+
+  /* ---------- 实验 A：帧差 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 225,
+    controls: [
+      { id: "layer", label: "看哪一层", value: "0", options: [["0", "第 1 层：我方球员"], ["1", "第 2 层：对方球员"], ["2", "第 3 层：球"], ["3", "第 4 层：当前球员"]] },
+      { id: "move", label: "在跑动的球员比例", min: 0, max: 1, step: 0.05, value: 0.5, fmt: (v) => Math.round(v * 100) + "%" },
+      { id: "dt", label: "两帧间隔（越大位移越大）", min: 0.2, max: 2, step: 0.1, value: 1, fmt: (v) => v.toFixed(1) },
+      { id: "seed", label: "换一个场面", button: true },
+    ],
+    note: "小地图缩小到 24×32 示意（原图 72×96）。中间是像素值 ÷255 之后的两帧之差：绿色 = 这一帧新出现的位置（+），红色 = 上一帧离开的位置（−）。把跑动比例拖到 0，看看帧差图还剩什么。",
+    render(svg, v) {
+      const sc = makeScene(K.rng(31 + v.seed * 7), v.move), A = raster(sc, 0)[+v.layer], B = raster(sc, v.dt)[+v.layer];
+      const D = A.map((x, i) => (B[i] - x) / 255 * 255);
+      const cs = 6.2;
+      K.svg(svg, "text", { x: 10, y: 18, "font-size": 12 }, "上一帧"); drawLayer(svg, 10, 26, cs, A, "raw", LCOL[+v.layer]);
+      K.svg(svg, "text", { x: 220, y: 18, "font-size": 12 }, "这一帧"); drawLayer(svg, 220, 26, cs, B, "raw", LCOL[+v.layer]);
+      K.svg(svg, "text", { x: 430, y: 18, "font-size": 12 }, "这一帧 − 上一帧"); drawLayer(svg, 430, 26, cs, D, "diff");
+      const nz = (arr) => arr.reduce((s, x) => s + (x ? 1 : 0), 0);
+      const nPl = +v.layer < 2 ? sc.pl.filter((p) => p.t === +v.layer).length : 1;
+      const still = +v.layer < 2 ? sc.pl.filter((p) => p.t === +v.layer && !p.vx && !p.vy).length : 0;
+      K.svg(svg, "text", { x: 10, y: 200 + 0, "font-size": 12, class: "muted" }, `这一层里共有 ${nPl} 个对象，其中 ${still} 个这一刻站着不动`);
+      return { readout: [
+        { k: "原图亮的像素", v: String(nz(B)) },
+        { k: "帧差图非零像素", v: String(nz(D)), color: "var(--accent)" },
+        { k: "帧差里“隐身”的球员", v: String(still), color: still ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：网络尺寸计算 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "f1", label: "第 1 层卷积核个数", min: 4, max: 64, step: 4, value: 16 },
+      { id: "s1", label: "第 1 层步长", min: 1, max: 8, step: 1, value: 4 },
+      { id: "f3", label: "第 3 层卷积核个数", min: 8, max: 64, step: 8, value: 32 },
+      { id: "nb", label: "分支数（图层数）", min: 1, max: 4, step: 1, value: 4 },
+      { id: "fc", label: "第一层全连接神经元", min: 64, max: 1024, step: 64, value: 512 },
+    ],
+    note: "默认值就是第 16 格的结构（8×8 / 4×4 / 3×3 卷积，步长 4 / 2 / 1，padding='same'）。'same' 时输出尺寸 = 输入尺寸 ÷ 步长（向上取整）。参数数 = 权重 + 偏置，由本页按结构推算。",
+    render(svg, v) {
+      let h = 72, w = 96; const ch = [1, v.f1, 24, v.f3], ks = [8, 4, 3], ss = [v.s1, 2, 1], rows = [];
+      let pBranch = 0;
+      for (let i = 0; i < 3; i++) { h = Math.ceil(h / ss[i]); w = Math.ceil(w / ss[i]); const p = ks[i] * ks[i] * ch[i] * ch[i + 1] + ch[i + 1]; pBranch += p; rows.push([`卷积 ${i + 1}：${ch[i + 1]} 个 ${ks[i]}×${ks[i]}，步长 ${ss[i]}`, `${h}×${w}×${ch[i + 1]}`, p]); }
+      const flat = h * w * v.f3, concat = flat * v.nb;
+      const pfc1 = concat * v.fc + v.fc, pfc2 = v.fc * (v.fc / 2) + v.fc / 2, pout = (v.fc / 2) * 19 + 19, total = pBranch * v.nb + pfc1 + pfc2 + pout;
+      rows.push(["拉平（每个分支）", String(flat), 0], [`拼接 ${v.nb} 个分支`, String(concat), 0], [`全连接 ${v.fc}`, String(v.fc), pfc1], [`全连接 ${v.fc / 2}`, String(v.fc / 2), pfc2], ["输出 19 个 Q 值", "19", pout]);
+      rows.forEach((r, i) => {
+        const y = 24 + i * 32;
+        K.svg(svg, "text", { x: 10, y, "font-size": 13 }, r[0]);
+        K.svg(svg, "text", { x: 330, y, "font-size": 13, "font-family": "var(--mono)" }, r[1]);
+        if (r[2]) { K.svg(svg, "rect", { x: 450, y: y - 12, width: Math.max(2, 180 * Math.log10(r[2]) / 7.5), height: 14, fill: r[2] > 1e6 ? "var(--bad)" : "var(--c1)", opacity: 0.7 }); K.svg(svg, "text", { x: 455, y, "font-size": 11 }, r[2].toLocaleString()); }
+      });
+      K.svg(svg, "text", { x: 450, y: 6 + 0, "font-size": 10, class: "muted" }, "");
+      return { readout: [
+        { k: "参数总数", v: total.toLocaleString(), color: "var(--accent)" },
+        { k: "第一层全连接占比", v: ((pfc1 / total) * 100).toFixed(1) + "%", color: "var(--bad)" },
+        { k: "四个卷积分支合计", v: (pBranch * v.nb).toLocaleString() },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：迷你射门场 Q 学习 ---------- */
+  const R5 = 5, C8 = 8;
+  function fEnv(r) {
+    let s;
+    return {
+      reset() { s = { ar: Math.floor(r() * R5), ac: 0, kr: 1 + Math.floor(r() * 3), dr: Math.floor(r() * R5), t: 0 }; return s; },
+      step(a) {
+        s.t++; let rew = 0, done = false;
+        if (a === 3) { // 射门：离球门越近、和守门员不在同一行，越容易进
+          const dist = C8 - 1 - s.ac; let p = Math.max(0, 0.9 - 0.18 * dist);
+          if (s.ar === s.kr) p *= 0.15; if (s.ar < 1 || s.ar > 3) p *= 0.3;
+          rew = r() < p ? 1 : -0.3; done = true;
+        } else {
+          if (a === 0) s.ar = Math.max(0, s.ar - 1); if (a === 1) s.ar = Math.min(R5 - 1, s.ar + 1); if (a === 2) s.ac = Math.min(C8 - 1, s.ac + 1);
+          if (s.ac < 4) { if (s.dr < s.ar && r() < 0.4) s.dr++; else if (s.dr > s.ar && r() < 0.4) s.dr--; }
+          s.kr = Math.min(3, Math.max(1, s.kr + (r() < 0.5 ? (r() < 0.5 ? 1 : -1) : 0)));
+          if (s.ac === 4 && s.dr === s.ar) { rew = -1; done = true; }
+          if (s.t >= 30 && !done) { rew = -0.5; done = true; }
+        }
+        return [Object.assign({}, s), rew, done];
+      },
+    };
+  }
+  const fKey = (s) => ((s.ar * C8 + s.ac) * 5 + s.kr) * 5 + s.dr;
+  const best = (Q, k) => { let b = 0; for (let i = 1; i < 4; i++) if (Q[k * 4 + i] > Q[k * 4 + b]) b = i; return b; };
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 290,
+    controls: [
+      { id: "N", label: "训练局数", min: 0, max: 5000, step: 250, value: 3000, fmt: (v) => v.toLocaleString() },
+      { id: "dec", label: "ε 每局减少（从 0.5 线性降到 0.01）", min: 0.0001, max: 0.01, step: 0.0001, value: 0.001, fmt: (v) => v.toFixed(4) },
+      { id: "B", label: "回放池大小", value: "300", options: [["1", "1（不回放，学完就扔）"], ["300", "300（作者设置）"], ["5000", "5000"]] },
+      { id: "batch", label: "每步从回放池抽几条来学", min: 1, max: 16, step: 1, value: 1 },
+      { id: "seed", label: "换随机种子", button: true },
+    ],
+    note: "真正的 DQN 用卷积网络估计 Q 值，浏览器里训练不动，这里换成一张 Q 表（5 行 × 8 列小球场：带球往右、上下躲开中场防守、找机会射门；守门员在最右列上下移动），ε 的起点、下限和线性衰减照第 18 格。注意：在表格版里回放池的好处不一定明显，它对神经网络更重要，因为能打散相邻帧之间的相关性。",
+    render(svg, v) {
+      const r = K.rng(17 + v.seed * 131), E = fEnv(r), Q = new Float64Array(R5 * C8 * 25 * 4), buf = [];
+      let eps = 0.5, goals = 0; const curve = [];
+      for (let ep = 0; ep < v.N; ep++) {
+        let s = E.reset(), k = fKey(s), done = false, g = 0;
+        while (!done) {
+          const a = r() < eps ? Math.floor(r() * 4) : best(Q, k);
+          const [s2, rew, d] = E.step(a), k2 = fKey(s2); if (rew === 1) g = 1;
+          buf.push([k, a, rew, k2, d]); if (buf.length > +v.B) buf.shift();
+          for (let j = 0; j < v.batch; j++) { const [kk, aa, rr, kk2, dd] = buf[Math.floor(r() * buf.length)]; const nm = dd ? 0 : Math.max(Q[kk2 * 4], Q[kk2 * 4 + 1], Q[kk2 * 4 + 2], Q[kk2 * 4 + 3]); Q[kk * 4 + aa] += 0.2 * (rr + 0.95 * nm - Q[kk * 4 + aa]); }
+          k = k2; done = d;
+        }
+        goals += g; eps = Math.max(0.01, eps - v.dec);
+        if ((ep + 1) % 100 === 0) { curve.push(goals / 100); goals = 0; }
+      }
+      // 评估：ε = 0
+      const er = K.rng(999 + v.seed), E2 = fEnv(er); let eg = 0; let demo = null;
+      for (let i = 0; i < 500; i++) {
+        let s = E2.reset(), done = false, path = [[s.ar, s.ac]], out = 0, last = s;
+        while (!done) { const a = best(Q, fKey(s)); const [s2, rew, d] = E2.step(a); s = s2; path.push([s.ar, s.ac]); done = d; out = rew; last = s2; }
+        if (out === 1) eg++;
+        if (i === 0) demo = { path, out, kr: last.kr };
+      }
+      const ax = K.axes(svg, { x: 56, y: 14, w: 300, h: 200 }, [0, Math.max(100, v.N)], [0, 1], { yticks: 4, xticks: 2, xlabel: "训练局数", ylabel: "每 100 局进球率", yfmt: (x) => Math.round(x * 100) + "%" });
+      if (curve.length) K.svg(svg, "path", { d: curve.map((c, i) => (i ? "L" : "M") + ax.sx((i + 1) * 100) + "," + ax.sy(c)).join(""), fill: "none", stroke: "var(--c3)", "stroke-width": 2.2 });
+      // 示例对局
+      const x0 = 400, y0 = 20, cs = 28;
+      K.svg(svg, "rect", { x: x0, y: y0, width: C8 * cs, height: R5 * cs, fill: "color-mix(in srgb, var(--good) 20%, var(--panel))", stroke: "var(--good)" });
+      K.svg(svg, "rect", { x: x0 + C8 * cs, y: y0 + cs, width: 6, height: 3 * cs, fill: "var(--ink-2)" });
+      K.svg(svg, "line", { x1: x0 + 4 * cs, x2: x0 + 4 * cs, y1: y0, y2: y0 + R5 * cs, stroke: "var(--good)", "stroke-dasharray": "3 3" });
+      K.svg(svg, "path", { d: demo.path.map((p, i) => (i ? "L" : "M") + (x0 + p[1] * cs + cs / 2) + "," + (y0 + p[0] * cs + cs / 2)).join(""), fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+      const lp = demo.path[demo.path.length - 1];
+      K.svg(svg, "circle", { cx: x0 + lp[1] * cs + cs / 2, cy: y0 + lp[0] * cs + cs / 2, r: 6, fill: "var(--warn)" });
+      K.svg(svg, "rect", { x: x0 + 7 * cs + 6, y: y0 + demo.kr * cs + 4, width: cs - 12, height: cs - 8, fill: "var(--c6)" });
+      K.svg(svg, "text", { x: x0, y: y0 + R5 * cs + 18, "font-size": 12 }, `按学到的 Q 表踢一次：${demo.out === 1 ? "进球！" : demo.out === -1 ? "被中场断球" : demo.out === -0.5 ? "超时" : "射门没进"}`);
+      K.svg(svg, "text", { x: x0, y: y0 + R5 * cs + 36, "font-size": 11, class: "muted" }, "蓝线 = 带球路线，红块 = 守门员");
+      return { readout: [
+        { k: "训练最后 100 局进球率", v: curve.length ? Math.round(curve[curve.length - 1] * 100) + "%" : "—" },
+        { k: "不再乱踢（ε=0）时进球率", v: Math.round((eg / 500) * 100) + "%", color: "var(--good)" },
+        { k: "训练结束时 ε", v: eps.toFixed(3) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,810 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>车牌自动识别</title>
+<meta name="description" content="Kaggle 案例拆解：先找到车牌在哪（InceptionResNetV2 回归框、YOLOv5 检测），再把车牌上的字读出来（Tesseract OCR），最后做成网页应用。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">图像数据 · 目标检测 + 文字识别 · 智慧停车与交通管理</div>
+  <h1>车牌自动识别：先找到车牌，再读出上面的字</h1>
+  <p class="en">Automatic Number Plate Recognition</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">PASCAL VOC 标注解析</span><span class="tag method">迁移学习 InceptionResNetV2</span>
+    <span class="tag method">边界框回归（MSE）</span><span class="tag method">Tesseract OCR</span>
+    <span class="tag method">YOLOv5</span><span class="tag method">非极大值抑制 NMS</span><span class="tag method">ONNX + OpenCV DNN</span><span class="tag method">Flask 网页应用</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Aslan Ahmedov</b></span>
+    <span>Kaggle 点赞 <b>2,543</b>（2026-11 抓取）</span>
+    <span>数据集 <b>aslanahmedov/number-plate-detection</b></span>
+    <span><a href="https://www.kaggle.com/code/aslanahmedov/automatic-number-plate-recognition" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">带车牌的汽车照片 + 人工画好的车牌框</div><p>作者用 LabelImg 工具在每张照片上手工框出车牌，框的位置存成 PASCAL VOC 格式的 XML 文件。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>要做什么</h3><div class="big">两步：车牌在哪？车牌写的什么？</div><p>第一步是<b>检测</b>：输出车牌框的四个坐标；第二步是<b>识别</b>：把框里的字符读成文字。应用场景是闯红灯抓拍、小区门禁、停车场计费。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">两套检测器 + 现成的 OCR</div><p>方案一：ImageNet 预训练的 InceptionResNetV2 接全连接层，直接回归 4 个坐标；方案二：YOLOv5s 训练 100 轮。两套都把裁出的车牌交给 Tesseract 读字，再用 Flask 做成网页。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">YOLO 版明显好于第一版，读字仍是短板</div><p>作者坦言第一版“精度很低、很慢”，Tesseract“没读出正确文字” <span data-cell="47">出处</span>；YOLOv5 版作者报告精确率 0.92 <span data-cell="68">出处</span>。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>Automatic Number Plate Recognition</b>（作者本人上传，来源写的是网络抓取）。以下规模信息来自数据集说明页和 notebook 代码。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">文件总数</div><div class="v">453</div></div>
+        <div class="stat-tile"><div class="k">目标类别</div><div class="v">1 类</div></div>
+        <div class="stat-tile"><div class="k">标注格式</div><div class="v" style="font-size:20px">PASCAL VOC</div></div>
+        <div class="stat-tile"><div class="k">YOLO 训练 / 测试</div><div class="v" style="font-size:20px">前 200 / 其余</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">“453 个文件，JPEG 图片 + 每张图一个 XML 标注”来自数据集说明；其中还有一张测试图 TEST.jpeg、一段测试视频和 data.yaml。只有一类目标：车牌（XML 里叫 <code>number_plate</code>，YOLO 配置里叫 <code>license_plate</code>）<span data-cell="62">出处</span>。YOLO 部分取前 200 条作训练、其余作测试 <span data-cell="59">出处</span>。照片尺寸不统一，作者给的 XML 示例是 1920×1080 <span data-cell="0">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">一份标注里有什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>字段</th><th>含义</th><th>作者示例（第 0 格）</th></tr>
+        <tr><td><code>filename</code></td><td>对应的图片文件名</td><td>N1.jpeg</td></tr>
+        <tr><td><code>size</code>：width / height / depth</td><td>图片宽、高（像素）和颜色通道数</td><td>1920 / 1080 / 3</td></tr>
+        <tr><td><code>object/name</code></td><td>框里是什么东西</td><td>number_plate</td></tr>
+        <tr><td><code>bndbox</code>：xmin, ymin</td><td>车牌框<b>左上角</b>的像素坐标</td><td>1093, 645</td></tr>
+        <tr><td><code>bndbox</code>：xmax, ymax</td><td>车牌框<b>右下角</b>的像素坐标</td><td>1396, 727</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)"><b>要预测的答案</b>就是这 4 个坐标（检测），以及车牌上的字符（识别）。注意：数据集只标了框，<b>没有标车牌上写的字</b>，所以读字这一步没法训练，也没法算准确率，只能交给现成的 Tesseract。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="21">
+    <h3>动手试试 A · 回归框：均方误差小，框就一定准吗？ <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="46">
+    <h3>动手试试 B · OCR 前处理：二值化阈值怎么选 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="51">
+    <h3>动手试试 C · 同一个车牌框的三种写法 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>引言称系统在低分辨率图像上识别车牌的准确率“接近 90–95%”（notebook 里没有计算这个数的代码）</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>TensorBoard 截图显示训练集、验证集没有过拟合，损失随轮次下降</td><td><span data-cell="23">第 23 格</span></td></tr>
+        <tr><td>Tesseract“显然没有读出正确的文字”，作者认为“至少能拿到 90% 的信息”；同时坦言数据太少、模型表现不好</td><td><span data-cell="47">第 47 格</span></td></tr>
+        <tr><td>第一版模型的主要问题是检测精度很低、处理很慢，所以改用 YOLO</td><td><span data-cell="48">第 48 格</span></td></tr>
+        <tr><td>YOLOv5 版：“0.92 Precision and 0.5 mean Average Precision”（原文如此，0.5 指 mAP 的值还是 IoU 门槛 0.5，没说清）</td><td><span data-cell="68">第 68 格</span></td></tr>
+        <tr><td>YOLO 检测“相当准”，偶有误判；想要读准文字，需要更多数据和 4K 高清摄像头</td><td><span data-cell="81">第 81 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">原 notebook 的损失曲线、预测框坐标、OCR 读出的文字都在运行输出里，Kaggle 下载的源码不带输出。作者文字里只有上表这几个数，其中“90–95%”没有对应的评估代码，“0.92”来自 YOLOv5 训练日志的截图，所以这里不再列别的分数。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>输入一张带车的照片或一帧视频，输出车牌框的位置和读出的车牌号。</li>
+        <li><b>同类问题：</b>停车场自动抬杆计费、高速收费站、闯红灯/超速抓拍、小区门禁；换个对象，就是集装箱箱号、电表读数、身份证号的识别。</li>
+        <li><b>可迁移的套路：</b>“先检测、再裁剪、再识别”的两段式流水线：检测器只管找位置，识别器只看裁好的小图。两段可以分别替换升级。</li>
+        <li><b>要补的课：</b>给车牌文字也做标注，才能训练专用的字符识别模型并计算整牌准确率；处理夜间、雨天、斜拍的照片。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>标注解析：xml.etree 读 PASCAL VOC，转成 CSV <span data-cell="2">第 2 格</span></li>
+        <li>预处理：缩放到 224×224、像素 /255、坐标除以宽高 <span data-cell="11">第 11 格</span></li>
+        <li>迁移学习：InceptionResNetV2 + Dense(500)→Dense(250)→Dense(4, sigmoid)，MSE 损失 <span data-cell="17">第 17 格</span></li>
+        <li>训练：Adam 学习率 1e-4，批大小 10，180 轮 <span data-cell="21">第 21 格</span></li>
+        <li>OCR：pytesseract.image_to_string <span data-cell="46">第 46 格</span></li>
+        <li>YOLO 标签：中心点 + 宽高，按图片尺寸归一化 <span data-cell="51">第 51 格</span></li>
+        <li>YOLOv5s 训练 100 轮、导出 ONNX <span data-cell="65">第 65 格</span></li>
+        <li>OpenCV DNN 推理、置信度过滤、NMSBoxes <span data-cell="75">第 75 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>第一版模型用均方误差（MSE）训练 4 个坐标。结合实验 A，说说为什么 MSE 很小，框却可能“没套住”车牌？检测任务通常用什么指标来判断框准不准？</li>
+      <li>作者在引言里写“准确率接近 90–95%”，但 notebook 里找不到算这个数的代码。如果你是停车场的验收方，你会要求测哪几个数？（提示：车牌找到了没有、每个字符读对没有、整块车牌全对没有）</li>
+      <li>YOLO 部分用 <code>df.iloc[:200]</code> 取前 200 条做训练，没有打乱；同一份“测试集”又被当作验证集来挑最好的权重。这样报出来的 0.92 可信吗？应该怎么切分？</li>
+      <li>作者把裁出来的车牌直接交给 Tesseract，没做任何前处理。根据实验 B，你会先做哪些处理？夜里、逆光、雨天的照片还会出什么问题？</li>
+      <li>数据集只标了车牌框，没有标车牌上的文字。要训练一个真正会“读车牌”的模型，还需要准备什么样的数据？</li>
+      <li>车牌号能关联到车主。停车场或小区门禁收集的车牌记录应该保存多久、谁能查看？公开数据集里的车牌照片要不要打码？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Aslan Ahmedov，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：aslanahmedov/number-plate-detection（数据集页标注的许可为 copyright-authors）。
+</footer>
+</main>
+
+<script src="nb/license-plate-recognition.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* 自查开关：网址带 ?fast 或 #fast 时动画直接跳到最后一帧（无界面截图用） */
+  const FAST = /fast/.test(location.search + location.hash);
+  if (FAST) {
+    K.tween = (ms, fn, ctx) => { if (ctx && !ctx.alive()) return Promise.resolve(false); fn(1, 1); return Promise.resolve(true); };
+    K.wait = (ms, ctx) => Promise.resolve(!ctx || ctx.alive());
+  }
+
+  const T = (svg, x, y, s, o) => K.svg(svg, "text", Object.assign({ x, y, "font-size": 13 }, o || {}), s);
+  const hide = (...els) => els.forEach((e) => (e.style.opacity = 0));
+  const fade = (ctx, els, ms) => ctx.tween(ms || 450, (t) => els.forEach((e) => (e.style.opacity = t)));
+
+  /* 画一辆简笔小汽车，返回车牌在画布上的矩形 */
+  function car(svg, x, y, s) {
+    const g = K.svg(svg, "g");
+    K.svg(g, "rect", { x: x, y: y + 40 * s, width: 220 * s, height: 70 * s, rx: 14 * s, fill: "var(--c1)", opacity: 0.85 });
+    K.svg(g, "path", { d: `M${x + 40 * s},${y + 42 * s} L${x + 65 * s},${y} L${x + 155 * s},${y} L${x + 180 * s},${y + 42 * s} Z`, fill: "var(--c1)", opacity: 0.6 });
+    K.svg(g, "rect", { x: x + 72 * s, y: y + 8 * s, width: 76 * s, height: 30 * s, rx: 4 * s, fill: "var(--panel-2)" });
+    [[30, 70], [190, 70]].forEach((p) => K.svg(g, "circle", { cx: x + p[0] * s, cy: y + p[1] * s, r: 11 * s, fill: "var(--warn)", opacity: 0.85 }));
+    K.svg(g, "circle", { cx: x + 45 * s, cy: y + 112 * s, r: 16 * s, fill: "var(--ink)" });
+    K.svg(g, "circle", { cx: x + 175 * s, cy: y + 112 * s, r: 16 * s, fill: "var(--ink)" });
+    const p = { x: x + 70 * s, y: y + 78 * s, w: 80 * s, h: 24 * s };
+    K.svg(g, "rect", { x: p.x, y: p.y, width: p.w, height: p.h, rx: 3, fill: "var(--panel)", stroke: "var(--ink)", "stroke-width": 1.5 });
+    K.svg(g, "text", { x: p.x + p.w / 2, y: p.y + p.h / 2 + 5 * s + 1, "text-anchor": "middle", "font-size": Math.max(9, 15 * s), "font-weight": 700, "font-family": "var(--mono)" }, "B7 KX429");
+    return { g, plate: p };
+  }
+
+  const steps = [
+    {
+      at: 0, title: "车牌识别要做哪两件事", kicker: "第 0–1 格 · 项目概览与导入",
+      html: `<p>作者先介绍车牌识别的用途：路上抓拍违章车辆、单位门口登记进出车辆、停车场记录停放车辆 <span data-cell="0">第 0 格</span>。</p><p>整个系统分两段：<b>检测</b>（在整张照片里找到车牌的位置，画个框）和<b>识别</b>（把框里的字读出来，这一步叫 OCR，光学字符识别）。第 1 格一次性导入了后面要用的全部库：OpenCV 读图、TensorFlow 搭模型、pytesseract 读字。</p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        const c = car(svg, 20, 110, 0.9);
+        const box = K.svg(svg, "rect", { x: c.plate.x - 4, y: c.plate.y - 4, width: c.plate.w + 8, height: c.plate.h + 8, fill: "none", stroke: "var(--good)", "stroke-width": 3 });
+        const n1 = K.node(svg, 270, 60, 130, 56, "① 检测\n车牌在哪？", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const n2 = K.node(svg, 270, 150, 130, 56, "② 裁剪\n只留车牌那块", {});
+        const n3 = K.node(svg, 270, 240, 130, 56, "③ OCR\n读出字符", { fill: "color-mix(in srgb, var(--c3) 16%, var(--panel))", stroke: "var(--c3)" });
+        const a1 = K.arrow(svg, 335, 116, 335, 148), a2 = K.arrow(svg, 335, 206, 335, 238), a3 = K.arrow(svg, 400, 268, 450, 268);
+        const out = K.node(svg, 452, 238, 230, 60, "“B7 KX429”", { bold: true, fs: 20 });
+        const crop = K.svg(svg, "g");
+        K.svg(crop, "rect", { x: 450, y: 150, width: 160, height: 50, rx: 4, fill: "var(--panel)", stroke: "var(--ink)", "stroke-width": 2 });
+        K.svg(crop, "text", { x: 530, y: 183, "text-anchor": "middle", "font-size": 24, "font-weight": 700, "font-family": "var(--mono)" }, "B7 KX429");
+        const a4 = K.arrow(svg, 400, 178, 446, 178);
+        T(svg, 20, 30, "示意：一张照片 → 两段流水线 → 一串文字", { class: "muted" });
+        hide(box, n1, n2, n3, a1, a2, a3, out, crop, a4);
+        (async () => {
+          for (const grp of [[n1], [box], [a1, n2], [a4, crop], [a2, n3], [a3, out]]) if (!(await fade(ctx, grp, 420))) return;
+        })();
+      },
+    },
+    {
+      at: 2, title: "把 XML 标注读成一张表", kicker: "第 2–7 格 · 标注解析",
+      html: `<p>每张照片都有一个同名 XML 文件，记录作者用 LabelImg 手工画的车牌框。第 2 格逐个打开 XML，沿着 <code>object → bndbox</code> 找到 <code>xmin、xmax、ymin、ymax</code> 四个数，装进字典；第 4 格转成 pandas 表格并存成 <code>labels.csv</code>。</p><p>第 6–7 格再从 XML 里读出 <code>filename</code>，拼出每张图片的路径，这样“图片”和“答案”就一一对上了。动画用的是作者在第 0 格贴出的 N1.jpeg 示例。</p>`,
+      cells: [2, 4, 6], highlight: ["find('bndbox')", "labels_dict", "to_csv"],
+      draw(svg, ctx) {
+        const lines = ["<annotation>", "  <filename>N1.jpeg</filename>", "  <size> 1920 × 1080 × 3 </size>", "  <object>", "    <name>number_plate</name>", "    <bndbox>", "      <xmin>1093</xmin>", "      <ymin>645</ymin>", "      <xmax>1396</xmax>", "      <ymax>727</ymax>", "    </bndbox>", "  </object>", "</annotation>"];
+        const L = lines.map((s, i) => K.svg(svg, "text", { x: 20, y: 40 + i * 21, "font-size": 12.5, "font-family": "var(--mono)", fill: i >= 6 && i <= 9 ? "var(--accent)" : "var(--ink)" }, s));
+        L.forEach((e) => (e.style.whiteSpace = "pre"));
+        hide(...L);
+        const cols = ["filepath", "xmin", "xmax", "ymin", "ymax"], vals = ["…/N1.xml", "1093", "1396", "645", "727"], xs = [370, 470, 530, 590, 650];
+        cols.forEach((c, i) => { K.svg(svg, "rect", { x: xs[i] - (i ? 28 : 50), y: 120, width: i ? 56 : 100, height: 30, fill: "var(--panel-2)", stroke: "var(--line)" }); T(svg, xs[i], 140, c, { "text-anchor": "middle", "font-size": 12, "font-weight": 700 }); });
+        const cells = vals.map((v, i) => { K.svg(svg, "rect", { x: xs[i] - (i ? 28 : 50), y: 150, width: i ? 56 : 100, height: 30, fill: "var(--panel)", stroke: "var(--line)" }); const t = T(svg, xs[i], 170, v, { "text-anchor": "middle", "font-size": 12, "font-family": "var(--mono)" }); t.style.opacity = 0; return t; });
+        T(svg, 320, 100, "labels.csv（每张图一行）", { "font-weight": 700 });
+        const src = [1, 6, 8, 7, 9];
+        const fly = T(svg, 0, 0, "", { "font-size": 12, "font-family": "var(--mono)", fill: "var(--accent)", "font-weight": 700 });
+        (async () => {
+          for (let i = 0; i < L.length; i++) if (!(await ctx.tween(70, (t) => (L[i].style.opacity = t)))) return;
+          for (let k = 0; k < 5; k++) {
+            const y0 = 40 + src[k] * 21, x0 = 260;
+            fly.textContent = vals[k];
+            if (!(await ctx.tween(520, (t) => { K.set(fly, { x: K.lerp(x0, xs[k] - 14, t), y: K.lerp(y0, 170, t) }); fly.style.opacity = 1 - t * 0.2; }))) return;
+            cells[k].style.opacity = 1; fly.style.opacity = 0;
+          }
+        })();
+        T(svg, 320, 230, "非结构化的 XML 文件 → 结构化的表格", { class: "muted" });
+        T(svg, 320, 254, "注意列的顺序：xmin, xmax, ymin, ymax（后面全程都按这个顺序）", { class: "muted", "font-size": 12 });
+      },
+    },
+    {
+      at: 8, title: "画出来核对一下标注", kicker: "第 8–9 格 · 数据校验",
+      html: `<p>标注是人工画的，难免出错。作者挑了一张图，把 XML 里的四个坐标当成矩形画回照片上，看青色框是不是正好套住车牌 <span data-cell="9">第 9 格</span>。</p><p>要注意图像坐标的约定：<b>原点在左上角，x 向右增大，y 向下增大</b>，和数学课上 y 向上的坐标系相反。</p>`,
+      cells: [9], highlight: ["add_shape"],
+      draw(svg, ctx) {
+        const W = 1920, H = 1080, ox = 50, oy = 40, sc = 0.2;
+        K.svg(svg, "rect", { x: ox, y: oy, width: W * sc, height: H * sc, fill: "var(--panel-2)", stroke: "var(--ink-3)" });
+        car(svg, ox + 1093 * sc - 70 * 0.78, oy + 645 * sc - 78 * 0.78, 0.78);
+        T(svg, ox, oy - 10, "(0, 0)", { "font-size": 12, "font-family": "var(--mono)" });
+        K.arrow(svg, ox, oy, ox + 60, oy, { color: "var(--accent)" }); T(svg, ox + 64, oy + 4, "x", { fill: "var(--accent)" });
+        K.arrow(svg, ox, oy, ox, oy + 60, { color: "var(--accent)" }); T(svg, ox - 14, oy + 72, "y", { fill: "var(--accent)" });
+        const bx = K.svg(svg, "rect", { x: ox + 1093 * sc, y: oy + 645 * sc, width: 0, height: 0, fill: "none", stroke: "var(--c4)", "stroke-width": 3 });
+        const p1 = K.svg(svg, "circle", { cx: ox + 1093 * sc, cy: oy + 645 * sc, r: 5, fill: "var(--c6)" });
+        const p2 = K.svg(svg, "circle", { cx: ox + 1396 * sc, cy: oy + 727 * sc, r: 5, fill: "var(--c6)" });
+        const t1 = T(svg, 456, 120, "左上角 (xmin, ymin) = (1093, 645)", { "font-size": 12 });
+        const t2 = T(svg, 456, 150, "右下角 (xmax, ymax) = (1396, 727)", { "font-size": 12 });
+        const t3 = T(svg, 456, 190, "两个角就能确定一个矩形", { class: "muted", "font-size": 12 });
+        T(svg, 50, 300, "示意：N1.jpeg（1920×1080）的标注框画回原图，车是简笔画", { class: "muted", "font-size": 12 });
+        hide(p1, p2, t1, t2, t3);
+        (async () => {
+          if (!(await fade(ctx, [p1, t1]))) return;
+          if (!(await fade(ctx, [p2, t2]))) return;
+          if (!(await ctx.tween(800, (t) => K.set(bx, { width: 303 * sc * t, height: 82 * sc * t })))) return;
+          fade(ctx, [t3]);
+        })();
+      },
+    },
+    {
+      at: 10, title: "缩放到 224×224，再把数字压到 0–1", kicker: "第 10–15 格 · 预处理与切分",
+      html: `<p>预训练模型要求输入固定为 224×224，所以每张照片都被<b>直接拉伸</b>成正方形（第 11 格的 <code>target_size=(224,224)</code>，长宽比会变）。</p><p>两种“归一化”：像素值 0–255 除以 255 变成 0–1；车牌坐标除以<b>原图</b>的宽和高，也变成 0–1。坐标变成“占全图的比例”之后，不管图片多大、拉伸成什么样，答案都不变。第 15 格按 8:2 切成训练集和测试集。</p>`,
+      cells: [11, 13, 15], highlight: ["target_size=(224,224)", "/255.0", "xmin/w", "ymin/h", "train_size=0.8"],
+      draw(svg, ctx) {
+        const W = 1920, H = 1080, sc = 0.2, ox = 30, oy = 50;
+        const frame = K.svg(svg, "rect", { x: ox, y: oy, width: W * sc, height: H * sc, fill: "var(--panel-2)", stroke: "var(--ink-3)" });
+        const pb = { x: 1093 / W, y: 645 / H, w: 303 / W, h: 82 / H };
+        const box = K.svg(svg, "rect", { x: ox + pb.x * W * sc, y: oy + pb.y * H * sc, width: pb.w * W * sc, height: pb.h * H * sc, fill: "color-mix(in srgb, var(--c4) 30%, transparent)", stroke: "var(--c4)", "stroke-width": 2 });
+        const lab = T(svg, ox, oy - 12, "原图 1920 × 1080", { "font-weight": 700 });
+        const S = 224 * 0.9;
+        const vals = [["xmin", 1093, W], ["xmax", 1396, W], ["ymin", 645, H], ["ymax", 727, H]];
+        const rows = vals.map((v, i) => T(svg, 470, 70 + i * 28, `${v[0]} = ${v[1]} / ${v[2]} = ${(v[1] / v[2]).toFixed(3)}`, { "font-family": "var(--mono)", "font-size": 13 }));
+        const px = T(svg, 470, 200, "像素：0…255  ÷ 255  →  0…1", { "font-family": "var(--mono)", "font-size": 13 });
+        const note = T(svg, 470, 236, "坐标变成“占全图的比例”", { class: "muted", "font-size": 12 });
+        const split = K.svg(svg, "g");
+        K.svg(split, "rect", { x: 470, y: 262, width: 176, height: 26, fill: "color-mix(in srgb, var(--c1) 20%, var(--panel))", stroke: "var(--c1)" });
+        K.svg(split, "rect", { x: 646, y: 262, width: 44, height: 26, fill: "color-mix(in srgb, var(--c3) 20%, var(--panel))", stroke: "var(--c3)" });
+        T(split, 558, 280, "训练 80%", { "text-anchor": "middle", "font-size": 12 }); T(split, 668, 280, "测 20%", { "text-anchor": "middle", "font-size": 11 });
+        hide(...rows, px, note, split);
+        (async () => {
+          if (!(await ctx.wait(500))) return;
+          if (!(await ctx.tween(1300, (t) => {
+            const w = K.lerp(W * sc, S, t), h = K.lerp(H * sc, S, t);
+            K.set(frame, { width: w, height: h });
+            K.set(box, { x: ox + pb.x * w, y: oy + pb.y * h, width: pb.w * w, height: pb.h * h });
+          }))) return;
+          lab.textContent = "拉伸成 224 × 224（车牌被压扁拉高，比例坐标不变）";
+          for (const r of rows) if (!(await fade(ctx, [r], 300))) return;
+          if (!(await fade(ctx, [px, note], 400))) return;
+          fade(ctx, [split], 400);
+        })();
+      },
+    },
+    {
+      at: 16, title: "借一个认识百万张图片的网络来“找车牌”", kicker: "第 16–19 格 · 迁移学习建模",
+      html: `<p>作者没有从零训练，而是借用在 ImageNet（一百多万张图、1000 类）上训练好的 <b>InceptionResNetV2</b>，去掉它原来的分类头（<code>include_top=False</code>），接上自己的“头”：Flatten → Dense(500) → Dense(250) → <b>Dense(4, sigmoid)</b> <span data-cell="17">第 17 格</span>。</p><p>最后一层输出 4 个 0–1 之间的数，正好对应归一化后的 xmin、xmax、ymin、ymax。这是把“找位置”当成<b>回归</b>问题：直接预测数值，损失函数用均方误差 MSE，优化器 Adam，学习率 1e-4 <span data-cell="19">第 19 格</span>。代码里没有冻结主干，所以整个网络的参数都会一起调整。</p>`,
+      cells: [17, 19], highlight: ["include_top=False", "Dense(4,activation='sigmoid')", "loss='mse'"],
+      draw(svg, ctx) {
+        const blocks = [];
+        for (let i = 0; i < 7; i++) blocks.push(K.svg(svg, "rect", { x: 40 + i * 44, y: 110 - i * 6, width: 36, height: 120 + i * 12 - i * 22, rx: 4, fill: "color-mix(in srgb, var(--c1) " + (20 + i * 8) + "%, var(--panel))", stroke: "var(--c1)" }));
+        T(svg, 40, 70, "InceptionResNetV2 主干（ImageNet 预训练）", { "font-weight": 700 });
+        T(svg, 40, 290, "多种尺寸的卷积核并联 + 残差捷径：先看出边缘、纹理，再看出“像车牌的东西”", { class: "muted", "font-size": 12 });
+        const head = [["Flatten", 380], ["Dense 500\nrelu", 460], ["Dense 250\nrelu", 540]].map((d) => K.node(svg, d[1], 135, 70, 70, d[0], { fill: "var(--accent-soft)", stroke: "var(--accent)", fs: 12 }));
+        const outs = ["xmin", "xmax", "ymin", "ymax"].map((s, i) => K.node(svg, 630, 100 + i * 36, 74, 30, s, { fs: 12, fill: "color-mix(in srgb, var(--c3) 16%, var(--panel))", stroke: "var(--c3)" }));
+        T(svg, 618, 260, "sigmoid → 0~1", { "font-size": 12, class: "muted" });
+        T(svg, 420, 100, "新接的“头”", { "font-weight": 700, fill: "var(--accent)" });
+        hide(...head, ...outs);
+        const pulse = K.svg(svg, "circle", { cx: 40, cy: 170, r: 7, fill: "var(--warn)" });
+        (async () => {
+          for (const h of head) if (!(await fade(ctx, [h], 300))) return;
+          if (!(await fade(ctx, outs, 400))) return;
+          for (let r = 0; r < 2; r++) {
+            if (!(await ctx.tween(1500, (t) => K.set(pulse, { cx: K.lerp(40, 650, t), cy: 170 + Math.sin(t * 12) * 6 })))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 20, title: "训练 180 轮：让预测框一步步贴近答案", kicker: "第 20–23 格 · 训练与 TensorBoard",
+      html: `<p>第 21 格开始训练：每次喂 10 张图（批大小 10），整个训练集反复学 <b>180 轮</b>，并把测试集当作验证集观察。每一轮，模型比较自己预测的 4 个数和标注答案，按 MSE 的大小往“误差变小”的方向微调参数。</p><p>作者在第 23 格放了一张 TensorBoard 截图，文字说训练集和验证集没有出现过拟合、损失随轮次下降。下面的实验 A 会告诉你：MSE 降下来，不等于框就一定准。</p>`,
+      cells: [21], highlight: ["epochs=180", "batch_size=10"],
+      draw(svg, ctx) {
+        const gt = { x: 120, y: 150, w: 160, h: 46 };
+        K.svg(svg, "rect", { x: 30, y: 40, width: 340, height: 250, fill: "var(--panel-2)", stroke: "var(--ink-3)" });
+        K.svg(svg, "rect", { x: gt.x, y: gt.y, width: gt.w, height: gt.h, fill: "none", stroke: "var(--good)", "stroke-width": 3 });
+        T(svg, gt.x, gt.y + gt.h + 18, "答案框（标注）", { fill: "var(--good)", "font-size": 12 });
+        const pr = K.svg(svg, "rect", { x: 200, y: 70, width: 90, height: 120, fill: "none", stroke: "var(--c6)", "stroke-width": 2.5, "stroke-dasharray": "6 4" });
+        T(svg, 34, 30, "虚线 = 模型预测框（示意）", { "font-size": 12, fill: "var(--c6)" });
+        const ax = K.axes(svg, { x: 430, y: 50, w: 260, h: 220 }, [0, 180], [0, 1], { xticks: 3, yticks: 0, xlabel: "训练轮次 epoch" });
+        T(svg, 430, 40, "损失 MSE（示意曲线）", { "font-size": 12 });
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        const ep = T(svg, 600, 40, "epoch 0", { "font-family": "var(--mono)" });
+        const loss = (e) => 0.06 + 0.85 * Math.exp(-e / 28);
+        const start = { x: 200, y: 70, w: 90, h: 120 };
+        ctx.wait(400).then((ok) => ok && ctx.tween(3200, (t, raw) => {
+          const e = raw * 180;
+          let d = "";
+          for (let k = 0; k <= e; k += 2) d += (d ? "L" : "M") + ax.sx(k) + "," + ax.sy(loss(k));
+          path.setAttribute("d", d);
+          ep.textContent = "epoch " + Math.round(e);
+          const a = 1 - Math.exp(-e / 28);
+          K.set(pr, { x: K.lerp(start.x, gt.x + 6, a), y: K.lerp(start.y, gt.y - 4, a), width: K.lerp(start.w, gt.w - 10, a), height: K.lerp(start.h, gt.h + 6, a) });
+        }));
+      },
+    },
+    {
+      at: 24, title: "用新照片预测，再把比例换回像素", kicker: "第 24–40 格 · 预测与反归一化",
+      html: `<p>拿一张没参与训练的 TEST.jpeg：先记下原图的高 h、宽 w，再缩放到 224×224、除以 255 <span data-cell="26">第 26 格</span>。模型一次要吃一“批”图，所以用 <code>reshape(1,224,224,3)</code> 在最前面加一维“第几张图” <span data-cell="32">第 32 格</span>。</p><p>模型输出的是 0–1 的比例，要乘上 <code>[w, w, h, h]</code> 变回原图上的像素坐标（反归一化）<span data-cell="36">第 36 格</span>，取整后用 <code>cv2.rectangle</code> 画框 <span data-cell="40">第 40 格</span>。</p>`,
+      cells: [24, 26, 32, 34, 36, 40], highlight: ["reshape(1,224,224,3)", "denorm = np.array([w,w,h,h])", "cv2.rectangle"],
+      draw(svg, ctx) {
+        const out = [0.57, 0.73, 0.6, 0.67], mul = ["w", "w", "h", "h"], W = 1920, H = 1080;
+        const n0 = K.node(svg, 20, 40, 120, 60, "TEST.jpeg\n原图 w × h", {});
+        const n1 = K.node(svg, 170, 40, 120, 60, "224×224\n÷255", {});
+        const n2 = K.node(svg, 320, 40, 140, 60, "reshape\n(1,224,224,3)", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const n3 = K.node(svg, 490, 40, 100, 60, "模型", { bold: true });
+        const arr = [K.arrow(svg, 140, 70, 168, 70), K.arrow(svg, 290, 70, 318, 70), K.arrow(svg, 460, 70, 488, 70)];
+        T(svg, 20, 140, "模型输出（示意数值）", { "font-size": 12, class: "muted" });
+        const o = out.map((v, i) => T(svg, 30 + i * 120, 168, v.toFixed(2), { "font-family": "var(--mono)", "font-size": 18, "font-weight": 700 }));
+        const m = out.map((v, i) => T(svg, 30 + i * 120, 198, "× " + mul[i], { "font-family": "var(--mono)", fill: "var(--accent)" }));
+        const r = out.map((v, i) => T(svg, 30 + i * 120, 228, "= " + Math.round(v * (i < 2 ? W : H)), { "font-family": "var(--mono)", "font-size": 16, fill: "var(--c3)", "font-weight": 700 }));
+        ["xmin", "xmax", "ymin", "ymax"].forEach((s, i) => T(svg, 30 + i * 120, 252, s, { "font-size": 11, class: "muted" }));
+        const fin = T(svg, 20, 300, "pt1 = (xmin, ymin)，pt2 = (xmax, ymax) → cv2.rectangle 画框（假设原图 1920×1080）", { "font-size": 12 });
+        hide(n1, n2, n3, ...arr, ...o, ...m, ...r, fin);
+        (async () => {
+          for (const g of [[arr[0], n1], [arr[1], n2], [arr[2], n3], o, m, r, [fin]]) if (!(await fade(ctx, g, 380))) return;
+        })();
+      },
+    },
+    {
+      at: 41, title: "打包成一个函数：照片进，框出来", kicker: "第 41–42 格 · 检测流水线",
+      html: `<p>把读图、预处理、预测、反归一化、画框这几步写进一个函数 <code>object_detection(path)</code>，输入图片路径，返回画好框的图和坐标 <span data-cell="42">第 42 格</span>。</p><p>这样做的好处是：后面做网页、接 OCR 时，只需要调用一行函数，不用每次复制一大段代码。</p>`,
+      cells: [42], highlight: ["def object_detection(path):", "return image, coords"],
+      draw(svg, ctx) {
+        K.svg(svg, "rect", { x: 150, y: 40, width: 420, height: 250, rx: 14, fill: "none", stroke: "var(--accent)", "stroke-width": 2, "stroke-dasharray": "8 5" });
+        T(svg, 165, 64, "def object_detection(path):", { "font-family": "var(--mono)", fill: "var(--accent)", "font-weight": 700 });
+        const st = ["读图，记下 h, w", "缩放 224 + ÷255", "reshape 加批次维", "model.predict", "× [w,w,h,h] 取整", "cv2.rectangle 画框"];
+        const ns = st.map((s, i) => K.node(svg, 180 + (i % 3) * 128, 90 + Math.floor(i / 3) * 100, 116, 56, s, { fs: 12 }));
+        const inp = K.node(svg, 20, 140, 110, 56, "图片路径", { bold: true });
+        const outp = K.node(svg, 590, 140, 110, 56, "image,\ncoords", { bold: true, fill: "color-mix(in srgb, var(--c3) 16%, var(--panel))", stroke: "var(--c3)" });
+        const a1 = K.arrow(svg, 130, 168, 176, 118), a2 = K.arrow(svg, 552, 218, 588, 172);
+        hide(...ns, outp, a2);
+        const dot = K.svg(svg, "circle", { cx: 130, cy: 168, r: 7, fill: "var(--warn)" });
+        (async () => {
+          for (let i = 0; i < ns.length; i++) {
+            const nx = 180 + (i % 3) * 128 + 58, ny = 90 + Math.floor(i / 3) * 100 + 28;
+            const cx = +dot.getAttribute("cx"), cy = +dot.getAttribute("cy");
+            if (!(await ctx.tween(320, (t) => K.set(dot, { cx: K.lerp(cx, nx, t), cy: K.lerp(cy, ny, t) })))) return;
+            ns[i].style.opacity = 1;
+          }
+          if (!(await ctx.tween(320, (t) => K.set(dot, { cx: K.lerp(482, 645, t), cy: K.lerp(218, 168, t) })))) return;
+          fade(ctx, [a2, outp]);
+        })();
+      },
+    },
+    {
+      at: 43, title: "OCR：把车牌那一小块交给 Tesseract 读字", kicker: "第 43–47 格 · 文字识别",
+      html: `<p>用预测框把车牌从原图里“抠”出来（叫 ROI，感兴趣区域）<span data-cell="44">第 44 格</span>，再交给开源 OCR 引擎 Tesseract 的 <code>image_to_string</code>，返回读到的文字 <span data-cell="46">第 46 格</span>。</p><p>作者列了 Tesseract 的局限：背景杂乱、透视变形、遮挡、低质量图像都会让它读错，甚至输出乱码；需要先放大、增强对比度、摆正文字。结果作者也直说“显然没有得到正确的文字” <span data-cell="47">第 47 格</span>，原因是数据少、检测框不准，加上没有做图像前处理。</p>`,
+      cells: [44, 46], highlight: ["roi = img[ymin:ymax,xmin:xmax]", "image_to_string"],
+      draw(svg, ctx) {
+        const c = car(svg, 20, 90, 1.0);
+        const p = c.plate;
+        const sel = K.svg(svg, "rect", { x: p.x, y: p.y, width: p.w, height: p.h, fill: "none", stroke: "var(--warn)", "stroke-width": 3 });
+        T(svg, 20, 40, "img[ymin:ymax, xmin:xmax] —— 先行（y）后列（x）", { "font-family": "var(--mono)", "font-size": 12 });
+        const big = K.svg(svg, "g");
+        K.svg(big, "rect", { x: 330, y: 80, width: 360, height: 100, rx: 6, fill: "var(--panel)", stroke: "var(--ink)", "stroke-width": 2.5 });
+        const chars = "B7 KX429".split("");
+        const ct = chars.map((ch, i) => T(big, 352 + i * 42, 150, ch, { "font-size": 54, "font-weight": 700, "font-family": "var(--mono)" }));
+        const scan = K.svg(svg, "rect", { x: 330, y: 76, width: 6, height: 108, fill: "var(--accent)", opacity: 0.7 });
+        const res = T(svg, 330, 230, "", { "font-family": "var(--mono)", "font-size": 22, "font-weight": 700, fill: "var(--c3)" });
+        T(svg, 330, 262, "Tesseract 从左到右找字符、逐个比对字形（示意）", { class: "muted", "font-size": 12 });
+        T(svg, 330, 284, "真实照片里的阴影、倾斜、反光都会让它读错", { class: "muted", "font-size": 12 });
+        hide(big, scan);
+        (async () => {
+          if (!(await ctx.wait(500))) return;
+          if (!(await fade(ctx, [big], 500))) return;
+          scan.style.opacity = 0.7;
+          if (!(await ctx.tween(2000, (t) => {
+            const x = 330 + t * 350; K.set(scan, { x });
+            const k = Math.floor((x - 345) / 42) + 1;
+            res.textContent = "→ “" + chars.slice(0, K.clamp(k, 0, chars.length)).join("") + "”";
+          }))) return;
+          scan.style.opacity = 0;
+        })();
+      },
+    },
+    {
+      at: 48, title: "做成网页：上传照片就能看到结果", kicker: "第 48 格 · Flask 网页应用（只有文字说明）",
+      html: `<p>第 48 格是一大段文字教程：用 Flask（一个 Python 写网站的小框架）搭一个页面，用户上传照片 → 服务器存进 <code>static/upload</code> → 调用检测和 OCR → 把裁出的车牌存进 <code>roi</code>、画好框的图存进 <code>predict</code> → 页面显示结果。</p><p>这部分代码作者放在 GitHub 上，notebook 里只有说明和片段，不能在 Kaggle 上运行。同一格的后半段开始讲第二套方案 YOLO：作者说第一版“精度很低，而且非常非常慢”。</p>`,
+      cells: [48],
+      draw(svg, ctx) {
+        const b = K.node(svg, 20, 120, 130, 80, "浏览器\n选择照片 → 上传", {});
+        const s = K.node(svg, 220, 50, 170, 70, "app.py（Flask）\n收到 POST 请求", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const d = K.node(svg, 220, 200, 170, 70, "deeplearning.py\n检测 + OCR", { fill: "color-mix(in srgb, var(--c3) 16%, var(--panel))", stroke: "var(--c3)" });
+        const f = K.node(svg, 470, 50, 220, 70, "static/upload  原图\nstatic/roi  车牌\nstatic/predict  画框图", { fs: 12 });
+        const r = K.node(svg, 470, 200, 220, 70, "index.html\n显示图片和车牌号", {});
+        const arrs = [K.arrow(svg, 150, 150, 218, 90), K.arrow(svg, 305, 120, 305, 198), K.arrow(svg, 390, 225, 468, 100), K.arrow(svg, 580, 120, 580, 198), K.arrow(svg, 85, 305, 85, 202, { dash: "5 4" })];
+        const back = K.svg(svg, "path", { d: "M580,270 L580,305 L85,305", fill: "none", stroke: "var(--ink-3)", "stroke-width": 1.5, "stroke-dasharray": "5 4" });
+        arrs[4].appendChild(back);
+        T(arrs[4], 300, 324, "结果返回浏览器", { "font-size": 12, class: "muted" });
+        hide(s, d, f, r, ...arrs);
+        (async () => {
+          for (const g of [[arrs[0], s], [arrs[1], d], [arrs[2], f], [arrs[3], r], [arrs[4]]]) if (!(await fade(ctx, g, 420))) return;
+        })();
+      },
+    },
+    {
+      at: 49, title: "换 YOLO：标签改成“中心点 + 宽高”", kicker: "第 49–51 格 · YOLO 标签格式",
+      html: `<p>YOLO 需要的标签格式和前面不同：不是两个角，而是 <b>[类别, 中心 x, 中心 y, 框宽, 框高]</b>，而且都要除以图片的宽、高变成比例。</p><p>第 49 格从 XML 里补读出每张图的宽、高；第 51 格按公式换算：<code>center_x = (xmin+xmax) / (2·width)</code>，<code>bb_width = (xmax−xmin) / width</code>，y 方向同理。实验 C 可以自己拖一个框，看三种写法怎么互相换算。</p>`,
+      cells: [49, 51], highlight: ["center_x", "bb_width"],
+      draw(svg, ctx) {
+        const ox = 40, oy = 50, Wd = 400, Hd = 225;
+        K.svg(svg, "rect", { x: ox, y: oy, width: Wd, height: Hd, fill: "var(--panel-2)", stroke: "var(--ink-3)" });
+        const b = { x: ox + 0.569 * Wd, y: oy + 0.597 * Hd, w: 0.158 * Wd, h: 0.076 * Hd };
+        b.w = 90; b.h = 34; b.x = 230; b.y = 170;
+        const rc = K.svg(svg, "rect", { x: b.x, y: b.y, width: b.w, height: b.h, fill: "color-mix(in srgb, var(--c4) 25%, transparent)", stroke: "var(--c4)", "stroke-width": 2 });
+        const c1 = K.svg(svg, "circle", { cx: b.x, cy: b.y, r: 5, fill: "var(--c6)" }), c2 = K.svg(svg, "circle", { cx: b.x + b.w, cy: b.y + b.h, r: 5, fill: "var(--c6)" });
+        const ct = K.svg(svg, "circle", { cx: b.x + b.w / 2, cy: b.y + b.h / 2, r: 6, fill: "var(--accent)" });
+        const wl = K.arrow(svg, b.x, b.y + b.h + 14, b.x + b.w, b.y + b.h + 14, { color: "var(--accent)" });
+        const hl = K.arrow(svg, b.x + b.w + 14, b.y, b.x + b.w + 14, b.y + b.h, { color: "var(--accent)" });
+        const L1 = T(svg, 470, 80, "VOC：两个角", { "font-weight": 700, fill: "var(--c6)" });
+        const L2 = T(svg, 470, 104, "(xmin, ymin), (xmax, ymax)  像素", { "font-family": "var(--mono)", "font-size": 12 });
+        const L3 = T(svg, 470, 160, "YOLO：中心 + 宽高", { "font-weight": 700, fill: "var(--accent)" });
+        const L4 = T(svg, 470, 184, "cx = (xmin+xmax)/2 ÷ 图宽", { "font-family": "var(--mono)", "font-size": 12 });
+        const L5 = T(svg, 470, 206, "w  = (xmax−xmin) ÷ 图宽", { "font-family": "var(--mono)", "font-size": 12 });
+        const L6 = T(svg, 470, 240, "一行 txt：0 cx cy w h", { "font-family": "var(--mono)", "font-size": 13, "font-weight": 700 });
+        const L7 = T(svg, 470, 262, "（0 = 唯一的类别 license_plate）", { "font-size": 12, class: "muted" });
+        hide(ct, wl, hl, L3, L4, L5, L6, L7);
+        (async () => {
+          if (!(await ctx.wait(700))) return;
+          if (!(await ctx.tween(600, (t) => { c1.style.opacity = 1 - t; c2.style.opacity = 1 - t; ct.style.opacity = t; }))) return;
+          for (const g of [[wl, hl], [L3], [L4, L5], [L6, L7]]) if (!(await fade(ctx, g, 380))) return;
+        })();
+      },
+    },
+    {
+      at: 52, title: "准备 YOLOv5 的文件夹，训练 100 轮", kicker: "第 52–68 格 · YOLOv5 训练与导出",
+      html: `<p>先把 Ultralytics 的 YOLOv5 代码克隆下来并安装依赖。YOLO 要求固定的文件夹结构：<code>data_images/train</code> 和 <code>data_images/test</code> 里，每张图旁边放一个同名 <code>.txt</code> 标签 <span data-cell="61">第 61 格</span>；再写一个 <code>data.yaml</code> 说明训练、验证路径和类别数 1 <span data-cell="62">第 62 格</span>。</p><p>按顺序取前 200 条作训练、其余作测试 <span data-cell="59">第 59 格</span>。用最小的 yolov5s 结构、批大小 8 训练 100 轮 <span data-cell="65">第 65 格</span>，把最好的权重 <code>best.pt</code> 导出成 ONNX 格式，方便 OpenCV 直接加载 <span data-cell="67">第 67 格</span>。作者看训练日志后报告：精确率 0.92 <span data-cell="68">第 68 格</span>。</p>`,
+      cells: [53, 59, 61, 65, 67], highlight: ["df.iloc[:200]", "label_txt = f'0 {x} {y} {w} {h}'", "--epochs 100", "--include torchscript onnx"],
+      draw(svg, ctx) {
+        const tree = ["yolov5/", "  data_images/", "    train/   N1.jpeg  N1.txt  …（前 200 张）", "    test/    …（其余）", "  data.yaml   nc: 1, names: [license_plate]"];
+        const tl = tree.map((s, i) => T(svg, 30, 50 + i * 26, s, { "font-family": "var(--mono)", "font-size": 12.5 }));
+        tl.forEach((e) => (e.style.whiteSpace = "pre"));
+        hide(...tl);
+        const n1 = K.node(svg, 30, 200, 150, 60, "train.py\nyolov5s · 100 轮", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const n2 = K.node(svg, 230, 200, 130, 60, "best.pt\n最好的权重", {});
+        const n3 = K.node(svg, 410, 200, 130, 60, "export.py\n→ best.onnx", {});
+        const n4 = K.node(svg, 590, 200, 110, 60, "OpenCV DNN\n直接加载", { fill: "color-mix(in srgb, var(--c3) 16%, var(--panel))", stroke: "var(--c3)" });
+        const ar = [K.arrow(svg, 180, 230, 228, 230), K.arrow(svg, 360, 230, 408, 230), K.arrow(svg, 540, 230, 588, 230)];
+        const bar = K.svg(svg, "rect", { x: 30, y: 290, width: 0, height: 10, rx: 4, fill: "var(--accent)" });
+        const ep = T(svg, 30, 322, "epoch 0 / 100", { "font-family": "var(--mono)", "font-size": 12 });
+        hide(n1, n2, n3, n4, ...ar);
+        (async () => {
+          for (const l of tl) if (!(await fade(ctx, [l], 220))) return;
+          if (!(await fade(ctx, [n1], 300))) return;
+          if (!(await ctx.tween(1600, (t, raw) => { K.set(bar, { width: 670 * raw }); ep.textContent = `epoch ${Math.round(raw * 100)} / 100`; }))) return;
+          for (const g of [[ar[0], n2], [ar[1], n3], [ar[2], n4]]) if (!(await fade(ctx, g, 350))) return;
+        })();
+      },
+    },
+    {
+      at: 69, title: "YOLO 推理：两万多个候选框，筛到只剩一个", kicker: "第 69–76 格 · 补边、过滤、NMS",
+      html: `<p>照片先补成正方形（把原图贴在左上角，其余补黑），再缩放成 640×640 送进网络 <span data-cell="75">第 75 格</span>。作者说明：输出有 <b>25200 行、6 列</b>，每行是一个候选框：中心 x、中心 y、宽、高、置信度、车牌类别概率 <span data-cell="74">第 74 格</span>。</p><p>筛选分两步：置信度 &gt; 0.4 且类别概率 &gt; 0.25 的才留下；同一块车牌往往被很多框重复框中，再用<b>非极大值抑制（NMS）</b>：先留分最高的框，和它重叠太多（IoU &gt; 0.45）的都删掉。最后按缩放比例换回原图坐标并画框。</p>`,
+      cells: [74, 75, 76], highlight: ["confidence > 0.4", "class_score > 0.25", "NMSBoxes", "max_rc"],
+      draw(svg, ctx) {
+        const ox = 40, oy = 40, S = 260;
+        K.svg(svg, "rect", { x: ox, y: oy, width: S, height: S, fill: "#111" });
+        K.svg(svg, "rect", { x: ox, y: oy, width: S, height: S * 0.5625, fill: "var(--panel-2)" });
+        T(svg, ox + 8, oy + S * 0.5625 + 22, "补黑边 → 正方形", { fill: "#eee", "font-size": 12 });
+        const c = car(svg, ox + 50, oy + 8, 0.62);
+        const P = c.plate;
+        for (let i = 0; i <= 8; i++) { K.svg(svg, "line", { x1: ox + i * S / 8, y1: oy, x2: ox + i * S / 8, y2: oy + S, stroke: "var(--ink-3)", opacity: 0.25 }); K.svg(svg, "line", { x1: ox, y1: oy + i * S / 8, x2: ox + S, y2: oy + i * S / 8, stroke: "var(--ink-3)", opacity: 0.25 }); }
+        const r = K.rng(4), cands = [];
+        for (let i = 0; i < 70; i++) {
+          const near = i < 14;
+          const conf = near ? 0.55 + r() * 0.4 : r() * 0.45;
+          const w = near ? P.w * (0.85 + r() * 0.3) : 15 + r() * 60, h = near ? P.h * (0.8 + r() * 0.4) : 10 + r() * 40;
+          const cx = near ? P.x + P.w / 2 + (r() - 0.5) * 12 : ox + r() * S, cy = near ? P.y + P.h / 2 + (r() - 0.5) * 8 : oy + r() * S * 0.56;
+          cands.push({ conf, near, e: K.svg(svg, "rect", { x: cx - w / 2, y: cy - h / 2, width: w, height: h, fill: "none", stroke: near ? "var(--c6)" : "var(--c2)", "stroke-width": 1.2, opacity: 0 }) });
+        }
+        const best = cands.filter((d) => d.near).sort((a, b) => b.conf - a.conf)[0];
+        const lab = T(svg, 340, 70, "", { "font-weight": 700, "font-size": 15 });
+        const sub = T(svg, 340, 96, "", { class: "muted", "font-size": 12 });
+        const flow = [["25200 个候选框（这里画 70 个示意）", "每行：cx, cy, w, h, 置信度, 类别概率"], ["置信度 > 0.4 且类别概率 > 0.25", "大部分背景框被扔掉"], ["NMS：留最高分，删掉 IoU > 0.45 的重复框", "同一块车牌只留一个框"]];
+        (async () => {
+          lab.textContent = flow[0][0]; sub.textContent = flow[0][1];
+          if (!(await ctx.tween(900, (t) => cands.forEach((d) => (d.e.style.opacity = t * 0.8))))) return;
+          if (!(await ctx.wait(600))) return;
+          lab.textContent = flow[1][0]; sub.textContent = flow[1][1];
+          if (!(await ctx.tween(700, (t) => cands.forEach((d) => { if (d.conf <= 0.4) d.e.style.opacity = 0.8 * (1 - t); })))) return;
+          if (!(await ctx.wait(600))) return;
+          lab.textContent = flow[2][0]; sub.textContent = flow[2][1];
+          if (!(await ctx.tween(700, (t) => cands.forEach((d) => { if (d.conf > 0.4 && d !== best) d.e.style.opacity = 0.8 * (1 - t); })))) return;
+          K.set(best.e, { stroke: "var(--good)", "stroke-width": 3 });
+          T(svg, 340, 150, "plate: " + Math.round(best.conf * 100) + "%（示意分数）", { fill: "var(--good)", "font-weight": 700 });
+        })();
+        T(svg, 340, 290, "输入 640×640；坐标 × (原边长 / 640) 换回原图", { "font-size": 12, class: "muted" });
+      },
+    },
+    {
+      at: 77, title: "检测 + OCR 合体，再到实时视频", kicker: "第 77–82 格 · 完整流水线与结论",
+      html: `<p>第 78 格的 <code>extract_text</code> 用 YOLO 的框裁出车牌交给 Tesseract；框是空的就返回 “no number”。第 75 格的 <code>drawings</code> 在框上方写“plate: 置信度%”，下方写读出的车牌号。</p><p>作者认为 YOLO 版“相当准，偶有误判”，要更准就要更多数据；实时视频逐帧调用同一个函数，作者说要读准文字需要 4K 高清摄像头 <span data-cell="81">第 81 格</span>。结论提到夜间、天气、非标准字体仍是挑战 <span data-cell="82">第 82 格</span>。</p>`,
+      cells: [78, 79], highlight: ["def extract_text(image,bbox):", "'no number'", "yolo_predictions(img,net)"],
+      draw(svg, ctx) {
+        const frames = [0, 1, 2, 3];
+        const gs = frames.map((f, i) => {
+          const g = K.svg(svg, "g");
+          K.svg(g, "rect", { x: 30, y: 50, width: 400, height: 250, fill: "var(--panel-2)", stroke: "var(--ink-3)" });
+          const c = car(g, 60 + i * 40, 120, 0.95);
+          const P = c.plate;
+          K.svg(g, "rect", { x: P.x - 3, y: P.y - 3, width: P.w + 6, height: P.h + 6, fill: "none", stroke: "var(--c5)", "stroke-width": 2.5 });
+          K.svg(g, "rect", { x: P.x - 3, y: P.y - 24, width: P.w + 6, height: 21, fill: "var(--c5)" });
+          K.svg(g, "text", { x: P.x + 2, y: P.y - 9, "font-size": 11, fill: "var(--panel)", "font-weight": 700 }, "plate: 示意%");
+          K.svg(g, "rect", { x: P.x - 3, y: P.y + P.h + 3, width: P.w + 6, height: 20, fill: "var(--ink)" });
+          K.svg(g, "text", { x: P.x + 2, y: P.y + P.h + 18, "font-size": 12, fill: "var(--good)", "font-family": "var(--mono)", "font-weight": 700 }, "B7 KX429");
+          g.style.opacity = i ? 0 : 1;
+          return g;
+        });
+        const fl = T(svg, 30, 36, "帧 1", { "font-family": "var(--mono)" });
+        T(svg, 460, 80, "每一帧：", { "font-weight": 700 });
+        ["get_detections → 候选框", "non_maximum_supression", "extract_text → Tesseract", "drawings → 写上分数和车牌号"].forEach((s, i) => T(svg, 460, 110 + i * 28, (i + 1) + ". " + s, { "font-size": 12.5 }));
+        T(svg, 460, 250, "视频 = 一帧帧循环调用", { class: "muted", "font-size": 12 });
+        T(svg, 460, 272, "（示意：车慢慢驶过镜头）", { class: "muted", "font-size": 12 });
+        (async () => {
+          for (let k = 1; k < 12; k++) {
+            if (!(await ctx.wait(450))) return;
+            gs.forEach((g, i) => (g.style.opacity = i === k % 4 ? 1 : 0));
+            fl.textContent = "帧 " + (k + 1);
+          }
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：MSE 与 IoU ---------- */
+  const GT = [0.36, 0.64, 0.5, 0.64]; // xmin, xmax, ymin, ymax（归一化）
+  function iou(a, b) {
+    const ix = Math.max(0, Math.min(a[1], b[1]) - Math.max(a[0], b[0])), iy = Math.max(0, Math.min(a[3], b[3]) - Math.max(a[2], b[2]));
+    const I = ix * iy, U = (a[1] - a[0]) * (a[3] - a[2]) + (b[1] - b[0]) * (b[3] - b[2]) - I;
+    return U > 0 ? I / U : 0;
+  }
+  const mse = (a, b) => a.reduce((s, v, i) => s + (v - b[i]) * (v - b[i]), 0) / 4;
+  function makeBox(dx, dy, sw, sh) {
+    const cx = (GT[0] + GT[1]) / 2 + dx, cy = (GT[2] + GT[3]) / 2 + dy, w = (GT[1] - GT[0]) * sw, h = (GT[3] - GT[2]) * sh;
+    return [K.clamp(cx - w / 2, 0, 1), K.clamp(cx + w / 2, 0, 1), K.clamp(cy - h / 2, 0, 1), K.clamp(cy + h / 2, 0, 1)];
+  }
+  const cloudA = (() => { const r = K.rng(77), out = []; for (let i = 0; i < 400; i++) { const b = makeBox((r() - 0.5) * 0.4, (r() - 0.5) * 0.3, 0.2 + r() * 1.8, 0.2 + r() * 2.8); out.push([mse(b, GT), iou(b, GT)]); } return out; })();
+  K.lab(document.getElementById("lab1"), {
+    width: 660, height: 330,
+    controls: [
+      { id: "dx", label: "预测框左右偏移（占图宽）", min: -0.2, max: 0.2, step: 0.005, value: 0.0, fmt: (v) => (v * 100).toFixed(1) + "%" },
+      { id: "dy", label: "预测框上下偏移（占图高）", min: -0.15, max: 0.15, step: 0.005, value: 0.1, fmt: (v) => (v * 100).toFixed(1) + "%" },
+      { id: "sw", label: "预测框宽度倍数", min: 0.2, max: 2, step: 0.05, value: 1, fmt: (v) => v.toFixed(2) + "×" },
+      { id: "sh", label: "预测框高度倍数", min: 0.2, max: 3, step: 0.05, value: 1, fmt: (v) => v.toFixed(2) + "×" },
+    ],
+    note: "绿框是标注答案，红虚线是“模型预测”。模型训练时最小化的是 4 个归一化坐标的均方误差 MSE；检测任务常用 IoU（交集面积 ÷ 并集面积）判断框准不准，IoU ≥ 0.5 通常才算找对。右图是 400 个随机框的 MSE 和 IoU，黄点是你现在的框。试试：只把框往下挪 10%，MSE 很小，IoU 却掉到 0。",
+    render(svg, v) {
+      const P = makeBox(v.dx, v.dy, v.sw, v.sh);
+      const ox = 20, oy = 30, W = 320, H = 180;
+      K.svg(svg, "rect", { x: ox, y: oy, width: W, height: H, fill: "var(--panel-2)", stroke: "var(--ink-3)" });
+      K.svg(svg, "text", { x: ox, y: oy - 10, "font-size": 12, class: "muted" }, "一张照片（16:9，示意）");
+      const R = (b, o) => K.svg(svg, "rect", Object.assign({ x: ox + b[0] * W, y: oy + b[2] * H, width: (b[1] - b[0]) * W, height: (b[3] - b[2]) * H }, o));
+      const ix0 = Math.max(P[0], GT[0]), ix1 = Math.min(P[1], GT[1]), iy0 = Math.max(P[2], GT[2]), iy1 = Math.min(P[3], GT[3]);
+      if (ix1 > ix0 && iy1 > iy0) R([ix0, ix1, iy0, iy1], { fill: "var(--warn)", "fill-opacity": 0.45 });
+      R(GT, { fill: "none", stroke: "var(--good)", "stroke-width": 3 });
+      R(P, { fill: "none", stroke: "var(--c6)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+      K.svg(svg, "text", { x: ox, y: oy + H + 20, "font-size": 12, fill: "var(--good)" }, "■ 答案框");
+      K.svg(svg, "text", { x: ox + 80, y: oy + H + 20, "font-size": 12, fill: "var(--c6)" }, "▭ 预测框");
+      K.svg(svg, "text", { x: ox + 160, y: oy + H + 20, "font-size": 12, fill: "var(--warn)" }, "■ 交集");
+      const vals = ["xmin", "xmax", "ymin", "ymax"].map((n, i) => `${n}: ${P[i].toFixed(3)} vs ${GT[i].toFixed(3)}`);
+      vals.forEach((s, i) => K.svg(svg, "text", { x: ox, y: oy + H + 44 + i * 18, "font-size": 11.5, "font-family": "var(--mono)" }, s));
+      const ax = K.axes(svg, { x: 400, y: 30, w: 240, h: 240 }, [0, 0.03], [0, 1], { xticks: 3, yticks: 4, xlabel: "MSE（越小越好）", xfmt: (x) => x.toFixed(3), yfmt: (y) => y.toFixed(2) });
+      K.svg(svg, "text", { x: 400, y: 20, "font-size": 12 }, "IoU（越大越好）");
+      K.svg(svg, "line", { x1: 400, x2: 640, y1: ax.sy(0.5), y2: ax.sy(0.5), stroke: "var(--good)", "stroke-dasharray": "4 3" });
+      K.svg(svg, "text", { x: 600, y: ax.sy(0.5) - 5, "font-size": 11, fill: "var(--good)" }, "IoU 0.5");
+      cloudA.forEach((d) => { if (d[0] <= 0.03) K.svg(svg, "circle", { cx: ax.sx(d[0]), cy: ax.sy(d[1]), r: 2.2, fill: "var(--c1)", opacity: 0.45 }); });
+      const m = mse(P, GT), u = iou(P, GT);
+      K.svg(svg, "circle", { cx: ax.sx(Math.min(m, 0.03)), cy: ax.sy(u), r: 7, fill: "var(--warn)", stroke: "var(--ink)", "stroke-width": 1.5 });
+      return { readout: [
+        { k: "MSE（训练时的损失）", v: m.toFixed(4) },
+        { k: "IoU", v: u.toFixed(2), color: u >= 0.5 ? "var(--good)" : "var(--bad)" },
+        { k: "按 IoU≥0.5 算", v: u >= 0.5 ? "找对了" : "没找对", color: u >= 0.5 ? "var(--good)" : "var(--bad)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：OCR 前处理（二值化 + 分割 + 模板匹配） ---------- */
+  const FONT = {
+    "0": [" ### ", "#   #", "#  ##", "# # #", "##  #", "#   #", " ### "], "1": ["  #  ", " ##  ", "  #  ", "  #  ", "  #  ", "  #  ", " ### "],
+    "2": [" ### ", "#   #", "    #", "   # ", "  #  ", " #   ", "#####"], "3": ["#####", "   # ", "  #  ", "   # ", "    #", "#   #", " ### "],
+    "4": ["   # ", "  ## ", " # # ", "#  # ", "#####", "   # ", "   # "], "5": ["#####", "#    ", "#### ", "    #", "    #", "#   #", " ### "],
+    "6": ["  ## ", " #   ", "#    ", "#### ", "#   #", "#   #", " ### "], "7": ["#####", "    #", "   # ", "  #  ", " #   ", " #   ", " #   "],
+    "8": [" ### ", "#   #", "#   #", " ### ", "#   #", "#   #", " ### "], "9": [" ### ", "#   #", "#   #", " ####", "    #", "   # ", " ##  "],
+    A: [" ### ", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"], B: ["#### ", "#   #", "#   #", "#### ", "#   #", "#   #", "#### "],
+    C: [" ### ", "#   #", "#    ", "#    ", "#    ", "#   #", " ### "], D: ["#### ", "#   #", "#   #", "#   #", "#   #", "#   #", "#### "],
+    E: ["#####", "#    ", "#    ", "#### ", "#    ", "#    ", "#####"], H: ["#   #", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"],
+    K: ["#   #", "#  # ", "# #  ", "##   ", "# #  ", "#  # ", "#   #"], M: ["#   #", "## ##", "# # #", "# # #", "#   #", "#   #", "#   #"],
+    P: ["#### ", "#   #", "#   #", "#### ", "#    ", "#    ", "#    "], R: ["#### ", "#   #", "#   #", "#### ", "# #  ", "#  # ", "#   #"],
+    T: ["#####", "  #  ", "  #  ", "  #  ", "  #  ", "  #  ", "  #  "], X: ["#   #", "#   #", " # # ", "  #  ", " # # ", "#   #", "#   #"],
+  };
+  const SC = 3, PITCH = 6 * SC, MG = 6;
+  // 把一个二值小图（按其墨迹外接框）重采样成 5×7
+  function to57(get, x0, x1, y0, y1) {
+    const g = [];
+    for (let r = 0; r < 7; r++) for (let c = 0; c < 5; c++) {
+      const xa = x0 + ((x1 - x0) * c) / 5, xb = x0 + ((x1 - x0) * (c + 1)) / 5, ya = y0 + ((y1 - y0) * r) / 7, yb = y0 + ((y1 - y0) * (r + 1)) / 7;
+      let n = 0, k = 0;
+      for (let y = Math.floor(ya); y < Math.max(Math.floor(ya) + 1, Math.ceil(yb)); y++) for (let x = Math.floor(xa); x < Math.max(Math.floor(xa) + 1, Math.ceil(xb)); x++) { k++; if (get(x, y)) n++; }
+      g.push(n / k > 0.4 ? 1 : 0);
+    }
+    return g;
+  }
+  // 模板也按同样的放大倍数画成像素，再按墨迹外接框重采样，和图上切出的字符用同一套流程
+  const TPL = Object.keys(FONT).map((ch) => {
+    const G = FONT[ch], get = (x, y) => { const r = G[Math.floor(y / SC)]; return !!r && r[Math.floor(x / SC)] === "#"; };
+    let x0 = 99, x1 = 0; G.forEach((row) => [...row].forEach((c, x) => { if (c === "#") { x0 = Math.min(x0, x * SC); x1 = Math.max(x1, (x + 1) * SC); } }));
+    return { ch, g: to57(get, x0, x1, 0, 7 * SC) };
+  });
+  function otsu(px) {
+    const hist = new Array(256).fill(0); px.forEach((v) => hist[v]++);
+    const N = px.length; let sum = 0; for (let i = 0; i < 256; i++) sum += i * hist[i];
+    let sB = 0, wB = 0, best = 0, th = 128;
+    for (let t = 0; t < 256; t++) { wB += hist[t]; if (!wB) continue; const wF = N - wB; if (!wF) break; sB += t * hist[t]; const mB = sB / wB, mF = (sum - sB) / wF, between = wB * wF * (mB - mF) * (mB - mF); if (between > best) { best = between; th = t; } }
+    return th;
+  }
+  function toURL(W, H, fn) {
+    const cv = document.createElement("canvas"); cv.width = W; cv.height = H;
+    const c2 = cv.getContext("2d"), im = c2.createImageData(W, H);
+    for (let i = 0; i < W * H; i++) { const v = fn(i); im.data[i * 4] = im.data[i * 4 + 1] = im.data[i * 4 + 2] = v; im.data[i * 4 + 3] = 255; }
+    c2.putImageData(im, 0, 0); return cv.toDataURL();
+  }
+  function ocrRun(v) {
+      const txt = v.plate, n = txt.length, W = MG * 2 + n * PITCH - SC, H = MG * 2 + 7 * SC;
+      const r = K.rng(31 + v.seed * 7);
+      const ink = new Uint8Array(W * H);
+      [...txt].forEach((ch, k) => FONT[ch].forEach((row, y) => [...row].forEach((c, x) => {
+        if (c !== "#") return;
+        for (let dy = 0; dy < SC; dy++) for (let dx = 0; dx < SC; dx++) ink[(MG + y * SC + dy) * W + MG + k * PITCH + x * SC + dx] = 1;
+      })));
+      const px = new Array(W * H);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const s = K.clamp((x / W - 0.3) / 0.5, 0, 1), sh = s * s * (3 - 2 * s);
+        const bg = 215 - v.light * 150 * sh;
+        const val = ink[y * W + x] ? bg * 0.35 : bg;
+        px[y * W + x] = Math.round(K.clamp(val + K.randn(r) * v.noise, 0, 255));
+      }
+      // 二值化
+      let th = v.th, bin = new Uint8Array(W * H);
+      if (v.mode === "otsu") th = otsu(px);
+      if (v.mode === "adapt") {
+        const I = new Float64Array((W + 1) * (H + 1));
+        for (let y = 0; y < H; y++) { let row = 0; for (let x = 0; x < W; x++) { row += px[y * W + x]; I[(y + 1) * (W + 1) + x + 1] = I[y * (W + 1) + x + 1] + row; } }
+        const R = 8, C = 25;
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+          const xa = Math.max(0, x - R), xb = Math.min(W, x + R + 1), ya = Math.max(0, y - R), yb = Math.min(H, y + R + 1);
+          const s = I[yb * (W + 1) + xb] - I[ya * (W + 1) + xb] - I[yb * (W + 1) + xa] + I[ya * (W + 1) + xa];
+          bin[y * W + x] = px[y * W + x] < s / ((xb - xa) * (yb - ya)) - C ? 1 : 0;
+        }
+      } else for (let i = 0; i < W * H; i++) bin[i] = px[i] < th ? 1 : 0;
+      // 列投影分割
+      const col = []; for (let x = 0; x < W; x++) { let c = 0; for (let y = 0; y < H; y++) c += bin[y * W + x]; col.push(c); }
+      const runs = []; let st = -1;
+      for (let x = 0; x <= W; x++) { const on = x < W && col[x] >= 2; if (on && st < 0) st = x; if (!on && st >= 0) { if (x - st >= 3) runs.push([st, x]); st = -1; } }
+      const segs = [];
+      runs.forEach(([a, b]) => { const k = Math.max(1, Math.round((b - a + SC) / PITCH)); for (let j = 0; j < k; j++) segs.push([Math.round(a + ((b - a) * j) / k), Math.round(a + ((b - a) * (j + 1)) / k)]); });
+      let read = "";
+      const boxes = segs.map(([a, b]) => {
+        let y0 = H, y1 = 0, x0 = b, x1 = a;
+        for (let y = 0; y < H; y++) for (let x = a; x < b; x++) if (bin[y * W + x]) { y0 = Math.min(y0, y); y1 = Math.max(y1, y + 1); x0 = Math.min(x0, x); x1 = Math.max(x1, x + 1); }
+        if (y1 <= y0) return null;
+        const g = to57((x, y) => bin[y * W + x] === 1, x0, x1, y0, y1);
+        let best = null, bd = 99;
+        TPL.forEach((t) => { let d = 0; for (let i = 0; i < 35; i++) d += t.g[i] !== g[i]; if (d < bd) { bd = d; best = t.ch; } });
+        const ch = bd <= 9 ? best : "?";
+        read += ch;
+        return { x0, x1, y0, y1, ch };
+      }).filter(Boolean);
+      return { txt, n, W, H, px, bin, th, boxes, read };
+  }
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 390,
+    controls: [
+      { id: "plate", label: "车牌（虚构）", value: "B7KX429", options: [["B7KX429", "B7 KX429"], ["MH12DE1433", "MH12 DE 1433"], ["TR52AH3080", "TR52 AH 3080"]] },
+      { id: "light", label: "光照不均（右侧阴影有多深）", min: 0, max: 1, step: 0.05, value: 0.6, fmt: (v) => Math.round(v * 100) + "%" },
+      { id: "noise", label: "噪点强度", min: 0, max: 40, step: 1, value: 8 },
+      { id: "mode", label: "二值化方法", value: "manual", options: [["manual", "手动固定阈值"], ["otsu", "Otsu 自动阈值（全图一个）"], ["adapt", "自适应阈值（按局部平均）"]] },
+      { id: "th", label: "手动阈值（低于它算“字”）", min: 10, max: 245, step: 1, value: 110 },
+      { id: "seed", label: "换一批噪点", button: true },
+    ],
+    note: "浏览器里现场生成一块灰度车牌图（每个字是 5×7 点阵放大 3 倍，车牌号为虚构），按所选方法二值化，再按“列投影”切出每个字符，和 22 个字形模板逐个比对，读出文字。这是一个极简的 OCR，Tesseract 的内部要复杂得多，但同样怕阴影和噪点。先把光照拉到 0，再慢慢往右拉，看固定阈值什么时候失效；然后换成自适应阈值。最后把噪点拉到 20 以上：自适应阈值也开始出错，真实系统还要先去噪。",
+    render(svg, v) {
+      const { txt, n, W, H, px, bin, th, boxes, read } = ocrRun(v);
+      // 画图
+      const S = Math.min(3, 600 / W);
+      K.svg(svg, "text", { x: 20, y: 18, "font-size": 12, class: "muted" }, "① 灰度车牌（生成）");
+      const imgA = K.svg(svg, "image", { x: 20, y: 26, width: W * S, height: H * S, href: toURL(W, H, (i) => px[i]), preserveAspectRatio: "none" });
+      imgA.style.imageRendering = "pixelated";
+      K.svg(svg, "text", { x: 20, y: 40 + H * S + 16, "font-size": 12, class: "muted" }, "② 二值化结果 + 切出的字符框" + (v.mode === "otsu" ? `（Otsu 算出阈值 ${th}）` : v.mode === "manual" ? `（阈值 ${th}）` : "（窗口 17×17，比局部平均暗 25 以上算字）"));
+      const y2 = 48 + H * S + 16;
+      const imgB = K.svg(svg, "image", { x: 20, y: y2, width: W * S, height: H * S, href: toURL(W, H, (i) => (bin[i] ? 20 : 235)), preserveAspectRatio: "none" });
+      imgB.style.imageRendering = "pixelated";
+      boxes.forEach((b) => {
+        K.svg(svg, "rect", { x: 20 + b.x0 * S, y: y2 + b.y0 * S, width: (b.x1 - b.x0) * S, height: (b.y1 - b.y0) * S, fill: "none", stroke: "var(--accent)", "stroke-width": 1.5 });
+        K.svg(svg, "text", { x: 20 + ((b.x0 + b.x1) / 2) * S, y: y2 + H * S + 24, "text-anchor": "middle", "font-size": 18, "font-weight": 700, "font-family": "var(--mono)", fill: b.ch === "?" ? "var(--bad)" : "var(--c3)" }, b.ch);
+      });
+      // 直方图
+      const hy = y2 + H * S + 44;
+      const hist = new Array(32).fill(0); px.forEach((p) => hist[p >> 3]++);
+      const hm = Math.max(...hist);
+      K.svg(svg, "text", { x: 20, y: hy + 4, "font-size": 12, class: "muted" }, "③ 灰度直方图（左暗右亮）和阈值位置");
+      hist.forEach((c, i) => K.svg(svg, "rect", { x: 20 + i * 12, y: hy + 70 - (c / hm) * 56, width: 10, height: (c / hm) * 56, fill: "var(--c1)", opacity: 0.7 }));
+      if (v.mode !== "adapt") K.svg(svg, "line", { x1: 20 + (th / 256) * 384, x2: 20 + (th / 256) * 384, y1: hy + 8, y2: hy + 74, stroke: "var(--c6)", "stroke-width": 2 });
+      let ok = 0; for (let i = 0; i < n; i++) if (read[i] === txt[i]) ok++;
+      const blackRatio = bin.reduce((s, b) => s + b, 0) / bin.length;
+      return { readout: [
+        { k: "读出的文字", v: read || "（什么也没切出来）", color: read === txt ? "var(--good)" : "var(--bad)" },
+        { k: "正确字符 / 总数", v: `${ok} / ${n}`, color: ok === n && read.length === n ? "var(--good)" : "var(--bad)" },
+        { k: "切出的字符块", v: String(boxes.length) },
+        { k: "被判为“字”的像素", v: (blackRatio * 100).toFixed(1) + "%" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：三种坐标写法 ---------- */
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "size", label: "照片尺寸（像素）", value: "1920x1080", options: [["1920x1080", "1920 × 1080（横拍）"], ["3024x4032", "3024 × 4032（手机竖拍）"], ["640x480", "640 × 480（老监控）"]] },
+      { id: "x", label: "车牌左边缘位置（占宽度）", min: 0, max: 0.9, step: 0.01, value: 0.57 },
+      { id: "w", label: "车牌宽度（占宽度）", min: 0.03, max: 0.5, step: 0.01, value: 0.16 },
+      { id: "y", label: "车牌上边缘位置（占高度）", min: 0, max: 0.95, step: 0.01, value: 0.6 },
+      { id: "h", label: "车牌高度（占高度）", min: 0.02, max: 0.3, step: 0.01, value: 0.08 },
+    ],
+    note: "左：原图上的框（像素）；中：拉伸到 224×224 后同一个框（第一版模型的输入）。下面的数字按作者第 11 格和第 51 格的公式现场换算。换一个照片尺寸：像素坐标全变了，归一化的数字一个都不变。",
+    render(svg, v) {
+      const [W, H] = v.size.split("x").map(Number);
+      const x1r = Math.min(1, v.x + v.w), y1r = Math.min(1, v.y + v.h);
+      const xmin = Math.round(v.x * W), xmax = Math.round(x1r * W), ymin = Math.round(v.y * H), ymax = Math.round(y1r * H);
+      const sc = Math.min(300 / W, 170 / H), ox = 20, oy = 24;
+      K.svg(svg, "text", { x: ox, y: 16, "font-size": 12, class: "muted" }, `原图 ${W}×${H}`);
+      K.svg(svg, "rect", { x: ox, y: oy, width: W * sc, height: H * sc, fill: "var(--panel-2)", stroke: "var(--ink-3)" });
+      K.svg(svg, "rect", { x: ox + xmin * sc, y: oy + ymin * sc, width: (xmax - xmin) * sc, height: (ymax - ymin) * sc, fill: "color-mix(in srgb, var(--c4) 30%, transparent)", stroke: "var(--c4)", "stroke-width": 2 });
+      K.svg(svg, "circle", { cx: ox + ((xmin + xmax) / 2) * sc, cy: oy + ((ymin + ymax) / 2) * sc, r: 3.5, fill: "var(--accent)" });
+      const qx = 360, qs = 150;
+      K.svg(svg, "text", { x: qx, y: 16, "font-size": 12, class: "muted" }, "拉伸到 224×224");
+      K.svg(svg, "rect", { x: qx, y: oy, width: qs, height: qs, fill: "var(--panel-2)", stroke: "var(--ink-3)" });
+      K.svg(svg, "rect", { x: qx + v.x * qs, y: oy + v.y * qs, width: (x1r - v.x) * qs, height: (y1r - v.y) * qs, fill: "color-mix(in srgb, var(--c4) 30%, transparent)", stroke: "var(--c4)", "stroke-width": 2 });
+      const nx0 = xmin / W, nx1 = xmax / W, ny0 = ymin / H, ny1 = ymax / H;
+      const cx = (xmin + xmax) / (2 * W), cy = (ymin + ymax) / (2 * H), bw = (xmax - xmin) / W, bh = (ymax - ymin) / H;
+      const L = [
+        ["VOC 像素（XML 里存的）", `xmin=${xmin}  xmax=${xmax}  ymin=${ymin}  ymax=${ymax}`, "var(--c6)"],
+        ["第一版模型的答案（第 11 格）", `${nx0.toFixed(3)}  ${nx1.toFixed(3)}  ${ny0.toFixed(3)}  ${ny1.toFixed(3)}`, "var(--c4)"],
+        ["YOLO 标签 txt（第 51 格）", `0  ${cx.toFixed(3)}  ${cy.toFixed(3)}  ${bw.toFixed(3)}  ${bh.toFixed(3)}`, "var(--accent)"],
+        ["在 224 图上的像素", `${Math.round(nx0 * 224)}  ${Math.round(nx1 * 224)}  ${Math.round(ny0 * 224)}  ${Math.round(ny1 * 224)}`, "var(--ink-3)"],
+      ];
+      L.forEach((d, i) => { K.svg(svg, "text", { x: 20, y: 214 + i * 22, "font-size": 12, fill: d[2], "font-weight": 700 }, d[0]); K.svg(svg, "text", { x: 230, y: 214 + i * 22, "font-size": 12.5, "font-family": "var(--mono)" }, d[1]); });
+      return { readout: [
+        { k: "框的像素面积", v: ((xmax - xmin) * (ymax - ymin)).toLocaleString() },
+        { k: "占全图面积", v: ((bw * bh) * 100).toFixed(2) + "%" },
+        { k: "224 图上车牌宽 × 高", v: `${Math.round(bw * 224)} × ${Math.round(bh * 224)} 像素` },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

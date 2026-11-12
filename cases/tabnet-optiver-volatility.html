@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TabNet 预测波动率</title>
+<meta name="description" content="Kaggle 案例拆解：TabNet 是给表格数据设计的神经网络，每一步用稀疏注意力掩码挑出少数几列特征，既能拟合又能解释。用在 Optiver 股票短期波动率预测比赛上。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">金融表格 · 回归 · 表格深度学习</div>
+  <h1>TabNet：会自己“挑列”的表格神经网络</h1>
+  <p class="en">Optiver Realized Volatility Predictions Using TabNet</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span><span class="tag dl">深度学习</span>
+    <span class="tag method">TabNet</span><span class="tag method">稀疏注意力掩码（entmax）</span><span class="tag method">分步决策</span>
+    <span class="tag method">订单簿特征工程</span><span class="tag method">已实现波动率</span><span class="tag method">RMSPE 损失</span><span class="tag method">K 折</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Ertuğrul Demir</b></span>
+    <span>Kaggle 点赞 <b>555</b>（2026-11 抓取）</span>
+    <span>数据 <b>Optiver Realized Volatility Prediction</b> 比赛</span>
+    <span><a href="https://www.kaggle.com/code/datafan07/optiver-volatility-predictions-using-tabnet" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">股票的逐秒挂单和成交</div><p>每只股票、每个 10 分钟时间段，有订单簿（买卖两档报价和数量）和成交记录。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">接下来 10 分钟的波动率</div><p>目标是下一个 10 分钟窗口的“已实现波动率”，用 RMSPE（均方根百分比误差）评分。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">特征工程 + TabNet 回归</div><p>从订单簿和成交里做出几百个统计特征，再用 TabNet（2 步决策、entmax 掩码）做 5 折回归，直接拿 RMSPE 当损失。<span data-cell="22">出处</span></p></div>
+    <div class="card panel"><h3>特别在哪里</h3><div class="big">每一步只看少数几列</div><p>普通全连接网络每个神经元都看所有列；TabNet 每一步先用注意力“掩码”挑出少数几列，被挑中的列一目了然，兼顾神经网络的拟合力和决策树的可解释性。<span data-cell="0">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛 <b>Optiver Realized Volatility Prediction</b>（Optiver 是一家做市商公司）：一个时间段 <code>time_id</code> 是 10 分钟，每只股票 <code>stock_id</code> 在每个时间段里有逐秒的订单簿快照和成交记录，要预测<b>下一个</b> 10 分钟的波动率。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">三张表</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>表</th><th>每行是什么</th><th>主要字段</th></tr>
+        <tr><td><code>train.csv</code></td><td>一只股票的一个时间段</td><td><code>stock_id</code>、<code>time_id</code>、<code>target</code>（<b>要预测的答案</b>：下一个 10 分钟的已实现波动率）</td></tr>
+        <tr><td><code>book_train.parquet</code></td><td>订单簿的一个快照</td><td><code>seconds_in_bucket</code>（第几秒）、买一 / 买二价格和数量、卖一 / 卖二价格和数量</td></tr>
+        <tr><td><code>trade_train.parquet</code></td><td>一秒里的成交汇总</td><td><code>price</code>、<code>size</code>（成交量）、<code>order_count</code>（成交笔数）</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">字段见第 7、10 格代码 <span data-cell="7">出处</span> <span data-cell="10">出处</span>。行数在第 7 格的打印输出里，源码不带输出，这里不写。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">两个关键概念</h3>
+      <ul class="tight">
+        <li><b>WAP（加权平均价）</b>：(买一价 × 卖一量 + 卖一价 × 买一量) ÷ (买一量 + 卖一量)。比单看买价或卖价更接近“此刻的真实价格”。<span data-cell="10">第 10 格</span></li>
+        <li><b>已实现波动率</b>：把相邻两秒 WAP 的对数收益率平方后加起来再开根号。价格抖得越厉害，这个数越大。<span data-cell="10">第 10 格</span></li>
+        <li><b>RMSPE</b>：每行误差先除以真实值变成百分比，再平方、平均、开根号。波动率很小的股票，错一点点也会被放大。<span data-cell="16">第 16 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="10">
+    <h3>动手试试 A · 从挂单算出已实现波动率 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="20">
+    <h3>动手试试 B · TabNet 的注意力掩码：挑哪几列 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>TabNet 想结合树模型的可解释性和神经网络的高性能</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>论文说 TabNet 不需要预处理，但作者发现标准化后收敛更快</td><td><span data-cell="17">第 17 格</span></td></tr>
+        <tr><td>模型可以更大更深，但经验上越大越容易过拟合，所以只用 2 步、16 维</td><td><span data-cell="19">第 19 格</span></td></tr>
+        <tr><td>用大批量（20480，虚拟批 2560）加快训练</td><td><span data-cell="21">第 21 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">5 折的 OOF RMSPE 分数在第 22 格的打印输出里，作者文字里没有写具体数值，源码也不带输出，这里不列分数。</p>
+      <h3>读代码时发现的问题（原文未改，供讨论）</h3>
+      <ul class="tight">
+        <li><b>平均重要性只用了 2 折</b>：第 28 格只取了 <code>importance_fold0+1</code> 和 <code>importance_fold1+1</code> 两列求平均，另外 3 折没算进去。<span data-cell="28">第 28 格</span></li>
+        <li>第 26 格画的是验证集曲线，标题却写成 “Train RMSPE”。<span data-cell="26">第 26 格</span></li>
+        <li>第 0 格介绍注意力变换器用 Sparsemax，第 20 格实际设的是 <code>mask_type = "entmax"</code>；另外 <code>lambda_sparse = 0</code>，没有用稀疏正则。<span data-cell="20">第 20 格</span></li>
+        <li><b>可能的信息泄漏</b>：第 10 格 <code>create_agg_features</code> 用全部训练集的 <code>target</code> 算股票间相关性再做 KMeans 分群，按时间段的统计特征也是在整张表上算的；随后 K 折随机切分（没按 <code>time_id</code> 分组），所以 OOF 分数可能偏乐观。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一只股票过去 10 分钟的盘口和成交，预测下一个 10 分钟价格会抖多厉害，用于期权定价和风险控制。</li>
+        <li><b>同类问题：</b>任何“很多列的表格”回归或分类：信用评分、保险定价、销量预测、医疗指标。</li>
+        <li><b>和普通全连接网络（MLP）的区别：</b>MLP 每一层把所有列混在一起，说不清用了哪列；TabNet 每一步先用 sparsemax / entmax 产生<b>稀疏掩码</b>，很多列的权重恰好是 0，只让少数列进入这一步的计算，还用“先验尺度”鼓励下一步去看别的列。</li>
+        <li><b>和梯度提升树的关系：</b>每一步像决策树的一次“挑特征”，但挑法是可微分、可端到端训练的；在很多表格比赛里，它常被拿来和 LightGBM 一起融合。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>订单簿：WAP1/2、对数收益、已实现波动率、价差、量差，按全窗口和后 200/300/400 秒分别统计 <span data-cell="10">第 10 格</span></li>
+        <li>成交：已实现波动率、成交量统计、价格趋势等 <span data-cell="10">第 10 格</span></li>
+        <li>按股票、按时间段的波动率汇总；按目标相关性把股票分 7 群再求平均 <span data-cell="12">第 12 格</span></li>
+        <li><code>stock_id</code> 作为类别特征（嵌入 1 维），其余列标准化 <span data-cell="18">第 18 格</span></li>
+        <li>TabNet：n_d = n_a = 16、2 步、γ = 2、entmax 掩码、Adam 2e-2 + 余弦退火重启 <span data-cell="20">第 20 格</span></li>
+        <li>5 折，最多 200 轮、耐心 50，RMSPE 作为损失和指标 <span data-cell="22">第 22 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>为什么用“百分比误差”RMSPE 而不是普通的 RMSE？对波动率很小的股票，两种指标的态度有什么不同？</li>
+      <li>TabNet 每一步只看少数几列，这对“解释模型为什么这样预测”有什么帮助？银行审核贷款时，这种解释重要吗？</li>
+      <li>第 10 格用全部训练集的答案（target）去给股票分群，再把分群特征交给模型。这一步可能带来什么问题？应该怎么改？</li>
+      <li>同一个 <code>time_id</code> 下所有股票同时发生。随机切 K 折会让同一时刻的股票分在训练和验证两边，这算不算“偷看”？</li>
+      <li>表格数据上，神经网络常常打不过梯度提升树。你觉得原因是什么？TabNet 想从哪个角度改善？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Ertuğrul Demir（datafan07），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意，不构成任何投资建议。数据：Kaggle 比赛 Optiver Realized Volatility Prediction；TabNet 论文：Arik & Pfister, 2019。
+</footer>
+</main>
+
+<script src="nb/tabnet-optiver-volatility.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+  const FEATS = ["已实现波动率(盘口)", "已实现波动率(成交)", "买卖价差均值", "挂单总量均值", "WAP 差均值", "成交笔数均值", "size_tau2", "stock_id"];
+  /* sparsemax / entmax-1.5 / softmax */
+  function softmax(z) { const m = Math.max(...z), e = z.map((x) => Math.exp(x - m)), s = e.reduce((a, b) => a + b, 0); return e.map((x) => x / s); }
+  function sparsemax(z) { const s = z.slice().sort((a, b) => b - a); let cum = 0, k = 0, cs = 0; for (let i = 0; i < s.length; i++) { cum += s[i]; if (1 + (i + 1) * s[i] > cum) { k = i + 1; cs = cum; } } const tau = (cs - 1) / k; return z.map((x) => Math.max(0, x - tau)); }
+  function entmax15(z) { const h = z.map((x) => x / 2); let lo = Math.max(...h) - 1, hi = Math.max(...h); for (let it = 0; it < 60; it++) { const t = (lo + hi) / 2, s = h.reduce((a, x) => a + Math.max(0, x - t) ** 2, 0); if (s > 1) lo = t; else hi = t; } const t = (lo + hi) / 2; const p = h.map((x) => Math.max(0, x - t) ** 2), s = p.reduce((a, b) => a + b, 0); return p.map((x) => x / s); }
+  /* 模拟盘口：返回逐秒的买一/卖一价格和数量 */
+  function fakeBook(seed, n, vol) {
+    const r = K.rng(seed), out = []; let mid = 100;
+    for (let t = 0; t < n; t++) {
+      mid *= Math.exp(K.randn(r) * vol);
+      const spr = mid * (0.0004 + r() * 0.0006), bs = 50 + Math.floor(r() * 300), as = 50 + Math.floor(r() * 300);
+      out.push({ t, bid: mid - spr / 2, ask: mid + spr / 2, bs, as });
+    }
+    return out;
+  }
+  const wapOf = (b) => (b.bid * b.as + b.ask * b.bs) / (b.bs + b.as);
+
+  const steps = [
+    {
+      at: 0, title: "TabNet：会“挑列”的表格神经网络", kicker: "第 0–5 格 · 比赛与模型介绍",
+      html: `<p>作者先介绍比赛：根据订单簿和成交数据，预测股票下一个 10 分钟的已实现波动率，用 RMSPE 评分。然后介绍 Google 2019 年提出的 <b>TabNet</b>（Attentive Interpretable Tabular Learning）：</p><ul class="tight"><li><b>特征变换器</b>：几层全连接 + 批归一化 + GLU 门控，一部分层所有步共享；</li><li><b>注意力变换器</b>：全连接 + 批归一化 + Sparsemax，输出一个<b>掩码</b>，决定这一步看哪几列；</li><li>重复若干<b>步</b>，每步的输出加起来得到最终预测，各步的掩码汇总就是特征重要性。</li></ul><p>动画：每一步，掩码只让少数几列（亮的）通过。</p>`,
+      cells: [0], highlight: ["Attentive Interpretable Tabular Learning", "Sparsemax"],
+      draw(svg, ctx) {
+        const n = 8, cw = 70, x0 = 60;
+        FEATS.forEach((f, i) => K.svg(svg, "text", { x: x0 + i * cw + 30, y: 32, "text-anchor": "middle", "font-size": 10 }, f.length > 7 ? f.slice(0, 6) + "…" : f));
+        const masks = [[0.55, 0, 0.3, 0, 0.15, 0, 0, 0], [0, 0.6, 0, 0.25, 0, 0, 0.15, 0]];
+        const rows = masks.map((m, s) => m.map((v, i) => K.svg(svg, "rect", { x: x0 + i * cw, y: 70 + s * 100, width: cw - 6, height: 60, rx: 6, fill: "var(--panel-2)", stroke: "var(--line)" })));
+        masks.forEach((m, s) => K.svg(svg, "text", { x: 20, y: 105 + s * 100, "font-size": 12, "font-weight": 700 }, "第 " + (s + 1) + " 步"));
+        const out = K.node(svg, 260, 280, 200, 44, "两步输出相加 → 预测波动率", { fs: 12, bold: true });
+        out.style.opacity = 0;
+        (async () => {
+          for (let s = 0; s < 2; s++) if (!(await ctx.tween(900, (t) => rows[s].forEach((e, i) => K.set(e, { fill: masks[s][i] > 0 ? `color-mix(in srgb, var(--c2) ${Math.round(masks[s][i] * 140 * t)}%, var(--panel-2))` : `color-mix(in srgb, var(--ink-3) ${Math.round(15 * t)}%, var(--panel-2))` }))))) return;
+          await ctx.tween(400, (t) => (out.style.opacity = t));
+        })();
+        K.svg(svg, "text", { x: 560, y: 300, "font-size": 11, class: "muted" }, "掩码数值为示意");
+      },
+    },
+    {
+      title: "读数据：股票 × 10 分钟时间段", kicker: "第 6–8 格 · 载入",
+      html: `<p>读 <code>train.csv</code> 和 <code>test.csv</code>，用“股票编号-时间段编号”拼出 <code>row_id</code>，作为后面合并特征的钥匙，并打印行数和缺失值数。</p><p>表的结构可以想成一个大格子：横着是时间段，竖着是股票，每个格子里要填一个“下一个 10 分钟的波动率”。</p>`,
+      cells: [7], highlight: ["train['row_id'] = train['stock_id'].astype(str) + '-' + train['time_id'].astype(str)"],
+      draw(svg, ctx) {
+        const R = 6, Cn = 10, r = K.rng(3), cells = [];
+        for (let i = 0; i < R; i++) { K.svg(svg, "text", { x: 70, y: 70 + i * 42, "text-anchor": "end", "font-size": 11 }, "股票 " + [0, 1, 3, 5, 8, 126][i]); for (let j = 0; j < Cn; j++) cells.push(K.svg(svg, "rect", { x: 80 + j * 58, y: 50 + i * 42, width: 54, height: 36, rx: 4, fill: "var(--panel-2)" })); }
+        for (let j = 0; j < Cn; j++) K.svg(svg, "text", { x: 107 + j * 58, y: 40, "text-anchor": "middle", "font-size": 10, class: "muted" }, "time " + (5 + j * 6));
+        K.svg(svg, "text", { x: 80, y: 320, "font-size": 11, class: "muted" }, "颜色深浅 = 波动率高低（编号和数值均为示意）");
+        const v = cells.map(() => 0.2 + r() * 0.8 * (0.5 + 0.5 * r()));
+        ctx.tween(1500, (t) => cells.forEach((c, k) => { if (k / cells.length <= t) K.set(c, { fill: K.heat(v[k]) }); }));
+      },
+    },
+    {
+      title: "盘口特征：WAP 与已实现波动率", kicker: "第 9–10 格 · 特征工程（核心）",
+      html: `<p>这一格是整个方案的大头，对每只股票的订单簿和成交分别做统计：</p><ul class="tight"><li><b>WAP</b>：用对面的挂单量加权买卖价，算出更准的“即时价格”；再算相邻两秒的对数收益率；</li><li><b>已实现波动率</b> = √(Σ 对数收益²)，就是比赛的目标在“过去”10 分钟里的同款量；</li><li>价差、买卖量差、总挂单量等，按<b>全窗口</b>和<b>最后 400 / 300 / 200 秒</b>分别求和、均值、标准差；</li><li>成交表里再算成交量、成交笔数、价格趋势等，并把同一股票、同一时间段的波动率汇总，以及按目标相关性把股票分 7 群求平均。</li></ul>`,
+      cells: [10], highlight: ["wap = (df['bid_price1'] * df['ask_size1'] + df['ask_price1'] * df['bid_size1']) / (df['bid_size1'] + df['ask_size1'])", "return np.sqrt(np.sum(series**2))", "df_feature_400 = get_stats_window(seconds_in_bucket = 400, add_suffix = True)", "kmeans = KMeans(n_clusters=7, random_state=0).fit(corr.values)"],
+      draw(svg, ctx) {
+        const B = fakeBook(5, 60, 0.0012);
+        const lo = Math.min(...B.map((b) => b.bid)), hi = Math.max(...B.map((b) => b.ask));
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 200 }, [0, 600], [lo, hi], { xlabel: "第几秒", yticks: 0 });
+        const ln = (fn, c, w) => { let d = ""; B.forEach((b, i) => (d += (i ? "L" : "M") + ax.sx(b.t * 10) + "," + ax.sy(fn(b)))); return K.svg(svg, "path", { d, fill: "none", stroke: c, "stroke-width": w }); };
+        const pb = ln((b) => b.bid, "var(--c3)", 1.2), pa = ln((b) => b.ask, "var(--c6)", 1.2), pw = ln(wapOf, "var(--accent)", 2.5);
+        K.svg(svg, "text", { x: 70, y: 46, "font-size": 11, fill: "var(--c6)" }, "卖一价");
+        K.svg(svg, "text", { x: 70, y: 222, "font-size": 11, fill: "var(--c3)" }, "买一价");
+        K.svg(svg, "text", { x: 140, y: 46, "font-size": 11, fill: "var(--accent)" }, "WAP");
+        const wins = [0, 200, 300, 400].map((s, k) => K.svg(svg, "rect", { x: ax.sx(s), y: 260 + k * 0, width: ax.sx(600) - ax.sx(s), height: 14, y2: 0, fill: K.colors[k], opacity: 0 }));
+        wins.forEach((w, k) => K.set(w, { y: 262 + k * 16, height: 12 }));
+        const labs = ["全窗口", "后 400 秒", "后 300 秒", "后 200 秒"].map((t, k) => K.svg(svg, "text", { x: 56, y: 272 + k * 16, "text-anchor": "end", "font-size": 10 }, t));
+        [pb, pa, pw].forEach((p) => { const L = p.getTotalLength(); p.style.strokeDasharray = L; p.style.strokeDashoffset = L; });
+        ctx.tween(1600, (t) => [pb, pa, pw].forEach((p) => (p.style.strokeDashoffset = p.getTotalLength() * (1 - t)))).then((ok) => ok && ctx.tween(800, (t) => wins.forEach((w) => (w.style.opacity = 0.7 * t))));
+      },
+    },
+    {
+      title: "拼起来：每行一张几百列的大表", kicker: "第 11–12 格 · 合并",
+      html: `<p>用多进程并行处理每只股票的盘口和成交文件，按 <code>row_id</code> 合并到训练表上；再加上按股票、按时间段汇总的波动率统计；把无穷大换成缺失值；最后加上“股票分群”的平均特征，缺失用训练集均值补。</p><p>结果是每个“股票 × 时间段”一行、几百列特征的大表，这正是 TabNet 要处理的典型表格数据。</p>`,
+      cells: [12], highlight: ["train_ = preprocessor(train_stock_ids, is_train = True)", "train = get_time_stock(train)", "train, test = create_agg_features(train,test)"],
+      draw(svg, ctx) {
+        const parts = [["基础表\nstock, time", 30, "var(--ink-3)"], ["盘口统计", 170, "var(--c1)"], ["成交统计", 310, "var(--c3)"], ["按股票/时间汇总", 450, "var(--c4)"], ["相关股票群平均", 590, "var(--c2)"]];
+        const bars = parts.map((p, i) => { const g = K.svg(svg, "g"); K.node(g, p[1], 40, 120, 50, p[0], { fs: 11, stroke: p[2] }); for (let k = 0; k < 6; k++) K.svg(g, "rect", { x: p[1] + 10 + k * 17, y: 110, width: 14, height: 120, fill: `color-mix(in srgb, ${p[2]} 35%, var(--panel))` }); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 30, y: 270, "font-size": 12 }, "按 row_id = “股票-时间段” 横向拼接 → 每行几百列");
+        (async () => { for (const b of bars) if (!(await ctx.tween(350, (t) => (b.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "损失与指标：RMSPE", kicker: "第 13–16 格 · 目标函数",
+      html: `<p>去掉 <code>row_id</code>、<code>target</code>、<code>time_id</code> 作为特征矩阵 X，目标 y 是 <code>target</code>。</p><p>评分用 <b>RMSPE</b> = √mean(((y − ŷ)/y)²)。作者把它同时写成 TabNet 的评估指标类和 PyTorch 损失函数，让模型<b>直接优化</b>比赛指标。因为除以了真实值 y，波动率小的行，同样的绝对误差会被放大很多倍。</p>`,
+      cells: [14, 16], highlight: ["return torch.sqrt(torch.mean( ((y_true - y_pred) / y_true) ** 2 )).clone()"],
+      draw(svg, ctx) {
+        const rows = [[0.001, 0.0015], [0.004, 0.0045], [0.010, 0.0105]];
+        K.svg(svg, "text", { x: 30, y: 36, "font-size": 13, "font-weight": 700 }, "三只股票，每只都预测偏高 0.0005（示意）");
+        const els = rows.map((r, i) => {
+          const y = 70 + i * 70;
+          K.svg(svg, "text", { x: 30, y: y + 24, "font-size": 12 }, `真实 ${r[0]}，预测 ${r[1]}`);
+          const a = K.svg(svg, "rect", { x: 260, y, width: 0, height: 16, fill: "var(--c1)" }), b = K.svg(svg, "rect", { x: 260, y: y + 20, width: 0, height: 16, fill: "var(--c2)" });
+          return [a, b, Math.abs(r[1] - r[0]) * 1e5 / 2, Math.abs((r[1] - r[0]) / r[0]) * 400];
+        });
+        K.svg(svg, "text", { x: 260, y: 290, "font-size": 12, fill: "var(--c1)" }, "■ 绝对误差（RMSE 看的）都一样");
+        K.svg(svg, "text", { x: 260, y: 312, "font-size": 12, fill: "var(--c2)" }, "■ 百分比误差（RMSPE 看的）：50%、12.5%、5%");
+        ctx.tween(1400, (t) => els.forEach(([a, b, wa, wb]) => { K.set(a, { width: wa * t }); K.set(b, { width: wb * t }); }));
+      },
+    },
+    {
+      title: "类别编码与标准化", kicker: "第 17–18 格 · 预处理",
+      html: `<p><code>stock_id</code> 是类别，用 LabelEncoder 编成 0、1、2……，交给 TabNet 当类别特征（内部做 1 维嵌入）。其余数值列逐列做<b>标准化</b>（减均值、除标准差）。</p><p>作者特别说明：TabNet 论文认为不需要预处理，但他发现标准化后收敛更快。</p>`,
+      cells: [18], highlight: ["l_enc = LabelEncoder()", "scaler = StandardScaler()"],
+      draw(svg, ctx) {
+        const r = K.rng(2), cols = [{ m: 0.004, s: 0.002, lab: "波动率" }, { m: 1200, s: 600, lab: "挂单总量" }, { m: 0.0006, s: 0.0003, lab: "价差" }];
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [-3, 3], [0, 3], { xlabel: "标准化之后（各列都以 0 为中心、尺度相近）", yticks: 0 });
+        cols.forEach((c, k) => {
+          K.svg(svg, "text", { x: 70, y: 60 + k * 70, "font-size": 12 }, c.lab + "：原始尺度 ~" + c.m);
+          const dots = []; for (let i = 0; i < 30; i++) { const z = K.randn(r); dots.push([z, K.svg(svg, "circle", { cx: ax.sx(0), cy: 80 + k * 70, r: 3.5, fill: K.colors[k] })]); }
+          ctx.tween(1400, (t) => dots.forEach(([z, d]) => K.set(d, { cx: ax.sx(K.lerp(k === 1 ? 2.5 : -2.5 + k, z, t)) })));
+        });
+      },
+    },
+    {
+      title: "TabNet 参数：步数、掩码、γ", kicker: "第 19–20 格 · 模型配置",
+      html: `<p>作者选了一个小模型（他说更大更深更容易过拟合）：</p><ul class="tight"><li><code>n_d = n_a = 16</code>：每步决策输出和注意力部分的宽度；</li><li><code>n_steps = 2</code>：决策 2 步；</li><li><code>gamma = 2</code>：一列特征被用过后，后面的步骤还能再用它的程度（γ 越大越允许重复使用）；</li><li><code>n_independent = n_shared = 2</code>：特征变换器里每步独有 2 层、各步共享 2 层；</li><li><code>mask_type = "entmax"</code>：用 entmax 生成掩码，介于 softmax（都给一点）和 sparsemax（大胆置 0）之间；</li><li>Adam 学习率 2e-2，余弦退火重启（每 200 步一个周期）。</li></ul>`,
+      cells: [20], highlight: ["n_steps = 2", "gamma = 2", "mask_type = \"entmax\"", "lambda_sparse = 0"],
+      draw(svg, ctx) {
+        const z = [2.2, 1.6, 1.1, 0.6, 0.3, 0.1, -0.2, -0.6];
+        const fns = [["softmax", softmax, "var(--c1)"], ["entmax（作者）", entmax15, "var(--c2)"], ["sparsemax", sparsemax, "var(--c3)"]];
+        fns.forEach(([nm, f, c], k) => {
+          const p = f(z), x0 = 30 + k * 230;
+          K.svg(svg, "text", { x: x0, y: 34, "font-size": 13, "font-weight": 700, fill: c }, nm);
+          const zero = p.filter((v) => v < 1e-9).length;
+          K.svg(svg, "text", { x: x0, y: 300, "font-size": 12 }, "权重恰好为 0 的列：" + zero + " / 8");
+          p.forEach((v, i) => { const b = K.svg(svg, "rect", { x: x0 + i * 24, y: 260, width: 20, height: 0, fill: c }); ctx.tween(1200, (t) => K.set(b, { y: 260 - v * 400 * t, height: v * 400 * t })); });
+        });
+        K.svg(svg, "text", { x: 30, y: 326, "font-size": 11, class: "muted" }, "同一组 8 个注意力分数（示意），三种归一化方式现场计算");
+      },
+    },
+    {
+      title: "5 折训练：大批量、早停、存模型", kicker: "第 21–22 格 · 训练",
+      html: `<p>5 折 KFold（打乱，种子 42）。每折训练一个 <code>TabNetRegressor</code>：最多 200 轮，验证 RMSPE 连续 50 轮不降就停；批大小 20480、“虚拟批” 2560（Ghost BatchNorm：在大批量里按小块分别做批归一化）；损失和指标都是 RMSPE。</p><p>每折训练完：保存模型，用 <code>explain</code> 拿到验证集的解释矩阵和每一步的掩码，记录特征重要性，预测验证集（OOF）和测试集（5 折取平均）。最后打印整体 OOF RMSPE。</p>`,
+      cells: [22], highlight: ["max_epochs = 200", "patience = 50", "batch_size = 1024*20", "virtual_batch_size = 128*20", "explain_matrix, masks = clf.explain(X_val)"],
+      draw(svg, ctx) {
+        for (let f = 0; f < 5; f++) for (let k = 0; k < 5; k++) K.svg(svg, "rect", { x: 40 + k * 70, y: 40 + f * 50, width: 66, height: 36, rx: 4, fill: k === f ? "color-mix(in srgb, var(--c2) 45%, var(--panel))" : "color-mix(in srgb, var(--c1) 22%, var(--panel))" });
+        K.svg(svg, "text", { x: 40, y: 30, "font-size": 12 }, "5 折：橙色 = 这一折的验证集");
+        const outs = ["保存模型", "解释矩阵 + 掩码", "特征重要性", "OOF 预测", "测试预测 ÷ 5"];
+        const ns = outs.map((o, i) => K.node(svg, 450, 40 + i * 50, 200, 36, o, { fs: 12 }));
+        hide(ns);
+        (async () => { for (const n of ns) if (!(await ctx.tween(300, (t) => (n.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "训练曲线", kicker: "第 23–26 格 · 看收敛",
+      html: `<p>把每折的训练损失和验证 RMSPE 随轮数画出来。余弦退火重启会让学习率周期性地升高再降低，曲线可能出现小的起伏。第 26 格画的是验证集，但标题沿用了 “Train RMSPE”，是复制粘贴时没改。</p>`,
+      cells: [24, 26], highlight: ["plt.title('Train RMSPE')"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [0, 200], [0.18, 0.6], { xlabel: "轮数", ylabel: "RMSPE（示意）" });
+        const r = K.rng(8), ps = [];
+        for (let f = 0; f < 5; f++) { let d = ""; for (let e = 0; e <= 200; e += 2) { const v = 0.21 + 0.35 * Math.exp(-e / 25) + 0.012 * Math.sin(e / 200 * Math.PI * 2) + f * 0.004 + K.randn(r) * 0.003; d += (e ? "L" : "M") + ax.sx(e) + "," + ax.sy(v); } ps.push(K.svg(svg, "path", { d, fill: "none", stroke: K.colors[f], "stroke-width": 1.6 })); }
+        K.svg(svg, "text", { x: 400, y: 60, "font-size": 11, class: "muted" }, "5 条线 = 5 折；形状为示意，不是作者的结果");
+        ps.forEach((p) => { const L = p.getTotalLength(); p.style.strokeDasharray = L; p.style.strokeDashoffset = L; });
+        ctx.tween(1800, (t) => ps.forEach((p) => (p.style.strokeDashoffset = p.getTotalLength() * (1 - t))));
+      },
+    },
+    {
+      title: "特征重要性：掩码汇总出来的", kicker: "第 27–28 格 · 可解释性",
+      html: `<p>TabNet 的特征重要性来自<b>各步掩码的加权汇总</b>：一列在越多样本、越重要的决策步里被选中，重要性越高。作者对各折的重要性求平均，画出前 25 名。</p><p class="note">代码只平均了前 2 折（<code>importance_fold0+1</code> 和 <code>importance_fold1+1</code>），不是 5 折。</p>`,
+      cells: [28], highlight: ["feature_importances[['importance_fold0+1','importance_fold1+1']].mean(axis=1)"],
+      draw(svg, ctx) {
+        const items = FEATS.slice(0, 7).map((f, i) => ({ label: f, value: [0.24, 0.19, 0.12, 0.1, 0.08, 0.06, 0.05][i], color: "var(--c2)" }));
+        const els = K.bars(svg, { x: 20, y: 30, w: 640, h: 250 }, items, { horizontal: true, labelWidth: 150, fmt: (v) => v.toFixed(2) });
+        K.svg(svg, "text", { x: 170, y: 310, "font-size": 11, class: "muted" }, "列名和数值均为示意，不是作者的运行结果");
+        els.forEach((e) => { const w = +e.rect.getAttribute("width"); e.rect.setAttribute("width", 0); e.w = w; });
+        ctx.tween(1200, (t) => els.forEach((e) => e.rect.setAttribute("width", e.w * t)));
+      },
+    },
+    {
+      title: "掩码与解释矩阵：每个样本看了哪些列", kicker: "第 29–32 格 · 逐样本解释",
+      html: `<p>和树模型的“全局重要性”不同，TabNet 能给出<b>每一个样本</b>的解释：</p><ul class="tight"><li><b>Masks</b>：每折、每一步一张热力图，行是样本（前 150 个），列是特征，亮的格子表示这一步这个样本用了这一列；</li><li><b>Explain Matrix</b>：把各步掩码汇总，得到每个样本对每列的依赖程度。</li></ul><p>动画：几行样本的掩码，不同样本挑的列不一样。</p>`,
+      cells: [30, 32], highlight: ["sns.heatmap(mask[:150], ax=j)", "sns.heatmap(matrix[:150], ax=axs[i])"],
+      draw(svg, ctx) {
+        const r = K.rng(12), rows = 10, cols = 8, s = 30, x0 = 200, y0 = 40, cells = [];
+        FEATS.forEach((f, j) => K.svg(svg, "text", { x: x0 + j * s + 14, y: y0 - 6, "text-anchor": "start", "font-size": 9, transform: `rotate(-35 ${x0 + j * s + 14} ${y0 - 6})` }, f.slice(0, 5)));
+        for (let i = 0; i < rows; i++) {
+          K.svg(svg, "text", { x: x0 - 8, y: y0 + i * 26 + 18, "text-anchor": "end", "font-size": 10 }, "样本 " + (i + 1));
+          const z = Array.from({ length: cols }, (_, j) => (j < 2 ? 1.2 : 0) + K.randn(r) * 0.9), p = entmax15(z);
+          p.forEach((v, j) => cells.push({ v, e: K.svg(svg, "rect", { x: x0 + j * s, y: y0 + i * 26 + 6, width: s - 2, height: 22, fill: "var(--panel-2)" }) }));
+        }
+        K.svg(svg, "text", { x: 470, y: 120, "font-size": 12 }, "亮 = 这一步用了这一列");
+        K.svg(svg, "text", { x: 470, y: 144, "font-size": 12 }, "暗 = 掩码恰好为 0");
+        K.svg(svg, "text", { x: 470, y: 180, "font-size": 11, class: "muted" }, "示意：entmax 现场算出的掩码");
+        ctx.tween(1500, (t) => cells.forEach((c) => K.set(c.e, { fill: K.heat(Math.min(1, c.v * 1.6) * t) })));
+      },
+    },
+    {
+      title: "提交", kicker: "第 33–34 格",
+      html: `<p>把 5 折模型对测试集预测的平均值写进 <code>submission.csv</code>（<code>row_id</code>, <code>target</code>）。</p>`,
+      cells: [34], highlight: ["test['target'] = test_predictions"],
+      draw(svg, ctx) {
+        const ns = [0, 1, 2, 3, 4].map((f) => K.node(svg, 40, 30 + f * 56, 130, 40, "折 " + (f + 1) + " 模型", { fs: 12 }));
+        const ar = ns.map((n, f) => K.arrow(svg, 172, 50 + f * 56, 318, 170));
+        const avg = K.node(svg, 320, 140, 140, 60, "平均", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const sub = K.node(svg, 520, 140, 170, 60, "submission.csv\nrow_id, target", { fs: 12 });
+        const a2 = K.arrow(svg, 460, 170, 518, 170);
+        hide([...ar, avg, sub, a2]);
+        ctx.tween(700, (t) => ar.forEach((a) => (a.style.opacity = t))).then((ok) => ok && ctx.tween(500, (t) => [avg, a2, sub].forEach((e) => (e.style.opacity = t))));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ===== 实验 A：已实现波动率 ===== */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 372,
+    controls: [
+      { id: "vol", label: "这 10 分钟里价格抖动的程度", min: 0.0002, max: 0.003, step: 0.0001, value: 0.001, fmt: (v) => (v * 1e4).toFixed(0) + " 个基点/秒" },
+      { id: "win", label: "统计窗口（第 10 格的四种）", value: "0", options: [["0", "全窗口（第 0–600 秒）"], ["200", "最后 400 秒（≥200）"], ["300", "最后 300 秒（≥300）"], ["400", "最后 200 秒（≥400）"]] },
+      { id: "seed", label: "换一段行情", button: true },
+    ],
+    note: "模拟 600 秒的买一 / 卖一价格和挂单量，现场计算 WAP、相邻两秒的对数收益率，以及已实现波动率 √Σ(对数收益²)。对比只用买一价算出的结果。",
+    render(svg, v) {
+      const B = fakeBook(10 + v.seed * 7, 600, v.vol), w0 = +v.win;
+      const W = B.map(wapOf);
+      const lo = Math.min(...B.map((b) => b.bid)), hi = Math.max(...B.map((b) => b.ask));
+      const ax = K.axes(svg, { x: 60, y: 20, w: 560, h: 170 }, [0, 600], [lo, hi], { yticks: 2, yfmt: (x) => x.toFixed(2) });
+      K.svg(svg, "rect", { x: ax.sx(w0), y: 20, width: ax.sx(600) - ax.sx(w0), height: 170, fill: "color-mix(in srgb, var(--accent) 10%, transparent)" });
+      let d = ""; W.forEach((x, i) => (d += (i ? "L" : "M") + ax.sx(i) + "," + ax.sy(x))); K.svg(svg, "path", { d, fill: "none", stroke: "var(--accent)", "stroke-width": 1.5 });
+      const lr = [], lrb = []; for (let i = Math.max(1, w0); i < 600; i++) { lr.push(Math.log(W[i] / W[i - 1])); lrb.push(Math.log(B[i].bid / B[i - 1].bid)); }
+      const ax2 = K.axes(svg, { x: 60, y: 220, w: 560, h: 90 }, [0, 600], [-4 * v.vol, 4 * v.vol], { xlabel: "第几秒（下：WAP 对数收益率）", yticks: 0 });
+      lr.forEach((x, k) => { const i = k + Math.max(1, w0); K.svg(svg, "line", { x1: ax2.sx(i), x2: ax2.sx(i), y1: ax2.sy(0), y2: ax2.sy(K.clamp(x, -4 * v.vol, 4 * v.vol)), stroke: "var(--c2)", "stroke-width": 0.8 }); });
+      const rv = Math.sqrt(lr.reduce((s, x) => s + x * x, 0)), rvb = Math.sqrt(lrb.reduce((s, x) => s + x * x, 0));
+      return { readout: [
+        { k: "已实现波动率（WAP）", v: rv.toFixed(5), color: "var(--accent)" },
+        { k: "只用买一价算", v: rvb.toFixed(5), color: "var(--ink-3)" },
+        { k: "参与计算的秒数", v: String(lr.length) },
+      ] };
+    },
+  });
+
+  /* ===== 实验 B：TabNet 掩码 ===== */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "mt", label: "掩码函数", value: "entmax", options: [["softmax", "softmax（都给一点）"], ["entmax", "entmax（作者）"], ["sparsemax", "sparsemax（论文默认）"]] },
+      { id: "gamma", label: "γ（作者 2）：用过的列还能再用多少", min: 1, max: 3, step: 0.1, value: 2, fmt: (v) => v.toFixed(1) },
+      { id: "sharp", label: "注意力分数的差距（越大越集中）", min: 0.5, max: 4, step: 0.1, value: 2, fmt: (v) => v.toFixed(1) },
+      { id: "seed", label: "换一个样本", button: true },
+    ],
+    note: "按 TabNet 论文公式现场计算两步掩码：第 1 步 M₁ = f(P₀ · a₁)，P₀ = 1；先验 P₁ = P₀ · (γ − M₁)；第 2 步 M₂ = f(P₁ · a₂)。a₁、a₂ 是随机生成的注意力分数（示意），f 是所选的掩码函数。γ = 1 时，第 1 步用满的列在第 2 步会被完全禁用。",
+    render(svg, v) {
+      const r = K.rng(31 + v.seed * 11), n = FEATS.length;
+      const a1 = FEATS.map((_, i) => (i === 0 ? 1 : 0) + K.randn(r) * 0.6).map((x) => x * v.sharp);
+      const a2 = FEATS.map((_, i) => (i === 0 ? 1 : 0) + (i === 1 ? 0.6 : 0) + K.randn(r) * 0.6).map((x) => x * v.sharp);
+      const f = v.mt === "softmax" ? softmax : v.mt === "sparsemax" ? sparsemax : entmax15;
+      const M1 = f(a1), P1 = M1.map((m) => v.gamma - m), M2 = f(a2.map((x, i) => x * P1[i]));
+      const imp = M1.map((m, i) => (m + M2[i]) / 2);
+      const col = (title, M, x0, color) => {
+        K.svg(svg, "text", { x: x0, y: 22, "font-size": 12, "font-weight": 700, fill: color }, title);
+        M.forEach((m, i) => { K.svg(svg, "rect", { x: x0, y: 34 + i * 38, width: 120, height: 26, rx: 3, fill: "var(--panel-2)" }); K.svg(svg, "rect", { x: x0, y: 34 + i * 38, width: 120 * m, height: 26, rx: 3, fill: color }); K.svg(svg, "text", { x: x0 + 124, y: 52 + i * 38, "font-size": 10, fill: m < 1e-9 ? "var(--ink-3)" : "var(--ink)" }, m < 1e-9 ? "0" : m.toFixed(2)); });
+      };
+      FEATS.forEach((fn, i) => K.svg(svg, "text", { x: 150, y: 52 + i * 38, "text-anchor": "end", "font-size": 11 }, fn));
+      col("第 1 步掩码 M₁", M1, 160, "var(--c1)");
+      col("第 2 步掩码 M₂", M2, 320, "var(--c2)");
+      col("两步汇总（等权示意）", imp, 480, "var(--c3)");
+      const z1 = M1.filter((x) => x < 1e-9).length, z2 = M2.filter((x) => x < 1e-9).length;
+      const overlap = M1.reduce((s, m, i) => s + Math.min(m, M2[i]), 0);
+      return { readout: [
+        { k: "第 1 步被关掉的列", v: z1 + " / " + n },
+        { k: "第 2 步被关掉的列", v: z2 + " / " + n },
+        { k: "两步重复使用的程度", v: overlap.toFixed(2), color: overlap > 0.5 ? "var(--warn)" : "var(--good)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

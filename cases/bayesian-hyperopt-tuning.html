@@ -1,0 +1,761 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>贝叶斯自动调参</title>
+<meta name="description" content="Kaggle 案例拆解：把“调超参数”当成一道优化题，用 Hyperopt 的贝叶斯优化（TPE）替 LightGBM 自动找参数，并和随机搜索比较 1000 次搜索的过程与提交成绩。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">问题</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格数据 · 超参数优化 · 贝叶斯优化</div>
+  <h1>贝叶斯自动调参：让电脑从试过的结果里学会“下一次试哪儿”</h1>
+  <p class="en">Introduction: Automated Hyperparameter Tuning</p>
+  <div class="tags">
+    <span class="tag opt">优化与运筹</span><span class="tag ml">机器学习</span>
+    <span class="tag method">贝叶斯优化</span><span class="tag method">TPE（树结构 Parzen 估计）</span><span class="tag method">Hyperopt</span>
+    <span class="tag method">随机搜索对照</span><span class="tag method">LightGBM</span><span class="tag method">5 折交叉验证 + 早停</span><span class="tag method">条件搜索空间</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Will Koehrsen</b></span>
+    <span>Kaggle 点赞 <b>727</b>（2026-11 抓取）</span>
+    <span>数据 <b>Home Credit Default Risk</b> 比赛 + 作者数据集 <b>willkoehrsen/home-credit-model-tuning</b></span>
+    <span><a href="https://www.kaggle.com/code/willkoehrsen/automated-model-tuning" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>问题是什么</h3><div class="big">LightGBM 有一大排“旋钮”（超参数），怎么拧最好？</div><p>模型本身是用来预测贷款申请人会不会还款困难；这篇 notebook 关心的是<b>怎么替模型挑超参数</b>，一共 10 个。<span data-cell="25">出处</span></p></div>
+    <div class="card panel"><h3>要找什么</h3><div class="big">一组让交叉验证 AUC 最高的超参数</div><p>Hyperopt 只会“求最小”，所以目标函数返回 <code>1 − AUC</code>，越小越好。每算一次目标函数，就要训练 5 个模型，很贵。<span data-cell="10">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">贝叶斯优化：用过去的成绩猜下一次试哪里</div><p>网格和随机搜索“不长记性”；TPE 把试过的结果分成“好的一堆”和“差的一堆”，下一次专挑像好结果的地方试。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">提交成绩：贝叶斯 0.792，随机搜索 0.787</div><p>两种方法各在小数据上搜 1000 次，再把最佳参数用到完整特征集上提交。作者提醒别太当真：随机搜索的交叉验证分数其实更高。<span data-cell="86">出处</span> <span data-cell="90">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>问题长什么样</h2>
+  <p class="lead">这一篇有两层：底下是一个普通的<b>机器学习任务</b>（贷款违约二分类），上面是一道<b>优化题</b>：在 10 个超参数组成的空间里，找让交叉验证分数最好的那一点。下面先看优化题的“实例、约束、目标”，再看底下用的数据。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">题目规模</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">要调的超参数</div><div class="v">10 个</div></div>
+        <div class="stat-tile"><div class="k">每次打分</div><div class="v">5 折 CV</div></div>
+        <div class="stat-tile"><div class="k">调参用的训练行</div><div class="v">10,000</div></div>
+        <div class="stat-tile"><div class="k">留作测试的行</div><div class="v">6,000</div></div>
+        <div class="stat-tile"><div class="k">notebook 里现场搜索</div><div class="v">5 + 5 次</div></div>
+        <div class="stat-tile"><div class="k">作者事先跑好的搜索</div><div class="v">各 1000 次</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">10 个超参数见第 25 格 <span data-cell="25">出处</span>；5 折和早停 100 轮见第 0、2 格 <span data-cell="2">出处</span>；从比赛训练表里随机抽 16000 行、切 10000 / 6000 见第 4 格 <span data-cell="4">出处</span>；现场只搜 <code>MAX_EVALS = 5</code>，再续到 10 <span data-cell="50">出处</span>；1000 次的结果是作者另外跑好、存成 CSV 读进来的 <span data-cell="58">出处</span>。完整比赛训练表共 307,511 行、122 列（比赛数据说明）。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">搜索空间：每个旋钮的范围（第 26 格）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>超参数</th><th>白话</th><th>取值方式</th></tr>
+        <tr><td><code>boosting_type</code></td><td>提升方式：gbdt / dart / goss 三选一</td><td>类别</td></tr>
+        <tr><td><code>subsample</code></td><td>每棵树抽多少比例的行；goss 固定 1.0</td><td>0.5–1 均匀（依赖上一行）</td></tr>
+        <tr><td><code>num_leaves</code></td><td>每棵树最多几片叶子（树有多“茂盛”）</td><td>20–150 整数</td></tr>
+        <tr><td><code>learning_rate</code></td><td>每棵新树改错的步子多大</td><td>0.01–0.5 对数均匀</td></tr>
+        <tr><td><code>subsample_for_bin</code></td><td>分箱时看多少行</td><td>20000–300000，步长 20000</td></tr>
+        <tr><td><code>min_child_samples</code></td><td>一片叶子至少要有几个样本</td><td>20–500，步长 5</td></tr>
+        <tr><td><code>reg_alpha</code> / <code>reg_lambda</code></td><td>两种“别学太细”的惩罚</td><td>0–1 均匀</td></tr>
+        <tr><td><code>colsample_bytree</code></td><td>每棵树随机用多少比例的列</td><td>0.6–1 均匀</td></tr>
+        <tr><td><code>is_unbalance</code></td><td>要不要照顾少数类（违约的人少）</td><td>是 / 否</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)"><b>目标函数</b>：<code>1 − 5 折交叉验证 ROC AUC</code>，越小越好 <span data-cell="11">第 11 格</span>。<b>约束</b>：只在上表范围里取值；goss 不能抽样行。<b>底下的数据</b>：比赛表 <code>application_train.csv</code>，每行一位贷款申请人；作者只保留数值列，去掉编号 <code>SK_ID_CURR</code>；答案列 <code>TARGET</code>：1 = 还款困难，0 = 正常还款。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="17">
+    <h3>动手试试 A · 对数均匀和均匀，抽出来差在哪 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="33">
+    <h3>动手试试 B · 网格、随机、TPE 比一比：谁先找到山顶 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="64">
+    <h3>动手试试 C · 两个旋钮一起调：随机搜索 vs TPE 的分数随次数变化 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>1000 次搜索后：贝叶斯优化的交叉验证最高分<b>不如</b>随机搜索，但它找到的参数在 6000 行测试集上表现<b>更好</b></td><td style="white-space:nowrap"><span data-cell="59">第 59 格</span></td></tr>
+        <tr><td>贝叶斯优化的分数随搜索次数<b>往上走</b>，说明它越来越多地试“有希望”的值；随机搜索没有这种趋势</td><td style="white-space:nowrap"><span data-cell="65">第 65 格</span></td></tr>
+        <tr><td>贝叶斯优化试 <code>dart</code> 的次数远多于均匀分布应有的次数，可以据此缩小下一轮的搜索范围</td><td style="white-space:nowrap"><span data-cell="76">第 76 格</span></td></tr>
+        <tr><td>把随机搜索的最佳参数用到完整特征集，提交得 <b>0.787</b>；原特征 kernel 的成绩是 <b>0.792</b></td><td style="white-space:nowrap"><span data-cell="86">第 86 格</span></td></tr>
+        <tr><td>贝叶斯优化的最佳参数提交得 <b>0.792</b>，胜过随机搜索；但作者说“不要太看重”，因为随机搜索的交叉验证分数更高</td><td style="white-space:nowrap"><span data-cell="90">第 90 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">交叉验证 AUC、测试集 AUC、最佳迭代次数等具体数值都在原 notebook 的运行输出里，Kaggle 下载的源码不带输出，作者文字里也没写，所以这里不列。上表的 0.787 / 0.792 是作者文字里写明的比赛提交分数（比赛的评价指标是 ROC AUC）。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>给任何“试一次很贵”的黑箱找好参数：模型超参数、神经网络结构、化学实验配方、广告出价、工厂工艺温度。</li>
+        <li><b>同类问题：</b>Optuna、SMAC、高斯过程优化（Spearmint）用的是同一套“四件套”：目标函数、搜索空间、优化算法、结果记录 <span data-cell="0">第 0 格</span>。</li>
+        <li><b>可迁移的套路：</b>先在小样本上搜 → 结果逐条写进 CSV 便于中途查看和续跑 → 看每个参数被试的分布，缩小范围 → 最后搬到全量数据上验证（小数据上的最优不一定是全量上的最优 <span data-cell="79">第 79 格</span>）。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>基线：LightGBM 默认参数 + 5 折 CV + 早停 100 轮 <span data-cell="7">第 7 格</span></li>
+        <li>目标函数：返回 <code>1 − AUC</code>，每次写一行 CSV <span data-cell="11">第 11 格</span></li>
+        <li>搜索空间：<code>hp.loguniform</code>、<code>hp.quniform</code>、<code>hp.uniform</code>、<code>hp.choice</code> 嵌套条件 <span data-cell="26">第 26 格</span></li>
+        <li>优化算法：<code>tpe.suggest</code> <span data-cell="33">第 33 格</span>；结果记录：<code>Trials</code> <span data-cell="35">第 35 格</span></li>
+        <li>运行与续跑：<code>fmin(max_evals=…)</code> <span data-cell="41">第 41 格</span> <span data-cell="50">第 50 格</span></li>
+        <li>对照：1000 次随机搜索 vs 1000 次贝叶斯优化 <span data-cell="58">第 58 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>随机搜索的交叉验证最高分更高，贝叶斯优化在测试集和比赛上更好（第 59、90 格）。只比较一次、差 0.005，你能下结论说“贝叶斯更好”吗？还需要做什么实验？</li>
+      <li>作者用 6000 行测试集挑“哪种搜索方法更好”。如果以后还要拿这份测试集报告最终成绩，会有什么问题？</li>
+      <li>第 14 格文字说学习率范围是 0.005–0.5，第 15 格代码写的是 0.005–0.2，第 26 格真正搜索时又是 0.01–0.5；第 68 格把第 15 格的分布当成“抽样分布”画在一起比较。这样比较公平吗？</li>
+      <li>第 43 格先排序得到 <code>trials_dict</code>，第 50 格又续跑到 10 次，第 52 格保存的却还是旧的 <code>trials_dict</code>。保存下来的记录里有几次？续跑的结果丢了吗？</li>
+      <li>按 LightGBM 的文档，<code>subsample</code> 只有在 <code>subsample_freq</code>（bagging_freq）大于 0 时才起作用，而搜索空间里没设它；另外 LightGBM 在 dart 模式下会提示早停不可用。这两点会怎样影响“贝叶斯优化偏爱 dart”的结论？</li>
+      <li>如果一次打分只要 1 毫秒（而不是几分钟），你还会用贝叶斯优化吗？它“花时间想下一步”的成本什么时候不划算？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Will Koehrsen，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Home Credit Default Risk 比赛（Home Credit Group）。
+</footer>
+</main>
+
+<script src="nb/bayesian-hyperopt-tuning.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 共用：示意的“分数地形” ---------- */
+  // 一维：x∈[0,1] 代表 log(学习率) 从 0.01 到 0.5；返回 AUC（示意）
+  function surf1(x) {
+    return 0.705 + 0.035 * Math.exp(-Math.pow((x - 0.62) / 0.09, 2)) + 0.022 * Math.exp(-Math.pow((x - 0.22) / 0.06, 2)) - 0.03 * Math.pow(x - 0.5, 2) + 0.003 * Math.sin(x * 40);
+  }
+  // 二维：x 代表 log(学习率)，y 代表叶子数，都归一到 [0,1]
+  function surf2(x, y) {
+    return 0.66 + 0.07 * Math.exp(-(Math.pow(x - 0.35, 2) / 0.03 + Math.pow(y - 0.7, 2) / 0.08)) + 0.03 * Math.exp(-(Math.pow(x - 0.82, 2) / 0.01 + Math.pow(y - 0.22, 2) / 0.02)) - 0.01 * x * y;
+  }
+  const LR_LO = 0.01, LR_HI = 0.5;
+  const lrOf = (x) => Math.exp(Math.log(LR_LO) + x * (Math.log(LR_HI) - Math.log(LR_LO)));
+
+  /* ---------- 共用：一个小型 TPE（每个维度独立的 Parzen 估计，和 Hyperopt 思路一致） ---------- */
+  function parzen(points, bw) {
+    const n = points.length, w0 = 1 / (n + 1);
+    return (x) => {
+      let s = 0;
+      for (let i = 0; i < n; i++) { const z = (x - points[i]) / bw; s += Math.exp(-0.5 * z * z); }
+      return w0 + (n ? (1 - w0) * s / (n * bw * Math.sqrt(2 * Math.PI)) : 0);
+    };
+  }
+  function bwOf(n) { return K.clamp(0.3 / Math.sqrt(Math.max(1, n)), 0.03, 0.3); }
+  // obs: [{x:[..], loss}]；返回 {x, dens}
+  function tpeSuggest(obs, D, gamma, r, nCand) {
+    const sorted = obs.slice().sort((a, b) => a.loss - b.loss);
+    const nGood = Math.max(1, Math.ceil(gamma * sorted.length));
+    const good = sorted.slice(0, nGood), bad = sorted.slice(nGood);
+    const dens = [];
+    for (let d = 0; d < D; d++) {
+      const gp = good.map((o) => o.x[d]), bp = bad.map((o) => o.x[d]);
+      dens.push({ l: parzen(gp, bwOf(gp.length)), g: parzen(bp, bwOf(bp.length)), gp, bp });
+    }
+    let best = null, bestS = -Infinity;
+    for (let c = 0; c < (nCand || 24); c++) {
+      const x = [];
+      let s = 1;
+      for (let d = 0; d < D; d++) {
+        const gp = dens[d].gp, w0 = 1 / (gp.length + 1);
+        let v = r() < w0 ? r() : gp[Math.floor(r() * gp.length)] + K.randn(r) * bwOf(gp.length);
+        v = K.clamp(v, 0, 1);
+        x.push(v);
+        s *= dens[d].l(v) / dens[d].g(v);
+      }
+      if (s > bestS) { bestS = s; best = x; }
+    }
+    return { x: best, dens };
+  }
+
+  const steps = [
+    {
+      at: 0, title: "四种调参法：贝叶斯优化凭什么更聪明", kicker: "第 0–1 格 · 背景",
+      html: `<p>作者先列出调超参数的四种办法：<b>手动</b>凭感觉试、<b>网格搜索</b>把所有组合都试一遍、<b>随机搜索</b>随机抽组合、<b>自动调参</b>（梯度、贝叶斯优化、进化算法等“有方向”的搜索）。</p><p>前两种的问题是“不长记性”：试过的结果不影响下一次试哪里。<b>贝叶斯优化</b>会根据已有成绩建一个便宜的“替身模型”（代理函数），估计哪里分数可能高，再去那里试，从而少花几次昂贵的训练。</p><p>动画里同一片示意地形（颜色越深分数越高），三种方法各试 9 次：网格均匀铺开，随机东一个西一个，贝叶斯后几次越来越往深色区域靠。</p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        const names = ["网格搜索", "随机搜索", "贝叶斯优化"], X0 = [30, 270, 510], Y0 = 56, S = 180, G = 12;
+        let mn = Infinity, mx = -Infinity;
+        for (let i = 0; i < G; i++) for (let j = 0; j < G; j++) { const v = surf2((i + 0.5) / G, (j + 0.5) / G); mn = Math.min(mn, v); mx = Math.max(mx, v); }
+        X0.forEach((x0, k) => {
+          for (let i = 0; i < G; i++) for (let j = 0; j < G; j++) {
+            const v = (surf2((i + 0.5) / G, (j + 0.5) / G) - mn) / (mx - mn);
+            K.svg(svg, "rect", { x: x0 + (i * S) / G, y: Y0 + S - ((j + 1) * S) / G, width: S / G + 0.5, height: S / G + 0.5, fill: K.heat(v * 0.85) });
+          }
+          K.svg(svg, "rect", { x: x0, y: Y0, width: S, height: S, fill: "none", stroke: "var(--line)" });
+          K.svg(svg, "text", { x: x0 + S / 2, y: Y0 - 12, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, names[k]);
+        });
+        const r = K.rng(4);
+        const P = [[], [], []];
+        for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) P[0].push([(a + 0.5) / 3, (b + 0.5) / 3]);
+        for (let i = 0; i < 9; i++) P[1].push([r(), r()]);
+        const bay = [[0.8, 0.85], [0.15, 0.2], [0.6, 0.45], [0.42, 0.62], [0.3, 0.78], [0.38, 0.68], [0.33, 0.72], [0.36, 0.7], [0.35, 0.69]];
+        bay.forEach((p) => P[2].push(p));
+        K.svg(svg, "text", { x: 30, y: 270, "font-size": 12, class: "muted" }, "示意地形：横轴 = 学习率，纵轴 = 叶子数，颜色越深 = 交叉验证分数越高");
+        const best = X0.map((x0) => K.svg(svg, "text", { x: x0 + S / 2, y: 300, "text-anchor": "middle", "font-size": 13 }, ""));
+        (async () => {
+          const bestV = [-1, -1, -1];
+          for (let i = 0; i < 9; i++) {
+            for (let k = 0; k < 3; k++) {
+              const p = P[k][i], cx = X0[k] + p[0] * S, cy = Y0 + S - p[1] * S;
+              const c = K.svg(svg, "circle", { cx, cy, r: 0, fill: k === 2 ? "var(--c6)" : "var(--ink)", stroke: "var(--panel)", "stroke-width": 1.5 });
+              K.svg(svg, "text", { x: cx + 7, y: cy - 5, "font-size": 10 }, String(i + 1));
+              ctx.tween(250, (t) => c.setAttribute("r", 5 * t));
+              const v = surf2(p[0], p[1]);
+              if (v > bestV[k]) bestV[k] = v;
+              best[k].textContent = "已试 " + (i + 1) + " 次 · 最好的点越深越好";
+            }
+            if (!(await ctx.wait(420))) return;
+          }
+          ["均匀铺开，大部分落在浅色区", "碰运气", "后半程集中在深色山顶"].forEach((s, k) => (best[k].textContent = s));
+        })();
+      },
+    },
+    {
+      title: "抽 16000 行做一个小数据集", kicker: "第 2–4 格 · 准备数据",
+      html: `<p>每试一组超参数都要训练 5 个模型，用全量数据会太慢。作者从比赛训练表里<b>随机抽 16000 行</b>，<b>只留数值列</b>（文字类的列先不管），去掉答案列 <code>TARGET</code> 和编号 <code>SK_ID_CURR</code>，再切成 10000 行训练、6000 行测试。</p><p>作者特别强调：测试集<b>只能在最后用一次</b>，调参必须在训练集上靠交叉验证完成。</p>`,
+      cells: [2, 4], highlight: ["n = 16000", "select_dtypes('number')", "test_size = 6000", "N_FOLDS = 5", "MAX_EVALS = 5"],
+      draw(svg, ctx) {
+        const full = K.node(svg, 30, 40, 660, 50, "application_train.csv · 全部贷款申请（307,511 行）", { bold: true });
+        const small = K.svg(svg, "rect", { x: 30, y: 120, width: 0, height: 44, rx: 6, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const st = K.svg(svg, "text", { x: 40, y: 147, "font-size": 13, "font-weight": 700 }, "");
+        const tr = K.node(svg, 30, 250, 300, 56, "训练 10,000 行\n调参只在这里做（5 折交叉验证）", { fill: "color-mix(in srgb, var(--c1) 14%, var(--panel))", stroke: "var(--c1)" });
+        const te = K.node(svg, 390, 250, 200, 56, "测试 6,000 行\n🔒 最后才用", { fill: "color-mix(in srgb, var(--c3) 14%, var(--panel))", stroke: "var(--c3)" });
+        [tr, te].forEach((e) => (e.style.opacity = 0));
+        const cols = ["AMT_CREDIT", "DAYS_BIRTH", "NAME_TYPE", "EXT_SOURCE_2", "GENDER", "AMT_INCOME"], isNum = [1, 1, 0, 1, 0, 1];
+        const chips = cols.map((c, i) => {
+          const g = K.node(svg, 30 + i * 112, 186, 104, 30, c, { fs: 11, fill: isNum[i] ? "var(--panel-2)" : "color-mix(in srgb, var(--ink-3) 20%, var(--panel))" });
+          g.style.opacity = 0; return g;
+        });
+        K.svg(svg, "text", { x: 30, y: 332, "font-size": 12, class: "muted" }, "列名只是举例；灰色 = 文字类列，被 select_dtypes('number') 去掉");
+        ctx.wait(400)
+          .then((ok) => ok && ctx.tween(1200, (t) => { small.setAttribute("width", 660 * (0.05 + 0.95 * (1 - t)) ); st.textContent = "随机抽样 → " + Math.round(K.lerp(307511, 16000, t)).toLocaleString() + " 行"; }))
+          .then((ok) => ok && ctx.tween(500, (t) => chips.forEach((c) => (c.style.opacity = t))))
+          .then((ok) => ok && ctx.wait(500))
+          .then((ok) => ok && ctx.tween(700, (t) => chips.forEach((c, i) => { if (!isNum[i]) c.style.opacity = 1 - t * 0.85; })))
+          .then((ok) => ok && ctx.tween(700, (t) => { tr.style.opacity = te.style.opacity = t; }));
+      },
+    },
+    {
+      title: "基线：默认参数 + 5 折交叉验证 + 早停", kicker: "第 5–9 格 · 先量一个起点",
+      html: `<p>先不调参，用 LightGBM 的默认参数打个分，作为“起点”。打分方法是 <b>5 折交叉验证</b>：把训练集切 5 份，轮流拿 1 份当小考、4 份当练习。</p><p>树的棵数不手动定，交给 <b>早停</b>：一棵一棵往上加，验证分数连续 100 棵都没再提高就停，取最好的那一刻。最后用这个棵数在整个训练集上重训，到 6000 行测试集上算一次 ROC AUC。</p>`,
+      cells: [7, 9], highlight: ["early_stopping_rounds = 100", "nfold = N_FOLDS", "roc_auc_score"],
+      draw(svg, ctx) {
+        const folds = [];
+        for (let k = 0; k < 5; k++) folds.push(K.svg(svg, "rect", { x: 40 + k * 128, y: 18, width: 118, height: 30, rx: 5, fill: "color-mix(in srgb, var(--c1) 14%, var(--panel))", stroke: "var(--c1)" }));
+        const fl = K.svg(svg, "text", { x: 360, y: 68, "text-anchor": "middle", "font-size": 12 }, "");
+        const ax = K.axes(svg, { x: 60, y: 90, w: 600, h: 190 }, [0, 600], [0, 1], { yticks: 0, xlabel: "已经加了几棵树（示意）" });
+        K.svg(svg, "text", { x: 66, y: 102, "font-size": 12 }, "↑ 验证 AUC");
+        const f = (t) => 0.9 - 0.75 * Math.exp(-t / 70) - 0.0009 * Math.max(0, t - 300);
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        const vline = K.svg(svg, "line", { x1: 0, x2: 0, y1: 90, y2: 280, stroke: "var(--good)", "stroke-dasharray": "5 3", "stroke-width": 2, opacity: 0 });
+        const lab = K.svg(svg, "text", { x: 70, y: 316, "font-size": 13, "font-weight": 700 }, "");
+        (async () => {
+          for (let k = 0; k < 5; k++) {
+            folds.forEach((r, j) => K.set(r, { fill: j === k ? "color-mix(in srgb, var(--c3) 22%, var(--panel))" : "color-mix(in srgb, var(--c1) 14%, var(--panel))", stroke: j === k ? "var(--c3)" : "var(--c1)" }));
+            fl.textContent = `第 ${k + 1} 折：绿色这份当小考，其余 4 份当练习`;
+            if (!(await ctx.wait(350))) return;
+          }
+          fl.textContent = "5 折的分数取平均 = 这组参数的交叉验证 AUC";
+          let best = -1, bestT = 0;
+          if (!(await ctx.tween(2600, (u) => {
+            const T = Math.round(u * 400 + 0.5);
+            let d = "";
+            best = -1;
+            for (let t = 1; t <= T; t++) { const v = f(t); if (v > best) { best = v; bestT = t; } d += (d ? "L" : "M") + ax.sx(t) + "," + ax.sy(v); }
+            path.setAttribute("d", d);
+            const wait = T - bestT;
+            lab.textContent = `已加 ${T} 棵 · 连续 ${wait} 棵没提高` + (wait >= 100 ? " → 停！" : "");
+          }))) return;
+          K.set(vline, { x1: ax.sx(bestT), x2: ax.sx(bestT), opacity: 1 });
+          K.svg(svg, "text", { x: ax.sx(bestT) + 6, y: 110, "font-size": 12, fill: "var(--good)" }, "取这一刻的棵数");
+        })();
+      },
+    },
+    {
+      title: "目标函数：喂进一组超参数，吐出一个“越小越好”的分", kicker: "第 10–11 格 · 四件套之一",
+      html: `<p>贝叶斯优化需要四样东西：<b>目标函数、搜索空间、优化算法、结果记录</b>。第一样是目标函数 <code>objective</code>：拿到一组超参数 → 做 5 折交叉验证加早停 → 返回 <code>loss = 1 − AUC</code>。</p><p>为什么是 1 − AUC？因为 Hyperopt 只会“求最小”。AUC 越高越好，那 1 − AUC 就是越低越好。每调用一次，函数还会往 CSV 文件里追加一行（loss、参数、第几次、用时、分数），方便中途查看。</p>`,
+      cells: [11], highlight: ["loss = 1 - best_score", "writer.writerow", "'status': STATUS_OK"],
+      notes: { 14: "注意：这段文字说学习率范围是 0.005 到 0.5，下面第 15 格代码写的却是 0.005 到 0.2，第 26 格真正搜索时又是 0.01 到 0.5。" },
+      draw(svg, ctx) {
+        const a = K.node(svg, 20, 40, 190, 80, "一组超参数\nnum_leaves、learning_rate\n… 共 10 个", { fs: 12 });
+        const b = K.node(svg, 265, 40, 190, 80, "objective()\n5 折交叉验证 + 早停", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const c = K.node(svg, 510, 40, 190, 80, "loss = 1 − AUC\n越小越好", { fill: "color-mix(in srgb, var(--good) 14%, var(--panel))", stroke: "var(--good)" });
+        const a1 = K.arrow(svg, 210, 80, 262, 80), a2 = K.arrow(svg, 455, 80, 507, 80);
+        [b, c, a1, a2].forEach((e) => (e.style.opacity = 0));
+        const hdr = ["loss", "hyperparameters", "iteration", "runtime", "score"], xs = [40, 130, 390, 480, 580];
+        K.svg(svg, "text", { x: 20, y: 160, "font-size": 13, "font-weight": 700 }, "bayes_test.csv（每调用一次追加一行；下面的数是示意）");
+        hdr.forEach((h, i) => K.svg(svg, "text", { x: xs[i], y: 190, "font-size": 12, "font-family": "var(--mono)", "font-weight": 700 }, h));
+        K.svg(svg, "line", { x1: 30, x2: 690, y1: 197, y2: 197, stroke: "var(--line)" });
+        const rows = [["0.27…", "{'num_leaves': 88, …}", "1", "41 s", "0.73…"], ["0.29…", "{'num_leaves': 31, …}", "2", "25 s", "0.71…"], ["0.26…", "{'num_leaves': 120, …}", "3", "63 s", "0.74…"]];
+        (async () => {
+          for (let k = 0; k < 3; k++) {
+            if (!(await ctx.tween(350, (t) => { a1.style.opacity = b.style.opacity = t; }))) return;
+            if (!(await ctx.tween(350, (t) => { a2.style.opacity = c.style.opacity = t; }))) return;
+            const g = K.svg(svg, "g");
+            rows[k].forEach((v, i) => K.svg(g, "text", { x: xs[i], y: 220 + k * 26, "font-size": 12, "font-family": "var(--mono)" }, v));
+            g.style.opacity = 0;
+            if (!(await ctx.tween(300, (t) => (g.style.opacity = t)))) return;
+            if (k < 2) { b.style.opacity = c.style.opacity = a1.style.opacity = a2.style.opacity = 0; if (!(await ctx.wait(200))) return; }
+          }
+        })();
+      },
+    },
+    {
+      title: "搜索空间不是格子，是“抽签箱”", kicker: "第 12–19 格 · 四件套之二",
+      html: `<p>网格搜索的空间是一张表格；Hyperopt 的空间是<b>概率分布</b>：每个超参数是一个抽签箱，告诉算法“这个值大概在哪个范围、各处抽到的机会多大”。</p><ul class="tight"><li>学习率用 <b>对数均匀</b> <code>hp.loguniform</code>：0.005–0.05 和 0.05–0.5 抽中的机会一样大（每段都是“乘 10”）。适合跨好几个数量级的参数。</li><li>叶子数用 <code>hp.quniform</code>：在 30–150 之间均匀抽整数。</li></ul><p>动画各抽 2000 次画直方图（横轴是普通刻度）：左边挤在小值一端，右边平平的。</p>`,
+      cells: [15, 17, 19], highlight: ["hp.loguniform", "hp.quniform", "range(10000)"],
+      draw(svg, ctx) {
+        const r = K.rng(9), N = 2000, B = 24;
+        const A = [], L = [];
+        for (let i = 0; i < N; i++) { A.push(Math.exp(Math.log(0.005) + r() * (Math.log(0.2) - Math.log(0.005)))); L.push(30 + Math.round(r() * 120)); }
+        const ax1 = K.axes(svg, { x: 40, y: 40, w: 300, h: 230 }, [0.005, 0.2], [0, 1], { yticks: 0, xticks: 3, xfmt: (v) => v.toFixed(3), xlabel: "learning_rate（0.005–0.2，对数均匀）" });
+        const ax2 = K.axes(svg, { x: 390, y: 40, w: 300, h: 230 }, [30, 150], [0, 1], { yticks: 0, xticks: 4, xlabel: "num_leaves（30–150，均匀整数）" });
+        const mk = (ax, lo, hi) => Array.from({ length: B }, (_, i) => K.svg(svg, "rect", { x: ax.sx(lo + ((hi - lo) * i) / B) + 1, y: 270, width: (ax.sx(hi) - ax.sx(lo)) / B - 2, height: 0, fill: "var(--c1)", opacity: 0.8 }));
+        const b1 = mk(ax1, 0.005, 0.2), b2 = mk(ax2, 30, 150);
+        b2.forEach((b) => K.set(b, { fill: "var(--c2)" }));
+        const cnt = K.svg(svg, "text", { x: 360, y: 24, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "");
+        ctx.tween(2600, (t) => {
+          const n = Math.round(t * N), h1 = new Array(B).fill(0), h2 = new Array(B).fill(0);
+          for (let i = 0; i < n; i++) { h1[Math.min(B - 1, Math.floor(((A[i] - 0.005) / 0.195) * B))]++; h2[Math.min(B - 1, Math.floor(((L[i] - 30) / 120.0001) * B))]++; }
+          const m = N / 6;
+          b1.forEach((b, i) => { const h = Math.min(230, (h1[i] / m) * 230); b.setAttribute("y", 270 - h); b.setAttribute("height", h); });
+          b2.forEach((b, i) => { const h = Math.min(230, (h2[i] / m) * 230); b.setAttribute("y", 270 - h); b.setAttribute("height", h); });
+          cnt.textContent = `已抽 ${n} 次`;
+        });
+      },
+    },
+    {
+      title: "条件空间：选了 goss 就不能再抽行", kicker: "第 20–24 格 · 嵌套的选择",
+      html: `<p>有些超参数互相牵连。LightGBM 的 <b>goss</b> 提升方式自己会挑样本，不能再设 <code>subsample</code>（每棵树抽多少比例的行）；gbdt 和 dart 则可以在 0.5–1 之间抽。</p><p>Hyperopt 用 <code>hp.choice</code> 里套字典来表达这种“先选 A，再决定 B”的关系。抽出来的结果是嵌套字典，作者再用 <code>dict.get('subsample', 1.0)</code> 把它拍平成 LightGBM 认识的两个顶层参数。</p>`,
+      cells: [21, 23], highlight: ["hp.choice", "'goss', 'subsample': 1.0", ".get('subsample', 1.0)"],
+      draw(svg, ctx) {
+        const root = K.node(svg, 260, 20, 200, 50, "boosting_type\nhp.choice 三选一", { bold: true });
+        const kids = [["gbdt", 60], ["dart", 260], ["goss", 460]].map(([n, x]) => ({ n, x, g: K.node(svg, x, 130, 200, 44, n, { fs: 14 }) }));
+        const leaves = [K.node(svg, 60, 230, 200, 50, "subsample ~ 均匀(0.5, 1)", { fs: 12 }), K.node(svg, 260, 230, 200, 50, "subsample ~ 均匀(0.5, 1)", { fs: 12 }), K.node(svg, 460, 230, 200, 50, "subsample = 1.0（固定）", { fs: 12, fill: "color-mix(in srgb, var(--warn) 14%, var(--panel))", stroke: "var(--warn)" })];
+        kids.forEach((k) => { K.arrow(svg, 360, 70, k.x + 100, 128); K.arrow(svg, k.x + 100, 174, k.x + 100, 228); });
+        const out = K.svg(svg, "text", { x: 360, y: 318, "text-anchor": "middle", "font-size": 13, "font-family": "var(--mono)" }, "");
+        const ball = K.svg(svg, "circle", { cx: 360, cy: 45, r: 8, fill: "var(--c6)" });
+        const r = K.rng(3);
+        (async () => {
+          for (let rep = 0; rep < 4; rep++) {
+            const k = [0, 2, 1, 0][rep], kd = kids[k];
+            if (!(await ctx.tween(500, (t) => { ball.setAttribute("cx", K.lerp(360, kd.x + 100, t)); ball.setAttribute("cy", K.lerp(45, 152, t)); }))) return;
+            if (!(await ctx.tween(400, (t) => ball.setAttribute("cy", K.lerp(152, 255, t))))) return;
+            const sub = k === 2 ? "1.0" : (0.5 + r() * 0.5).toFixed(2);
+            out.textContent = `抽到：{'boosting_type': '${kd.n}', 'subsample': ${sub}}`;
+            if (!(await ctx.wait(900))) return;
+            ball.setAttribute("cx", 360); ball.setAttribute("cy", 45);
+          }
+        })();
+      },
+    },
+    {
+      title: "完整搜索空间：10 个旋钮一起抽签", kicker: "第 25–31 格 · 试抽与试跑",
+      html: `<p>作者把 10 个超参数拼成完整的 <code>space</code>：类别用 <code>hp.choice</code>，整数用 <code>hp.quniform</code>，跨数量级的学习率用 <code>hp.loguniform</code>，其余用 <code>hp.uniform</code>。</p><p>然后从空间里随手抽两次看看长什么样（每次结果都不同），再用抽到的一组参数把目标函数试跑一遍，确认能返回 loss 和最佳棵数。</p>`,
+      cells: [26, 28, 31], highlight: ["space = {", "sample(space)", "results = objective(sample(space))"],
+      draw(svg, ctx) {
+        const P = [["boosting_type", (r) => ["gbdt", "dart", "goss"][Math.floor(r() * 3)]], ["num_leaves", (r) => String(20 + Math.round(r() * 130))], ["learning_rate", (r) => Math.exp(Math.log(0.01) + r() * Math.log(50)).toFixed(4)], ["subsample_for_bin", (r) => String(20000 * (1 + Math.floor(r() * 15)))], ["min_child_samples", (r) => String(20 + 5 * Math.floor(r() * 97))], ["reg_alpha", (r) => r().toFixed(3)], ["reg_lambda", (r) => r().toFixed(3)], ["colsample_bytree", (r) => (0.6 + 0.4 * r()).toFixed(3)], ["is_unbalance", (r) => (r() < 0.5 ? "True" : "False")], ["subsample", (r) => (0.5 + 0.5 * r()).toFixed(3)]];
+        K.svg(svg, "text", { x: 40, y: 26, "font-size": 13, "font-weight": 700 }, "sample(space) 抽出的一组（示意）");
+        const vals = P.map((p, i) => {
+          K.svg(svg, "text", { x: 60, y: 56 + i * 27, "font-size": 13, "font-family": "var(--mono)" }, p[0]);
+          K.svg(svg, "rect", { x: 260, y: 40 + i * 27, width: 150, height: 22, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" });
+          return K.svg(svg, "text", { x: 335, y: 56 + i * 27, "text-anchor": "middle", "font-size": 13, "font-family": "var(--mono)", fill: "var(--accent)" }, "");
+        });
+        const draw = K.svg(svg, "text", { x: 460, y: 60, "font-size": 14, "font-weight": 700 }, "");
+        const note = K.svg(svg, "text", { x: 460, y: 90, "font-size": 12, class: "muted" }, "");
+        const r = K.rng(21);
+        (async () => {
+          for (let d = 1; d <= 2; d++) {
+            draw.textContent = `第 ${d} 次抽签（第 ${d === 1 ? 28 : 29} 格）`;
+            for (let k = 0; k < 10; k++) {
+              for (let f = 0; f < 3; f++) { vals.forEach((v, i) => { if (i >= k) v.textContent = P[i][1](r); }); if (!(await ctx.wait(45))) return; }
+            }
+            if (P[0][1] && vals[0].textContent === "goss") vals[9].textContent = "1.0";
+            note.textContent = "goss 时 subsample 自动为 1.0";
+            if (!(await ctx.wait(900))) return;
+          }
+          K.node(svg, 460, 200, 230, 70, "objective(sample(space))\n→ 返回 loss 和最佳棵数", { fs: 12, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        })();
+      },
+    },
+    {
+      title: "优化算法 TPE：把试过的点分成“好的”和“差的”", kicker: "第 32–33 格 · 四件套之三",
+      html: `<p>第三样是优化算法。Hyperopt 用的是 <b>TPE（树结构 Parzen 估计）</b>，代码只有一行 <code>tpe.suggest</code>，但思路值得讲清：</p><ol class="tight"><li>把已经试过的点按分数排队，前面一小部分（默认约 25%）算“好的”，其余算“差的”；</li><li>分别估计“好点大概分布在哪”（下图绿色曲线 l）和“差点大概分布在哪”（灰色曲线 g）；</li><li>在 l 高、g 低的地方，也就是 l / g 最大的地方，试下一次。</li></ol><p>动画里的点和曲线是示意，用的是本页自带的小型 TPE 现场算的。</p>`,
+      cells: [33], highlight: ["tpe.suggest"],
+      draw(svg, ctx) {
+        const r = K.rng(12), obs = [];
+        for (let i = 0; i < 14; i++) { const x = r(); obs.push({ x: [x], loss: 1 - surf1(x) }); }
+        const ax = K.axes(svg, { x: 50, y: 20, w: 620, h: 150 }, [0, 1], [0.67, 0.75], { yticks: 0, xticks: 0 });
+        K.svg(svg, "text", { x: 44, y: 30, "text-anchor": "end", "font-size": 11 }, "AUC");
+        const pts = obs.map((o) => K.svg(svg, "circle", { cx: ax.sx(o.x[0]), cy: ax.sy(1 - o.loss), r: 5, fill: "var(--ink-3)" }));
+        const sorted = obs.slice().sort((a, b) => a.loss - b.loss), nGood = Math.ceil(0.25 * obs.length), thr = 1 - sorted[nGood - 1].loss;
+        const tl = K.svg(svg, "line", { x1: 50, x2: 670, y1: ax.sy(thr), y2: ax.sy(thr), stroke: "var(--good)", "stroke-dasharray": "5 3", opacity: 0 });
+        const tt = K.svg(svg, "text", { x: 672, y: ax.sy(thr) - 4, "text-anchor": "end", "font-size": 11, fill: "var(--good)", opacity: 0 }, "前 25% = 好的");
+        const res = tpeSuggest(obs, 1, 0.25, K.rng(5), 60), d = res.dens[0];
+        const ax2 = K.axes(svg, { x: 50, y: 200, w: 620, h: 100 }, [0, 1], [0, 1], { yticks: 0, xticks: 0, xlabel: "学习率（对数刻度，示意）" });
+        let mx = 0; const xs = [];
+        for (let i = 0; i <= 120; i++) { const x = i / 120; xs.push(x); mx = Math.max(mx, d.l(x), d.g(x)); }
+        const pathOf = (fn, s) => xs.map((x, i) => (i ? "L" : "M") + ax2.sx(x) + "," + ax2.sy(Math.min(1, (fn(x) / mx) * s))).join("");
+        const pl = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--good)", "stroke-width": 2.5 });
+        const pg = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--ink-3)", "stroke-width": 2 });
+        const legend = K.svg(svg, "text", { x: 60, y: 214, "font-size": 12 }, "");
+        const nx = res.x[0];
+        const arrow = K.arrow(svg, ax.sx(nx), 198, ax.sx(nx), ax.sy(surf1(nx)) + 10, { color: "var(--c6)", sw: 2 });
+        arrow.style.opacity = 0;
+        const nt = K.svg(svg, "text", { x: ax.sx(nx) + 8, y: 192, "font-size": 12, fill: "var(--c6)", "font-weight": 700, opacity: 0 }, "l / g 最大 → 下一次试这里");
+        (async () => {
+          if (!(await ctx.wait(500))) return;
+          if (!(await ctx.tween(500, (t) => { tl.style.opacity = t; tt.style.opacity = t; }))) return;
+          obs.forEach((o, i) => { if (1 - o.loss >= thr) K.set(pts[i], { fill: "var(--good)" }); });
+          if (!(await ctx.wait(500))) return;
+          if (!(await ctx.tween(1000, (t) => { pl.setAttribute("d", pathOf(d.l, t)); pg.setAttribute("d", pathOf(d.g, t)); legend.textContent = "绿 l(x)：好点的分布    灰 g(x)：差点的分布"; }))) return;
+          if (!(await ctx.wait(300))) return;
+          ctx.tween(500, (t) => { arrow.style.opacity = t; nt.style.opacity = t; });
+        })();
+      },
+    },
+    {
+      title: "fmin 跑起来：提议 → 打分 → 记录，循环", kicker: "第 34–48 格 · 四件套之四 + 运行",
+      html: `<p>第四样是<b>结果记录</b>：<code>Trials</code> 对象保存每次目标函数的返回值，同时 CSV 文件也在一行行追加。TPE 就是靠这份记录来“长记性”的。</p><p>四件套齐了，交给 <code>fmin</code>：它循环“TPE 提议一组参数 → 目标函数打分 → 写进记录”，直到 <code>max_evals</code> 次（这里只设 5 次，为了在 Kaggle 上跑得完）。<code>best</code> 只保存最好那组参数；想看搜索过程就读 CSV，再用 <code>evaluate</code> 拿最好那组参数在测试集上算一次 AUC。</p>`,
+      cells: [35, 41, 47], highlight: ["Trials()", "fmin(fn = objective", "max_evals = MAX_EVALS", "roc_auc_score(test_labels, preds)"],
+      draw(svg, ctx) {
+        const C = [[300, 30, "TPE 提议\n下一组超参数"], [520, 140, "objective 打分\n5 折 CV → 1 − AUC"], [300, 250, "Trials + CSV\n记下这一次"], [80, 140, "看全部记录\n更新“好 / 差”"]];
+        C.forEach(([x, y, t], i) => K.node(svg, x, y, 160, 60, t, { fs: 12, fill: i === 1 ? "var(--accent-soft)" : "var(--panel-2)", stroke: i === 1 ? "var(--accent)" : "var(--line)" }));
+        const P = [[380, 60], [600, 170], [380, 280], [160, 170]];
+        for (let i = 0; i < 4; i++) { const a = P[i], b = P[(i + 1) % 4]; K.arrow(svg, K.lerp(a[0], b[0], 0.3), K.lerp(a[1], b[1], 0.3), K.lerp(a[0], b[0], 0.7), K.lerp(a[1], b[1], 0.7)); }
+        const cnt = K.svg(svg, "text", { x: 380, y: 176, "text-anchor": "middle", "font-size": 22, "font-weight": 700 }, "0 / 5");
+        const ball = K.svg(svg, "circle", { cx: 380, cy: 60, r: 9, fill: "var(--c6)" });
+        const recs = [];
+        (async () => {
+          for (let k = 1; k <= 5; k++) {
+            for (let s = 0; s < 4; s++) {
+              const a = P[s], b = P[(s + 1) % 4];
+              if (!(await ctx.tween(330, (t) => { ball.setAttribute("cx", K.lerp(a[0], b[0], t)); ball.setAttribute("cy", K.lerp(a[1], b[1], t)); }))) return;
+              if (s === 1) { cnt.textContent = `${k} / 5`; recs.push(K.svg(svg, "rect", { x: 520 + (k - 1) * 30, y: 290, width: 24, height: 24, rx: 4, fill: "var(--c3)" })); }
+            }
+          }
+          K.svg(svg, "text", { x: 520, y: 284, "font-size": 12 }, "Trials 里 5 条记录");
+          cnt.textContent = "完成：best = 最低 loss 那组";
+          K.set(cnt, { "font-size": 14 });
+        })();
+      },
+    },
+    {
+      title: "接着搜、存下来：搜索可以“断点续传”", kicker: "第 49–55 格 · 续跑与保存",
+      html: `<p>TPE 本身不记状态，它需要的只是历史记录。所以把已经有 5 条记录的 <code>Trials</code> 再交给 <code>fmin</code>、把 <code>MAX_EVALS</code> 改成 10，它就会接着搜 5 次，而不是从头来。</p><p>作者再把记录存成 json 文件，以后读回来还能继续。<b>但这里有个小错</b>：第 52 格保存的是第 43 格排好序的 <code>trials_dict</code>，那是续跑之前的快照，只有 5 条；续跑新增的 5 条没有存进去。</p><p>第 55 格是 1000 次完整搜索的代码，被作者整段注释掉了（在 Kaggle 的时间限制内跑不完），结果改成直接读事先跑好的 CSV。</p>`,
+      cells: [50, 52], highlight: ["MAX_EVALS = 10", "json.dumps(trials_dict)"],
+      notes: { 55: "这一格全部被注释掉：1000 次搜索太久，作者在别处跑完后把结果上传成数据集。" },
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 40, y: 40, "font-size": 14, "font-weight": 700 }, "Trials 对象（内存里）");
+        const blocks = [];
+        for (let i = 0; i < 10; i++) { const b = K.svg(svg, "rect", { x: 40 + i * 50, y: 56, width: 42, height: 42, rx: 6, fill: i < 5 ? "var(--c3)" : "var(--c1)", opacity: i < 5 ? 1 : 0 }); blocks.push(b); K.svg(svg, "text", { x: 61 + i * 50, y: 83, "text-anchor": "middle", "font-size": 13, fill: "var(--panel)", opacity: 0 }, String(i + 1)); }
+        const txt = svg.querySelectorAll("text");
+        const lab = K.svg(svg, "text", { x: 560, y: 84, "font-size": 13 }, "5 次（第 41 格）");
+        K.svg(svg, "text", { x: 40, y: 160, "font-size": 14, "font-weight": 700 }, "trials_dict（第 43 格排序时的快照）");
+        const snap = [];
+        for (let i = 0; i < 5; i++) snap.push(K.svg(svg, "rect", { x: 40 + i * 50, y: 176, width: 42, height: 42, rx: 6, fill: "var(--c3)", opacity: 0 }));
+        const file = K.node(svg, 420, 240, 260, 60, "trials.json（第 52 格保存）\n只有前 5 条", { fs: 12, fill: "color-mix(in srgb, var(--warn) 14%, var(--panel))", stroke: "var(--warn)" });
+        file.style.opacity = 0;
+        const arr = K.arrow(svg, 290, 200, 420, 262, { color: "var(--warn)" }); arr.style.opacity = 0;
+        (async () => {
+          for (let i = 1; i < txt.length; i++) if (i <= 10) txt[i].style.opacity = i <= 5 ? 1 : 0;
+          if (!(await ctx.tween(600, (t) => snap.forEach((s) => (s.style.opacity = t))))) return;
+          if (!(await ctx.wait(400))) return;
+          lab.textContent = "续跑到 10 次（第 50 格）";
+          for (let i = 5; i < 10; i++) { if (!(await ctx.tween(260, (t) => { blocks[i].style.opacity = t; txt[i + 1].style.opacity = t; }))) return; }
+          if (!(await ctx.wait(400))) return;
+          ctx.tween(600, (t) => { file.style.opacity = t; arr.style.opacity = t; });
+        })();
+      },
+    },
+    {
+      title: "1000 次对 1000 次：分数随次数怎么变", kicker: "第 56–66 格 · 读入事先跑好的结果",
+      html: `<p>作者读入事先跑好的两份记录：<b>贝叶斯优化 1000 次</b>、<b>随机搜索 1000 次</b>，各自取交叉验证最好的那组参数，到测试集上算 AUC。作者的文字结论是：贝叶斯的交叉验证最高分反而<b>不如</b>随机搜索，但测试集上<b>更好</b>。</p><p>再把每一次的分数按顺序画出来：随机搜索的点没有趋势；贝叶斯优化的点<b>越往后越高</b>，说明它确实越来越多地在“有希望”的地方试。动画里的点是示意形状，真实的图在原 notebook 的运行输出里。</p>`,
+      cells: [58, 64], highlight: ["bayesian_trials_1000.csv", "random_search_trials_1000.csv", "lmplot"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 24, w: 600, h: 250 }, [0, 1000], [0, 1], { yticks: 0, xlabel: "第几次搜索" });
+        K.svg(svg, "text", { x: 66, y: 36, "font-size": 12 }, "↑ CV AUC");
+        K.svg(svg, "text", { x: 60, y: 330, "font-size": 12, class: "muted" }, "示意：蓝 = 随机搜索（没有趋势），红 = 贝叶斯优化（越往后越高）");
+        const r = K.rng(31), R = [], B = [];
+        for (let i = 0; i < 160; i++) { const it = (i + 0.5) * 6.25; R.push([it, K.clamp(0.55 + K.randn(r) * 0.13 - (r() < 0.12 ? 0.3 : 0), 0.02, 0.97)]); B.push([it, K.clamp(0.42 + 0.35 * (it / 1000) + K.randn(r) * 0.08 - (r() < 0.06 ? 0.25 : 0), 0.02, 0.97)]); }
+        const er = R.map((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 0, fill: "var(--c1)", opacity: 0.6 }));
+        const eb = B.map((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 0, fill: "var(--c6)", opacity: 0.6 }));
+        const tr = K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0.42), x2: ax.sx(0), y2: ax.sy(0.42), stroke: "var(--c6)", "stroke-width": 3 });
+        const tr2 = K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0.55), x2: ax.sx(0), y2: ax.sy(0.55), stroke: "var(--c1)", "stroke-width": 3 });
+        ctx.tween(2600, (t) => {
+          const n = t * 160;
+          er.forEach((c, i) => c.setAttribute("r", K.clamp(n - i, 0, 1) * 3));
+          eb.forEach((c, i) => c.setAttribute("r", K.clamp(n - i, 0, 1) * 3));
+          tr.setAttribute("x2", ax.sx(1000 * t)); tr.setAttribute("y2", ax.sy(0.42 + 0.35 * t));
+          tr2.setAttribute("x2", ax.sx(1000 * t)); tr2.setAttribute("y2", ax.sy(0.55));
+        });
+      },
+    },
+    {
+      title: "被试过的值长什么样：抽样分布、随机、贝叶斯", kicker: "第 67–70 格 · 超参数分布",
+      html: `<p>接着看每个超参数“被试过的值”的分布。三条曲线：<b>抽样分布</b>（搜索空间本身）、<b>随机搜索</b>试过的值、<b>贝叶斯优化</b>试过的值。随机搜索应该和抽样分布差不多；贝叶斯优化会集中在它认为有希望的区域，曲线更尖。虚线是两种方法各自找到的最佳值。</p><p>注意：第 68 格画学习率时，“抽样分布”用的是第 17 格按 0.005–0.2 抽出的 <code>learning_rate_dist</code>，而真正搜索时的范围是 0.01–0.5（第 26 格），参照线画错了范围。</p>`,
+      cells: [68, 70], highlight: ["learning_rate_dist, label = 'Sampling Distribution'", "Bayes Optimization"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 30, w: 620, h: 240 }, [0, 1], [0, 1], { yticks: 0, xticks: 0, xlabel: "learning_rate（示意形状）" });
+        const xs = Array.from({ length: 121 }, (_, i) => i / 120);
+        const fS = (x) => 0.35 * Math.exp(-x * 2.2) + 0.02, fR = (x) => 0.33 * Math.exp(-x * 2.1) + 0.03 + 0.015 * Math.sin(x * 14), fB = (x) => 0.9 * Math.exp(-Math.pow((x - 0.18) / 0.07, 2)) + 0.05 * Math.exp(-x * 3);
+        const mk = (f, c, w) => K.svg(svg, "path", { d: "", fill: "none", stroke: c, "stroke-width": w });
+        const ps = [mk(fS, "var(--ink-3)", 3), mk(fR, "var(--c1)", 3), mk(fB, "var(--c6)", 3)], fs = [fS, fR, fB];
+        [["抽样分布", "var(--ink-3)"], ["随机搜索", "var(--c1)"], ["贝叶斯优化", "var(--c6)"]].forEach(([n, c], i) => { K.svg(svg, "rect", { x: 470, y: 40 + i * 22, width: 14, height: 4, fill: c }); K.svg(svg, "text", { x: 490, y: 46 + i * 22, "font-size": 12 }, n); });
+        const v1 = K.svg(svg, "line", { x1: ax.sx(0.2), x2: ax.sx(0.2), y1: 270, y2: 270, stroke: "var(--c6)", "stroke-dasharray": "5 3", "stroke-width": 2 });
+        const v2 = K.svg(svg, "line", { x1: ax.sx(0.42), x2: ax.sx(0.42), y1: 270, y2: 270, stroke: "var(--c1)", "stroke-dasharray": "5 3", "stroke-width": 2 });
+        (async () => {
+          for (let k = 0; k < 3; k++) {
+            if (!(await ctx.tween(800, (t) => { const n = Math.round(t * 120); ps[k].setAttribute("d", xs.slice(0, n + 1).map((x, i) => (i ? "L" : "M") + ax.sx(x) + "," + ax.sy(fs[k](x))).join("")); }))) return;
+          }
+          ctx.tween(600, (t) => { v1.setAttribute("y1", 270 - 230 * t); v2.setAttribute("y1", 270 - 230 * t); });
+        })();
+      },
+    },
+    {
+      title: "搜索的演化：贝叶斯越来越偏爱 dart", kicker: "第 71–78 格 · 随时间变化",
+      html: `<p>作者把贝叶斯优化每一次试的 8 个数值超参数按搜索顺序画成散点加趋势线，能看出它在往哪个方向收：有的参数越试越小，有的越试越大（具体方向在运行输出里，这里画的是示意）。</p><p>最后数一数三种提升方式各被试了多少次：随机搜索三者差不多；贝叶斯优化<b>试 dart 的次数远多于均匀抽签应有的次数</b>（第 76 格）。作者建议用这些信息给下一轮搜索划一个更窄的范围。</p>`,
+      cells: [72, 75], highlight: ["regplot", "value_counts"],
+      draw(svg, ctx) {
+        const r = K.rng(8), names = ["colsample_bytree", "learning_rate", "min_child_samples", "num_leaves"], slope = [0.25, -0.35, 0.3, -0.2];
+        const panels = names.map((n, k) => {
+          const x0 = 20 + k * 110, ax = K.axes(svg, { x: x0, y: 40, w: 96, h: 130 }, [0, 1], [0, 1], { xticks: 0, yticks: 0 });
+          K.svg(svg, "text", { x: x0 + 48, y: 30, "text-anchor": "middle", "font-size": 10 }, n);
+          const P = [];
+          for (let i = 0; i < 40; i++) { const t = i / 39; P.push(K.svg(svg, "circle", { cx: ax.sx(t), cy: ax.sy(K.clamp(0.5 + slope[k] * (t - 0.5) * 2 + K.randn(r) * 0.15, 0.02, 0.98)), r: 0, fill: "var(--c6)", opacity: 0.6 })); }
+          const L = K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0.5 - slope[k]), x2: ax.sx(0), y2: ax.sy(0.5 - slope[k]), stroke: "var(--ink)", "stroke-width": 2 });
+          return { P, L, ax, s: slope[k] };
+        });
+        K.svg(svg, "text", { x: 20, y: 196, "font-size": 11, class: "muted" }, "横轴 = 第几次搜索，纵轴 = 试的值（示意）");
+        K.svg(svg, "text", { x: 470, y: 30, "font-size": 13, "font-weight": 700 }, "boosting_type 被试的次数");
+        const types = ["gbdt", "dart", "goss"], hR = [0.33, 0.34, 0.33], hB = [0.18, 0.66, 0.16];
+        const bars = [];
+        types.forEach((t, i) => {
+          K.svg(svg, "text", { x: 470, y: 70 + i * 70, "font-size": 12 }, t);
+          bars.push([K.svg(svg, "rect", { x: 510, y: 54 + i * 70, width: 0, height: 18, fill: "var(--c1)" }), K.svg(svg, "rect", { x: 510, y: 76 + i * 70, width: 0, height: 18, fill: "var(--c6)" })]);
+        });
+        K.svg(svg, "rect", { x: 470, y: 270, width: 12, height: 10, fill: "var(--c1)" }); K.svg(svg, "text", { x: 488, y: 279, "font-size": 11 }, "随机搜索");
+        K.svg(svg, "rect", { x: 560, y: 270, width: 12, height: 10, fill: "var(--c6)" }); K.svg(svg, "text", { x: 578, y: 279, "font-size": 11 }, "贝叶斯优化");
+        K.svg(svg, "text", { x: 470, y: 304, "font-size": 11, class: "muted" }, "长短只表示“dart 明显更多”，不是原文数值");
+        (async () => {
+          if (!(await ctx.tween(1600, (t) => panels.forEach((p) => { p.P.forEach((c, i) => c.setAttribute("r", K.clamp(t * 40 - i, 0, 1) * 2.6)); p.L.setAttribute("x2", p.ax.sx(t)); p.L.setAttribute("y2", p.ax.sy(0.5 - p.s + 2 * p.s * t)); })))) return;
+          ctx.tween(1000, (t) => bars.forEach((b, i) => { b[0].setAttribute("width", 180 * hR[i] * 1.4 * t); b[1].setAttribute("width", 180 * hB[i] * 1.4 * t); }));
+        })();
+      },
+    },
+    {
+      title: "搬到完整数据上提交：0.787 对 0.792", kicker: "第 79–91 格 · 全量验证与结论",
+      html: `<p>最后一步检验“小数据上调出来的参数，到大数据上还灵不灵”。作者换用另一个公开 kernel 做好的完整特征集，分别用随机搜索和贝叶斯优化在小数据上找到的最佳参数，重新做 5 折交叉验证加早停定棵数，训练后提交到比赛。</p><ul class="tight"><li>随机搜索的参数：<b>0.787</b>（原 kernel 自己的成绩是 0.792）<span data-cell="86">第 86 格</span></li><li>贝叶斯优化的参数：<b>0.792</b> <span data-cell="90">第 90 格</span></li></ul><p>作者自己提醒：随机搜索的交叉验证分数其实更高，所以“不要太看重”这次胜负。结论是：贝叶斯优化是一种好用的自动调参工具，思路就是<b>从过去的经验里学习</b>。</p>`,
+      cells: [83, 88], highlight: ["submission_random_search.csv", "submission_bayesian_optimization.csv", "random_results.loc[0, 'hyperparameters']", "bayes_results.loc[0, 'hyperparameters']"],
+      draw(svg, ctx) {
+        K.node(svg, 20, 30, 170, 56, "小数据 10,000 行\n各搜 1000 次", { fs: 12 });
+        K.node(svg, 230, 30, 170, 56, "两组最佳超参数", { fs: 12, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        K.node(svg, 440, 30, 260, 56, "完整特征集（另一个公开 kernel）\nCV 定棵数 → 训练 → 提交", { fs: 12 });
+        K.arrow(svg, 190, 58, 228, 58); K.arrow(svg, 400, 58, 438, 58);
+        const D = [["原 kernel", 0.792, "var(--ink-3)"], ["随机搜索", 0.787, "var(--c1)"], ["贝叶斯优化", 0.792, "var(--c6)"]];
+        const ax = K.axes(svg, { x: 120, y: 120, w: 520, h: 170 }, [0, 1], [0.78, 0.795], { xticks: 0, yticks: 3, yfmt: (v) => v.toFixed(3) });
+        K.svg(svg, "text", { x: 120, y: 112, "font-size": 12, fill: "var(--warn)" }, "注意：纵轴从 0.78 开始，差距被放大了");
+        const bars = D.map((d, i) => {
+          const x = 160 + i * 160;
+          K.svg(svg, "text", { x: x + 50, y: 308, "text-anchor": "middle", "font-size": 13 }, d[0]);
+          const rct = K.svg(svg, "rect", { x, y: ax.sy(0.78), width: 100, height: 0, fill: d[2], rx: 3 });
+          const tx = K.svg(svg, "text", { x: x + 50, y: ax.sy(d[1]) - 6, "text-anchor": "middle", "font-size": 14, "font-weight": 700, opacity: 0 }, d[1].toFixed(3));
+          return { rct, tx, v: d[1] };
+        });
+        K.svg(svg, "text", { x: 120, y: 332, "font-size": 12, class: "muted" }, "比赛提交分数（ROC AUC），出处：第 86、90 格作者文字");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1200, (t) => bars.forEach((b) => { const y = K.lerp(ax.sy(0.78), ax.sy(b.v), t); b.rct.setAttribute("y", y); b.rct.setAttribute("height", ax.sy(0.78) - y); b.tx.style.opacity = t; })));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：对数均匀 vs 均匀 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "rg", label: "学习率的范围", value: "a", options: [["a", "0.005 – 0.2（第 15 格代码）"], ["b", "0.01 – 0.5（第 26 格真正搜索）"], ["c", "0.005 – 0.5（第 14 格文字）"]] },
+      { id: "dist", label: "抽签方式", value: "log", options: [["log", "对数均匀 hp.loguniform"], ["uni", "普通均匀 hp.uniform"]] },
+      { id: "n", label: "抽多少次", min: 100, max: 10000, step: 100, value: 10000 },
+      { id: "seed", label: "重新抽", button: true },
+    ],
+    note: "横轴是普通刻度。对数均匀时，0.005–0.05 和 0.05–0.5 这两段（各“乘 10”）抽中的机会一样，所以直方图挤在左边；普通均匀时，大部分签都落在 0.05 以上。",
+    render(svg, v) {
+      const R = { a: [0.005, 0.2], b: [0.01, 0.5], c: [0.005, 0.5] }[v.rg], lo = R[0], hi = R[1];
+      const r = K.rng(77 + v.seed * 13), B = 40, h = new Array(B).fill(0), vals = [];
+      for (let i = 0; i < v.n; i++) {
+        const x = v.dist === "log" ? Math.exp(Math.log(lo) + r() * (Math.log(hi) - Math.log(lo))) : lo + r() * (hi - lo);
+        vals.push(x); h[Math.min(B - 1, Math.floor(((x - lo) / (hi - lo)) * B))]++;
+      }
+      const mx = Math.max(...h);
+      const ax = K.axes(svg, { x: 50, y: 20, w: 560, h: 250 }, [lo, hi], [0, mx], { xticks: 5, yticks: 4, xfmt: (x) => x.toFixed(3), yfmt: (y) => Math.round(y), xlabel: "learning_rate" });
+      h.forEach((c, i) => K.svg(svg, "rect", { x: ax.sx(lo + ((hi - lo) * i) / B) + 0.5, y: ax.sy(c), width: (ax.sx(hi) - ax.sx(lo)) / B - 1, height: ax.sy(0) - ax.sy(c), fill: v.dist === "log" ? "var(--c1)" : "var(--c2)", opacity: 0.85 }));
+      if (0.05 > lo && 0.05 < hi) { K.svg(svg, "line", { x1: ax.sx(0.05), x2: ax.sx(0.05), y1: 20, y2: 270, stroke: "var(--warn)", "stroke-dasharray": "5 3", "stroke-width": 2 }); K.svg(svg, "text", { x: ax.sx(0.05) + 5, y: 34, "font-size": 12, fill: "var(--warn)" }, "0.05"); }
+      vals.sort((a, b) => a - b);
+      const below = vals.filter((x) => x < 0.05).length / vals.length, med = vals[Math.floor(vals.length / 2)];
+      K.svg(svg, "text", { x: 50, y: 318, "font-size": 12, class: "muted" }, `纵轴 = 落在这个小区间里的次数（共 ${v.n} 次）`);
+      return { readout: [
+        { k: "小于 0.05 的比例", v: (below * 100).toFixed(1) + "%" },
+        { k: "中位数", v: med.toFixed(4) },
+        { k: "最小 / 最大", v: vals[0].toFixed(4) + " / " + vals[vals.length - 1].toFixed(3) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：一维上的网格 / 随机 / TPE ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 400,
+    controls: [
+      { id: "m", label: "搜索方法", value: "tpe", options: [["grid", "网格搜索（等距铺开）"], ["rand", "随机搜索"], ["tpe", "TPE 贝叶斯优化"]] },
+      { id: "n", label: "一共能试几次（预算）", min: 5, max: 40, step: 1, value: 15 },
+      { id: "g", label: "TPE：前百分之多少算“好的”（gamma）", min: 0.1, max: 0.5, step: 0.05, value: 0.25, fmt: (x) => Math.round(x * 100) + "%" },
+      { id: "noise", label: "打分噪声（交叉验证的抖动）", min: 0, max: 0.01, step: 0.001, value: 0.002, fmt: (x) => x.toFixed(3) },
+      { id: "seed", label: "换一批随机数", button: true },
+    ],
+    note: "浏览器里现场跑：虚线是“真实”分数曲线（示意，实际调参时看不到），每个点是一次昂贵的打分，数字是第几次试。TPE 前 5 次随机开局，之后每次按 l(x)/g(x) 最大挑下一个点；下方绿 / 灰曲线是最后一步的 l 和 g。左边那个矮一点的山头是陷阱。",
+    render(svg, v) {
+      const r = K.rng(500 + v.seed * 31), N = v.n, obs = [];
+      const score = (x) => surf1(x) + K.randn(r) * v.noise;
+      let lastD = null;
+      for (let i = 0; i < N; i++) {
+        let x;
+        if (v.m === "grid") x = (i + 0.5) / N;
+        else if (v.m === "rand" || i < 5) x = r();
+        else { const s = tpeSuggest(obs, 1, v.g, r, 24); x = s.x[0]; lastD = s.dens[0]; }
+        const auc = score(x);
+        obs.push({ x: [x], loss: 1 - auc, auc, i });
+      }
+      const ax = K.axes(svg, { x: 50, y: 14, w: 560, h: 230 }, [0, 1], [0.66, 0.76], { xticks: 0, yticks: 4, yfmt: (y) => y.toFixed(2) });
+      [0.01, 0.02, 0.05, 0.1, 0.2, 0.5].forEach((lr) => { const x = Math.log(lr / LR_LO) / Math.log(LR_HI / LR_LO); K.svg(svg, "text", { x: ax.sx(x), y: 260, "text-anchor": "middle", "font-size": 11 }, String(lr)); });
+      K.svg(svg, "text", { x: 330, y: 276, "text-anchor": "middle", "font-size": 12 }, "learning_rate（对数刻度）");
+      let d = "";
+      for (let i = 0; i <= 200; i++) { const x = i / 200; d += (i ? "L" : "M") + ax.sx(x) + "," + ax.sy(surf1(x)); }
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--ink-3)", "stroke-dasharray": "4 3", "stroke-width": 1.5 });
+      let best = obs[0];
+      obs.forEach((o) => { if (o.auc > best.auc) best = o; });
+      obs.forEach((o, i) => {
+        const cx = ax.sx(o.x[0]), cy = ax.sy(K.clamp(o.auc, 0.66, 0.76));
+        K.svg(svg, "circle", { cx, cy, r: 5, fill: `color-mix(in srgb, var(--c6) ${Math.round(30 + (70 * i) / Math.max(1, N - 1))}%, var(--panel))`, stroke: o === best ? "var(--ink)" : "var(--panel)", "stroke-width": o === best ? 2.5 : 1 });
+        if (N <= 25) K.svg(svg, "text", { x: cx + 6, y: cy - 6, "font-size": 9 }, String(i + 1));
+      });
+      // 真最优
+      let tx = 0, tv = -1;
+      for (let i = 0; i <= 1000; i++) { const x = i / 1000, s = surf1(x); if (s > tv) { tv = s; tx = x; } }
+      if (lastD && v.m === "tpe") {
+        const ax2 = K.axes(svg, { x: 50, y: 300, w: 560, h: 80 }, [0, 1], [0, 1], { xticks: 0, yticks: 0 });
+        let mx = 0; for (let i = 0; i <= 100; i++) mx = Math.max(mx, lastD.l(i / 100), lastD.g(i / 100));
+        const pth = (f) => Array.from({ length: 101 }, (_, i) => (i ? "L" : "M") + ax2.sx(i / 100) + "," + ax2.sy(f(i / 100) / mx)).join("");
+        K.svg(svg, "path", { d: pth(lastD.l), fill: "none", stroke: "var(--good)", "stroke-width": 2 });
+        K.svg(svg, "path", { d: pth(lastD.g), fill: "none", stroke: "var(--ink-3)", "stroke-width": 1.5 });
+        K.svg(svg, "text", { x: 56, y: 296, "font-size": 11 }, "绿 l(x)：好点的分布   灰 g(x)：差点的分布（最后一步）");
+      } else K.svg(svg, "text", { x: 50, y: 320, "font-size": 12, class: "muted" }, v.m === "grid" ? "网格：位置提前定死，和打分结果无关" : "随机：每次都独立抽，不看以前的成绩");
+      const near = obs.filter((o) => Math.abs(o.x[0] - tx) < 0.06).length;
+      return { readout: [
+        { k: "找到的最高分", v: best.auc.toFixed(4) },
+        { k: "第几次找到", v: String(best.i + 1) },
+        { k: "离真山顶还差", v: (tv - surf1(best.x[0])).toFixed(4), color: tv - surf1(best.x[0]) < 0.003 ? "var(--good)" : "var(--bad)" },
+        { k: "落在山顶附近的次数", v: near + " / " + N },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：二维上随机搜索 vs TPE ---------- */
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 420,
+    controls: [
+      { id: "n", label: "每种方法搜索几次", min: 30, max: 300, step: 10, value: 150 },
+      { id: "noise", label: "打分噪声", min: 0, max: 0.02, step: 0.002, value: 0.006, fmt: (x) => x.toFixed(3) },
+      { id: "show", label: "右边地图显示谁的点", value: "tpe", options: [["tpe", "TPE"], ["rand", "随机搜索"]] },
+      { id: "seed", label: "换一批随机数", button: true },
+    ],
+    note: "浏览器里现场跑两种搜索，模仿第 64 格那张图：左边每个点是一次打分（蓝 = 随机，红 = TPE），实线是“到目前为止的最高分”。右边是示意地形（横 = 学习率，纵 = 叶子数，越深越好），看点都落在哪儿。噪声大时，最高分可能是“运气好”抖出来的，这和作者说的“随机搜索 CV 分更高、测试却更差”是同一个现象。",
+    render(svg, v) {
+      const N = v.n;
+      const run = (tpe, seed) => {
+        const r = K.rng(seed), obs = [];
+        for (let i = 0; i < N; i++) {
+          const x = tpe && i >= 10 ? tpeSuggest(obs, 2, 0.25, r, 24).x : [r(), r()];
+          const truth = surf2(x[0], x[1]), auc = truth + K.randn(r) * v.noise;
+          obs.push({ x, loss: 1 - auc, auc, truth });
+        }
+        return obs;
+      };
+      const R = run(false, 900 + v.seed * 7), T = run(true, 1900 + v.seed * 7);
+      const ax = K.axes(svg, { x: 46, y: 14, w: 330, h: 300 }, [0, N], [0.6, 0.76], { xticks: 3, yticks: 4, yfmt: (y) => y.toFixed(2), xlabel: "第几次搜索" });
+      const plot = (O, c) => {
+        let bst = -1, d = "";
+        O.forEach((o, i) => {
+          K.svg(svg, "circle", { cx: ax.sx(i + 0.5), cy: ax.sy(K.clamp(o.auc, 0.6, 0.76)), r: 2.4, fill: c, opacity: 0.55 });
+          bst = Math.max(bst, o.auc); d += (i ? "L" : "M") + ax.sx(i + 0.5) + "," + ax.sy(Math.min(0.76, bst));
+        });
+        K.svg(svg, "path", { d, fill: "none", stroke: c, "stroke-width": 2.2 });
+      };
+      plot(R, "var(--c1)"); plot(T, "var(--c6)");
+      // 地形
+      const X0 = 410, Y0 = 14, S = 220, G = 22;
+      let mn = Infinity, mx = -Infinity;
+      for (let i = 0; i < G; i++) for (let j = 0; j < G; j++) { const s = surf2((i + 0.5) / G, (j + 0.5) / G); mn = Math.min(mn, s); mx = Math.max(mx, s); }
+      for (let i = 0; i < G; i++) for (let j = 0; j < G; j++) K.svg(svg, "rect", { x: X0 + (i * S) / G, y: Y0 + S - ((j + 1) * S) / G, width: S / G + 0.4, height: S / G + 0.4, fill: K.heat(((surf2((i + 0.5) / G, (j + 0.5) / G) - mn) / (mx - mn)) * 0.85) });
+      K.svg(svg, "rect", { x: X0, y: Y0, width: S, height: S, fill: "none", stroke: "var(--line)" });
+      const O = v.show === "tpe" ? T : R;
+      O.forEach((o) => K.svg(svg, "circle", { cx: X0 + o.x[0] * S, cy: Y0 + S - o.x[1] * S, r: 2.6, fill: v.show === "tpe" ? "var(--c6)" : "var(--ink)", opacity: 0.75 }));
+      K.svg(svg, "text", { x: X0 + S / 2, y: Y0 + S + 18, "text-anchor": "middle", "font-size": 12 }, "学习率 →（示意地形）");
+      K.svg(svg, "text", { x: X0, y: Y0 + S + 40, "font-size": 12 }, "↑ 纵轴：叶子数");
+      K.svg(svg, "text", { x: 46, y: 360, "font-size": 12, fill: "var(--c1)" }, "● 随机搜索");
+      K.svg(svg, "text", { x: 130, y: 360, "font-size": 12, fill: "var(--c6)" }, "● TPE（前 10 次随机开局）");
+      const stat = (O) => {
+        let b = O[0];
+        O.forEach((o) => { if (o.auc > b.auc) b = o; });
+        const tail = O.slice(Math.floor((O.length * 2) / 3)), mean = tail.reduce((s, o) => s + o.truth, 0) / tail.length;
+        return { b, mean };
+      };
+      const sr = stat(R), st = stat(T);
+      K.svg(svg, "text", { x: 46, y: 384, "font-size": 12, class: "muted" }, `“记录的最高分”里含噪声；它的真实分：随机 ${sr.b.truth.toFixed(4)}，TPE ${st.b.truth.toFixed(4)}`);
+      return { readout: [
+        { k: "随机：记录的最高分", v: sr.b.auc.toFixed(4), color: "var(--c1)" },
+        { k: "TPE：记录的最高分", v: st.b.auc.toFixed(4), color: "var(--c6)" },
+        { k: "后 1/3 次的平均真实分：随机", v: sr.mean.toFixed(4), color: "var(--c1)" },
+        { k: "后 1/3 次的平均真实分：TPE", v: st.mean.toFixed(4), color: "var(--c6)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

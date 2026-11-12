@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>自编码器去噪</title>
+<meta name="description" content="Kaggle 案例拆解：自编码器怎样工作——把输入压到很窄的瓶颈再还原；在 Fashion-MNIST 上做图像重建和卷积去噪，最后用 LSTM 编码器-解码器做序列到序列预测。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">图像 / 序列 · 无监督表示学习 · 编码器-解码器</div>
+  <h1>自编码器：先压缩成 10 个数，再画回原图</h1>
+  <p class="en">How Autoencoders Work: Intro and UseCases</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">自编码器 Autoencoder</span><span class="tag method">瓶颈 / 潜空间</span><span class="tag method">数据流形</span>
+    <span class="tag method">卷积去噪自编码器</span><span class="tag method">椒盐噪声</span><span class="tag method">上采样 UpSampling</span><span class="tag method">LSTM 编码器-解码器</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Shivam Bansal</b></span>
+    <span>Kaggle 点赞 <b>1,053</b>（2026-11 抓取）</span>
+    <span>数据集 <b>zalando-research/fashionmnist</b></span>
+    <span><a href="https://www.kaggle.com/code/shivamb/how-autoencoders-work-intro-and-usecases" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">Fashion-MNIST：28×28 的服装灰度小图</div><p>按数据集说明，共 10 类（T 恤、裤子、套衫、裙子、外套、凉鞋、衬衫、运动鞋、包、短靴），训练文件 6 万张。作者只用像素，不用标签，按 8:2 划出验证集。<span data-cell="9">出处</span> 第三个用例则用随机生成的整数序列。<span data-cell="41">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">预测“输入自己”</div><p>自编码器的目标就是输出和输入一样。用例 1：重建原图；用例 2：输入加噪的图，输出干净的图；用例 3：输入 6 个数，输出前 3 个数的倒序。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">中间留一个窄窄的“瓶颈”</div><p>784 个像素经过 1500→1000→500 层压到 10 个数，再对称展开回 784。去噪版用 3 层卷积 + 池化压缩，3 层上采样还原。序列版用两个 LSTM。<span data-cell="11">出处</span> <span data-cell="33">出处</span> <span data-cell="43">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">能重建、能去噪，但训练得都很短</div><p>作者写道：训练 20 轮的自编码器“能很好地重建输入图像”；去噪网络只训了 10 轮，建议训练 500–1000 轮效果更好；序列模型只训 1 轮。<span data-cell="22">出处</span> <span data-cell="40">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">用例 1、2 用 <b>Fashion-MNIST</b>（Zalando 发布的服装小图数据集）的训练文件 fashion-mnist_train.csv；用例 3 的序列数据由代码随机生成（第 41 格）。规模来自数据集说明。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">训练文件行数</div><div class="v">60,000</div></div>
+        <div class="stat-tile"><div class="k">图片尺寸</div><div class="v">28×28 灰度</div></div>
+        <div class="stat-tile"><div class="k">类别（不使用）</div><div class="v">10</div></div>
+        <div class="stat-tile"><div class="k">训练 / 验证</div><div class="v">80% / 20%</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">行数与类别数来自数据集说明；读入、缩放与 8:2 划分见 <span data-cell="9">第 9 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>label</code></td><td>服装类别 0–9（本 notebook 不使用）</td><td>类别</td></tr>
+        <tr><td><code>pixel1</code> … <code>pixel784</code></td><td>28×28 个像素的灰度 0–255，既是输入，<b>也是要还原的答案</b></td><td>整数</td></tr>
+        <tr><td>用例 3：输入序列</td><td>6 个 1–50 的随机整数（one-hot 成 51 维）</td><td>序列</td></tr>
+        <tr><td>用例 3：目标序列</td><td><b>要预测的答案</b>：输入前 3 个数的倒序</td><td>序列</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+      <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+      <p class="lead"></p>
+      <div id="pipe"></div>
+      <div data-at="39">
+    <h3>动手试试 B · 调瓶颈大小和噪声，看重建与去噪 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="6">
+    <h3>动手试试 A · 二维数据压到一维：直线能压，正弦曲线压不了 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+    <section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>训练 20 轮的全连接自编码器能很好地重建输入图像</td><td><span data-cell="22">第 22 格</span></td></tr>
+        <tr><td>去噪网络只训练了 10 轮；想要更好的效果，可以训练 500–1000 轮</td><td><span data-cell="36">第 36 格</span> <span data-cell="40">第 40 格</span></td></tr>
+        <tr><td>线性流形可以无损压到一维；弯曲的流形（如正弦）用平移和旋转无法恢复，需要深度网络把空间“掰直”</td><td><span data-cell="6">第 6 格</span></td></tr>
+        <tr><td>自编码器的用途：降维、图像压缩、去噪、生成、特征提取</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>序列到序列部分的代码主要来自 Jason Brownlee 的博客</td><td><span data-cell="40">第 40 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">重建图、去噪图、序列预测结果和损失值都在运行输出里，源码不带输出，作者文字也没写具体数值，所以这里不列分数。另外，第 10 格的文字说编码层是 2000、1200、500 个节点，而第 11 格的代码实际是 <b>1500、1000、500</b>，本页以代码为准。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>把一张 784 像素的图压成 10 个数（降维、压缩、做特征）；把带噪点的图还原成干净的图；把一个序列转换成另一个序列。</li>
+        <li><b>同类问题：</b>老照片/扫描件去噪、医学影像降噪、异常检测（重建误差大的就是异常，如工业瑕疵、信用卡欺诈）、推荐系统里的用户表示、图像压缩、给无标签数据预训练特征。</li>
+        <li><b>可迁移的套路：</b>“输入 = 目标”的无监督训练；故意破坏输入（加噪声、遮挡）再让网络还原，逼它学到真正的结构；瓶颈越窄压缩越狠，但细节损失越多。</li>
+        <li><b>往后延伸：</b>变分自编码器（VAE）让潜空间可以采样生成新图；扩散模型本质上也是“学会去噪”。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>数据流形与降维直觉 <span data-cell="4">第 4 格</span></li>
+        <li>全连接自编码器 784→…→10→…→784 <span data-cell="11">第 11 格</span></li>
+        <li>MSE 损失 + Adam + 早停 <span data-cell="15">第 15 格</span></li>
+        <li>椒盐噪声（imgaug）<span data-cell="27">第 27 格</span></li>
+        <li>卷积去噪自编码器 <span data-cell="33">第 33 格</span></li>
+        <li>LSTM 编码器-解码器 <span data-cell="43">第 43 格</span>、逐步预测 <span data-cell="51">第 51 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>如果瓶颈层和输入一样宽（784），自编码器会学到什么？为什么一定要“窄”？</li>
+      <li>去噪自编码器的输入是带噪图、目标是干净图。如果反过来，或者两边都用干净图，会学到什么不同的东西？</li>
+      <li>作者用 MSE 作为图像重建的损失。MSE 会让重建图偏模糊，为什么？还可以用什么损失？</li>
+      <li>怎样用自编码器做异常检测？阈值怎么定？</li>
+      <li>第 33 格解码器里有一层卷积没写 <code>padding='same'</code>，尺寸从 16 变成 14，最后才能上采样回 28。请自己推一遍各层尺寸。</li>
+      <li>序列用例里，预测时解码器每一步的输入是自己上一步的输出。和训练时用真实的“种子序列”相比，会有什么问题？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Shivam Bansal，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：Fashion-MNIST（Zalando Research，Xiao, Rasul &amp; Vollgraf, 2017）。
+</footer>
+</main>
+
+<script src="nb/autoencoder-denoising.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 代码生成的“服装”小图（G×G 灰度） ---------- */
+  const G = 16;
+  function garment(kind, r) {
+    const d = new Float32Array(G * G), j = () => (r() - 0.5) * 2;
+    const w = 1 + j() * 0.12, h = 1 + j() * 0.1, dx = j() * 0.8, br = 0.75 + r() * 0.25;
+    const inside = (x, y) => {
+      const u = (x - 7.5 - dx) / w, v = (y - 7.5) / h;
+      if (kind === 0) return (Math.abs(u) < 3.2 && v > -5 && v < 6) || (v > -5 && v < -1.5 && Math.abs(u) < 6.5); // T 恤
+      if (kind === 1) return v > -6.5 && v < 7 && ((u > -4 && u < -0.6) || (u > 0.6 && u < 4) || (v < -3.5 && Math.abs(u) < 4)); // 裤子
+      if (kind === 2) return Math.abs(u) < 5.5 && v > -2.5 && v < 6 || (v > -5.5 && v < -2.5 && Math.abs(Math.abs(u) - 2.5) < 0.9); // 包
+      if (kind === 3) return v > 1 && v < 5 && u > -6.5 && u < 6.5 && (u > -6.5 + (4 - v) * 0.0) && (v > 3 || u < 1.5 + v * 0.3); // 运动鞋
+      return v > -6 && v < 6.5 && Math.abs(u) < 1.6 + (v + 6) * 0.33; // 裙子
+    };
+    for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) if (inside(x, y)) d[y * G + x] = br * (0.8 + 0.2 * Math.sin(x * 1.3 + y));
+    return d;
+  }
+  const KINDS = ["T 恤", "裤子", "包", "运动鞋", "裙子"];
+  const DATA = (() => { const r = K.rng(42), out = []; for (let i = 0; i < 120; i++) out.push(garment(i % 5, r)); return out; })();
+  function gimg(svg, d, x, y, w, attrs) {
+    const n = Math.round(Math.sqrt(d.length));
+    const cv = document.createElement("canvas"); cv.width = cv.height = n;
+    const g = cv.getContext("2d"), im = g.createImageData(n, n);
+    const bg = getComputedStyle(document.body).backgroundColor.match(/\d+/g).map(Number);
+    const fg = (() => { const e = document.createElement("i"); e.style.color = "var(--ink)"; document.body.appendChild(e); const c = getComputedStyle(e).color.match(/\d+/g).map(Number); e.remove(); return c; })();
+    for (let i = 0; i < n * n; i++) { const t = K.clamp(d[i], 0, 1); for (let k = 0; k < 3; k++) im.data[i * 4 + k] = Math.round(bg[k] + (fg[k] - bg[k]) * t); im.data[i * 4 + 3] = 255; }
+    g.putImageData(im, 0, 0);
+    const e = K.svg(svg, "image", Object.assign({ x, y, width: w, height: w, preserveAspectRatio: "none" }, attrs || {}));
+    e.setAttribute("href", cv.toDataURL()); e.style.imageRendering = "pixelated";
+    K.svg(svg, "rect", { x, y, width: w, height: w, fill: "none", stroke: "var(--line)" });
+    return e;
+  }
+  function saltPepper(d, p, r) { return d.map((v) => { const u = r(); return u < p / 2 ? 0 : u < p ? 1 : v; }); }
+
+  /* ---------- 线性自编码器 = PCA（幂迭代 + 收缩） ---------- */
+  const PCA = (() => {
+    const D = G * G, N = DATA.length, mean = new Float64Array(D);
+    DATA.forEach((x) => x.forEach((v, i) => (mean[i] += v / N)));
+    const C = Array.from({ length: D }, () => new Float64Array(D));
+    DATA.forEach((x) => { const c = Array.from(x, (v, i) => v - mean[i]); for (let i = 0; i < D; i++) { const ci = c[i]; if (!ci) continue; const Ci = C[i]; for (let j = 0; j < D; j++) Ci[j] += (ci * c[j]) / N; } });
+    const comps = [], vals = [], r = K.rng(5);
+    for (let k = 0; k < 24; k++) {
+      let v = Float64Array.from({ length: D }, () => r() - 0.5);
+      for (let it = 0; it < 60; it++) {
+        const w = new Float64Array(D);
+        for (let i = 0; i < D; i++) { let s = 0; const Ci = C[i]; for (let j = 0; j < D; j++) s += Ci[j] * v[j]; w[i] = s; }
+        comps.forEach((u) => { let dt = 0; for (let i = 0; i < D; i++) dt += w[i] * u[i]; for (let i = 0; i < D; i++) w[i] -= dt * u[i]; });
+        const nrm = Math.hypot(...w) || 1; v = w.map((x) => x / nrm);
+      }
+      let lam = 0; for (let i = 0; i < D; i++) { let s = 0; for (let j = 0; j < D; j++) s += C[i][j] * v[j]; lam += s * v[i]; }
+      comps.push(v); vals.push(lam);
+    }
+    return { mean, comps, vals, D };
+  })();
+  function encode(x, k) { return PCA.comps.slice(0, k).map((u) => { let s = 0; for (let i = 0; i < PCA.D; i++) s += (x[i] - PCA.mean[i]) * u[i]; return s; }); }
+  function decode(z) { const out = Float32Array.from(PCA.mean); z.forEach((c, j) => { const u = PCA.comps[j]; for (let i = 0; i < PCA.D; i++) out[i] += c * u[i]; }); return out; }
+  const mse = (a, b) => a.reduce((s, v, i) => s + (v - b[i]) ** 2, 0) / a.length;
+
+  const steps = [
+    {
+      title: "自编码器：输出 = 输入", at: 0, kicker: "第 0 格 · 概念",
+      html: `<p>自编码器是一种特殊的神经网络：<b>训练目标就是它的输入本身</b>，所以不需要标签，属于无监督学习。</p><p>它由三部分组成：<b>编码器</b>（层越来越窄）、中间的<b>潜在表示</b>（最窄的“瓶颈”，也叫潜空间）、<b>解码器</b>（编码器的镜像，层越来越宽）。瓶颈很窄，网络没法死记硬背，只能学会用很少的数概括输入，再凭这几个数把输入画回来。</p>`,
+      cells: [0], highlight: ["bottleneck", "Latent View"],
+      draw(svg, ctx) {
+        const widths = [9, 7, 5, 2, 5, 7, 9], xs = widths.map((_, i) => 160 + i * 70);
+        const nodes = widths.map((n, li) => Array.from({ length: n }, (_, i) => [xs[li], 170 + (i - (n - 1) / 2) * 30]));
+        for (let li = 0; li < 6; li++) nodes[li].forEach((a) => nodes[li + 1].forEach((b) => K.svg(svg, "line", { x1: a[0], y1: a[1], x2: b[0], y2: b[1], stroke: "var(--line)" })));
+        const circ = nodes.map((L, li) => L.map((p) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 8, fill: li === 3 ? "var(--c2)" : "var(--panel-2)", stroke: "var(--ink-3)" })));
+        const x0 = DATA[0];
+        gimg(svg, x0, 20, 120, 100);
+        const out = gimg(svg, decode(encode(x0, 12)), 600, 120, 100); out.style.opacity = 0;
+        K.svg(svg, "text", { x: 70, y: 110, "text-anchor": "middle", "font-size": 12 }, "输入");
+        K.svg(svg, "text", { x: 650, y: 110, "text-anchor": "middle", "font-size": 12 }, "输出 ≈ 输入");
+        [["编码器", 230, "var(--c1)"], ["瓶颈", 370, "var(--c2)"], ["解码器", 510, "var(--c3)"]].forEach((d) => K.svg(svg, "text", { x: d[1], y: 312, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: d[2] }, d[0]));
+        (async () => {
+          for (let li = 0; li < 7; li++) {
+            if (!(await ctx.tween(260, (u) => circ[li].forEach((c) => (c.style.fill = `color-mix(in srgb, ${li === 3 ? "var(--c2)" : "var(--accent)"} ${Math.round(u * 60)}%, var(--panel-2))`))))) return;
+          }
+          await ctx.tween(400, (u) => (out.style.opacity = u));
+        })();
+        K.svg(svg, "text", { x: 360, y: 334, "text-anchor": "middle", "font-size": 11, class: "muted" }, "输出图是本页实验 B 的线性自编码器现场重建的（示意）");
+      },
+    },
+    {
+      title: "数据流形：二维的点其实在一条线上", at: 1, kicker: "第 1–4 格 · 降维直觉",
+      html: `<p>作者用一个二维例子讲原理：所有数据点都落在一条直线上，这条线就是<b>数据流形</b>（真实数据所在的低维结构）。</p><p>只要选一个参考点 A 和直线的角度 L，线上任何一点 B 都能用“到 A 的距离 d”这<b>一个数</b>表示。编码就是：先平移（以 A 为原点），再旋转角度 L，第二个坐标变成 0，只剩 d；解码是反过来：旋转回去再平移回去。这相当于一个没有隐藏层的自编码器，权重 W 就是那个旋转。</p>`,
+      cells: [4], highlight: ["(d, 0) = W. (u1B, u2B)", "Inverse (W)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 20, w: 280, h: 280 }, [0, 12], [0, 12], { xlabel: "x1", ylabel: "x2" });
+        const pts = Array.from({ length: 12 }, (_, i) => 2 + (i * 8) / 11);
+        const P = pts.map((t) => K.svg(svg, "circle", { cx: ax.sx(t), cy: ax.sy(t), r: 5, fill: "var(--c1)" }));
+        K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0), x2: ax.sx(12), y2: ax.sy(12), stroke: "var(--c2)", "stroke-dasharray": "5 4" });
+        K.svg(svg, "text", { x: ax.sx(2) + 8, y: ax.sy(2) + 16, "font-size": 13, "font-weight": 700 }, "A");
+        const lat = K.axes(svg, { x: 420, y: 160, w: 270, h: 1 }, [0, 12], [0, 1], { yticks: 0, xlabel: "潜在表示：只剩一个数 d" });
+        const L = pts.map((t) => K.svg(svg, "circle", { cx: lat.sx(0), cy: 160, r: 5, fill: "var(--c3)", opacity: 0 }));
+        K.svg(svg, "text", { x: 420, y: 60, "font-size": 13, "font-family": "var(--mono)" }, "编码：d = W·(x − A)");
+        K.svg(svg, "text", { x: 420, y: 84, "font-size": 13, "font-family": "var(--mono)" }, "解码：x = A + W⁻¹·(d, 0)");
+        K.svg(svg, "text", { x: 420, y: 250, "font-size": 12 }, "2 个数 → 1 个数，没有信息损失");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1500, (u) => pts.forEach((t, i) => { const d = (t - 2) * Math.SQRT2; L[i].setAttribute("cx", K.lerp(ax.sx(t), lat.sx(d), u)); L[i].setAttribute("cy", K.lerp(ax.sy(t), 160, u)); L[i].style.opacity = u; })));
+      },
+    },
+    {
+      title: "弯曲的流形：要把空间“掰直”", at: 5, kicker: "第 5–6 格 · 为什么要深度网络",
+      html: `<p>如果数据像正弦波那样弯曲，就不能靠平移和旋转压到一条直线上：投影到一维会让不同的点挤到同一个位置，信息丢了，再也还原不回去。</p><p>作者的解释：深度神经网络能在隐藏层里<b>把空间弯折</b>，把弯曲的流形“拉直”成接近线性的形状，然后再压缩。这就是自编码器需要多层非线性网络的原因。实验 A 可以亲手试。</p>`,
+      cells: [6], highlight: ["bend the space"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 30, w: 620, h: 200 }, [0, 100], [-1.3, 1.3], { xticks: 4, yticks: 2 });
+        const N = 50, xs = Array.from({ length: N }, (_, i) => i * 2), ys = xs.map((x) => Math.sin((2 * Math.PI * 2 * x) / 100));
+        let arc = [0]; for (let i = 1; i < N; i++) arc.push(arc[i - 1] + Math.hypot((xs[i] - xs[i - 1]) / 100 * 6, ys[i] - ys[i - 1]));
+        const tot = arc[N - 1];
+        const P = xs.map((x, i) => K.svg(svg, "circle", { cx: ax.sx(x), cy: ax.sy(ys[i]), r: 4, fill: K.heat(i / N * 0.9 + 0.1) }));
+        const lab = K.svg(svg, "text", { x: 360, y: 270, "text-anchor": "middle", "font-size": 13 }, "直接压扁到横轴：同一高度的点重叠在一起（颜色混杂）");
+        K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 11, class: "muted" }, "颜色 = 点在曲线上的先后顺序");
+        (async () => {
+          if (!(await ctx.wait(600))) return;
+          if (!(await ctx.tween(1200, (u) => P.forEach((p, i) => p.setAttribute("cx", ax.sx(K.lerp(xs[i], 50 + ys[i] * 40, u))))))) return;
+          if (!(await ctx.wait(900))) return;
+          lab.textContent = "深度网络：先把曲线“拉直”（按曲线长度展开），再压缩，顺序保住了";
+          await ctx.tween(1500, (u) => P.forEach((p, i) => { p.setAttribute("cx", ax.sx(K.lerp(50 + ys[i] * 40, (arc[i] / tot) * 100, u))); p.setAttribute("cy", ax.sy(K.lerp(ys[i], 0, u))); }));
+        })();
+      },
+    },
+    {
+      title: "用例 1 的数据：每张图拉平成 784 个数", at: 7, kicker: "第 7–9 格 · Fashion-MNIST",
+      html: `<p>读入 Fashion-MNIST 训练集 CSV：第一列是类别标签，后面 784 列是 28×28 的像素值。作者<b>只用像素</b>（自编码器不需要标签），除以 255 缩到 0~1，按 8:2 切出验证集，并把每张图拉平成长度 784 的向量，送进全连接网络。</p>`,
+      cells: [9], highlight: ["train_x / 255", "test_size=0.2", "reshape(-1, 784)"],
+      draw(svg, ctx) {
+        const x = DATA[1];
+        gimg(svg, x, 30, 50, 200);
+        K.svg(svg, "text", { x: 130, y: 40, "text-anchor": "middle", "font-size": 12 }, "一张小图（示意：16×16，真实为 28×28）");
+        const strip = [];
+        for (let i = 0; i < G * G; i++) strip.push(K.svg(svg, "rect", { x: 270 + (i % 64) * 6.6, y: 80 + Math.floor(i / 64) * 30, width: 6, height: 24, fill: K.heat(x[i]), opacity: 0 }));
+        K.svg(svg, "text", { x: 270, y: 60, "font-size": 12, "font-weight": 700 }, "按行拉平 → 一条长向量（真实长度 784）");
+        K.svg(svg, "text", { x: 270, y: 230, "font-size": 12 }, "标签列被丢掉：输入是 x，目标也是 x");
+        K.svg(svg, "text", { x: 270, y: 256, "font-size": 12, class: "muted" }, "像素 / 255 → 0~1");
+        ctx.tween(1800, (u) => strip.forEach((s, i) => (s.style.opacity = u * G * G > i ? 1 : 0)));
+      },
+    },
+    {
+      title: "全连接自编码器：784 → 10 → 784", at: 10, kicker: "第 10–13 格 · 网络结构",
+      html: `<p>编码器三层全连接 <b>1500 → 1000 → 500</b>（ReLU），瓶颈只有 <b>10 个节点</b>（sigmoid），解码器镜像 500 → 1000 → 1500，最后输出 784 个数。</p><p>也就是说，每张图要被概括成 10 个数。注意第 10 格的文字写的是 2000、1200、500，与代码不一致，以第 11 格的代码为准。</p>`,
+      cells: [11, 10], highlight: ["Dense(1500", "Dense(10, activation='sigmoid')", "Dense(784)"],
+      draw(svg, ctx) {
+        const L = [["输入", 784], ["", 1500], ["", 1000], ["", 500], ["瓶颈", 10], ["", 500], ["", 1000], ["", 1500], ["输出", 784]];
+        const bars = L.map((l, i) => {
+          const h = 20 + Math.sqrt(l[1]) * 6.5, x = 30 + i * 76;
+          const r = K.svg(svg, "rect", { x, y: 170 - h / 2, width: 48, height: h, rx: 5, fill: i === 4 ? "var(--c2)" : i < 4 ? "color-mix(in srgb, var(--c1) 35%, var(--panel))" : "color-mix(in srgb, var(--c3) 35%, var(--panel))" });
+          const t = K.svg(svg, "text", { x: x + 24, y: 170 + h / 2 + 18, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, String(l[1]));
+          if (l[0]) K.svg(svg, "text", { x: x + 24, y: 170 - h / 2 - 8, "text-anchor": "middle", "font-size": 11 }, l[0]);
+          r.style.opacity = t.style.opacity = 0;
+          return [r, t];
+        });
+        K.svg(svg, "text", { x: 360, y: 330, "text-anchor": "middle", "font-size": 12, class: "muted" }, "条高 ∝ √节点数；编码层 ReLU，瓶颈 sigmoid，输出层线性");
+        (async () => { for (const b of bars) if (!(await ctx.tween(200, (u) => b.forEach((e) => (e.style.opacity = u))))) return; })();
+      },
+    },
+    {
+      title: "训练：输入和目标是同一张图", at: 14, kicker: "第 14–22 格 · 重建",
+      html: `<p><code>model.fit(train_x, train_x, ...)</code>：输入和目标都是 <code>train_x</code>。损失用 <b>MSE</b>（逐像素差的平方再平均），Adam 优化，batch 2048，训练 20 轮，早停耐心 10 轮。</p><p>然后对验证集预测，把前 5 张原图和重建图并排画出来。作者的结论：训练 20 轮已经能很好地重建输入。下面动画用实验 B 的线性自编码器示意“瓶颈越宽，重建越像”。</p>`,
+      cells: [15, 22], highlight: ["model.fit(train_x, train_x", "loss='mse'", "epochs=20"],
+      draw(svg, ctx) {
+        const items = [DATA[0], DATA[6], DATA[12], DATA[3], DATA[9]];
+        K.svg(svg, "text", { x: 20, y: 40, "font-size": 12, "font-weight": 700 }, "原图");
+        items.forEach((x, i) => gimg(svg, x, 110 + i * 120, 20, 90));
+        const lab = K.svg(svg, "text", { x: 20, y: 170, "font-size": 12, "font-weight": 700 }, "");
+        const g = K.svg(svg, "g");
+        const msg = K.svg(svg, "text", { x: 110, y: 300, "font-size": 13 }, "");
+        (async () => {
+          for (const k of [1, 2, 4, 8, 16, 24]) {
+            g.innerHTML = "";
+            let m = 0;
+            items.forEach((x, i) => { const rec = decode(encode(x, k)); m += mse(x, rec) / items.length; gimg(g, rec, 110 + i * 120, 150, 90); });
+            lab.textContent = `重建（瓶颈 ${k}）`;
+            msg.textContent = `平均 MSE = ${m.toFixed(4)}（线性自编码器示意，数值不是原 notebook 的）`;
+            if (!(await ctx.wait(900))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "用例 2：故意加椒盐噪声", at: 23, kicker: "第 23–31 格 · 构造带噪数据",
+      html: `<p>去噪任务需要“带噪图 → 干净图”的成对数据。作者直接<b>人工加噪</b>：用 imgaug 的 <code>SaltAndPepper(0.1)</code>，随机让约 10% 的像素变成纯黑或纯白（“盐”和“胡椒”），模拟传感器坏点、传输错误这类脉冲噪声。</p><p>这次图片保持 28×28×1 的形状，因为接下来要用卷积网络。</p>`,
+      cells: [27, 26], highlight: ["SaltAndPepper(0.1)", "reshape(-1, 28, 28, 1)"],
+      draw(svg, ctx) {
+        const items = [DATA[5], DATA[11], DATA[17], DATA[23], DATA[29]];
+        K.svg(svg, "text", { x: 20, y: 70, "font-size": 12, "font-weight": 700 }, "加噪前");
+        K.svg(svg, "text", { x: 20, y: 210, "font-size": 12, "font-weight": 700 }, "加噪后");
+        items.forEach((x, i) => gimg(svg, x, 110 + i * 120, 30, 100));
+        const g = K.svg(svg, "g");
+        ctx.tween(1600, (u) => { g.innerHTML = ""; const r = K.rng(3); items.forEach((x, i) => gimg(g, saltPepper(x, 0.1 * u, r), 110 + i * 120, 170, 100)); });
+        K.svg(svg, "text", { x: 110, y: 310, "font-size": 12, class: "muted" }, "约 10% 的像素被随机替换成 0 或 1");
+      },
+    },
+    {
+      title: "卷积去噪自编码器", at: 32, kicker: "第 32–35 格 · 网络结构",
+      html: `<p><b>编码器</b>：3 组“3×3 卷积（64→32→16 个通道）+ 2×2 最大池化”，图从 28 → 14 → 7 → 4。</p><p><b>解码器</b>：3 组“卷积 + <code>UpSampling2D</code>”，<b>上采样</b>就是把每个像素复制成 2×2，尺寸翻倍：4 → 8 → 16；第三个卷积没有 <code>padding='same'</code>，16 → 14，再上采样到 28，最后 1 个通道的卷积输出图像。</p><p>作者解释：池化不可逆，上采样只是近似的逆操作。</p>`,
+      cells: [33, 32], highlight: ["MaxPool2D( (2, 2), padding='same')", "UpSampling2D((2, 2))", "Conv2D(64, (3, 3), activation='relu')(decoded_layer2)"],
+      draw(svg, ctx) {
+        const L = [[28, 1, "输入"], [14, 64, "卷积+池化"], [7, 32, ""], [4, 16, "潜在表示"], [8, 16, "卷积+上采样"], [16, 32, ""], [14, 64, "无填充卷积"], [28, 64, "上采样"], [28, 1, "输出"]];
+        const els = L.map((l, i) => {
+          const s = 12 + l[0] * 3.4, x = 18 + i * 78, g = K.svg(svg, "g");
+          K.svg(g, "rect", { x: x + (64 - s) / 2 / 2, y: 160 - s / 2, width: s * 0.6, height: s, rx: 3, fill: i === 3 ? "var(--c2)" : i < 3 ? "color-mix(in srgb, var(--c1) 35%, var(--panel))" : "color-mix(in srgb, var(--c3) 35%, var(--panel))" });
+          K.svg(g, "text", { x: x + 25, y: 160 + s / 2 + 16, "text-anchor": "middle", "font-size": 11, "font-weight": 700 }, `${l[0]}×${l[0]}`);
+          K.svg(g, "text", { x: x + 25, y: 160 + s / 2 + 30, "text-anchor": "middle", "font-size": 10, class: "muted" }, `${l[1]} 通道`);
+          if (l[2]) K.svg(g, "text", { x: x + 25, y: 160 - s / 2 - 8, "text-anchor": "middle", "font-size": 10 }, l[2]);
+          g.style.opacity = 0; return g;
+        });
+        // 上采样小演示
+        const up = K.svg(svg, "g"); up.style.opacity = 0;
+        [[0.2, 0.9], [0.6, 0.4]].forEach((row, y) => row.forEach((v, x) => K.svg(up, "rect", { x: 380 + x * 20, y: 290 + y * 20, width: 19, height: 19, fill: K.heat(v) })));
+        K.arrow(up, 425, 310, 455, 310);
+        [[0.2, 0.9], [0.6, 0.4]].forEach((row, y) => row.forEach((v, x) => { for (let a = 0; a < 2; a++) for (let b = 0; b < 2; b++) K.svg(up, "rect", { x: 460 + (2 * x + b) * 10, y: 290 + (2 * y + a) * 10, width: 9.5, height: 9.5, fill: K.heat(v) }); }));
+        K.svg(up, "text", { x: 510, y: 315, "font-size": 11 }, "UpSampling：复制成 2×2");
+        (async () => { for (const e of els) if (!(await ctx.tween(200, (u) => (e.style.opacity = u)))) return; await ctx.tween(300, (u) => (up.style.opacity = u)); })();
+      },
+    },
+    {
+      title: "训练：输入带噪，目标干净", at: 36, kicker: "第 36–39 格 · 去噪",
+      html: `<p>关键在这一行：<code>model_2.fit(train_x_n, train_x, ...)</code>：<b>输入是带噪图，目标是干净图</b>。网络要学会“什么是衣服本来的样子”，才能把随机的黑白点去掉；随机噪声没有规律，网络记不住它，只能学到图像真正的结构。</p><p>MSE 损失，batch 2048，训练 10 轮（早停耐心 10）。作者说为了更好的效果，可以训练 500–1000 轮。</p>`,
+      cells: [37, 40], highlight: ["model_2.fit(train_x_n, train_x", "epochs=10"],
+      draw(svg, ctx) {
+        const x = DATA[7], r = K.rng(8), xn = saltPepper(x, 0.1, r);
+        gimg(svg, xn, 30, 90, 150); K.svg(svg, "text", { x: 105, y: 80, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, "输入：带噪");
+        const net = K.node(svg, 230, 130, 150, 70, "卷积去噪\n自编码器", { fill: "color-mix(in srgb, var(--c4) 18%, var(--panel))", stroke: "var(--c4)" });
+        K.arrow(svg, 185, 165, 226, 165); K.arrow(svg, 382, 165, 420, 165);
+        const outG = K.svg(svg, "g");
+        gimg(svg, x, 560, 90, 150); K.svg(svg, "text", { x: 635, y: 80, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, "目标：干净原图");
+        K.svg(svg, "text", { x: 500, y: 80, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, "网络输出");
+        const lossT = K.svg(svg, "text", { x: 425, y: 280, "font-size": 13 }, "");
+        K.svg(svg, "text", { x: 425, y: 304, "font-size": 11, class: "muted" }, "示意：用逐步变宽的线性自编码器模拟“越训越干净”");
+        (async () => {
+          for (const k of [1, 3, 6, 10, 16]) {
+            outG.innerHTML = "";
+            const rec = decode(encode(xn, k)).map((v) => K.clamp(v, 0, 1));
+            gimg(outG, rec, 425, 90, 150);
+            lossT.textContent = `MSE(输出, 干净图) = ${mse(rec, x).toFixed(4)}`;
+            if (!(await ctx.wait(800))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "用例 3：序列到序列的数据", at: 40, kicker: "第 40–41 格 · 序列数据",
+      html: `<p>自编码器的“编码-解码”思路也能用于序列。作者造了一个玩具任务：随机生成 6 个 1–50 之间的整数作为输入，目标是<b>前 3 个数的倒序</b>。</p><p>每个数用 one-hot 编码成长度 51 的向量。除了输入 X1 和目标 y，还有一个“种子序列” X2：在目标前面补一个 0、去掉最后一个，作为解码器每一步的输入（训练时把正确答案的前一个词喂给解码器）。一共生成 10 万条。</p>`,
+      cells: [41], highlight: ["target = inp_seq[:n_out]", "list(reversed(target))", "seed_seq = [0] + target_seq[:-1]", "samples = 100000"],
+      draw(svg, ctx) {
+        const r = K.rng(12), inp = Array.from({ length: 6 }, () => 1 + Math.floor(r() * 50));
+        const tgt = inp.slice(0, 3).reverse(), seed = [0].concat(tgt.slice(0, 2));
+        const row = (y, arr, label, col, hl) => { K.svg(svg, "text", { x: 30, y: y + 26, "font-size": 12, "font-weight": 700 }, label); return arr.map((v, i) => { const g = K.node(svg, 170 + i * 74, y, 64, 40, String(v), { fs: 15, fill: hl && hl(i) ? `color-mix(in srgb, ${col} 30%, var(--panel))` : "var(--panel-2)", stroke: hl && hl(i) ? col : "var(--line)" }); g.style.opacity = 0; return g; }); };
+        const a = row(30, inp, "输入 X1（6 个数）", "var(--c1)", (i) => i < 3);
+        const b = row(120, tgt, "目标 y：前 3 个倒序", "var(--c3)", () => true);
+        const c = row(210, seed, "种子 X2：补 0 右移", "var(--c2)", () => true);
+        K.svg(svg, "text", { x: 30, y: 300, "font-size": 12 }, "每个数再变成长度 51 的 one-hot 向量，例如 3 → [0,0,0,1,0,…,0]");
+        K.svg(svg, "text", { x: 30, y: 324, "font-size": 11, class: "muted" }, "数字为浏览器里随机生成的示例");
+        (async () => { for (const grp of [a, b, c]) for (const g of grp) if (!(await ctx.tween(130, (u) => (g.style.opacity = u)))) return; })();
+      },
+    },
+    {
+      title: "LSTM 编码器-解码器，逐步预测", at: 42, kicker: "第 42–54 格 · 序列模型",
+      html: `<p><b>编码器</b>是一个 128 单元的 LSTM，读完 6 个数后只保留最终的两个状态：隐藏状态 h 和记忆单元 c，这就是整个输入序列的“压缩表示”。<b>解码器</b>也是 LSTM，用 h、c 作为初始状态，每一步输出一个 51 类的 softmax。</p><p>训练（1 轮，分类交叉熵）时解码器输入是种子序列；<b>预测</b>时没有答案可喂，<code>predict_sequence</code> 从全 0 向量开始，每一步把<b>自己上一步的输出</b>和更新后的状态再喂回去，循环 3 次。</p>`,
+      cells: [43, 51], highlight: ["return_state=True", "initial_state=encoder_states", "target_seq = pred", "current_state = [h, c]"],
+      draw(svg, ctx) {
+        const r = K.rng(12), inp = Array.from({ length: 6 }, () => 1 + Math.floor(r() * 50)), tgt = inp.slice(0, 3).reverse();
+        const enc = inp.map((v, i) => { K.node(svg, 20 + i * 62, 250, 52, 32, String(v), { fs: 13, fill: "color-mix(in srgb, var(--c1) 20%, var(--panel))" }); return K.node(svg, 20 + i * 62, 160, 52, 44, "LSTM", { fs: 11, stroke: "var(--c1)" }); });
+        for (let i = 0; i < 6; i++) K.arrow(svg, 46 + i * 62, 248, 46 + i * 62, 206, { color: "var(--line)" });
+        const ha = []; for (let i = 0; i < 5; i++) { const a = K.arrow(svg, 72 + i * 62, 182, 80 + i * 62, 182, { color: "var(--c4)", sw: 2 }); a.style.opacity = 0.2; ha.push(a); }
+        const st = K.node(svg, 400, 160, 70, 44, "h, c", { fs: 13, bold: true, fill: "color-mix(in srgb, var(--c4) 22%, var(--panel))", stroke: "var(--c4)" }); st.style.opacity = 0;
+        K.arrow(svg, 384, 182, 398, 182, { color: "var(--c4)" });
+        const dec = [0, 1, 2].map((i) => K.node(svg, 500 + i * 72, 160, 60, 44, "LSTM", { fs: 11, stroke: "var(--c3)" }));
+        const outs = tgt.map((v, i) => { const g = K.node(svg, 500 + i * 72, 70, 60, 34, String(v), { fs: 14, bold: true, fill: "color-mix(in srgb, var(--c3) 25%, var(--panel))", stroke: "var(--c3)" }); g.style.opacity = 0; return g; });
+        const ins = ["0", ...tgt.slice(0, 2).map(String)].map((v, i) => { const g = K.node(svg, 505 + i * 72, 250, 50, 32, v, { fs: 12 }); g.style.opacity = 0; return g; });
+        const fb = [0, 1].map((i) => { const p = K.svg(svg, "path", { d: `M${560 + i * 72},70 C${600 + i * 72},40 ${600 + i * 72},300 ${560 + (i + 1) * 72 - 30},284`, fill: "none", stroke: "var(--accent)", "stroke-dasharray": "4 3", "stroke-width": 1.5 }); p.style.opacity = 0; return p; });
+        K.svg(svg, "text", { x: 20, y: 140, "font-size": 12, "font-weight": 700, fill: "var(--c1)" }, "编码器：读入 6 个数");
+        K.svg(svg, "text", { x: 500, y: 140, "font-size": 12, "font-weight": 700, fill: "var(--c3)" }, "解码器：逐个吐出");
+        K.svg(svg, "text", { x: 500, y: 330, "font-size": 11, class: "muted" }, "预测时：上一步输出（虚线）当下一步输入");
+        (async () => {
+          for (let i = 0; i < 6; i++) { enc[i].querySelector("rect").style.fill = "color-mix(in srgb, var(--c1) 25%, var(--panel))"; if (i < 5 && !(await ctx.tween(200, (u) => (ha[i].style.opacity = 0.2 + 0.8 * u)))) return; }
+          if (!(await ctx.tween(300, (u) => (st.style.opacity = u)))) return;
+          for (let i = 0; i < 3; i++) {
+            if (!(await ctx.tween(250, (u) => (ins[i].style.opacity = u)))) return;
+            dec[i].querySelector("rect").style.fill = "color-mix(in srgb, var(--c3) 25%, var(--panel))";
+            if (!(await ctx.tween(300, (u) => (outs[i].style.opacity = u)))) return;
+            if (i < 2 && !(await ctx.tween(300, (u) => (fb[i].style.opacity = u)))) return;
+          }
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：线性自编码器（PCA）重建与去噪 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 660, height: 330,
+    controls: [
+      { id: "k", label: "瓶颈大小（潜在表示有几个数）", min: 1, max: 24, step: 1, value: 6 },
+      { id: "noise", label: "椒盐噪声比例（作者用 0.1）", min: 0, max: 0.4, step: 0.01, value: 0.1, fmt: (v) => Math.round(v * 100) + "%" },
+      { id: "pick", label: "换一组图", button: true },
+    ],
+    note: "120 张 16×16 的“服装”图由代码生成（5 类）。线性自编码器：编码 z = Wᵀ(x − 均值)，解码 x̂ = 均值 + W z，W 是数据最主要的 k 个方向（幂迭代求得）。第一行原图，第二行加噪，第三行把带噪图送进自编码器得到的输出。瓶颈太小会糊，太大会把噪声也“学”回来。",
+    render(svg, v) {
+      const r = K.rng(100 + v.pick * 7), idx = [0, 1, 2, 3, 4].map((i) => (i + v.pick * 5 + Math.floor(r() * 3) * 5) % DATA.length);
+      let mNoisy = 0, mRec = 0;
+      ["原图", "加噪", "自编码器输出"].forEach((t, j) => K.svg(svg, "text", { x: 8, y: 52 + j * 100, "font-size": 12, "font-weight": 700 }, t));
+      idx.forEach((ii, c) => {
+        const x = DATA[ii], xn = saltPepper(x, v.noise, r), rec = decode(encode(xn, v.k)).map((q) => K.clamp(q, 0, 1));
+        gimg(svg, x, 110 + c * 108, 10, 90); gimg(svg, xn, 110 + c * 108, 110, 90); gimg(svg, rec, 110 + c * 108, 210, 90);
+        mNoisy += mse(xn, x) / 5; mRec += mse(rec, x) / 5;
+      });
+      const tot = PCA.vals.reduce((a, b) => a + Math.max(0, b), 0), kept = PCA.vals.slice(0, v.k).reduce((a, b) => a + Math.max(0, b), 0);
+      K.svg(svg, "text", { x: 110, y: 322, "font-size": 11, class: "muted" }, `256 个像素 → ${v.k} 个数 → 256 个像素；压缩比 ${(256 / v.k).toFixed(1)} : 1`);
+      return { readout: [
+        { k: "带噪图的 MSE", v: mNoisy.toFixed(4), color: "var(--bad)" },
+        { k: "输出的 MSE（对干净图）", v: mRec.toFixed(4), color: mRec < mNoisy ? "var(--good)" : "var(--bad)" },
+        { k: "噪声被去掉的比例", v: mNoisy > 0 ? Math.round((1 - mRec / mNoisy) * 100) + "%" : "—" },
+        { k: "瓶颈保留的方差", v: Math.round((kept / tot) * 100) + "%" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验：二维 → 一维 ---------- */
+  const labB = { lastBest: 0, ang: 20 };
+  K.lab(document.getElementById("lab2"), {
+    width: 660, height: 360,
+    controls: [
+      { id: "shape", label: "数据形状", value: "line", options: [["line", "直线（第 1 格的例子）"], ["sine", "正弦曲线（第 5 格的例子）"]] },
+      { id: "ang", label: "编码方向 W 的角度（度）", min: 0, max: 179, step: 1, value: 20 },
+      { id: "noise", label: "数据的噪声", min: 0, max: 1, step: 0.05, value: 0.2, fmt: (v) => v.toFixed(2) },
+      { id: "best", label: "求最优方向", button: true },
+    ],
+    note: "编码：d = (x − 均值)·w，w 是单位方向向量；解码：x̂ = 均值 + d·w。虚线连接每个点和它的重建点。直线数据调到正确角度时误差几乎只剩噪声；正弦数据无论怎么转，误差都降不下来，这就是作者说的“需要把空间掰直”。点“求最优方向”会用主成分分析算出误差最小的角度。",
+    render(svg, v, api) {
+      const r = K.rng(4), N = 60, P = [];
+      for (let i = 0; i < N; i++) {
+        const t = 2 + (i * 8) / (N - 1);
+        if (v.shape === "line") P.push([t + K.randn(r) * v.noise * 0.4, t + K.randn(r) * v.noise * 0.4]);
+        else P.push([1 + (i * 10) / (N - 1), 6 + 3 * Math.sin((i / (N - 1)) * 4 * Math.PI) + K.randn(r) * v.noise * 0.4]);
+      }
+      const m = [P.reduce((s, p) => s + p[0], 0) / N, P.reduce((s, p) => s + p[1], 0) / N];
+      let ang = v.ang;
+      if (v.best > 0 && v.best !== labB.lastBest) {
+        let sxx = 0, syy = 0, sxy = 0; P.forEach((p) => { const a = p[0] - m[0], b = p[1] - m[1]; sxx += a * a; syy += b * b; sxy += a * b; });
+        let th = 0.5 * Math.atan2(2 * sxy, sxx - syy) * (180 / Math.PI); if (th < 0) th += 180;
+        labB.lastBest = v.best; labB.ang = Math.round(th) % 180;
+        const s = document.querySelector("#lab2 input[type=range]"); if (s) { s.value = labB.ang; s.dispatchEvent(new Event("input")); return; }
+      }
+      const w = [Math.cos((ang * Math.PI) / 180), Math.sin((ang * Math.PI) / 180)];
+      const ax = K.axes(svg, { x: 50, y: 15, w: 320, h: 310 }, [0, 12], [0, 12], { xlabel: "x1", ylabel: "x2" });
+      K.svg(svg, "line", { x1: ax.sx(m[0] - w[0] * 9), y1: ax.sy(m[1] - w[1] * 9), x2: ax.sx(m[0] + w[0] * 9), y2: ax.sy(m[1] + w[1] * 9), stroke: "var(--c2)", "stroke-width": 2 });
+      let err = 0; const ds = [];
+      P.forEach((p, i) => {
+        const d = (p[0] - m[0]) * w[0] + (p[1] - m[1]) * w[1], q = [m[0] + d * w[0], m[1] + d * w[1]];
+        err += ((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2) / N; ds.push([d, i]);
+        K.svg(svg, "line", { x1: ax.sx(p[0]), y1: ax.sy(p[1]), x2: ax.sx(q[0]), y2: ax.sy(q[1]), stroke: "var(--ink-3)", "stroke-dasharray": "2 2" });
+        K.svg(svg, "circle", { cx: ax.sx(q[0]), cy: ax.sy(q[1]), r: 2.5, fill: "var(--c2)" });
+        K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 4, fill: K.heat(i / N * 0.85 + 0.15) });
+      });
+      // 一维潜在表示
+      const lat = K.axes(svg, { x: 420, y: 180, w: 220, h: 1 }, [-8, 8], [0, 1], { yticks: 0, xticks: 4, xlabel: "潜在表示 d（一维）" });
+      ds.forEach(([d, i]) => K.svg(svg, "circle", { cx: lat.sx(K.clamp(d, -8, 8)), cy: 168 - (i % 4) * 5, r: 3.5, fill: K.heat(i / N * 0.85 + 0.15) }));
+      K.svg(svg, "text", { x: 420, y: 60, "font-size": 12 }, "颜色 = 点在数据里的先后顺序");
+      K.svg(svg, "text", { x: 420, y: 80, "font-size": 12 }, "潜在表示里颜色乱了 = 信息丢了");
+      // 顺序保持程度：相邻点的 d 是否单调
+      let mono = 0; for (let i = 1; i < N; i++) { const a = ds[i][0] - ds[i - 1][0]; mono += a > 0 ? 1 : 0; }
+      const order = Math.max(mono, N - 1 - mono) / (N - 1);
+      return { readout: [
+        { k: "当前角度", v: ang + "°" },
+        { k: "平均重建误差", v: err.toFixed(3), color: err < 0.2 ? "var(--good)" : "var(--bad)" },
+        { k: "顺序保持程度", v: Math.round(order * 100) + "%", color: order > 0.9 ? "var(--good)" : "var(--warn)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

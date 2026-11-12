@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>实时估计 Rt</title>
+<meta name="description" content="Kaggle 案例拆解：用泊松似然和逐日贝叶斯更新，从印度尼西亚各省每天的新冠新增病例实时估计有效再生数 Rt 及其最高密度区间。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">时间序列 · 流行病学 · 贝叶斯更新</div>
+  <h1>一个病人会传给几个人？用贝叶斯每天更新印尼各省的 Rt</h1>
+  <p class="en">Estimating COVID-19 Rt in Real-Time. Indonesia</p>
+  <div class="tags">
+    <span class="tag st">统计分析</span>
+    <span class="tag method">有效再生数 Rt</span><span class="tag method">贝叶斯定理</span><span class="tag method">泊松似然</span>
+    <span class="tag method">逐日后验更新</span><span class="tag method">高斯随机游走先验</span><span class="tag method">最高密度区间 HDI</span>
+    <span class="tag method">最大似然选 σ</span><span class="tag method">高斯平滑</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Hendratno</b>（改编自 Kevin Systrom 的 rt.live 方法）</span>
+    <span>Kaggle 点赞 <b>42</b>（2026-11 抓取）</span>
+    <span>数据集 <b>hendratno/covid19-indonesia</b></span>
+    <span><a href="https://www.kaggle.com/code/hendratno/estimating-covid-19-rt-in-real-time-indonesia" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">印度尼西亚全国和各省每天的累计确诊数</div><p>作者自己维护的 covid19-indonesia 数据集，读入地点、日期、累计确诊三列，差分得到每日新增。<span data-cell="21">出处</span></p></div>
+    <div class="card panel"><h3>要估计什么</h3><div class="big">有效再生数 Rt：每个感染者此刻平均传染几人</div><p>Rt &gt; 1 疫情在扩大，Rt &lt; 1 在收缩。它会随防控措施变化，所以要“实时”估计。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">泊松似然 + 每天一次贝叶斯更新</div><p>Bettencourt &amp; Ribeiro（2008，PLoS ONE）的方法，经 Kevin Systrom 的 rt.live notebook 实现，作者从俄罗斯版改成印尼各省。<span data-cell="0">出处</span> <span data-cell="2">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">每省一条 Rt 曲线 + 90% 区间 + 受控排名</div><p>还按大规模社会限制（PSBB）状态给省份上色。但作者开头引用了印尼官方声明：因报告延迟，Rt 目前在印尼<b>不可靠</b>。<span data-cell="0">出处</span> <span data-cell="43">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>hendratno/covid19-indonesia</b>，由 notebook 作者本人整理上传。代码只读其中三列：日期、地点、累计确诊数。<span data-cell="21">出处</span> 数据集总行数和起止日期作者没写，这里不列。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">地区</div><div class="v" style="font-size:18px">34 个省 + 全国</div></div>
+        <div class="stat-tile"><div class="k">时间粒度</div><div class="v">每天</div></div>
+        <div class="stat-tile"><div class="k">序列间隔</div><div class="v">约 7 天</div></div>
+        <div class="stat-tile"><div class="k">平滑窗口</div><div class="v" style="font-size:18px">7 天高斯</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">34 个省是第 43 格限制措施名单里列出的省份数 <span data-cell="43">出处</span>；序列间隔 7 天见第 10 格 <span data-cell="10">出处</span>；平滑见第 23 格 <span data-cell="23">出处</span>。</p>
+      <p class="callout warn"><b>作者开篇的提醒：</b>2020 年 8 月 4 日印尼新冠工作组发言人表示，因为化验结果做不到 24 小时内上报、报告有延迟、发病日期没有记录、各地算法不同，Rt 在印尼<b>暂时不能用</b>于分区，它只是 15 个指标之一。<span data-cell="0">出处</span></p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">用到的字段和中间量</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>名称</th><th>含义</th></tr>
+        <tr><td><code>location</code></td><td>省份名，或 Indonesia（全国）</td></tr>
+        <tr><td><code>date</code></td><td>日期，缺的日子补上前一天的累计值</td></tr>
+        <tr><td><code>cases</code></td><td>累计确诊数</td></tr>
+        <tr><td><code>new_cases</code> = cases.diff()</td><td>每日新增 k<sub>t</sub></td></tr>
+        <tr><td><code>smoothed</code></td><td>7 天高斯平滑后的每日新增（取整）</td></tr>
+        <tr><td><b>Rt</b></td><td><b>要估计的量</b>：一个感染者平均传给几个人</td></tr>
+      </table></div>
+      <p class="callout"><b>Rt 和因果：</b>作者最后把各省的 Rt 和是否实施大规模社会限制放在一起比较。但限制措施往往是<b>疫情严重</b>的省份才上的，直接看“有限制的省 Rt 高”就下结论，会把因果方向弄反。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="10">
+    <h3>实验 A · 从两天的病例数反推 Rt <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labA"></div>
+  </div>
+  <div data-at="25">
+    <h3>实验 B · 实时追踪一条“真实” Rt <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labB"></div>
+  </div>
+  <div data-at="35">
+    <h3>实验 C · 用最大似然挑 σ <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labC"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>Rt &lt; 1 一般表示局面受控；Rt 能帮助判断措施效果、决定收紧还是放松</td><td><span data-cell="0">第 0 格</span></td></tr>
+        <tr><td>看到 20 例新增时，λ 最可能是 20，但 17、21 也都有可能</td><td><span data-cell="8">第 8 格</span></td></tr>
+        <tr><td>贝叶斯更新综合了前几天的信息：后验比单天似然更稳，而且越来越窄</td><td><span data-cell="13">第 13 格</span></td></tr>
+        <tr><td>每天的后验一开始很宽，之后越来越确定</td><td><span data-cell="26">第 26 格</span></td></tr>
+        <tr><td>σ 用最大似然在 0.05–1 之间选，所有省份的对数似然加总后取最大</td><td><span data-cell="32">第 32 格</span></td></tr>
+        <tr><td>按 90% 区间上限 ≤ 1 列为“可能受控”，下限 ≥ 1 列为“可能未受控”</td><td><span data-cell="47">第 47 格</span> <span data-cell="48">第 48 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">每个省份的 Rt 数值、选中的 σ、受控 / 未受控名单都在运行输出和图里，源码不带输出，作者文字里也没写，所以这里不列任何省份的结果。</p>
+      <p class="callout warn"><b>原文值得注意的地方：</b>①第 21 格打印 <code>Dropping {location}</code>，但循环变量叫 <code>state</code>，真遇到要丢弃的省份会报 NameError；②第 31 格的区间延伸起点 2020-03-21、横轴起点 2020-03-01 都是从美国版原样搬来的硬编码日期；③第 30 格注释写“研究一下为什么要平移 −1”，但代码里并没有平移；④第 43 格的限制措施名单注明截至 2021-01-11，和数据最后一天未必对得上；⑤第 23 格平滑后取整，病例很少的省份会出现大量 0，算法只从“最后一个 0 之后”开始，很多小省份只剩几天数据。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能回答：</b>“此刻疫情在加速还是减速”“把握有多大”，并且每天来新数据就更新一次。</li>
+        <li><b>同类问题：</b>流感、登革热等传染病监测；网络谣言的转发“再生数”；门店客流、App 新增用户的增长势头。</li>
+        <li><b>可迁移的套路：</b>写出“观测数据 ↔ 隐藏量”的似然 → 选一个合理的初始先验 → 允许隐藏量每天小幅漂移（随机游走）→ 每天：昨天的后验扩散成今天的先验，乘似然再归一化 → 用区间而不是单个数字汇报。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>泊松分布与似然 <span data-cell="3">第 3 格</span> <span data-cell="7">第 7 格</span></li>
+        <li>λ = k<sub>t−1</sub>·e<sup>γ(Rt−1)</sup>，γ = 1/7 <span data-cell="10">第 10 格</span></li>
+        <li>累乘更新（无漂移版）<span data-cell="12">第 12 格</span></li>
+        <li>最高密度区间 HDI <span data-cell="16">第 16 格</span></li>
+        <li>7 天高斯平滑 <span data-cell="23">第 23 格</span></li>
+        <li>高斯过程矩阵 + Gamma(4) 初始先验 + 逐日更新 <span data-cell="25">第 25 格</span></li>
+        <li>最大似然选 σ <span data-cell="33">第 33 格</span> <span data-cell="35">第 35 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>官方说“化验结果要几天才报上来，Rt 不可靠”。报告延迟会让 Rt 的估计偏早还是偏晚？检测量突然翻倍又会怎样？</li>
+      <li>作者把序列间隔定为 7 天。如果真实是 4 天，同样的病例增长，算出来的 Rt 会偏大还是偏小？（实验 A 里试试。）</li>
+      <li>σ 大，Rt 曲线跟得快但抖；σ 小，曲线平滑但反应慢。疫情防控部门更怕哪一种错误？</li>
+      <li>实施大规模社会限制的省份 Rt 更高，能说明限制措施没用吗？这里藏着什么混杂因素或反向因果？</li>
+      <li>“90% 区间上限 ≤ 1 才算受控”，为什么用上限而不是最可能值？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Hendratno，改编自 fo2rist 的俄罗斯版，后者又改编自 Kevin Systrom 的 rt.live notebook；方法来自 Bettencourt &amp; Ribeiro (2008), Real Time Bayesian Estimation of the Epidemic Potential of Emerging Infectious Diseases, PLoS ONE。版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。
+</footer>
+</main>
+
+<script src="nb/covid-rt-bayesian-indonesia.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const fade = (els, ctx, ms) => ctx.tween(ms || 500, (t) => els.forEach((e) => (e.style.opacity = t)));
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+
+  /* ---------- 小工具 ---------- */
+  const lfact = (() => { const c = [0]; for (let i = 1; i < 200; i++) c.push(c[i - 1] + Math.log(i)); return (n) => (n < 200 ? c[Math.round(n)] : n * Math.log(n) - n + 0.5 * Math.log(2 * Math.PI * n)); })();
+  const logPois = (k, lam) => (lam <= 0 ? (k === 0 ? 0 : -1e9) : k * Math.log(lam) - lam - lfact(k));
+  function poisS(r, lam) { if (lam > 50) return Math.max(0, Math.round(lam + Math.sqrt(lam) * K.randn(r))); let L = Math.exp(-lam), k = 0, p = 1; do { k++; p *= r(); } while (p > L); return k - 1; }
+  const GRID = []; for (let i = 0; i <= 300; i++) GRID.push(i * 0.02); // Rt 0–6
+  function gammaPdf4(x) { return x <= 0 ? 0 : x * x * x * Math.exp(-x) / 6; }
+  function hdi(p, mass) { // 最短区间（两指针）
+    const c = [0]; p.forEach((v) => c.push(c[c.length - 1] + v));
+    let best = [0, p.length - 1], j = 0;
+    for (let i = 0; i < p.length; i++) { while (j < p.length && c[j + 1] - c[i] < mass) j++; if (j >= p.length) break; if (j - i < best[1] - best[0]) best = [i, j]; }
+    return [GRID[best[0]], GRID[best[1]]];
+  }
+  /* 逐日后验：k 序列、序列间隔 si、漂移 σ */
+  function runRt(k, si, sigma) {
+    const g = 1 / si, n = GRID.length, w = Math.max(1, Math.ceil(4 * sigma / 0.02));
+    const ker = []; for (let d = -w; d <= w; d++) ker.push(Math.exp(-0.5 * Math.pow(d * 0.02 / sigma, 2)));
+    let post = GRID.map(gammaPdf4); let s = post.reduce((a, b) => a + b, 0); post = post.map((v) => v / s);
+    const out = []; let ll = 0;
+    for (let t = 1; t < k.length; t++) {
+      const prior = new Array(n).fill(0);
+      for (let i = 0; i < n; i++) { if (post[i] < 1e-12) continue; let z = 0; for (let d = -w; d <= w; d++) { const j = i + d; if (j >= 0 && j < n) z += ker[d + w]; } for (let d = -w; d <= w; d++) { const j = i + d; if (j >= 0 && j < n) prior[j] += post[i] * ker[d + w] / z; } }
+      const num = GRID.map((R, i) => prior[i] * Math.exp(logPois(k[t], Math.max(0.5, k[t - 1]) * Math.exp(g * (R - 1)))));
+      const den = num.reduce((a, b) => a + b, 0) || 1e-300;
+      ll += Math.log(den);
+      post = num.map((v) => v / den);
+      let mi = 0; post.forEach((v, i) => { if (v > post[mi]) mi = i; });
+      out.push({ ml: GRID[mi], h: hdi(post, 0.9), post });
+    }
+    return { out, ll };
+  }
+  function smooth7(x) { const w = [-3, -2, -1, 0, 1, 2, 3].map((d) => Math.exp(-0.5 * (d / 2) * (d / 2))); return x.map((_, i) => { let s = 0, z = 0; for (let d = -3; d <= 3; d++) { const j = i + d; if (j >= 0 && j < x.length) { s += x[j] * w[d + 3]; z += w[d + 3]; } } return Math.round(s / z); }); }
+  /* 模拟疫情：真实 Rt 分三段 */
+  function simEpi(seed, si, noise, weekly) {
+    const r = K.rng(seed), T = 120, R = [], lam = [], k = [];
+    let level = 20;
+    for (let t = 0; t < T; t++) {
+      const rt = t < 35 ? 1.8 : t < 75 ? 0.8 : 1.25; R.push(rt);
+      if (t) level = level * Math.exp((rt - 1) / si);
+      let obs = poisS(r, level);
+      if (noise > 0) obs = Math.max(0, Math.round(obs * Math.exp(K.randn(r) * noise)));
+      if (weekly && t % 7 === 6) obs = Math.round(obs * 0.4);
+      k.push(obs);
+    }
+    return { R, k };
+  }
+  function pline(svg, ax, xs, ys, attrs) { return K.svg(svg, "path", Object.assign({ d: "M" + xs.map((x, i) => ax.sx(x).toFixed(1) + "," + ax.sy(ys[i]).toFixed(1)).join("L"), fill: "none", stroke: "var(--c1)", "stroke-width": 2 }, attrs || {})); }
+  function pband(svg, ax, xs, lo, hi, attrs) { return K.svg(svg, "path", Object.assign({ d: "M" + xs.map((x, i) => ax.sx(x) + "," + ax.sy(hi[i])).join("L") + "L" + xs.slice().reverse().map((x, j) => ax.sx(x) + "," + ax.sy(lo[xs.length - 1 - j])).join("L") + "Z", fill: "var(--c1)", "fill-opacity": 0.18 }, attrs || {})); }
+
+  const steps = [
+    {
+      at: 0, title: "Rt：一个病人此刻会传给几个人", kicker: "第 0–1 格 · 开场",
+      html: `<p>Rt 叫<b>有效再生数</b>：在时间 t，每个感染者平均会传染几个人。疫情一开始的那个值叫 R0，但防控措施一变，Rt 就跟着变。<span data-cell="0">出处</span></p><p>动画里，Rt = 2 时一代传两个，人数像滚雪球；Rt = 0.8 时一代比一代少，慢慢熄灭。所以原文说：Rt &lt; 1 一般表示局面受控。</p><p>notebook 的来历：Kevin Systrom 实现了 Bettencourt &amp; Ribeiro 的方法并做成 rt.live 网站，有人改成俄罗斯版，本作者再改成印尼各省版。开头还引用了印尼官方“Rt 暂时不可靠”的声明。</p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        const tree = (x0, R, color, label) => {
+          K.svg(svg, "text", { x: x0 + 150, y: 26, "text-anchor": "middle", "font-size": 15, "font-weight": 700, fill: color }, label);
+          const gens = [[x0 + 150]]; const els = [];
+          for (let g = 1; g < 5; g++) {
+            const prev = gens[g - 1], next = [];
+            prev.forEach((px, i) => { const kids = R >= 1 ? 2 : (i % 5 === 4 ? 0 : 1); for (let c = 0; c < kids; c++) next.push(0); });
+            const sp = Math.min(36, 280 / Math.max(1, next.length));
+            const xs = next.map((_, i) => x0 + 150 + (i - (next.length - 1) / 2) * sp);
+            gens.push(R >= 1 ? xs : xs.slice(0, Math.max(1, Math.round(prev.length * 0.8))));
+          }
+          gens.forEach((xs, g) => xs.forEach((x) => { const c = K.svg(svg, "circle", { cx: x, cy: 60 + g * 62, r: 8, fill: color }); c.style.opacity = 0; els.push([g, c]); }));
+          return els;
+        };
+        const a = tree(20, 2, "var(--bad)", "Rt = 2：越传越多"), b = tree(380, 0.8, "var(--good)", "Rt = 0.8：慢慢熄灭");
+        K.svg(svg, "text", { x: 360, y: 336, "text-anchor": "middle", "font-size": 12, class: "muted" }, "每一行是一代感染者（示意）");
+        (async () => { for (let g = 0; g < 5; g++) { if (!(await ctx.tween(450, (t) => [...a, ...b].forEach(([gg, c]) => { if (gg === g) c.style.opacity = t; })))) return; } })();
+      },
+    },
+    {
+      at: 2, title: "贝叶斯定理与泊松分布", kicker: "第 2–5 格 · 两个工具",
+      html: `<p>方法的骨架是贝叶斯定理：<b>P(Rt | k) ∝ P(k | Rt) × P(Rt)</b>。看到当天新增 k 例后，对 Rt 的看法（后验）= 似然 × 先验。每过一天，就拿昨天的结论当今天的先验，再更新一次。<span data-cell="2">出处</span></p><p>似然用<b>泊松分布</b>：如果平均每天该来 λ 例，实际来 k 例的概率是多少。作者画了 λ = 10、20、30、40 四条分布。<span data-cell="3">出处</span> <span data-cell="5">出处</span></p>`,
+      cells: [2, 3, 5], highlight: ["poisson.pmf", "lambdas = [10, 20, 30, 40]"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 24, w: 620, h: 250 }, [0, 70], [0, 0.13], { xticks: 7, yticks: 0, xlabel: "当天新增病例数 k" });
+        const L = [10, 20, 30, 40], cols = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)"];
+        const groups = L.map((lam, i) => { const g = K.svg(svg, "g"); for (let k = 0; k < 70; k++) K.svg(g, "circle", { cx: ax.sx(k), cy: ax.sy(Math.exp(logPois(k, lam))), r: 3, fill: cols[i] }); K.svg(g, "text", { x: ax.sx(lam), y: ax.sy(Math.exp(logPois(lam, lam))) - 10, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: cols[i] }, "λ=" + lam); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 360, y: 326, "text-anchor": "middle", "font-size": 13, class: "muted" }, "平均 λ 例时，实际来几例都有可能，但大多在 λ 附近");
+        (async () => { for (const g of groups) { if (!(await fade([g], ctx, 500))) return; } })();
+      },
+    },
+    {
+      at: 6, title: "似然：看到 20 例，λ 最可能是多少", kicker: "第 6–8 格 · 把问题倒过来",
+      html: `<p>现实中我们知道的是 k（今天来了 20 例），想知道的是 λ。把 k 固定在 20，让 λ 从 1 变到 45，算每个 λ 下“看到 20 例”的概率，这条曲线就是<b>似然函数</b>。<span data-cell="6">出处</span> <span data-cell="7">出处</span></p><p>作者的解读：最可能的 λ 是 20，但 21、17 也完全可能只是运气；λ = 40 却只看到 20 例，就不太可能了。<span data-cell="8">出处</span></p>`,
+      cells: [6, 7, 8], highlight: ["k = 20", "np.linspace(1, 45, 90)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 24, w: 620, h: 250 }, [1, 45], [0, 0.1], { xticks: 4, yticks: 0, xlabel: "λ（平均每天该来几例）" });
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 3 });
+        const dot = K.svg(svg, "circle", { cx: 0, cy: 0, r: 6, fill: "var(--accent)" });
+        const lab = K.svg(svg, "text", { x: 470, y: 60, "font-size": 14, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 360, y: 326, "text-anchor": "middle", "font-size": 13, class: "muted" }, "固定 k = 20，扫遍每个 λ，记下“看到 20 例”的概率");
+        ctx.tween(2400, (t) => {
+          const lmax = 1 + 44 * t; let d = "";
+          for (let l = 1; l <= lmax; l += 0.25) d += (d ? "L" : "M") + ax.sx(l) + "," + ax.sy(Math.exp(logPois(20, l)));
+          K.set(path, { d }); K.set(dot, { cx: ax.sx(lmax), cy: ax.sy(Math.exp(logPois(20, lmax))) });
+          lab.textContent = `λ = ${lmax.toFixed(1)}：P(k=20) = ${(Math.exp(logPois(20, lmax)) * 100).toFixed(2)}%`;
+        });
+      },
+    },
+    {
+      at: 9, title: "λ 与 Rt 之间的桥：序列间隔约 7 天", kicker: "第 9–10 格 · 关键公式",
+      html: `<p>关键一步是把 λ 和 Rt 连起来：<span data-cell="9">出处</span></p><p class="callout"><b>λ = 昨天的新增 × e<sup>γ(Rt − 1)</sup></b>，γ = 1 / 序列间隔</p><p><b>序列间隔</b>是“一个人发病到他传染的人发病”平均隔几天，作者按美国疾控中心的资料取约 7 天。Rt = 1 时今天和昨天一样多；Rt &gt; 1 时今天该比昨天多一点。</p><p>作者用 20、40、55、90 四天的病例，画出后三天各自对 Rt 的似然。<span data-cell="10">出处</span></p>`,
+      cells: [9, 10], highlight: ["GAMMA = 1/7", "np.exp(GAMMA * (r_t_range[:, None] - 1))"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 24, w: 620, h: 250 }, [0, 10], [0, 1], { xticks: 5, yticks: 0, xlabel: "Rt" });
+        const k = [20, 40, 55, 90], cols = ["var(--c1)", "var(--c2)", "var(--c3)"];
+        const cs = [1, 2, 3].map((t, i) => {
+          const ys = GRID.map((R) => Math.exp(logPois(k[t], k[t - 1] * Math.exp((R - 1) / 7)))), m = Math.max(...ys);
+          const p = pline(svg, ax, GRID.slice(0, 251), ys.slice(0, 251).map((y) => y / m), { stroke: cols[i], "stroke-width": 2.5 });
+          const mi = ys.indexOf(m);
+          const tx = K.svg(svg, "text", { x: ax.sx(GRID[mi]), y: ax.sy(1) - 8, "text-anchor": "middle", "font-size": 12, "font-weight": 700, fill: cols[i] }, `${k[t - 1]}→${k[t]} 例`);
+          return [p, tx];
+        }).flat();
+        K.svg(svg, "text", { x: 360, y: 326, "text-anchor": "middle", "font-size": 13, class: "muted" }, "每天单独看：涨得越猛，似然越偏向大的 Rt（各自按最高点缩放）");
+        hide(cs);
+        (async () => { for (let i = 0; i < cs.length; i += 2) { if (!(await fade([cs[i], cs[i + 1]], ctx, 600))) return; } })();
+      },
+    },
+    {
+      at: 11, title: "逐日贝叶斯更新：把几天的证据叠起来", kicker: "第 11–14 格 · 累乘",
+      html: `<p>单看某一天，猜测各不相同。贝叶斯更新把它们合起来：今天的后验 = 昨天的后验 × 今天的似然，再归一化。作者用累乘 <code>cumprod</code> 一次算完。<span data-cell="11">出处</span> <span data-cell="12">出处</span></p><p>作者的解读：第 2 天的后验往左移了，但没有单看第 2 天那么多，因为它综合了两天的信息；第 3 天又稍微右移，更重要的是<b>变窄了</b>，我们越来越有把握。<span data-cell="13">出处</span> 然后取每天后验的最高点作为“最可能的 Rt”。<span data-cell="14">出处</span></p>`,
+      cells: [11, 12, 13, 14], highlight: ["cumprod", "idxmax"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 24, w: 620, h: 250 }, [0, 6], [0, 1], { xticks: 6, yticks: 0, xlabel: "Rt" });
+        const k = [20, 40, 55, 90], cols = ["var(--c1)", "var(--c2)", "var(--c3)"];
+        let post = GRID.map(() => 1);
+        const els = [];
+        [1, 2, 3].forEach((t, i) => {
+          post = post.map((p, j) => p * Math.exp(logPois(k[t], k[t - 1] * Math.exp((GRID[j] - 1) / 7))));
+          const s = post.reduce((a, b) => a + b, 0); post = post.map((v) => v / s);
+          const m = Math.max(...post);
+          els.push(pline(svg, ax, GRID, post.map((v) => v / m * (0.55 + 0.15 * i)), { stroke: cols[i], "stroke-width": 3 }));
+          els.push(K.svg(svg, "text", { x: 520, y: 60 + i * 22, "font-size": 13, "font-weight": 700, fill: cols[i] }, `第 ${t} 天后验（最可能 ${GRID[post.indexOf(m)].toFixed(2)}）`));
+        });
+        K.svg(svg, "text", { x: 360, y: 326, "text-anchor": "middle", "font-size": 13, class: "muted" }, "曲线高度按“越往后越有把握”示意放大，看的是位置和胖瘦");
+        hide(els);
+        (async () => { for (let i = 0; i < els.length; i += 2) { if (!(await fade([els[i], els[i + 1]], ctx, 700))) return; await ctx.wait(300); } })();
+      },
+    },
+    {
+      at: 15, title: "最高密度区间：最可能值加一条“把握带”", kicker: "第 15–19 格 · HDI",
+      html: `<p>只报一个“最可能值”不够，还要说清不确定性。作者写了一个函数找<b>最高密度区间（HDI）</b>：包含 90% 概率的<b>最短</b>区间。<span data-cell="16">出处</span></p><p>然后把每天的最可能值连成线、HDI 涂成灰带。<span data-cell="18">出处</span> 作者说：区间随时间收窄，因为越来越确定；这个 4 天的小例子还没加上下一章的“允许 Rt 漂移”。<span data-cell="19">出处</span></p>`,
+      cells: [15, 16, 18], highlight: ["highest_density_interval", "fill_between"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 24, w: 620, h: 220 }, [0, 4], [0, 1], { xticks: 4, yticks: 0, xlabel: "Rt" });
+        const p = GRID.map((R) => Math.pow(R, 5) * Math.exp(-R * 3.2)); const s = p.reduce((a, b) => a + b, 0); const pn = p.map((v) => v / s); const m = Math.max(...pn);
+        const xs = GRID.slice(0, 201);
+        K.svg(svg, "path", { d: "M" + ax.sx(0) + "," + ax.sy(0) + xs.map((x, i) => "L" + ax.sx(x) + "," + ax.sy(pn[i] / m)).join("") + "Z", fill: "var(--panel-2)", stroke: "var(--ink-3)" });
+        const [lo, hi] = hdi(pn, 0.9);
+        const fillP = K.svg(svg, "path", { d: "", fill: "var(--c1)", "fill-opacity": 0.35 });
+        const lab = K.svg(svg, "text", { x: 360, y: 300, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 360, y: 326, "text-anchor": "middle", "font-size": 12, class: "muted" }, "示意后验：从最高点向两边扩，直到涂满 90% 的面积");
+        const mi = pn.indexOf(m);
+        ctx.tween(2000, (t) => {
+          const a = Math.round(K.lerp(mi, GRID.indexOf(lo), t)), b = Math.round(K.lerp(mi, GRID.indexOf(hi), t));
+          let d = "M" + ax.sx(GRID[a]) + "," + ax.sy(0); for (let i = a; i <= b; i++) d += "L" + ax.sx(GRID[i]) + "," + ax.sy(pn[i] / m); d += "L" + ax.sx(GRID[b]) + "," + ax.sy(0) + "Z";
+          K.set(fillP, { d }); const mass = pn.slice(a, b + 1).reduce((x, y) => x + y, 0);
+          lab.textContent = `区间 ${GRID[a].toFixed(2)} ~ ${GRID[b].toFixed(2)}，涂了 ${(mass * 100).toFixed(0)}% 的概率`;
+        });
+      },
+    },
+    {
+      at: 20, title: "换上印尼数据：34 个省，每天的累计确诊", kicker: "第 20–21 格 · 读数据",
+      html: `<p>正式分析换成作者自己的印尼数据集：读地点、日期、累计确诊三列。<span data-cell="21">出处</span> 处理步骤：去掉 Diamond Princess（从美国版继承下来的过滤项），丢掉全程没病例的地区，把缺的日期补上，第一天设为 0，空缺用前一天的累计值填。</p><p class="callout warn">第 21 格丢弃地区时打印的是 <code>{location}</code>，但循环变量叫 <code>state</code>，真触发时会报错。</p>`,
+      cells: [20, 21], highlight: ["covid_19_indonesia_time_series_all.csv", "ffill", "Diamond Princess"],
+      draw(svg, ctx) {
+        const days = 10, rows = ["Aceh", "Bali", "DKI Jakarta", "Papua"], vals = [[0, 1, 1, null, 3, 3, 5, null, 8, 9], [0, 2, null, 4, 4, 7, null, 9, 12, 15], [0, 5, 9, 14, null, 25, 31, 40, null, 58], [0, 0, null, 1, 1, null, 2, 2, 3, null]];
+        rows.forEach((n, i) => K.svg(svg, "text", { x: 110, y: 74 + i * 56, "text-anchor": "end", "font-size": 13, "font-weight": 700 }, n));
+        const cells = [];
+        vals.forEach((row, i) => row.forEach((v, j) => {
+          const x = 120 + j * 56, y = 50 + i * 56;
+          K.svg(svg, "rect", { x, y, width: 52, height: 40, rx: 5, fill: "var(--panel-2)", stroke: "var(--line)" });
+          const t = K.svg(svg, "text", { x: x + 26, y: y + 26, "text-anchor": "middle", "font-size": 14, fill: v == null ? "var(--bad)" : "var(--ink)" }, v == null ? "空" : String(v));
+          if (v == null) cells.push({ t, fillv: row.slice(0, j).reverse().find((q) => q != null) });
+        }));
+        K.svg(svg, "text", { x: 400, y: 30, "text-anchor": "middle", "font-size": 13, class: "muted" }, "累计确诊（示意数字）：缺的日子用前一天的累计值补");
+        const msg = K.svg(svg, "text", { x: 400, y: 300, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--accent)" }, "ffill：前向填充");
+        msg.style.opacity = 0;
+        (async () => { await ctx.wait(800); for (const c of cells) { if (!ctx.alive()) return; c.t.textContent = String(c.fillv); K.set(c.t, { fill: "var(--accent)" }); if (!(await ctx.wait(220))) return; } fade([msg], ctx, 500); })();
+      },
+    },
+    {
+      at: 22, title: "平滑：先把报告的毛刺磨掉", kicker: "第 22–23 格 · 预处理",
+      html: `<p>累计数先差分成每日新增，再做 7 天窗口的<b>高斯平滑</b>（标准差 2 天），取整。<span data-cell="23">出处</span> 作者说这是一个“任意的选择”：报告受检测积压影响很乱，真实的传播过程不会这么剧烈地跳。<span data-cell="22">出处</span></p><p>另外只从“最后一个 0 之后”开始分析，保证每天都有病例。动画里灰点是原始每日新增（周末报告少、补报时暴涨），蓝线是平滑后的样子。</p>`,
+      cells: [22, 23], highlight: ["rolling(7", "win_type='gaussian'", "std=2", "last_zero"],
+      draw(svg, ctx) {
+        const r = K.rng(6), raw = [];
+        for (let t = 0; t < 70; t++) { const base = 30 * Math.exp(t / 25); let v = poisS(r, base); if (t % 7 === 5 || t % 7 === 6) v = Math.round(v * 0.45); if (t % 7 === 0) v = Math.round(v * 1.6); raw.push(v); }
+        const sm = smooth7(raw), ax = K.axes(svg, { x: 50, y: 24, w: 620, h: 250 }, [0, 69], [0, Math.max(...raw) * 1.05], { xticks: 0, yticks: 3, xlabel: "天（示意数据，含周末少报、周一补报）" });
+        const dots = raw.map((v, i) => K.svg(svg, "circle", { cx: ax.sx(i), cy: ax.sy(v), r: 3.5, fill: "var(--ink-3)", opacity: 0.8 }));
+        const p = pline(svg, ax, sm.map((_, i) => i), sm, { stroke: "var(--c1)", "stroke-width": 3 });
+        const L = p.getTotalLength(); p.style.strokeDasharray = L; p.style.strokeDashoffset = L;
+        K.svg(svg, "text", { x: 70, y: 320, "font-size": 12, fill: "var(--ink-3)" }, "● 原始每日新增");
+        K.svg(svg, "text", { x: 200, y: 320, "font-size": 12, fill: "var(--c1)" }, "— 7 天高斯平滑");
+        hide(dots);
+        fade(dots, ctx, 800).then((ok) => ok && ctx.tween(1500, (t) => (p.style.strokeDashoffset = L * (1 - t))));
+      },
+    },
+    {
+      at: 24, title: "允许 Rt 每天变一点：先验扩散与 σ", kicker: "第 24–25 格 · 完整算法",
+      html: `<p>前面的累乘假设 Rt 一直不变，但防控措施一变 Rt 就变。改进办法：每天先把昨天的后验<b>用高斯核“抹开”</b>一点（标准差 σ），当作今天的先验，表示“Rt 今天可能和昨天差一点”。<span data-cell="24">出处</span></p><p>第 25 格的完整流程：①算每天的 λ；②算似然；③建高斯过程矩阵；④初始先验取均值为 4 的 Gamma 分布；⑤逐日循环：抹开 → 乘似然 → 除以 P(k)，同时把 log P(k) 累加起来，留给后面选 σ 用。<span data-cell="25">出处</span></p><p>σ 越大，Rt 越能快速变化，旧证据被“遗忘”得也越快，效果类似只看最近几天的滑动窗口。</p>`,
+      cells: [24, 25], highlight: ["process_matrix", "sps.gamma(a=4)", "log_likelihood += np.log(denominator)", "sigma=.15"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 50, y: 24, w: 620, h: 240 }, [0, 4], [0, 1], { xticks: 4, yticks: 0, xlabel: "Rt" });
+        const base = GRID.map((R) => Math.exp(-0.5 * Math.pow((R - 1.4) / 0.08, 2)));
+        const p = K.svg(svg, "path", { d: "", fill: "color-mix(in srgb, var(--c1) 22%, transparent)", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const lab = K.svg(svg, "text", { x: 360, y: 306, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 360, y: 330, "text-anchor": "middle", "font-size": 12, class: "muted" }, "昨天的后验（尖）被高斯核抹开 → 今天的先验（宽一些）");
+        const draw = (sig) => {
+          const w = sig / 0.02, out = GRID.map((_, i) => { let s = 0; for (let j = 0; j < GRID.length; j++) s += base[j] * Math.exp(-0.5 * Math.pow((i - j) / Math.max(0.01, w), 2)); return s; });
+          const m = Math.max(...out); K.set(p, { d: "M" + ax.sx(0) + "," + ax.sy(0) + GRID.slice(0, 201).map((x, i) => "L" + ax.sx(x) + "," + ax.sy(out[i] / m)).join("") + "Z" });
+          lab.textContent = sig < 0.01 ? "σ = 0：完全照搬昨天" : `σ = ${sig.toFixed(2)}：允许 Rt 今天和昨天差这么多`;
+        };
+        draw(0);
+        (async () => { for (const s of [0.05, 0.15, 0.3, 0.5]) { if (!(await ctx.wait(800))) return; draw(s); } })();
+      },
+    },
+    {
+      at: 26, title: "结果：每天一条后验，连成实时 Rt 曲线", kicker: "第 26–31 格 · 画图",
+      html: `<p>作者先把每天的后验叠在一张图上：一开始又宽又平，越往后越尖。<span data-cell="26">出处</span> <span data-cell="27">出处</span> 再算每天的 90% HDI 和最可能值，画成实时 Rt 图：点按 Rt 着色（高于 1 偏红、低于 1 偏黑），灰带是区间，横线是 Rt = 1。<span data-cell="30">出处</span> <span data-cell="31">出处</span></p><p class="callout warn">第 31 格的起始日期 2020-03-01、2020-03-21 是从美国版直接搬来的硬编码；第 30 格注释“为什么要平移 −1”，代码里却没有平移。</p>`,
+      cells: [26, 27, 30, 31], highlight: ["highest_density_interval(posteriors, p=.9)", "axhline(1.0"],
+      draw(svg, ctx) {
+        const sim = simEpi(11, 7, 0.05, false), res = runRt(smooth7(sim.k), 7, 0.15).out;
+        const ax = K.axes(svg, { x: 50, y: 20, w: 620, h: 250 }, [0, 119], [0, 3], { xticks: 0, yticks: 3, xlabel: "天（浏览器现场模拟：真实 Rt 1.8 → 0.8 → 1.25）" });
+        K.svg(svg, "line", { x1: 50, x2: 670, y1: ax.sy(1), y2: ax.sy(1), stroke: "var(--ink-3)" });
+        const xs = res.map((_, i) => i + 1);
+        const band = pband(svg, ax, xs, res.map((d) => d.h[0]), res.map((d) => Math.min(3, d.h[1])), { fill: "var(--ink-3)", "fill-opacity": 0.2 });
+        const truth = pline(svg, ax, sim.R.map((_, i) => i), sim.R, { stroke: "var(--good)", "stroke-dasharray": "5 4" });
+        const dots = res.map((d, i) => K.svg(svg, "circle", { cx: ax.sx(i + 1), cy: ax.sy(Math.min(3, d.ml)), r: 3.5, fill: d.ml > 1 ? "var(--bad)" : "var(--ink)", stroke: "var(--panel)" }));
+        K.svg(svg, "text", { x: 60, y: 320, "font-size": 12, fill: "var(--good)" }, "- - 真实 Rt（模拟设定）   ● 最可能值（红 > 1）   灰带 = 90% HDI");
+        hide([band, truth, ...dots]);
+        (async () => { if (!(await fade([truth], ctx, 500))) return; if (!(await ctx.tween(1800, (t) => dots.forEach((d, i) => (d.style.opacity = i / dots.length < t ? 1 : 0))))) return; fade([band], ctx, 600); })();
+      },
+    },
+    {
+      at: 32, title: "σ 选多大：让数据自己投票", kicker: "第 32–35 格 · 最大似然",
+      html: `<p>σ 该取多少？作者采用 Adam Lerer 的建议：用<b>最大似然</b>。每个 σ 都把整个算法跑一遍，记下“看到这些数据的概率” P(k) 的对数之和；为了不只迁就某一个省，把所有省份的对数似然加起来，取最大的那个 σ。<span data-cell="24">出处</span> <span data-cell="32">出处</span></p><p>候选 σ 是 0.05 到 1 之间均匀取的 20 个值。<span data-cell="33">出处</span> 选中的值写在第 35 格图的标题里（运行输出，这里不列）。<span data-cell="35">出处</span></p>`,
+      cells: [32, 33, 35], highlight: ["np.linspace(1/20, 1, 20)", "total_log_likelihoods.argmax()"],
+      draw(svg, ctx) {
+        const sim = simEpi(23, 7, 0.08, false), sig = [0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.55, 0.7, 0.85, 1.0];
+        const ksm = smooth7(sim.k), lls = sig.map((s) => runRt(ksm, 7, s).ll), lo = Math.min(...lls), hi = Math.max(...lls);
+        const ax = K.axes(svg, { x: 60, y: 24, w: 600, h: 240 }, [0, 1], [lo - (hi - lo) * 0.1, hi + (hi - lo) * 0.1], { xticks: 5, yticks: 0, xlabel: "σ", ylabel: "总对数似然" });
+        const best = lls.indexOf(hi);
+        const pts = sig.map((s, i) => K.svg(svg, "circle", { cx: ax.sx(s), cy: ax.sy(lls[i]), r: 6, fill: i === best ? "var(--good)" : "var(--c1)" }));
+        const lab = K.svg(svg, "text", { x: 360, y: 316, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--good)" }, `这组模拟数据里，σ = ${sig[best]} 时数据“最说得通”`);
+        hide([...pts, lab]);
+        (async () => { for (const p of pts) { if (!(await fade([p], ctx, 220))) return; } fade([lab], ctx, 500); })();
+      },
+    },
+    {
+      at: 36, title: "汇总全部省份", kicker: "第 36–41 格 · 批量计算",
+      html: `<p>选定 σ 后，作者取出每个省在这个 σ 下的后验，计算 90% 和 50% 两种 HDI 以及最可能值，拼成一张总表 <code>final_results</code>。<span data-cell="37">出处</span> 然后每行 4 个小图画出所有省份的实时 Rt，最后导出 rt.csv。<span data-cell="39">出处</span> <span data-cell="41">出处</span></p><p>动画示意了“每个省一条曲线”的样子：不同省份数据多少不同，区间宽窄差别很大。病例很少的省，区间宽得几乎什么也说明不了。</p>`,
+      cells: [36, 37, 39, 41], highlight: ["hdis_50", "to_csv('rt.csv')"],
+      draw(svg, ctx) {
+        const names = ["省份 A", "省份 B", "省份 C", "省份 D", "省份 E", "省份 F"], sizes = [200, 60, 25, 120, 8, 40];
+        const panels = names.map((n, i) => {
+          const g = K.svg(svg, "g"), x = 20 + (i % 3) * 235, y = 14 + Math.floor(i / 3) * 165;
+          K.svg(g, "rect", { x, y, width: 225, height: 155, rx: 6, fill: "var(--panel-2)", stroke: "var(--line)" });
+          K.svg(g, "text", { x: x + 8, y: y + 18, "font-size": 12, "font-weight": 700 }, `${n}（每天约 ${sizes[i]} 例）`);
+          const r = K.rng(50 + i), T = 60, k = []; let lev = sizes[i];
+          for (let t = 0; t < T; t++) { const R = t < 25 ? 1.3 : 0.85; if (t) lev *= Math.exp((R - 1) / 7); k.push(poisS(r, lev)); }
+          const res = runRt(smooth7(k), 7, 0.2).out;
+          const ax = { sx: (t) => x + 10 + t / 59 * 205, sy: (v) => y + 145 - Math.min(3, v) / 3 * 115 };
+          K.svg(g, "line", { x1: x + 10, x2: x + 215, y1: ax.sy(1), y2: ax.sy(1), stroke: "var(--ink-3)", "stroke-dasharray": "3 3" });
+          K.svg(g, "path", { d: "M" + res.map((d, t) => ax.sx(t + 1) + "," + ax.sy(d.h[1])).join("L") + "L" + res.slice().reverse().map((d, j) => ax.sx(res.length - j) + "," + ax.sy(d.h[0])).join("L") + "Z", fill: "var(--ink-3)", "fill-opacity": 0.25 });
+          K.svg(g, "path", { d: "M" + res.map((d, t) => ax.sx(t + 1) + "," + ax.sy(d.ml)).join("L"), fill: "none", stroke: "var(--c1)", "stroke-width": 1.8 });
+          g.style.opacity = 0; return g;
+        });
+        (async () => { for (const p of panels) { if (!(await fade([p], ctx, 350))) return; } })();
+      },
+    },
+    {
+      at: 42, title: "排名：哪些省“可能受控”，哪些“可能未受控”", kicker: "第 42–48 格 · 结论图",
+      html: `<p>作者按印尼国家减灾署（BNPB）的公开信息，把省份分成：没有限制措施、部分大规模社会限制（PSBB）、PSBB 等几类（注明截至 2021-01-11），用不同深浅的红色上色。<span data-cell="42">出处</span> <span data-cell="43">出处</span></p><p>每个省取最后一天的 Rt 画成带误差线的柱状图，按最可能值、按区间上限各排一次；<b>90% 区间上限 ≤ 1</b> 的列为“可能受控”，<b>下限 ≥ 1</b> 的列为“可能未受控”。<span data-cell="45">出处</span> <span data-cell="47">出处</span> <span data-cell="48">出处</span></p><p class="callout">这张图很容易被读成“上了限制措施的省 Rt 反而高”。但限制措施通常是疫情严重的地方才上的，这是<b>反向因果</b>：是高 Rt 导致了限制，不是限制导致了高 Rt。</p>`,
+      cells: [42, 43, 45, 47, 48], highlight: ["High_90.le(1)", "Low_90.ge(1.0)", "lssr"],
+      draw(svg, ctx) {
+        const D = [["甲", 0.7, 0.55, 0.92, "var(--c1)"], ["乙", 0.85, 0.6, 1.15, "var(--c1)"], ["丙", 0.95, 0.75, 1.2, "var(--c6)"], ["丁", 1.1, 0.8, 1.5, "var(--c6)"], ["戊", 1.25, 1.05, 1.45, "var(--c6)"], ["己", 1.6, 1.2, 2.0, "var(--c6)"]];
+        const ax = K.axes(svg, { x: 60, y: 24, w: 600, h: 230 }, [0, 6], [0, 2.2], { xticks: 0, yticks: 4, ylabel: "最近一天 Rt" });
+        K.svg(svg, "line", { x1: 60, x2: 660, y1: ax.sy(1), y2: ax.sy(1), stroke: "var(--ink)", "stroke-dasharray": "4 3" });
+        const bars = D.map((d, i) => {
+          const g = K.svg(svg, "g"), x = ax.sx(i + 0.2), w = ax.sx(0.6) - ax.sx(0);
+          K.svg(g, "rect", { x, y: ax.sy(d[1]), width: w, height: ax.sy(0) - ax.sy(d[1]), fill: "var(--panel-2)", stroke: "var(--line)" });
+          K.svg(g, "line", { x1: x + w / 2, x2: x + w / 2, y1: ax.sy(d[2]), y2: ax.sy(d[3]), stroke: "var(--ink)", "stroke-width": 2 });
+          const tag = d[3] <= 1 ? ["可能受控", "var(--good)"] : d[2] >= 1 ? ["可能未受控", "var(--bad)"] : ["说不准", "var(--ink-3)"];
+          K.svg(g, "text", { x: x + w / 2, y: 274, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "省" + d[0]);
+          K.svg(g, "text", { x: x + w / 2, y: 294, "text-anchor": "middle", "font-size": 12, fill: tag[1], "font-weight": 700 }, tag[0]);
+          g.style.opacity = 0; return g;
+        });
+        K.svg(svg, "text", { x: 360, y: 326, "text-anchor": "middle", "font-size": 12, class: "muted" }, "示意数据：竖线是 90% 区间。整条竖线都在虚线下方才算“可能受控”");
+        (async () => { for (const b of bars) { if (!(await fade([b], ctx, 350))) return; } })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：两天反推 Rt ---------- */
+  K.lab(document.getElementById("labA"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "k0", label: "昨天新增病例", min: 5, max: 200, step: 1, value: 40 },
+      { id: "k1", label: "今天新增病例", min: 0, max: 300, step: 1, value: 55 },
+      { id: "si", label: "序列间隔（天）", min: 2, max: 12, step: 0.5, value: 7 },
+    ],
+    note: "浏览器现场算泊松似然 P(今天 k 例 | Rt)，其中 λ = 昨天 × e^((Rt−1)/序列间隔)。默认值是作者第 10 格例子里的 40 → 55。注意：同样的增长，序列间隔越长，算出的 Rt 越大。",
+    render(svg, v) {
+      const g = 1 / v.si, ys = GRID.map((R) => Math.exp(logPois(v.k1, v.k0 * Math.exp(g * (R - 1))))), s = ys.reduce((a, b) => a + b, 0), p = ys.map((y) => y / s), m = Math.max(...p);
+      const ax = K.axes(svg, { x: 50, y: 20, w: 560, h: 230 }, [0, 6], [0, 1], { xticks: 6, yticks: 0, xlabel: "Rt" });
+      const [lo, hi] = hdi(p, 0.9), a = GRID.indexOf(lo), b = GRID.indexOf(hi);
+      K.svg(svg, "path", { d: "M" + ax.sx(lo) + "," + ax.sy(0) + GRID.slice(a, b + 1).map((x, i) => "L" + ax.sx(x) + "," + ax.sy(p[a + i] / m)).join("") + "L" + ax.sx(hi) + "," + ax.sy(0) + "Z", fill: "var(--c1)", "fill-opacity": 0.25 });
+      pline(svg, ax, GRID, p.map((y) => y / m), { "stroke-width": 3 });
+      K.svg(svg, "line", { x1: ax.sx(1), x2: ax.sx(1), y1: 20, y2: 250, stroke: "var(--ink-3)", "stroke-dasharray": "4 3" });
+      K.svg(svg, "text", { x: ax.sx(1) + 4, y: 34, "font-size": 12, class: "muted" }, "Rt = 1");
+      K.svg(svg, "text", { x: 56, y: 304, "font-size": 12, class: "muted" }, "蓝色阴影 = 只凭这一天数据的 90% 最高密度区间");
+      const ml = GRID[p.indexOf(m)], formula = 1 + Math.log(Math.max(0.5, v.k1) / v.k0) * v.si;
+      return { readout: [
+        { k: "最可能的 Rt", v: ml.toFixed(2), color: ml > 1 ? "var(--bad)" : "var(--good)" },
+        { k: "90% 区间", v: lo.toFixed(2) + " ~ " + hi.toFixed(2) },
+        { k: "公式直接反解", v: "1 + ln(今/昨)×间隔 = " + formula.toFixed(2) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：实时追踪 ---------- */
+  K.lab(document.getElementById("labB"), {
+    width: 660, height: 400,
+    controls: [
+      { id: "sig", label: "σ：允许 Rt 每天变化多少", min: 0.02, max: 1, step: 0.01, value: 0.15, fmt: (v) => v.toFixed(2) },
+      { id: "si", label: "估计时假设的序列间隔（真实是 7 天）", min: 3, max: 12, step: 0.5, value: 7, fmt: (v) => v + " 天" },
+      { id: "noise", label: "报告噪声", min: 0, max: 0.6, step: 0.05, value: 0.15, fmt: (v) => "±" + Math.round(v * 100) + "%" },
+      { id: "wk", label: "周日少报", value: "no", options: [["no", "没有"], ["yes", "周日少报 60%"]] },
+      { id: "sm", label: "估计前先做 7 天高斯平滑（作者的做法）", value: "yes", options: [["yes", "平滑"], ["no", "不平滑，直接用原始数据"]] },
+      { id: "seed", label: "换一场模拟疫情", button: true },
+    ],
+    note: "浏览器现场模拟 120 天的疫情：真实 Rt 先是 1.8，第 35 天采取措施降到 0.8，第 75 天放松回到 1.25。病例按泊松抽样再加报告噪声。然后完整跑一遍作者第 25 格的算法（Gamma 先验、高斯扩散、逐日更新、90% HDI）。",
+    render(svg, v) {
+      const sim = simEpi(700 + v.seed * 19, 7, v.noise, v.wk === "yes");
+      const k = v.sm === "yes" ? smooth7(sim.k) : sim.k;
+      const res = runRt(k, v.si, v.sig).out;
+      const ax = K.axes(svg, { x: 50, y: 14, w: 590, h: 110 }, [0, 119], [0, Math.max(...sim.k) * 1.05], { xticks: 0, yticks: 2, ylabel: "新增" });
+      sim.k.forEach((c, i) => K.svg(svg, "rect", { x: ax.sx(i), y: ax.sy(c), width: 3.5, height: ax.sy(0) - ax.sy(c), fill: "var(--ink-3)", opacity: 0.6 }));
+      if (v.sm === "yes") pline(svg, ax, k.map((_, i) => i), k, { stroke: "var(--c2)", "stroke-width": 1.8 });
+      const ax2 = K.axes(svg, { x: 50, y: 150, w: 590, h: 180 }, [0, 119], [0, 3], { xticks: 6, yticks: 3, xlabel: "天", ylabel: "Rt" });
+      K.svg(svg, "line", { x1: 50, x2: 640, y1: ax2.sy(1), y2: ax2.sy(1), stroke: "var(--ink-3)" });
+      const xs = res.map((_, i) => i + 1);
+      pband(svg, ax2, xs, res.map((d) => Math.min(3, d.h[0])), res.map((d) => Math.min(3, d.h[1])));
+      pline(svg, ax2, xs, res.map((d) => Math.min(3, d.ml)), { "stroke-width": 2.2 });
+      pline(svg, ax2, sim.R.map((_, i) => i), sim.R, { stroke: "var(--good)", "stroke-dasharray": "6 4", "stroke-width": 2 });
+      K.svg(svg, "text", { x: 56, y: 394, "font-size": 12, class: "muted" }, "上：每日新增（灰）" + (v.sm === "yes" ? "、平滑后（橙）" : "") + "　下：真实 Rt（绿虚线）、最可能值（蓝）、90% HDI（蓝带）");
+      let err = 0, cover = 0, lag = -1;
+      res.forEach((d, i) => { const tr = sim.R[i + 1]; err += Math.abs(d.ml - tr); if (tr >= d.h[0] && tr <= d.h[1]) cover++; });
+      for (let i = 34; i < res.length; i++) if (res[i].ml < 1) { lag = i + 1 - 35; break; }
+      return { readout: [
+        { k: "平均误差 |估计 − 真实|", v: (err / res.length).toFixed(2) },
+        { k: "真实值落在 90% 区间里", v: Math.round(cover / res.length * 100) + "% 的天数", color: cover / res.length < 0.7 ? "var(--bad)" : "var(--good)" },
+        { k: "措施后几天才看到 Rt < 1", v: lag >= 0 ? lag + " 天" : "没看到" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：最大似然选 σ ---------- */
+  K.lab(document.getElementById("labC"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "sc", label: "真实 Rt 的变化方式（模拟设定）", value: "step", options: [["step", "两次突变（1.8 → 0.8 → 1.25）"], ["flat", "一直不变（1.1）"], ["wiggle", "每天小幅随机游走"]] },
+      { id: "noise", label: "报告噪声", min: 0, max: 0.5, step: 0.05, value: 0.1, fmt: (v) => "±" + Math.round(v * 100) + "%" },
+      { id: "seed", label: "换一场模拟疫情", button: true },
+    ],
+    note: "对同一份模拟数据（先按作者的做法 7 天高斯平滑），用 12 个候选 σ 各跑一遍算法，累加每天的 log P(k)（第 25 格里的 log_likelihood），画出“总对数似然 vs σ”，最高点就是作者第 35 格选 σ 的办法。",
+    render(svg, v) {
+      const r = K.rng(1300 + v.seed * 29), T = 120, R = [], k = []; let lev = 30, rw = 1.2;
+      for (let t = 0; t < T; t++) {
+        let rt = v.sc === "flat" ? 1.1 : v.sc === "step" ? (t < 35 ? 1.8 : t < 75 ? 0.8 : 1.25) : (rw = K.clamp(rw + K.randn(r) * 0.08, 0.5, 2));
+        R.push(rt); if (t) lev *= Math.exp((rt - 1) / 7); lev = Math.min(lev, 5000);
+        let o = poisS(r, lev); if (v.noise) o = Math.max(0, Math.round(o * Math.exp(K.randn(r) * v.noise))); k.push(o);
+      }
+      const ks = smooth7(k), sig = [0.02, 0.05, 0.08, 0.12, 0.16, 0.2, 0.3, 0.4, 0.5, 0.65, 0.8, 1.0], lls = sig.map((s) => runRt(ks, 7, s).ll);
+      const lo = Math.min(...lls), hi = Math.max(...lls), best = lls.indexOf(hi);
+      const ax = K.axes(svg, { x: 70, y: 20, w: 540, h: 230 }, [0, 1], [lo - (hi - lo) * 0.08 - 1, hi + (hi - lo) * 0.08 + 1], { xticks: 5, yticks: 3, xlabel: "σ", ylabel: "总对数似然" });
+      pline(svg, ax, sig, lls, { stroke: "var(--c1)" });
+      sig.forEach((s, i) => K.svg(svg, "circle", { cx: ax.sx(s), cy: ax.sy(lls[i]), r: i === best ? 7 : 4, fill: i === best ? "var(--good)" : "var(--c1)" }));
+      K.svg(svg, "text", { x: 76, y: 306, "font-size": 12, class: "muted" }, "绿点 = 让“看到这份数据”的概率最大的 σ");
+      return { readout: [
+        { k: "最大似然选出的 σ", v: sig[best].toFixed(2), color: "var(--good)" },
+        { k: "最好 vs 最差的对数似然差", v: (hi - lo).toFixed(1) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

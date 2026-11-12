@@ -1,0 +1,603 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>手语拼写识别</title>
+<meta name="description" content="Kaggle 案例拆解：把美国手语的手指拼写视频翻译成文字。MediaPipe 关键点 → 补齐到 128 帧 → 卷积下采样 + Transformer 编码器解码器逐字输出，用编辑距离评估。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">视频关键点序列 · 序列到序列 · 手语翻译</div>
+  <h1>看手指拼字母：用 Transformer 把手语拼写翻译成一句话</h1>
+  <p class="en">Google - American Sign Language Fingerspelling Recognition with TensorFlow</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">MediaPipe 关键点</span><span class="tag method">TFRecord</span><span class="tag method">主力手镜像 + 标准化</span>
+    <span class="tag method">补齐 / 缩放到 128 帧</span><span class="tag method">Conv1D 下采样</span><span class="tag method">Transformer 编码器-解码器</span>
+    <span class="tag method">因果遮罩</span><span class="tag method">贪心解码</span><span class="tag method">编辑距离</span><span class="tag method">TFLite 导出</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Gusthema</b>（gusthema）</span>
+    <span>Kaggle 点赞 <b>1,963</b>（2026-11 抓取）</span>
+    <span>数据 <b>Kaggle 比赛 asl-fingerspelling</b>（Google）</span>
+    <span><a href="https://www.kaggle.com/code/gusthema/asl-fingerspelling-recognition-w-tensorflow" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">手语视频里抽出来的关键点坐标</div><p>不是原始视频，而是 MediaPipe 从每一帧里找出的手、脸、身体关键点的 x、y、z 坐标，每一段对应一句英文短语。<span data-cell="10">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这段手指拼写拼出了哪句话</div><p>输入一串帧，输出一串字符（字母、数字、空格、符号），是“序列到序列”的翻译任务。<span data-cell="0">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">卷积下采样 + Transformer</div><p>只取主力手 21 点和手臂 5 个姿态点，补齐到 128 帧；三层卷积把时间压短，2 层编码器 + 1 层解码器逐字生成。借鉴了 Keras 的语音识别 Transformer 教程。<span data-cell="50">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一条能提交比赛的完整流水线</div><p>训练 13 轮后转成 TFLite 小模型并打包提交。具体损失和编辑距离在运行输出里，源码不带，这里不列分数。<span data-cell="62">出处</span> <span data-cell="70">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛 <b>Google - American Sign Language Fingerspelling Recognition</b>：志愿者对着手机摄像头用手指拼出短语，Google 用 MediaPipe 把视频转成关键点后公开。下面的数字都来自作者 notebook 的文字。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">train.csv 行数（短语数）</div><div class="v">67,208</div></div>
+        <div class="stat-tile"><div class="k">train.csv 列数</div><div class="v">5</div></div>
+        <div class="stat-tile"><div class="k">示例短语 “3 creekhouse” 的帧数</div><div class="v">123</div></div>
+        <div class="stat-tile"><div class="k">每帧的列数（其中坐标列）</div><div class="v">1630（1628）</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">67208 条、5 列见 <span data-cell="8">第 8 格</span>；123 帧、1630 列见 <span data-cell="15">第 15 格</span>。手部关键点 21 个见 <span data-cell="19">第 19 格</span>。作者最终每帧只用 156 列（手 21 点 × 2 只 + 手臂姿态 10 点，各 x、y、z）<span data-cell="28">第 28 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">两张表各有什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>表 / 列</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>train.csv</code> · <code>path</code>、<code>file_id</code></td><td>关键点存在哪个 parquet 文件里</td><td>文本 / 整数</td></tr>
+        <tr><td><code>sequence_id</code></td><td>这一段在文件里的编号</td><td>整数</td></tr>
+        <tr><td><code>phrase</code></td><td><b>要预测的答案</b>：拼出的短语，如 “3 creekhouse”</td><td>文本</td></tr>
+        <tr><td>parquet · <code>x_right_hand_0</code> … </td><td>每一帧里右手第 0 号点的 x 坐标；同理有 y、z，左手、脸、身体姿态</td><td>小数（可能是空值）</td></tr>
+      </table></div>
+      <p class="note">坐标是相对画面宽高的比例（0–1 左右）。手没被拍到的那一帧，对应的列是空值 NaN。列名格式来自第 20、28 格代码。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="42">
+    <h3>动手试试 A · 主力手镜像与补齐到 128 帧 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="54">
+    <h3>动手试试 B · 自注意力：这一帧该看哪几帧 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="64">
+    <h3>动手试试 C · 编辑距离：差几步才能改对 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者做到的事</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>用 MediaPipe 把关键点重新画成手的骨架动画</td><td><span data-cell="21">第 21 格</span></td></tr>
+        <tr><td>把 parquet 重新整理成 TFRecord，作者说约 10 分钟，之后读取更快</td><td><span data-cell="34">第 34 格</span></td></tr>
+        <tr><td>只保留“有效手部帧数大于短语长度 2 倍”的样本</td><td><span data-cell="35">第 35 格</span></td></tr>
+        <tr><td>Transformer：隐藏维 200、4 个头、2 层编码器、1 层解码器，Adam 学习率 0.0001，训练 13 轮</td><td><span data-cell="62">第 62 格</span></td></tr>
+        <tr><td>每 4 轮打印一批验证样本的“目标 / 预测”对照</td><td><span data-cell="60">第 60 格</span></td></tr>
+        <tr><td>转成 TFLite 并用解释器跑通一条样本</td><td><span data-cell="71">第 71 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">原 notebook 的损失曲线、编辑距离和预测样例都在运行输出里，Kaggle 下载的源码不带输出，作者文字里也没写具体数值，所以这里不列分数。</p>
+      <p class="callout warn">我们读代码时发现：训练时显示的 <code>edit_dist</code> 用的是 <code>tf.argmax(preds, axis=1)</code>，在“时间”这一维上取最大，而不是在“字符”这一维（应为 <code>axis=-1</code>）；比较对象也是带起始符和填充的 <code>target</code>。所以这个数字不能当成比赛分数看。<span data-cell="58">第 58 格</span></p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一段拼写手势的关键点，输出一串字母，可做手语学习 App 的自动批改、聋人与听人的文字沟通辅助。</li>
+        <li><b>同类问题：</b>语音识别（声音帧 → 文字）、手写轨迹识别、唇语识别，都是“一串帧 → 一串字”。</li>
+        <li><b>可迁移的套路：</b>先用现成模型抽关键点 → 只留相关部位 → 镜像统一左右手 → 定长补齐 → 卷积压缩时间 → Transformer 翻译 → 编辑距离评估。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>关键点检测：MediaPipe（深度学习，比赛方预先算好）<span data-cell="20">第 20 格</span></li>
+        <li>特征选择：双手 42 点 + 手臂姿态 10 点 <span data-cell="26">第 26 格</span></li>
+        <li>预处理：主力手判定、左手镜像 1−x、逐帧标准化、补齐 / 缩放到 128 帧 <span data-cell="42">第 42 格</span></li>
+        <li>模型：Conv1D×3 下采样 + Transformer 编码器 / 解码器 <span data-cell="52">第 52 格</span> <span data-cell="58">第 58 格</span></li>
+        <li>训练：标签平滑交叉熵，遮掉填充位 <span data-cell="62">第 62 格</span></li>
+        <li>推理：贪心解码，导出 TFLite <span data-cell="67">第 67 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者只用了手和手臂的关键点，把 468 个脸部点全扔了。手语里脸部表情有没有用？扔掉的好处和代价各是什么？</li>
+      <li>短于 128 帧的补 0，长于 128 帧的被“压扁”。一个拼得很慢的长短语被压扁后，会丢掉什么信息？</li>
+      <li>为什么要把左手动作镜像成右手？如果不镜像，模型要多学什么？</li>
+      <li>训练时解码器看的是“正确答案的前一个字”，预测时却只能看“自己上一步猜的字”。这会带来什么问题？</li>
+      <li>作者在训练中显示的 edit_dist 计算方式有误（见第 04 节）。如果你只盯着这个数字调参，可能会被误导到哪里去？</li>
+      <li>比赛数据只给关键点、不给原始视频，这对保护参与者的隐私有什么意义？关键点就一定认不出是谁吗？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Gusthema，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Google - American Sign Language Fingerspelling Recognition 比赛。
+</footer>
+</main>
+
+<script src="nb/asl-fingerspelling-transformer.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* 21 个手部关键点的示意坐标（张开的手，单位：画布像素，原点在手腕） */
+  const HAND = [[0,0],[-28,-14],[-48,-34],[-60,-54],[-70,-72],[-22,-62],[-26,-92],[-28,-112],[-30,-130],[-4,-66],[-4,-100],[-4,-122],[-4,-142],[14,-62],[18,-94],[20,-114],[22,-130],[30,-52],[38,-76],[42,-92],[46,-106]];
+  const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[0,17],[17,18],[18,19],[19,20]];
+  function drawHand(g, cx, cy, s, opt) {
+    opt = opt || {};
+    const P = HAND.map((p, i) => {
+      let x = p[0], y = p[1];
+      if (opt.curl && i > 4 && i % 4 !== 1) { y = y * (1 - opt.curl * 0.55); }
+      if (opt.mirror) x = -x;
+      return [cx + x * s, cy + y * s];
+    });
+    BONES.forEach(([a, b]) => K.svg(g, "line", { x1: P[a][0], y1: P[a][1], x2: P[b][0], y2: P[b][1], stroke: opt.stroke || "var(--c3)", "stroke-width": 2 }));
+    P.forEach((p, i) => K.svg(g, "circle", { cx: p[0], cy: p[1], r: opt.r || 3.2, fill: i === 0 ? "var(--c6)" : opt.dot || "var(--c1)" }));
+    return P;
+  }
+
+  const steps = [
+    {
+      title: "任务：把手指拼写翻译成文字", kicker: "第 0–5 格 · 目标与环境",
+      html: `<p>美国手语（ASL）里，人名、地名、网址这类没有专门手势的词，要用<b>手指拼写</b>：一个字母一个手形，连续打出来。<span data-cell="0">出处</span></p><p>作者的目标：输入一段视频帧的关键点，输出对应的短语 <code>phrase</code>。还要安装 MediaPipe（谷歌的关键点工具包）来画图，导入 TensorFlow。<span data-cell="1">出处</span></p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        const letters = ["C", "A", "T"];
+        const hands = [];
+        letters.forEach((L, i) => {
+          const g = K.svg(svg, "g");
+          K.svg(g, "rect", { x: 30 + i * 150, y: 40, width: 130, height: 200, rx: 10, fill: "var(--panel-2)", stroke: "var(--line)" });
+          drawHand(g, 95 + i * 150, 215, 1.05, { curl: [0.6, 1, 0.3][i] });
+          K.svg(g, "text", { x: 95 + i * 150, y: 270, "text-anchor": "middle", "font-size": 22, "font-weight": 700, fill: "var(--accent)" }, L);
+          g.style.opacity = 0; hands.push(g);
+        });
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 13, class: "muted" }, "每个字母一个手形，连起来就是一个词（手形为示意，不是真实 ASL 字母）");
+        const arr = K.arrow(svg, 490, 140, 560, 140); arr.style.opacity = 0;
+        const out = K.svg(svg, "text", { x: 580, y: 148, "font-size": 30, "font-weight": 700, "font-family": "var(--mono)" }, "");
+        (async () => {
+          for (let i = 0; i < 3; i++) if (!(await ctx.tween(400, (t) => (hands[i].style.opacity = t)))) return;
+          if (!(await ctx.tween(300, (t) => (arr.style.opacity = t)))) return;
+          for (let i = 0; i < 3; i++) { if (!(await ctx.wait(300))) return; out.textContent += letters[i].toLowerCase(); }
+        })();
+        K.svg(svg, "text", { x: 30, y: 318, "font-size": 12, class: "muted" }, "任务形式：一串帧 → 一串字符（和语音识别一样是“序列到序列”）");
+      },
+    },
+    {
+      title: "train.csv：一句话对应一段关键点", kicker: "第 6–12 格 · 读入索引表",
+      html: `<p><code>train.csv</code> 有 5 列、67208 行，每行是一条样本：短语 <code>phrase</code>，以及它的关键点存在哪个文件（<code>file_id</code>）、文件里第几段（<code>sequence_id</code>）。<span data-cell="8">出处</span> <span data-cell="10">出处</span></p><p>就像图书馆的索引卡：卡片上写书名，再写“在几号书架第几本”。真正的关键点数据很大，存在一堆 parquet 文件里。</p>`,
+      cells: [7, 8, 10],
+      draw(svg, ctx) {
+        K.node(svg, 30, 60, 230, 200, "train.csv\n\n每行：phrase\nfile_id\nsequence_id\n\n共 67,208 行", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const files = [];
+        for (let i = 0; i < 4; i++) {
+          const g = K.node(svg, 420, 30 + i * 72, 260, 56, `${["5414471", "1234567", "…", "9999999"][i]}.parquet\n（很多段 sequence）`, { fill: "var(--panel-2)" });
+          files.push(g);
+        }
+        K.svg(svg, "text", { x: 420, y: 330, "font-size": 11, class: "muted" }, "文件名为示意");
+        const a = K.arrow(svg, 262, 160, 418, 58, { color: "var(--accent)" });
+        a.style.opacity = 0;
+        ctx.wait(500).then((ok) => ok && ctx.tween(600, (t) => (a.style.opacity = t))).then((ok) => ok && ctx.tween(500, (t) => files[0].querySelector("rect").style.strokeWidth = 1 + 2 * t));
+      },
+    },
+    {
+      title: "一段序列：123 帧 × 1630 列", kicker: "第 13–16 格 · 打开第一条样本",
+      html: `<p>作者用 <code>pq.read_table(..., filters=...)</code> 只取出第一条样本那一段。短语 “3 creekhouse” 一共 <b>123 帧</b>，每帧 <b>1630 列</b>，其中 1628 列是坐标。<span data-cell="15">出处</span></p><p>这 1628 列是脸、双手、身体上各个关键点的 x、y、z 坐标，列名像 <code>x_right_hand_0</code>；另外两列是编号一类的信息。手没拍到的帧，手部那些列就是空值 NaN。一句 12 个字符的短语用了 123 帧，平均每个字符大约 10 帧。</p>`,
+      cells: [14, 15],
+      draw(svg, ctx) {
+        const rows = 18, cols = 40;
+        const cw = 14, ch = 13, x0 = 120, y0 = 40;
+        K.svg(svg, "text", { x: x0, y: 28, "font-size": 12, class: "muted" }, "列：x_face_0 … z_right_hand_20（示意，只画一部分）");
+        K.svg(svg, "text", { x: 20, y: y0 + 10, "font-size": 12, class: "muted" }, "行 = 帧");
+        const r = K.rng(4), cells = [];
+        for (let i = 0; i < rows; i++) for (let j = 0; j < cols; j++) {
+          const nan = j > 28 && j < 36 && (i % 5 < 2);
+          cells.push(K.svg(svg, "rect", { x: x0 + j * cw, y: y0 + i * ch, width: cw - 1, height: ch - 1, fill: nan ? "var(--panel)" : K.heat(0.25 + 0.6 * r()), stroke: nan ? "var(--bad)" : "none", opacity: 0 }));
+        }
+        K.svg(svg, "text", { x: x0, y: 300, "font-size": 13 }, "123 帧 × 1630 列（其中坐标列 1628）");
+        K.svg(svg, "text", { x: x0, y: 322, "font-size": 12, fill: "var(--bad)" }, "红边空格 = NaN：这一帧没检测到这只手");
+        ctx.tween(1500, (t) => cells.forEach((c, k) => (c.style.opacity = Math.floor(k / cols) / rows <= t ? 1 : 0)));
+      },
+    },
+    {
+      title: "MediaPipe：一只手 21 个点", kicker: "第 17–21 格 · 关键点可视化",
+      html: `<p>这些坐标是谷歌的 <b>MediaPipe</b> 从视频里找出来的：先用一个神经网络找到手在哪，再用另一个神经网络在手上定出 <b>21 个关键点</b>（手腕 1 个，每根手指 4 个）。<span data-cell="19">出处</span> 这一步是<b>深度学习</b>，比赛方已经替大家跑好了。</p><p>作者把每一帧的点重新画成骨架图，连成动画看手在怎么动。<span data-cell="20">出处</span> <span data-cell="21">出处</span></p>`,
+      cells: [18, 20, 21], highlight: ["mp_hands.HAND_CONNECTIONS", "draw_landmarks"],
+      draw(svg, ctx) {
+        const g = K.svg(svg, "g");
+        const pts = drawHand(g, 200, 290, 1.7, {});
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "21 个点：0 号手腕（红），每根手指 4 个（示意）");
+        pts.forEach((p, i) => K.svg(svg, "text", { x: p[0] + 6, y: p[1] - 3, "font-size": 9, class: "muted" }, i));
+        // 右边：逐帧变化
+        const g2 = K.svg(svg, "g");
+        K.svg(svg, "text", { x: 430, y: 30, "font-size": 13, class: "muted" }, "逐帧重画 → 手的动作动画");
+        const lab = K.svg(svg, "text", { x: 540, y: 320, "text-anchor": "middle", "font-size": 12, "font-family": "var(--mono)" }, "frame 0");
+        (async () => {
+          for (let f = 0; f < 40; f++) {
+            g2.innerHTML = "";
+            drawHand(g2, 540, 260, 1.3, { curl: 0.5 + 0.5 * Math.sin(f / 4), r: 2.6 });
+            lab.textContent = "frame " + f;
+            if (!(await ctx.wait(110))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "只留手和手臂：挑出 156 列", kicker: "第 22–32 格 · 特征选择",
+      html: `<p>作者认为手指拼写主要靠手的动作，于是只要：右手 21 点、左手 21 点、手臂上的 10 个姿态点（左右各 5 个：手肘、手腕、手掌附近，编号 13–22）。<span data-cell="23">出处</span> <span data-cell="26">出处</span></p><p>每个点 x、y、z 三列，一共 (21+21+10)×3 = <b>156 列</b>；脸部 468 个点全部不要。再记下哪些列是 x、哪些是右手、哪些是左臂，后面好取。<span data-cell="28">出处</span> <span data-cell="32">出处</span></p>`,
+      cells: [26, 28, 32], highlight: ["LPOSE", "RPOSE"],
+      draw(svg, ctx) {
+        const parts = [["脸 468 点", 468, "var(--ink-3)", false], ["身体姿态 33 点", 33, "var(--c4)", "只留 10"], ["左手 21 点", 21, "var(--c2)", true], ["右手 21 点", 21, "var(--c1)", true]];
+        const tot = 543, W = 640;
+        let x = 40;
+        const segs = parts.map((p) => {
+          const w = Math.max(20, (p[1] / tot) * W * 0.85);
+          const r = K.svg(svg, "rect", { x, y: 70, width: w, height: 50, fill: p[2], opacity: 0.85 });
+          K.svg(svg, "text", { x: x + w / 2, y: 140, "text-anchor": "middle", "font-size": 11 }, p[0]);
+          const s = { r, x, w, keep: p[3] }; x += w + 4; return s;
+        });
+        K.svg(svg, "text", { x: 40, y: 50, "font-size": 13, class: "muted" }, "一帧里的全部关键点（宽度按点数比例）");
+        const res = K.svg(svg, "text", { x: 40, y: 230, "font-size": 18, "font-weight": 700, fill: "var(--accent)", opacity: 0 }, "(21 + 21 + 10) × 3 = 156 列");
+        K.svg(svg, "text", { x: 40, y: 260, "font-size": 12, class: "muted" }, "姿态点 13–22：左右手肘、手腕、小指 / 食指 / 拇指根附近");
+        ctx.wait(700).then((ok) => ok && ctx.tween(1000, (t) => segs.forEach((s) => { if (!s.keep) s.r.style.opacity = 0.85 - 0.75 * t; else if (s.keep === "只留 10") s.r.setAttribute("width", s.w * (1 - 0.7 * t)); })))
+          .then((ok) => ok && ctx.tween(500, (t) => (res.style.opacity = t)));
+      },
+    },
+    {
+      title: "整理成 TFRecord，筛掉太短的样本", kicker: "第 33–38 格 · 预处理落盘",
+      html: `<p>作者把每个 parquet 文件里的 156 列和对应短语一起写成 <b>TFRecord</b>（TensorFlow 的二进制格式），以后读起来快。作者说这一步大约要 10 分钟。<span data-cell="34">出处</span></p><p>写之前有一道筛选：数一数这段里右手、左手各有多少帧是完整的（没有 NaN），取多的那只手；只有当完整帧数<b>大于短语长度的 2 倍</b>才保留。<span data-cell="35">出处</span> 理由：每个字母至少要有两帧画面，否则手都没拍清，怎么认？</p>`,
+      cells: [35], highlight: ["2*len(phrase)<no_nan", "FRAME_LEN = 128"],
+      draw(svg, ctx) {
+        const samples = [["hello", 40], ["new york city", 18], ["3 creekhouse", 60], ["kaggle", 9], ["zip 94043", 30]];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "条件：手部完整帧数 > 2 × 短语长度（样本为示意）");
+        samples.forEach(([p, n], i) => {
+          const y = 60 + i * 52, need = 2 * p.length, ok = n > need;
+          K.svg(svg, "text", { x: 30, y: y + 18, "font-size": 13, "font-family": "var(--mono)" }, `"${p}"`);
+          const bar = K.svg(svg, "rect", { x: 220, y: y + 4, width: 0, height: 20, rx: 3, fill: ok ? "var(--c3)" : "var(--bad)" });
+          K.svg(svg, "line", { x1: 220 + need * 5, x2: 220 + need * 5, y1: y, y2: y + 28, stroke: "var(--ink)", "stroke-dasharray": "3 2" });
+          const tag = K.svg(svg, "text", { x: 560, y: y + 18, "font-size": 13, "font-weight": 700, fill: ok ? "var(--good)" : "var(--bad)", opacity: 0 }, ok ? "保留" : "丢掉");
+          ctx.wait(200 + i * 300).then((k) => k && ctx.tween(600, (t) => bar.setAttribute("width", n * 5 * t))).then((k) => k && (tag.style.opacity = 1));
+        });
+        K.svg(svg, "text", { x: 220, y: 330, "font-size": 11, class: "muted" }, "虚线 = 2 × 字符数，彩条 = 完整帧数");
+      },
+    },
+    {
+      title: "字符表：加上起点、终点和填充", kicker: "第 39–41 格 · 把文字变成编号",
+      html: `<p>模型只认数字。比赛给了一张 <code>character_to_prediction_index.json</code>，把每个可能出现的字符（字母、数字、空格、符号）对应到一个编号 0–58。<span data-cell="41">出处</span></p><p>作者又加了三个特殊记号：<code>&lt;</code> 表示“开始写”（60），<code>&gt;</code> 表示“写完了”（61），<code>P</code> 表示“空位填充”（59）。<span data-cell="40">出处</span> 有了起止符，解码器才知道从哪开始、什么时候停笔。</p>`,
+      cells: [41], highlight: ["pad_token_idx = 59", "start_token_idx = 60", "end_token_idx = 61"],
+      draw(svg, ctx) {
+        const txt = "<hello>".split("").concat(Array(5).fill("P"));
+        const ids = txt.map((c) => (c === "<" ? 60 : c === ">" ? 61 : c === "P" ? 59 : "x"));
+        K.svg(svg, "text", { x: 30, y: 40, "font-size": 13, class: "muted" }, "短语 “hello” 变成定长 64 的编号序列（这里只画 12 格；字母编号以比赛的 json 为准，用 x 代替）");
+        txt.forEach((c, i) => {
+          const x = 40 + i * 54;
+          const box = K.svg(svg, "rect", { x, y: 80, width: 48, height: 48, rx: 6, fill: c === "P" ? "var(--panel-2)" : c === "<" || c === ">" ? "var(--accent-soft)" : "color-mix(in srgb, var(--c3) 20%, var(--panel))", stroke: "var(--line)", opacity: 0 });
+          const t1 = K.svg(svg, "text", { x: x + 24, y: 110, "text-anchor": "middle", "font-size": 18, "font-family": "var(--mono)", opacity: 0 }, c);
+          const t2 = K.svg(svg, "text", { x: x + 24, y: 160, "text-anchor": "middle", "font-size": 14, "font-family": "var(--mono)", fill: "var(--accent)", opacity: 0 }, ids[i]);
+          ctx.wait(i * 150).then((ok) => ok && ctx.tween(300, (t) => { box.style.opacity = t1.style.opacity = t; })).then((ok) => ok && ctx.wait(800)).then((ok) => ok && ctx.tween(300, (t) => (t2.style.opacity = t)));
+        });
+        K.svg(svg, "text", { x: 40, y: 220, "font-size": 13 }, "< = 60 开始    > = 61 结束    P = 59 填充");
+        K.svg(svg, "text", { x: 40, y: 250, "font-size": 12, class: "muted" }, "第 46 格把每个短语补到 64 个编号长");
+      },
+    },
+    {
+      title: "主力手、镜像、标准化、补齐到 128 帧", kicker: "第 42 格 · 核心预处理",
+      html: `<p>这一格做了四件事（参考了 irohith 的公开代码）<span data-cell="42">出处</span>：</p><ul class="tight"><li><b>选主力手</b>：哪只手 NaN 帧更少，就是在打手语的那只手。</li><li><b>左手镜像</b>：如果主力手是左手，把 x 换成 <code>1 − x</code>，左右翻转成“右手”，模型只需学一种手。</li><li><b>逐帧标准化</b>：手的 21 个点减去平均位置、除以标准差，离镜头远近、站在画面哪里都不影响。</li><li><b>定长 128 帧</b>：短的在后面补 0，长的用 <code>tf.image.resize</code> 线性插值压到 128 帧；剩下的 NaN 也换成 0。</li></ul><p>这些都是经典的数值处理，不是深度学习。</p>`,
+      cells: [42], highlight: ["1-hand_x", "resize_pad", "reduce_std", "tf.pad"],
+      draw(svg, ctx) {
+        const gL = K.svg(svg, "g"), gR = K.svg(svg, "g");
+        K.svg(svg, "text", { x: 30, y: 28, "font-size": 13, class: "muted" }, "① 左手 → x 变成 1−x，镜像成右手");
+        drawHand(gL, 120, 250, 1.1, { mirror: true, stroke: "var(--c2)" });
+        K.svg(svg, "line", { x1: 210, x2: 210, y1: 70, y2: 280, stroke: "var(--ink-3)", "stroke-dasharray": "4 4" });
+        gR.style.opacity = 0;
+        drawHand(gR, 300, 250, 1.1, { stroke: "var(--c3)" });
+        const arr = K.arrow(svg, 160, 300, 260, 300); arr.style.opacity = 0;
+        K.svg(svg, "text", { x: 420, y: 28, "font-size": 13, class: "muted" }, "② 帧数统一成 128");
+        const bars = [[60, "补 0"], [128, "刚好"], [220, "压扁"]];
+        const els = bars.map(([n, lab], i) => {
+          const y = 70 + i * 70;
+          K.svg(svg, "text", { x: 420, y: y - 6, "font-size": 12 }, `原来 ${n} 帧 → ${lab}`);
+          const r = K.svg(svg, "rect", { x: 420, y, width: n * 1.1, height: 26, fill: "var(--c1)" });
+          const pad = K.svg(svg, "rect", { x: 420 + n * 1.1, y, width: 0, height: 26, fill: "var(--panel-2)", stroke: "var(--line)" });
+          return [r, pad, n];
+        });
+        K.svg(svg, "line", { x1: 420 + 128 * 1.1, x2: 420 + 128 * 1.1, y1: 50, y2: 290, stroke: "var(--accent)", "stroke-dasharray": "4 3" });
+        K.svg(svg, "text", { x: 420 + 128 * 1.1 + 4, y: 300, "font-size": 11, fill: "var(--accent)" }, "128");
+        ctx.wait(500).then((ok) => ok && ctx.tween(800, (t) => { gR.style.opacity = t; arr.style.opacity = t; }))
+          .then((ok) => ok && ctx.tween(1200, (t) => els.forEach(([r, pad, n]) => {
+            if (n < 128) pad.setAttribute("width", (128 - n) * 1.1 * t);
+            if (n > 128) r.setAttribute("width", K.lerp(n, 128, t) * 1.1);
+          })));
+      },
+    },
+    {
+      title: "读回数据，切训练集和验证集", kicker: "第 43–49 格 · tf.data 流水线",
+      html: `<p><code>decode_fn</code> 把 TFRecord 解析回“帧 × 156 列”的数组 <span data-cell="44">出处</span>；<code>convert_fn</code> 给短语加上 <code>&lt;</code> 和 <code>&gt;</code>，查表变成编号，补到 64 长，同时对坐标做上一章的预处理。<span data-cell="46">出处</span></p><p>然后按<b>文件</b>切分：前 80% 的 TFRecord 文件做训练，后 20% 做验证，每批 64 条。<span data-cell="49">出处</span> 按文件切，同一个文件里的样本不会一半在训练、一半在验证。</p>`,
+      cells: [44, 46, 49], highlight: ["0.8 * len(tf_records)", "batch_size = 64"],
+      draw(svg, ctx) {
+        const n = 20, boxes = [];
+        K.svg(svg, "text", { x: 30, y: 36, "font-size": 13, class: "muted" }, "每个小方块 = 一个 TFRecord 文件（数量为示意）");
+        for (let i = 0; i < n; i++) {
+          const b = K.svg(svg, "rect", { x: 40 + i * 32, y: 70, width: 26, height: 40, rx: 4, fill: "var(--panel-2)", stroke: "var(--line)" });
+          boxes.push(b);
+        }
+        const l1 = K.svg(svg, "text", { x: 40, y: 140, "font-size": 13, fill: "var(--c1)", opacity: 0 }, "前 80%：训练集");
+        const l2 = K.svg(svg, "text", { x: 40 + 16 * 32, y: 140, "font-size": 13, fill: "var(--c2)", opacity: 0 }, "后 20%：验证");
+        const flow = ["TFRecord", "decode_fn", "convert_fn\n加起止符+预处理", "batch(64)", "模型"];
+        flow.forEach((t, i) => { K.node(svg, 30 + i * 136, 200, 120, 60, t, { fill: i === 2 ? "var(--accent-soft)" : "var(--panel-2)" }); if (i < 4) K.arrow(svg, 150 + i * 136, 230, 166 + i * 136, 230); });
+        ctx.wait(400).then((ok) => ok && ctx.tween(900, (t) => boxes.forEach((b, i) => { if (i / n <= t) K.set(b, { fill: i < 16 ? "color-mix(in srgb, var(--c1) 35%, var(--panel))" : "color-mix(in srgb, var(--c2) 35%, var(--panel))" }); })))
+          .then((ok) => ok && ctx.tween(400, (t) => { l1.style.opacity = l2.style.opacity = t; }));
+      },
+    },
+    {
+      title: "输入层：三层卷积把 128 帧压成 16 步", kicker: "第 50–52 格 · Conv1D 下采样",
+      html: `<p>作者说模型仿照 Keras 的“语音识别 Transformer”教程，因为两者都是“一串帧 → 一句话”。<span data-cell="50">出处</span></p><p>关键点先进 <code>LandmarkEmbedding</code>：三层一维卷积，每层窗口 11 帧、步长 2，所以 128 → 64 → 32 → <b>16</b> 步。每一步“概括”了附近几十帧的手部动作，序列变短，后面的注意力计算量小很多。解码器那边的 <code>TokenEmbedding</code> 把字符编号变成向量，再加上位置向量。<span data-cell="52">出处</span></p><p>小发现：<code>LandmarkEmbedding</code> 里定义了位置编码 <code>pos_emb</code>，但 <code>call</code> 里没用上。</p>`,
+      cells: [52], highlight: ["strides=2", "Conv1D", "self.pos_emb"],
+      draw(svg, ctx) {
+        const L = [128, 64, 32, 16], W = 640;
+        L.forEach((n, k) => {
+          const y = 40 + k * 72, w = W / 128;
+          K.svg(svg, "text", { x: 20, y: y + 16, "font-size": 12 }, k === 0 ? "输入 128 帧" : `卷积 ${k} → ${n}`);
+          const cells = [];
+          for (let i = 0; i < n; i++) cells.push(K.svg(svg, "rect", { x: 110 + i * (W * 0.88 / n), y, width: W * 0.88 / n - (n > 64 ? 0.3 : 1.5), height: 22, fill: K.heat(0.3 + 0.12 * k + 0.2 * Math.sin(i * 0.3 * (k + 1))), opacity: k === 0 ? 1 : 0 }));
+          if (k) ctx.wait(500 + k * 700).then((ok) => ok && ctx.tween(500, (t) => cells.forEach((c) => (c.style.opacity = t))));
+        });
+        // 卷积窗口滑动示意
+        const win = K.svg(svg, "rect", { x: 110, y: 36, width: (11 * 640 * 0.88) / 128, height: 30, fill: "none", stroke: "var(--accent)", "stroke-width": 2 });
+        ctx.tween(2600, (t) => win.setAttribute("x", 110 + t * 640 * 0.8));
+        K.svg(svg, "text", { x: 110, y: 330, "font-size": 12, class: "muted" }, "蓝框 = 宽 11 帧的卷积窗口，每次跳 2 帧");
+      },
+    },
+    {
+      title: "编码器：自注意力看整段动作", kicker: "第 53–54 格 · Transformer Encoder",
+      html: `<p>每个编码器层有两部分：<b>多头自注意力</b>（每一步都去看所有其他步，决定该借鉴谁的信息）和<b>前馈网络</b>（每一步单独再加工）。每部分后面都有残差相加和层归一化。<span data-cell="54">出处</span></p><p>手指拼写里，一个字母的手形会受前后字母影响（手要从上一个形状过渡过来），所以“看前后”很重要。作者最终用了 2 层编码器、4 个头。<span data-cell="62">出处</span></p>`,
+      cells: [54], highlight: ["MultiHeadAttention", "layernorm1(inputs + attn_output)"],
+      draw(svg, ctx) {
+        const n = 8, xs = Array.from({ length: n }, (_, i) => 80 + i * 78);
+        xs.forEach((x, i) => { K.node(svg, x - 28, 250, 56, 40, "t" + (i + 1), { fill: "var(--panel-2)" }); K.node(svg, x - 28, 40, 56, 40, "t" + (i + 1) + "′", { fill: "var(--accent-soft)", stroke: "var(--accent)" }); });
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 12, class: "muted" }, "下排：卷积后的 16 步（这里画 8 步）；上排：注意力之后；线越粗 = 权重越大（示意）");
+        const q = 4, lines = [];
+        xs.forEach((x, j) => {
+          const w = Math.exp(-Math.abs(j - q) * 0.9);
+          lines.push([K.svg(svg, "line", { x1: x, y1: 248, x2: xs[q], y2: 82, stroke: "var(--accent)", "stroke-width": 0.5 + 6 * w, opacity: 0 }), w]);
+        });
+        ctx.tween(1400, (t) => lines.forEach(([l, w]) => (l.style.opacity = t * (0.25 + 0.75 * w))));
+      },
+    },
+    {
+      title: "解码器与整体模型：一个字一个字往外写", kicker: "第 55–58 格 · Decoder · 因果遮罩",
+      html: `<p>解码器先对“已经写出的字”做自注意力，但加了<b>因果遮罩</b>：第 3 个字只能看前 2 个字，不能偷看后面的答案。<span data-cell="56">出处</span> 然后用这些字去问编码器的 16 步：“下一个字该看手的哪一段？”（交叉注意力）。</p><p>训练时，解码器的输入是正确答案右移一位（以 <code>&lt;</code> 开头），目标是答案左移一位；填充位 P 不算损失。预测时用<b>贪心解码</b>：每步取概率最大的字，接到后面再预测下一个。<span data-cell="57">出处</span> <span data-cell="58">出处</span></p>`,
+      cells: [56, 58], highlight: ["causal_attention_mask", "dec_input = target[:, :-1]", "def generate"],
+      draw(svg, ctx) {
+        const toks = ["<", "c", "a", "t", ">"];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "因果遮罩：绿色 = 能看到的字");
+        const n = 5, s = 38, x0 = 80, y0 = 60;
+        toks.forEach((t, i) => { K.svg(svg, "text", { x: x0 + i * s + s / 2, y: y0 - 6, "text-anchor": "middle", "font-size": 13, "font-family": "var(--mono)" }, t); K.svg(svg, "text", { x: x0 - 12, y: y0 + i * s + 24, "text-anchor": "end", "font-size": 13, "font-family": "var(--mono)" }, t); });
+        const cells = [];
+        for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) cells.push([K.svg(svg, "rect", { x: x0 + j * s, y: y0 + i * s, width: s - 3, height: s - 3, rx: 4, fill: j <= i ? "color-mix(in srgb, var(--good) 45%, var(--panel))" : "var(--panel-2)", opacity: 0 }), i]);
+        ctx.tween(1200, (t) => cells.forEach(([c, i]) => (c.style.opacity = i / n <= t ? 1 : 0)));
+        // 右侧：贪心逐字生成
+        K.svg(svg, "text", { x: 400, y: 30, "font-size": 13, class: "muted" }, "预测：每步取最可能的字接上");
+        const out = K.svg(svg, "text", { x: 400, y: 110, "font-size": 30, "font-family": "var(--mono)", "font-weight": 700 }, "<");
+        const probs = [["c", 0.71], ["a", 0.64], ["t", 0.58], [">", 0.80]];
+        const bars = [];
+        (async () => {
+          if (!(await ctx.wait(1300))) return;
+          for (const [c, p] of probs) {
+            bars.forEach((b) => b.remove()); bars.length = 0;
+            const cand = [[c, p], ["k", (1 - p) * 0.6], ["e", (1 - p) * 0.4]];
+            cand.forEach(([cc, pp], k) => {
+              bars.push(K.svg(svg, "rect", { x: 430, y: 150 + k * 34, width: 220 * pp, height: 24, rx: 3, fill: k ? "var(--ink-3)" : "var(--accent)" }));
+              bars.push(K.svg(svg, "text", { x: 410, y: 167 + k * 34, "font-size": 13, "font-family": "var(--mono)" }, cc));
+              bars.push(K.svg(svg, "text", { x: 436 + 220 * pp, y: 167 + k * 34, "font-size": 11, class: "muted" }, pp.toFixed(2)));
+            });
+            if (!(await ctx.wait(800))) return;
+            out.textContent += c;
+          }
+        })();
+        K.svg(svg, "text", { x: 400, y: 300, "font-size": 11, class: "muted" }, "概率数值为示意");
+      },
+    },
+    {
+      title: "训练 13 轮，用编辑距离看效果", kicker: "第 59–64 格 · 训练与评估",
+      html: `<p>模型配置：隐藏维 200、4 个头、前馈 400、编码器 2 层、解码器 1 层、62 类输出；损失是带 0.1 标签平滑的交叉熵，Adam 学习率 0.0001，训练 13 轮。<span data-cell="62">出处</span> 每 4 轮打印一批验证样本的“目标”和“预测”对照。<span data-cell="60">出处</span></p><p>比赛的评分是<b>归一化的编辑距离</b>（Levenshtein）：把预测改成正确答案，最少要增、删、改几个字。<span data-cell="57">出处</span> 但要注意，训练里显示的 <code>edit_dist</code> 在错误的维度上取了 argmax（见第 04 节），不能直接当分数。最后画训练和验证损失曲线。<span data-cell="64">出处</span></p>`,
+      cells: [60, 62, 64], highlight: ["label_smoothing=0.1", "epochs=13", "num_hid=200"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [0, 13], [0, 1], { xlabel: "轮次（epoch）", yticks: 0 });
+        const tr = (e) => 0.85 * Math.exp(-e / 4) + 0.12, va = (e) => 0.8 * Math.exp(-e / 4.5) + 0.2;
+        let d1 = "", d2 = "";
+        for (let e = 0; e <= 13; e += 0.25) { d1 += (d1 ? "L" : "M") + ax.sx(e) + "," + ax.sy(tr(e)); d2 += (d2 ? "L" : "M") + ax.sx(e) + "," + ax.sy(va(e)); }
+        const p1 = K.svg(svg, "path", { d: d1, fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const p2 = K.svg(svg, "path", { d: d2, fill: "none", stroke: "var(--c2)", "stroke-width": 2.5 });
+        [p1, p2].forEach((p) => { const L = p.getTotalLength ? p.getTotalLength() : 900; p.style.strokeDasharray = L; p.style.strokeDashoffset = L; p._L = L; });
+        K.svg(svg, "text", { x: 470, y: 60, "font-size": 12, fill: "var(--c1)" }, "— 训练损失");
+        K.svg(svg, "text", { x: 470, y: 80, "font-size": 12, fill: "var(--c2)" }, "— 验证损失");
+        K.svg(svg, "text", { x: 60, y: 318, "font-size": 12, fill: "var(--warn)" }, "曲线形状纯属示意：作者的真实曲线在运行输出里，源码不带");
+        ctx.tween(2200, (t) => [p1, p2].forEach((p) => (p.style.strokeDashoffset = p._L * (1 - t))));
+      },
+    },
+    {
+      title: "转成 TFLite，打包提交", kicker: "第 65–71 格 · 部署",
+      html: `<p>比赛要求提交手机上也能跑的 <b>TFLite</b> 小模型。作者包了一层 <code>TFLiteModel</code>：输入原始的 156 列 → 预处理 → 贪心生成 → 截到结束符 <code>&gt;</code> 为止 → 输出 one-hot。<span data-cell="67">出处</span></p><p>再用 <code>TFLiteConverter</code> 转换，和列名清单 <code>inference_args.json</code> 一起压缩成 submission.zip <span data-cell="69">出处</span> <span data-cell="70">出处</span>；最后用 TFLite 解释器读回来，跑一条验证样本，确认能输出字符串。<span data-cell="71">出处</span></p>`,
+      cells: [67, 69, 71], highlight: ["TFLiteConverter", "inference_args.json", "get_signature_runner"],
+      draw(svg, ctx) {
+        const steps = [["156 列关键点", "var(--panel-2)"], ["pre_process", "var(--panel-2)"], ["generate\n贪心解码", "var(--accent-soft)"], ["截到 >", "var(--panel-2)"], ["字符串", "color-mix(in srgb, var(--c3) 20%, var(--panel))"]];
+        const nodes = steps.map(([t, f], i) => { const g = K.node(svg, 20 + i * 140, 60, 118, 60, t, { fill: f }); g.style.opacity = 0; return g; });
+        const arrs = [0, 1, 2, 3].map((i) => { const a = K.arrow(svg, 140 + i * 140, 90, 158 + i * 140, 90); a.style.opacity = 0; return a; });
+        K.svg(svg, "rect", { x: 10, y: 40, width: 700, height: 100, rx: 10, fill: "none", stroke: "var(--accent)", "stroke-dasharray": "6 4" });
+        K.svg(svg, "text", { x: 20, y: 34, "font-size": 12, fill: "var(--accent)" }, "TFLiteModel（整个打包进 model.tflite）");
+        K.node(svg, 200, 200, 150, 60, "model.tflite", { bold: true });
+        K.node(svg, 370, 200, 170, 60, "inference_args.json\n（用到的列名）");
+        K.svg(svg, "text", { x: 200, y: 300, "font-size": 13 }, "→ zip 成 submission.zip 提交");
+        (async () => { for (let i = 0; i < 5; i++) { if (!(await ctx.tween(300, (t) => { nodes[i].style.opacity = t; if (i) arrs[i - 1].style.opacity = t; }))) return; } })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：镜像 + 补齐 / 压缩到 128 帧 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "n", label: "这段手语原本有几帧", min: 20, max: 300, step: 1, value: 123 },
+      { id: "hand", label: "主力手", value: "R", options: [["R", "右手"], ["L", "左手（需要镜像 1−x）"]] },
+      { id: "miss", label: "手被挡住（NaN）的帧占比", min: 0, max: 40, step: 1, value: 10, fmt: (v) => v + "%" },
+    ],
+    note: "模拟一段食指指尖 x 坐标随时间变化的曲线（0–1 是相对画面宽度）。电脑现场执行作者的 resize_pad：不足 128 帧就在后面补 0，超过就线性插值压成 128 帧；NaN 最后换成 0。",
+    render(svg, v) {
+      const r = K.rng(7 + v.n), raw = [];
+      for (let i = 0; i < v.n; i++) {
+        let x = 0.55 + 0.18 * Math.sin(i / 9) + 0.05 * Math.sin(i / 2.3);
+        if (v.hand === "L") x = 1 - x;              // 左手打出来正好左右相反
+        raw.push(r() * 100 < v.miss ? NaN : x);
+      }
+      const fixed = raw.map((x) => (v.hand === "L" && !isNaN(x) ? 1 - x : x));  // 作者：左手 1−x
+      let out = [];
+      if (v.n < 128) out = fixed.concat(Array(128 - v.n).fill(0));
+      else for (let k = 0; k < 128; k++) {                  // 线性插值缩放（与 tf.image.resize 双线性一致的半像素对齐）
+        const pos = (k + 0.5) * v.n / 128 - 0.5, a = Math.max(0, Math.floor(pos)), b = Math.min(v.n - 1, a + 1), t = K.clamp(pos - a, 0, 1);
+        out.push(isNaN(fixed[a]) || isNaN(fixed[b]) ? NaN : K.lerp(fixed[a], fixed[b], t));
+      }
+      out = out.map((x) => (isNaN(x) ? 0 : x));
+      const ax1 = K.axes(svg, { x: 50, y: 20, w: 560, h: 110 }, [0, Math.max(128, v.n)], [0, 1], { yticks: 2, xlabel: "" });
+      K.svg(svg, "text", { x: 56, y: 34, "font-size": 12, class: "muted" }, v.hand === "L" ? "原始（左手，灰）→ 镜像后（蓝）" : "原始坐标（右手）");
+      const path = (arr, ax, col, w) => { let d = "", pen = false; arr.forEach((x, i) => { if (isNaN(x)) { pen = false; return; } d += (pen ? "L" : "M") + ax.sx(i) + "," + ax.sy(x); pen = true; }); K.svg(svg, "path", { d, fill: "none", stroke: col, "stroke-width": w }); };
+      if (v.hand === "L") path(raw, ax1, "var(--ink-3)", 1.5);
+      path(fixed, ax1, "var(--c1)", 2);
+      raw.forEach((x, i) => { if (isNaN(x)) K.svg(svg, "line", { x1: ax1.sx(i), x2: ax1.sx(i), y1: 125, y2: 130, stroke: "var(--bad)", "stroke-width": 1.5 }); });
+      const ax2 = K.axes(svg, { x: 50, y: 175, w: 560, h: 110 }, [0, 128], [0, 1], { yticks: 2, xlabel: "进入模型的 128 帧" });
+      K.svg(svg, "text", { x: 56, y: 170, "font-size": 12, class: "muted" }, "resize_pad 之后（红色竖线 = NaN 被换成 0 的位置）");
+      if (v.n < 128) K.svg(svg, "rect", { x: ax2.sx(v.n), y: 175, width: ax2.sx(128) - ax2.sx(v.n), height: 110, fill: "var(--panel-2)", opacity: 0.8 });
+      path(out, ax2, "var(--c3)", 2);
+      out.forEach((x, i) => { if (x === 0 && i < Math.min(v.n, 128)) K.svg(svg, "line", { x1: ax2.sx(i), x2: ax2.sx(i), y1: 280, y2: 285, stroke: "var(--bad)", "stroke-width": 1.5 }); });
+      const zeros = out.filter((x) => x === 0).length;
+      return { readout: [
+        { k: "处理方式", v: v.n < 128 ? `补 ${128 - v.n} 帧 0` : v.n === 128 ? "不变" : `压缩 ${(v.n / 128).toFixed(2)} 倍` },
+        { k: "128 帧里为 0 的帧", v: zeros + " 帧", color: zeros > 40 ? "var(--bad)" : "var(--ink)" },
+        { k: "镜像后范围", v: Math.min(...fixed.filter((x) => !isNaN(x))).toFixed(2) + "–" + Math.max(...fixed.filter((x) => !isNaN(x))).toFixed(2) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：自注意力 ---------- */
+  // 8 个时间步，每步一个 2 维“手形特征”（示意）：三段不同的字母手形 + 过渡
+  const FEAT = [[1, 0.1], [0.9, 0.3], [0.5, 0.7], [0.1, 1], [0.15, 0.95], [0.6, 0.4], [0.95, -0.2], [1, -0.3]];
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "q", label: "当前这一步（查询 query）", min: 1, max: 8, step: 1, value: 4 },
+      { id: "temp", label: "注意力的“专注度”（分数放大倍数）", min: 0.5, max: 8, step: 0.5, value: 3 },
+      { id: "pos", label: "加入位置信息的强度", min: 0, max: 2, step: 0.1, value: 0.5 },
+    ],
+    note: "每一步的特征是 2 个数（示意）。电脑现场计算：分数 = 当前步与每一步特征的点积 × 专注度 − 位置惩罚 × 两步的距离，再做 softmax 得到权重（加起来等于 1），最后按权重把各步特征加权平均。",
+    render(svg, v) {
+      const q = v.q - 1, s = FEAT.map((f, j) => (FEAT[q][0] * f[0] + FEAT[q][1] * f[1]) * v.temp - v.pos * Math.abs(j - q));
+      const m = Math.max(...s), e = s.map((x) => Math.exp(x - m)), Z = e.reduce((a, b) => a + b, 0), w = e.map((x) => x / Z);
+      const mix = [0, 1].map((d) => FEAT.reduce((a, f, j) => a + w[j] * f[d], 0));
+      FEAT.forEach((f, j) => {
+        const x = 50 + j * 72;
+        K.svg(svg, "rect", { x: x - 3, y: 40, width: 66, height: 60, rx: 8, fill: j === q ? "var(--accent-soft)" : "var(--panel-2)", stroke: j === q ? "var(--accent)" : "var(--line)", "stroke-width": j === q ? 2 : 1 });
+        K.svg(svg, "text", { x: x + 30, y: 64, "text-anchor": "middle", "font-size": 12 }, "第 " + (j + 1) + " 步");
+        K.svg(svg, "text", { x: x + 30, y: 84, "text-anchor": "middle", "font-size": 9, "font-family": "var(--mono)", class: "muted" }, `(${f[0]},${f[1]})`);
+        K.svg(svg, "rect", { x: x + 8, y: 230 - 110 * w[j], width: 44, height: 110 * w[j], rx: 3, fill: "var(--accent)", opacity: 0.85 });
+        K.svg(svg, "text", { x: x + 30, y: 248, "text-anchor": "middle", "font-size": 11, "font-family": "var(--mono)" }, w[j].toFixed(2));
+        K.svg(svg, "line", { x1: x + 30, y1: 100, x2: 50 + q * 72 + 30, y2: 100, stroke: "var(--accent)", "stroke-width": 0.5 + 8 * w[j], opacity: 0.25 + 0.6 * w[j] });
+      });
+      K.svg(svg, "text", { x: 50, y: 132, "font-size": 12, class: "muted" }, "柱子 = 注意力权重（softmax 之后，所有柱子加起来 = 1）");
+      K.svg(svg, "text", { x: 50, y: 285, "font-size": 13 }, `第 ${v.q} 步注意力之后的新特征 = (${mix[0].toFixed(2)}, ${mix[1].toFixed(2)})`);
+      const top = w.map((x, j) => [x, j]).sort((a, b) => b[0] - a[0]).slice(0, 2);
+      return { readout: [
+        { k: "最关注", v: "第 " + (top[0][1] + 1) + " 步 " + (top[0][0] * 100).toFixed(0) + "%" },
+        { k: "其次", v: "第 " + (top[1][1] + 1) + " 步 " + (top[1][0] * 100).toFixed(0) + "%" },
+        { k: "看自己的比例", v: (w[q] * 100).toFixed(0) + "%" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：编辑距离 ---------- */
+  function lev(a, b) {
+    const D = Array.from({ length: a.length + 1 }, (_, i) => Array.from({ length: b.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)));
+    for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) D[i][j] = Math.min(D[i - 1][j] + 1, D[i][j - 1] + 1, D[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    return D;
+  }
+  const PHRASES = ["3 creekhouse", "hello kaggle", "new york", "zip 94043"];
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "p", label: "正确答案", value: "0", options: PHRASES.map((p, i) => [String(i), p + (i ? "（自拟示例）" : "（第 15 格的示例短语）")]) },
+      { id: "k", label: "模型犯了几处错（随机增 / 删 / 改）", min: 0, max: 6, step: 1, value: 2 },
+      { id: "seed", label: "换一种错法", button: true },
+    ],
+    note: "电脑先把正确答案随机改坏 k 处，当作“模型的预测”，再用动态规划现场算出编辑距离：从左上角出发，每格取“左边 +1、上边 +1、左上 +0 或 +1”中最小的一个，右下角就是答案。",
+    render(svg, v) {
+      const truth = PHRASES[+v.p], r = K.rng(31 + v.seed * 13 + v.k * 7 + +v.p);
+      const al = "abcdefghijklmnopqrstuvwxyz ";
+      let pred = truth.split("");
+      for (let i = 0; i < v.k; i++) {
+        const op = Math.floor(r() * 3), pos = Math.floor(r() * (pred.length + (op === 0 ? 1 : 0)));
+        const ch = al[Math.floor(r() * al.length)];
+        if (op === 0) pred.splice(pos, 0, ch); else if (op === 1 && pred.length > 1) pred.splice(pos, 1); else pred[Math.min(pos, pred.length - 1)] = ch;
+      }
+      pred = pred.join("");
+      const D = lev(pred, truth), d = D[pred.length][truth.length];
+      const cs = Math.min(24, 520 / (truth.length + 2), 300 / (pred.length + 2)), x0 = 40, y0 = 40;
+      truth.split("").forEach((c, j) => K.svg(svg, "text", { x: x0 + (j + 1.5) * cs, y: y0 - 6, "text-anchor": "middle", "font-size": 12, "font-family": "var(--mono)" }, c === " " ? "␣" : c));
+      pred.split("").forEach((c, i) => K.svg(svg, "text", { x: x0 - 6, y: y0 + (i + 1.5) * cs + 4, "text-anchor": "end", "font-size": 12, "font-family": "var(--mono)" }, c === " " ? "␣" : c));
+      // 回溯最优路径
+      const path = new Set(); let i = pred.length, j = truth.length; path.add(i + "," + j);
+      while (i > 0 || j > 0) {
+        if (i > 0 && j > 0 && D[i][j] === D[i - 1][j - 1] + (pred[i - 1] === truth[j - 1] ? 0 : 1)) { i--; j--; }
+        else if (i > 0 && D[i][j] === D[i - 1][j] + 1) i--; else j--;
+        path.add(i + "," + j);
+      }
+      const mx = Math.max(d, 1);
+      for (let a = 0; a <= pred.length; a++) for (let b = 0; b <= truth.length; b++) {
+        const on = path.has(a + "," + b);
+        K.svg(svg, "rect", { x: x0 + b * cs, y: y0 + a * cs, width: cs - 1, height: cs - 1, fill: on ? "color-mix(in srgb, var(--warn) 70%, var(--panel))" : K.heat(Math.min(1, D[a][b] / (mx + 6)) * 0.35) });
+        if (cs >= 18) K.svg(svg, "text", { x: x0 + b * cs + cs / 2, y: y0 + a * cs + cs / 2 + 4, "text-anchor": "middle", "font-size": 9, "font-family": "var(--mono)" }, D[a][b]);
+      }
+      const yb = y0 + (pred.length + 1) * cs + 26;
+      K.svg(svg, "text", { x: 40, y: Math.min(yb, 345), "font-size": 13, "font-family": "var(--mono)" }, `答案："${truth}"   预测："${pred}"`);
+      K.svg(svg, "text", { x: 40, y: Math.min(yb + 22, 368), "font-size": 12, class: "muted" }, "竖着是预测、横着是答案；高亮格子是一条最省步数的修改路线");
+      return { readout: [
+        { k: "编辑距离 D", v: d + " 步", color: d ? "var(--bad)" : "var(--good)" },
+        { k: "答案长度 N", v: truth.length + " 个字符" },
+        { k: "D / N（越小越好）", v: (d / truth.length).toFixed(3) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

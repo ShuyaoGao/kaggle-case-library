@@ -1,0 +1,609 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>新冠胸片识别</title>
+<meta name="description" content="Kaggle 案例拆解：用 PyTorch 和预训练 DenseNet-121 区分新冠肺炎胸片与正常胸片，并看清“两个来源拼数据”带来的捷径学习风险和学习率调度的隐藏 bug。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">胸部 X 光 · 二分类 · PyTorch 迁移学习</div>
+  <h1>新冠胸片识别：模型学到的是肺炎，还是“这张片子从哪来”？</h1>
+  <p class="en">Hyperdrive into PyTorch - Tutorial (COVID 19 Detection - Pytorch Tutorial)</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">PyTorch</span><span class="tag method">DenseNet-121 迁移学习</span><span class="tag method">数据增强</span>
+    <span class="tag method">StepLR</span><span class="tag method">Cohen's Kappa</span><span class="tag method">混淆矩阵</span><span class="tag method">推理函数</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Arun Pandian R</b></span>
+    <span>Kaggle 点赞 <b>549</b>（2026-11 抓取）</span>
+    <span>数据 <b>ieee8023/covid-chestxray-dataset</b> + <b>paultimothymooney/chest-xray-pneumonia</b> + <b>tawsifurrahman/covid19-radiography-database</b></span>
+    <span><a href="https://www.kaggle.com/code/arunrk7/covid-19-detection-pytorch-tutorial" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">从三个地方拼起来的胸部 X 光片</div><p>新冠片子来自 GitHub 上的公开收集；正常片子取自一个<b>儿童</b>肺炎数据集的前 300 张；测试片子又来自第三个数据库。<span data-cell="2">出处</span> <span data-cell="10">出处</span> <span data-cell="38">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这张胸片是新冠肺炎还是正常</div><p>二分类，类别名 <code>covid19</code> 和 <code>normal</code>。<span data-cell="7">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">预训练 DenseNet-121，全部层一起训练</div><p>换掉最后的分类层，用 Adam 训练 10 轮，按验证损失保存最好的模型；手写 PyTorch 训练循环。<span data-cell="28">出处</span> <span data-cell="32">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">作者没写分数，自己提醒“不能用于真实诊断”</div><p>分类报告和混淆矩阵在运行输出里；作者在结尾强调数据很少，模型不能当诊断工具。<span data-cell="55">出处</span></p></div>
+  </div>
+  <p class="callout warn">本页只讲 notebook 的方法，不提供医疗建议。新冠肺炎的诊断依靠核酸 / 抗原检测和医生的综合判断，胸片模型最多是辅助。</p>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">这份 notebook 没有用一个现成的数据集，而是自己从三个来源拼数据。弄清楚“每类图片从哪来”，是理解这个案例的关键。规模信息来自作者代码和各数据集说明。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">三个来源</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>用途</th><th>来源</th><th>取了什么</th></tr>
+        <tr><td>训练 / 验证：新冠</td><td>Cohen 等人在 GitHub 收集的 COVID 胸片库</td><td>诊断为 <code>Pneumonia/Viral/COVID-19</code>、拍摄方向为 AP 或 PA 的全部图片 <span data-cell="5">出处</span></td></tr>
+        <tr><td>训练 / 验证：正常</td><td>Paul Mooney 的 Chest X-Ray Images (Pneumonia)</td><td>训练集 NORMAL 文件夹的<b>前 300 张</b> <span data-cell="10">出处</span></td></tr>
+        <tr><td>测试</td><td>Tawsifur Rahman 等的 COVID-19 Radiography Database</td><td>COVID-19 和 NORMAL 文件夹各取前 100 张 <span data-cell="41">出处</span></td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">Paul Mooney 数据集的说明写明：图片来自广州市妇女儿童医疗中心 <b>1–5 岁儿童</b>的胸片。而 COVID 片子主要是成人。这一点后面会反复讨论。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">正常（训练用）</div><div class="v">300 张</div></div>
+        <div class="stat-tile"><div class="k">测试集</div><div class="v">100 + 100</div></div>
+        <div class="stat-tile"><div class="k">输入尺寸</div><div class="v">150×150</div></div>
+        <div class="stat-tile"><div class="k">验证比例</div><div class="v">20%</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">新冠训练图片的张数由 GitHub 库当时的内容决定，作者用饼图展示了比例，具体数字在运行输出里，这里不写。尺寸见第 19 格 <span data-cell="19">出处</span>，验证比例见第 21 格 <span data-cell="21">出处</span>。</p>
+      <h3>文件夹就是标签</h3>
+      <p style="font-size:14px">作者把图片复制进 <code>COVID19-DATASET/train/covid19</code> 和 <code>…/normal</code> 两个文件夹，PyTorch 的 <code>ImageFolder</code> 会按文件夹名自动打标签：<code>covid19</code>=0，<code>normal</code>=1（按字母顺序）。页面中的胸片均由代码生成，是示意图。</p>
+      <h3>两个拍摄方向</h3>
+      <ul class="tight">
+        <li><b>PA（后前位）</b>：病人站着，X 光从背后射向前胸，门诊最常见</li>
+        <li><b>AP（前后位）</b>：从前往后照，常用于卧床的重病人或小孩</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="12">
+    <h3>动手试试 A · 捷径学习：模型会不会只学“片子从哪来” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="32">
+    <h3>动手试试 B · scheduler.step() 放错位置会怎样 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>新冠和健康胸片看起来很像，连专家有时也难判断，所以模型可以帮忙</td><td><span data-cell="17">第 17 格</span></td></tr>
+        <tr><td>医学影像要把 CNN 层全部或部分重新训练，不能只训练分类层</td><td><span data-cell="27">第 27 格</span></td></tr>
+        <tr><td>按最低验证损失保存模型，因为医学模型不希望出现假阳性或假阴性</td><td><span data-cell="31">第 31 格</span></td></tr>
+        <tr><td>数据太少，不能声称这个模型可以诊断真实病人，更不能自称是新的基线</td><td><span data-cell="55">第 55 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">作者没有在文字里写任何分数；分类报告、混淆矩阵都在运行输出里，Kaggle 下载的源码不带输出，这里不列分数。</p>
+      <h3>原作者的问题（如实列出，原文未改）</h3>
+      <ul class="tight">
+        <li><b>正常片子来自儿童数据集，新冠片子主要来自成人</b>：两类图片在年龄、体型、医院、设备上都不同，模型可能学到“是不是儿童片子”而不是“有没有新冠”。这叫<b>捷径学习</b>。<span data-cell="10">第 10 格</span></li>
+        <li><b>学习率调度器每个批次就走一步</b>：<code>StepLR(step_size=7)</code> 注释写“每 7 轮衰减”，但 <code>scheduler.step()</code> 放在批次循环里，实际每 7 个批次（每批 8 张）就把学习率乘 0.1，很快就接近 0，模型后面几乎学不动。<span data-cell="28">第 28 格</span> <span data-cell="32">第 32 格</span></li>
+        <li>Kappa 是在每个只有 8 张图的批次上分别算、再取平均，小批次上的 Kappa 波动很大，和在整个验证集上算的结果不一样。<span data-cell="32">第 32 格</span></li>
+        <li>第 13 格说用“正确的比例”避免过拟合，其实只是把正常片子截到 300 张；作者也说 K 折交叉验证留到下一个 notebook。<span data-cell="13">第 13 格</span></li>
+        <li>推理函数里算了 <code>score = out[0][0]</code> 但没有用到，<code>Variable</code> 也是旧版 PyTorch 的写法。<span data-cell="52">第 52 格</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>作为 PyTorch 入门模板：ImageFolder 读图 → transforms 增强 → 预训练模型换头 → 手写训练循环 → 保存权重 → CPU 上做单张推理。</li>
+        <li><b>同类问题：</b>任何“文件夹分好类”的图片二分类：结核、气胸、骨折、工业缺陷。</li>
+        <li><b>要警惕的套路：</b>两类图片来自不同来源时，先检查“只看来源能不能猜对标签”；测试集最好来自另一家医院但两类同源；学习率调度器在哪一层循环里 <code>step()</code> 要和设计一致。</li>
+        <li><b>边界：</b>作者自己也说了，不能拿来诊断真实病人。任何医学 AI 上临床前，都要经过严格的外部验证和监管审批。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>按诊断和拍摄方向筛选图片 <span data-cell="5">第 5 格</span></li>
+        <li>transforms：缩放 150、旋转 10°、水平翻转、ImageNet 标准化 <span data-cell="19">第 19 格</span></li>
+        <li>SubsetRandomSampler 切 80/20 <span data-cell="21">第 21 格</span></li>
+        <li>DenseNet-121 预训练 + 新分类层，全部参数可训练 <span data-cell="28">第 28 格</span></li>
+        <li>Adam(1e-3) + StepLR + 按最低验证损失保存 <span data-cell="32">第 32 格</span></li>
+        <li>Cohen's Kappa、分类报告、混淆矩阵 <span data-cell="45">第 45 格</span> <span data-cell="47">第 47 格</span></li>
+        <li>CPU 推理函数 <span data-cell="52">第 52 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>正常片子全是 1–5 岁儿童的，新冠片子主要是成人的。如果模型准确率很高，你能确定它学会了“认新冠”吗？怎么设计实验来检验？</li>
+      <li>测试集换成了第三个数据库，这算“外部验证”吗？如果测试集的 COVID 片子和训练用的 GitHub 片子有重复，会怎样？</li>
+      <li>作者说选“验证损失最低”的模型是因为医学模型不希望有假阳性和假阴性。这个理由成立吗？</li>
+      <li>scheduler.step() 放在批次循环里还是轮次循环里，你怎么从训练日志里看出它放错了？</li>
+      <li>新冠胸片的典型表现（双肺外周、下肺为主的磨玻璃影）也会出现在其他肺炎里。仅靠胸片能区分新冠和其他病毒性肺炎吗？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Arun Pandian R，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意，胸片由代码生成。数据：Cohen J.P. 等 COVID-19 Image Data Collection；Kermany 等 Chest X-Ray Images (Pneumonia)；Chowdhury、Rahman 等 COVID-19 Radiography Database。本页内容不构成医疗建议。
+</footer>
+</main>
+
+<script src="nb/covid-xray-pytorch.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* 自查开关：网址带 ?fast 时动画直接跳到最后一帧（无界面截图用） */
+  if (/[?&]fast/.test(location.search)) { K.tween = (ms, fn, ctx) => { if (ctx && !ctx.alive()) return Promise.resolve(false); fn(1, 1); return Promise.resolve(true); }; K.wait = (ms, ctx) => Promise.resolve(!ctx || ctx.alive()); }
+  if (/[?&]fold/.test(location.search)) document.head.appendChild(Object.assign(document.createElement("style"), { textContent: ".walk .ch-cells > .cell, .walk .cell-note { display: none !important; }" }));
+  /* ===== 页面专用：像素图工具（用代码生成小图，在浏览器里真算卷积、模糊、池化、几何变换） ===== */
+  const PX = (function () {
+    function rgbOf(name, fb) {
+      let s = (K.css(name) || fb || "#888888").trim();
+      if (s[0] !== "#") return [128, 128, 128];
+      if (s.length === 4) s = "#" + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+      return [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
+    }
+    function grid(W, H, f) { const a = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) a[y * W + x] = f(x, y); return { W, H, a }; }
+    /* 彩色图：{W,H,rgb:[R,G,B]}，每个通道取值 0–1 */
+    function rgbGrid(W, H, f) { const R = new Float32Array(W * H), G = new Float32Array(W * H), B = new Float32Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const c = f(x, y), i = y * W + x; R[i] = c[0]; G[i] = c[1]; B[i] = c[2]; } return { W, H, rgb: [R, G, B] }; }
+    const chan = (m, c) => ({ W: m.W, H: m.H, a: m.rgb[c] });
+    const fromChans = (ch) => ({ W: ch[0].W, H: ch[0].H, rgb: ch.map((c) => c.a) });
+    const gray = (m) => (m.rgb ? grid(m.W, m.H, (x, y) => { const i = y * m.W + x; return 0.299 * m.rgb[0][i] + 0.587 * m.rgb[1][i] + 0.114 * m.rgb[2][i]; }) : m);
+    function at(m, x, y) { return m.a[y * m.W + x]; }
+    function atClamp(m, x, y) { x = x < 0 ? 0 : x >= m.W ? m.W - 1 : x; y = y < 0 ? 0 : y >= m.H ? m.H - 1 : y; return m.a[y * m.W + x]; }
+    function atZero(m, x, y) { return x < 0 || y < 0 || x >= m.W || y >= m.H ? 0 : m.a[y * m.W + x]; }
+    /* padding='same'：边界外按 0 补 */
+    function conv(m, k) { const n = k.length, r = (n - 1) / 2; return grid(m.W, m.H, (x, y) => { let s = 0; for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) s += k[j][i] * atZero(m, x + i - r, y + j - r); return s; }); }
+    function map(m, f) { if (m.rgb) return { W: m.W, H: m.H, rgb: m.rgb.map((a) => { const o = new Float32Array(a.length); for (let i = 0; i < a.length; i++) o[i] = f(a[i], i); return o; }) }; const o = { W: m.W, H: m.H, a: new Float32Array(m.a.length) }; for (let i = 0; i < m.a.length; i++) o.a[i] = f(m.a[i], i); return o; }
+    const relu = (m) => map(m, (v) => (v > 0 ? v : 0));
+    function pool(m, s) { s = s || 2; const W = Math.ceil(m.W / s), H = Math.ceil(m.H / s); return grid(W, H, (x, y) => { let b = -Infinity; for (let j = 0; j < s; j++) for (let i = 0; i < s; i++) { const xx = x * s + i, yy = y * s + j; if (xx < m.W && yy < m.H) b = Math.max(b, at(m, xx, yy)); } return b; }); }
+    function range(m) { let lo = Infinity, hi = -Infinity; for (const v of m.a) { if (v < lo) lo = v; if (v > hi) hi = v; } return [lo, hi]; }
+    /* 可分离高斯模糊（边界用最近像素），彩色图逐通道做 */
+    function blur(m, sigma) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => blur(chan(m, c), sigma)));
+      if (sigma <= 0.01) return m;
+      const r = Math.max(1, Math.ceil(sigma * 3)), w = [];
+      let s = 0;
+      for (let i = -r; i <= r; i++) { const v = Math.exp((-i * i) / (2 * sigma * sigma)); w.push(v); s += v; }
+      for (let i = 0; i < w.length; i++) w[i] /= s;
+      const t = grid(m.W, m.H, (x, y) => { let a = 0; for (let i = -r; i <= r; i++) a += w[i + r] * atClamp(m, x + i, y); return a; });
+      return grid(m.W, m.H, (x, y) => { let a = 0; for (let i = -r; i <= r; i++) a += w[i + r] * atClamp(t, x, y + i); return a; });
+    }
+    function bilinear(m, x, y) {
+      const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+      return (atClamp(m, x0, y0) * (1 - fx) + atClamp(m, x0 + 1, y0) * fx) * (1 - fy) + (atClamp(m, x0, y0 + 1) * (1 - fx) + atClamp(m, x0 + 1, y0 + 1) * fx) * fy;
+    }
+    /* 绕中心旋转/缩放/平移/翻转；fill：'nearest' 用最近像素，数字表示边界外填这个值 */
+    function affine(m, p) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => affine(chan(m, c), p)));
+      const th = ((p.rot || 0) * Math.PI) / 180, c = Math.cos(th), s = Math.sin(th), z = p.zoom || 1;
+      const cx = (m.W - 1) / 2, cy = (m.H - 1) / 2, tx = (p.tx || 0) * m.W, ty = (p.ty || 0) * m.H;
+      return grid(m.W, m.H, (x, y) => {
+        let u = x - cx - tx, v = y - cy - ty;
+        if (p.flip) u = -u;
+        if (p.vflip) v = -v;
+        const a = (c * u + s * v) / z + cx, b = (-s * u + c * v) / z + cy;
+        if (p.fill != null && p.fill !== "nearest" && (a < -0.5 || b < -0.5 || a > m.W - 0.5 || b > m.H - 0.5)) return p.fill;
+        return bilinear(m, a, b);
+      });
+    }
+    function resize(m, W, H) {
+      if (m.rgb) return fromChans([0, 1, 2].map((c) => resize(chan(m, c), W, H)));
+      return grid(W, H, (x, y) => bilinear(m, ((x + 0.5) * m.W) / W - 0.5, ((y + 0.5) * m.H) / H - 0.5));
+    }
+    function toURL(m, mode, lo, hi) {
+      const cv = document.createElement("canvas"); cv.width = m.W; cv.height = m.H;
+      const g = cv.getContext("2d"), id = g.createImageData(m.W, m.H), d = id.data;
+      if (m.rgb) {
+        for (let i = 0; i < m.W * m.H; i++) { for (let c = 0; c < 3; c++) d[i * 4 + c] = Math.max(0, Math.min(1, m.rgb[c][i])) * 255; d[i * 4 + 3] = 255; }
+      } else {
+        const P = rgbOf("--panel", "#ffffff"), A = rgbOf("--c1"), B = rgbOf("--c6");
+        if (lo == null || hi == null) { const r = range(m); if (lo == null) lo = r[0]; if (hi == null) hi = r[1]; }
+        const span = hi - lo || 1, amax = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+        for (let i = 0; i < m.a.length; i++) {
+          const v = m.a[i]; let r, gg, b;
+          if (mode === "div") { const t = Math.max(-1, Math.min(1, v / amax)), C = t >= 0 ? B : A, k = Math.abs(t); r = P[0] + (C[0] - P[0]) * k; gg = P[1] + (C[1] - P[1]) * k; b = P[2] + (C[2] - P[2]) * k; }
+          else if (mode === "heat") { const k = Math.max(0, Math.min(1, (v - lo) / span)); r = P[0] + (B[0] - P[0]) * k; gg = P[1] + (B[1] - P[1]) * k; b = P[2] + (B[2] - P[2]) * k; }
+          else { const k = Math.max(0, Math.min(1, (v - lo) / span)) * 255; r = gg = b = k; }
+          d[i * 4] = r; d[i * 4 + 1] = gg; d[i * 4 + 2] = b; d[i * 4 + 3] = 255;
+        }
+      }
+      g.putImageData(id, 0, 0);
+      return cv.toDataURL();
+    }
+    function draw(svg, x, y, w, h, m, mode, lo, hi, smooth) {
+      const e = K.svg(svg, "image", { x, y, width: w, height: h, preserveAspectRatio: "none" });
+      if (!smooth) e.style.imageRendering = "pixelated";
+      e.setAttribute("href", toURL(m, mode, lo, hi));
+      K.svg(svg, "rect", { x, y, width: w, height: h, fill: "none", stroke: "var(--line)" });
+      return e;
+    }
+    function update(e, m, mode, lo, hi) { e.setAttribute("href", toURL(m, mode, lo, hi)); }
+    function lines(svg, x, y, w, h, W, H, op) {
+      const g = K.svg(svg, "g");
+      for (let i = 0; i <= W; i++) K.svg(g, "line", { x1: x + (w * i) / W, x2: x + (w * i) / W, y1: y, y2: y + h, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      for (let j = 0; j <= H; j++) K.svg(g, "line", { y1: y + (h * j) / H, y2: y + (h * j) / H, x1: x, x2: x + w, stroke: "var(--panel)", "stroke-width": 1, opacity: op || 0.6 });
+      return g;
+    }
+    const smooth = (e0, e1, x) => { const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+    const blob = (x, y, cx, cy, sx, sy) => Math.exp(-(((x - cx) * (x - cx)) / (2 * sx * sx) + ((y - cy) * (y - cy)) / (2 * sy * sy)));
+    /* 平滑噪声：几层不同频率的随机网格插值叠加，用来做纹理 */
+    function noise(W, H, seed, cells) {
+      const r = K.rng(seed || 1), n = cells || 6, g0 = grid(n + 1, n + 1, () => r());
+      return grid(W, H, (x, y) => bilinear(g0, (x / W) * n, (y / H) * n));
+    }
+    return { grid, rgbGrid, chan, fromChans, gray, at, atClamp, conv, map, relu, pool, range, blur, bilinear, affine, resize, toURL, draw, update, lines, smooth, blob, noise, rgbOf };
+  })();
+
+
+  /* ===== 用代码画一张示意胸片（灰度 0–1）=====
+   * child：儿童（胸廓更圆、肋骨更水平、心影相对更大）；covid：双肺外周、下肺为主的磨玻璃影；marker：角落的字母标记 */
+  function cxr(N, o) {
+    o = Object.assign({ child: false, covid: false, seed: 3, bright: 1, marker: false }, o || {});
+    const r = K.rng(o.seed), spots = [];
+    if (o.covid) for (let i = 0; i < 10; i++) { const side = i % 2 ? 1 : -1; spots.push([0.5 + side * (0.24 + r() * 0.08), 0.5 + r() * 0.24, 0.04 + r() * 0.05, 0.5 + r() * 0.5]); }
+    const noise = Array.from({ length: N * N }, () => (r() - 0.5) * 0.05);
+    const bw = o.child ? 0.5 : 0.47, lw = o.child ? 0.17 : 0.165, lh = o.child ? 0.27 : 0.32, ly = o.child ? 0.55 : 0.52, hs = o.child ? 1.35 : 1, tilt = o.child ? 1 : 2.5;
+    return PX.grid(N, N, (px, py) => {
+      const x = (px + 0.5) / N, y = (py + 0.5) / N, nz = noise[py * N + px];
+      let v = 0.04;
+      const body = ((x - 0.5) / bw) ** 2 + ((y - 0.75) / 0.68) ** 2;
+      v += 0.55 * (1 - PX.smooth(0.85, 1.0, body));
+      let lung = 0;
+      for (const cx of [0.3, 0.7]) { const d = ((x - cx) / lw) ** 2 + ((y - ly) / lh) ** 2; lung = Math.max(lung, 1 - PX.smooth(0.55, 1.0, d)); }
+      v -= 0.42 * lung;
+      v += 0.22 * lung * Math.pow(Math.abs(Math.sin(Math.PI * (y * 8 + tilt * (x - 0.5) ** 2))), 14);
+      v += 0.35 * Math.exp(-((x - 0.5) ** 2) / (2 * 0.04 ** 2)) * PX.smooth(0.05, 0.2, y);
+      v += 0.4 * PX.blob(x, y, 0.56, 0.72, 0.11 * hs, 0.09 * hs);
+      { const yc = 0.2 + 0.12 * Math.abs(x - 0.5); if (Math.abs(x - 0.5) > 0.06 && Math.abs(x - 0.5) < 0.36) v += 0.4 * Math.exp(-((y - yc) ** 2) / (2 * 0.012 ** 2)); }
+      for (const sp of spots) v += 0.5 * sp[3] * lung * PX.blob(x, y, sp[0], sp[1], sp[2], sp[2] * 1.3) * (0.7 + 4 * nz);
+      if (o.marker && x > 0.82 && x < 0.9 && y > 0.06 && y < 0.14 && (Math.abs(x - 0.83) < 0.012 || Math.abs(y - 0.13) < 0.012)) v = 0.95;
+      return K.clamp((v + nz) * o.bright, 0, 1);
+    });
+  }
+
+  const steps = [
+    {
+      title: "新冠片子：从 GitHub 公开库里筛", kicker: "第 4–9 格 · 收集正例", at: 4,
+      html: `<p>作者直接 <code>git clone</code> 了 Cohen 等人在 GitHub 上公开收集的 COVID 胸片库，读它的 <code>metadata.csv</code>，筛出：</p><ul class="tight"><li>诊断 <code>finding</code> 等于 <code>Pneumonia/Viral/COVID-19</code></li><li>拍摄方向 <code>view</code> 是 <b>AP</b> 或 <b>PA</b>（正面胸片），去掉侧位片和 CT</li></ul><p>然后建好 <code>train/covid19</code> 和 <code>train/normal</code> 两个文件夹，把筛出的图片复制进 <code>covid19</code>。这个库是疫情早期从论文、网站上收集来的，来自很多不同医院、不同设备，多数是成人。</p>`,
+      cells: [5, 9], highlight: ["Pneumonia/Viral/COVID-19", "(selected_df.view == \"AP\") | (selected_df.view == \"PA\")"],
+      draw(svg, ctx) {
+        const rows = [["COVID-19", "PA", true], ["COVID-19", "L（侧位）", false], ["ARDS", "AP", false], ["COVID-19", "AP", true], ["SARS", "PA", false], ["COVID-19", "AP Supine", false], ["COVID-19", "PA", true]];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "metadata.csv（示意行）");
+        K.svg(svg, "text", { x: 40, y: 56, "font-size": 12, class: "muted" }, "finding");
+        K.svg(svg, "text", { x: 230, y: 56, "font-size": 12, class: "muted" }, "view");
+        const els = rows.map((r, i) => {
+          const y = 80 + i * 34, g = K.svg(svg, "g");
+          K.svg(g, "rect", { x: 30, y: y - 20, width: 320, height: 30, rx: 4, fill: "var(--panel-2)" });
+          K.svg(g, "text", { x: 40, y, "font-size": 13, "font-family": "var(--mono)" }, r[0]);
+          K.svg(g, "text", { x: 230, y, "font-size": 13, "font-family": "var(--mono)" }, r[1]);
+          return { g, keep: r[2], y };
+        });
+        K.svg(svg, "text", { x: 420, y: 60, "font-size": 13, "font-weight": 700 }, "→ train/covid19/");
+        const thumbs = [];
+        (async () => {
+          if (!(await ctx.wait(500))) return;
+          let k = 0;
+          for (const e of els) {
+            if (e.keep) { const t = PX.draw(svg, 420 + (k % 2) * 120, 80 + Math.floor(k / 2) * 120, 105, 105, cxr(48, { covid: true, seed: 10 + k }), null, 0, 1, true); thumbs.push(t); k++; }
+            if (!(await ctx.tween(260, (t) => (e.g.style.opacity = e.keep ? 1 : 1 - 0.75 * t)))) return;
+          }
+        })();
+        K.svg(svg, "text", { x: 30, y: 330, "font-size": 11.5, class: "muted" }, "只留诊断是新冠、且是正面（AP/PA）的胸片；行内容为示意");
+      },
+    },
+    {
+      title: "正常片子：取儿童数据集的前 300 张", kicker: "第 10–13 格 · 收集负例", at: 10,
+      html: `<p>正常的胸片从另一个数据集拿：Paul Mooney 的肺炎数据集，取训练集 NORMAL 文件夹里的<b>前 300 张</b>。然后数一数两个文件夹的图片数，画成饼图。</p><p>问题在于：根据数据集说明，这批图片全部来自<b>1–5 岁儿童</b>。于是“新冠 vs 正常”在数据上同时也是“成人 vs 儿童”“多家医院 vs 一家医院”。模型可能根本没学新冠的特征，只学会了分辨“是不是小孩的胸片”。动画左右对比：儿童胸廓更圆、肋骨更平、心影占比更大。</p><p>作者在第 13 格说“按正确比例取数据避免过拟合”，但没有注意到来源不同的问题。</p>`,
+      cells: [10, 12], highlight: ["chest-xray-pneumonia/chest_xray/train/NORMAL')[:300]", "ax1.pie"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700, fill: "var(--c6)" }, "covid19：成人为主、多家医院（示意）");
+        K.svg(svg, "text", { x: 380, y: 30, "font-size": 13, "font-weight": 700, fill: "var(--c1)" }, "normal：1–5 岁儿童、一家医院（示意）");
+        const a = [], b = [];
+        for (let i = 0; i < 4; i++) {
+          a.push(PX.draw(svg, 30 + (i % 2) * 150, 42 + Math.floor(i / 2) * 138, 130, 130, cxr(56, { covid: true, seed: 20 + i, bright: 0.85 + i * 0.07, marker: i % 2 === 0 }), null, 0, 1, true));
+          b.push(PX.draw(svg, 380 + (i % 2) * 150, 42 + Math.floor(i / 2) * 138, 130, 130, cxr(56, { child: true, seed: 40 + i }), null, 0, 1, true));
+        }
+        [...a, ...b].forEach((e, i) => { e.style.opacity = 0; ctx.wait(i * 120).then((ok) => ok && ctx.tween(300, (t) => (e.style.opacity = t))); });
+        K.svg(svg, "text", { x: 30, y: 335, "font-size": 12, fill: "var(--warn)" }, "模型可能学到的“捷径”：体型、肋骨角度、角落的标记、亮度……都和标签一起变化");
+      },
+    },
+    {
+      title: "看几张图：真的很难分吗", kicker: "第 14–17 格 · 看图", at: 14,
+      html: `<p>作者从两个文件夹里各随机显示 4 张图，感叹“它们看起来很像，有时连医学专家都难判断”。</p><p>新冠肺炎在胸片上的典型表现是双肺<b>磨玻璃影</b>：肺里出现一片片像毛玻璃一样的淡淡白雾，常在肺的外周和下部。早期或轻症时胸片可能完全正常，这也是为什么胸片不能单独用来确诊新冠。动画演示磨玻璃影一点点出现。</p>`,
+      cells: [15, 16],
+      draw(svg, ctx) {
+        const steps = [0, 0.33, 0.66, 1];
+        const base = cxr(96, { seed: 7 }), sick = cxr(96, { seed: 7, covid: true });
+        const img = PX.draw(svg, 30, 20, 300, 300, base, null, 0, 1, true);
+        K.svg(svg, "text", { x: 370, y: 60, "font-size": 14, "font-weight": 700 }, "磨玻璃影（示意）");
+        K.svg(svg, "text", { x: 370, y: 90, "font-size": 12.5 }, "肺野里出现淡淡的白雾，");
+        K.svg(svg, "text", { x: 370, y: 110, "font-size": 12.5 }, "多在双肺外周、偏下的位置。");
+        const lab = K.svg(svg, "text", { x: 370, y: 160, "font-size": 13, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 370, y: 220, "font-size": 12, class: "muted" }, "早期或轻症可能看不出来；");
+        K.svg(svg, "text", { x: 370, y: 240, "font-size": 12, class: "muted" }, "其他病毒性肺炎也可能长这样。");
+        (async () => {
+          for (const s of steps) {
+            const m = PX.map(base, (v, i) => v + (sick.a[i] - v) * s);
+            PX.update(img, m, null, 0, 1);
+            lab.textContent = `病变程度 ${Math.round(s * 100)}%`;
+            if (!(await ctx.wait(700))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "图像变换：统一尺寸、轻度增强、标准化", kicker: "第 18–19 格 · transforms", at: 18,
+      html: `<p>训练集的变换：缩放到 150×150 → 随机旋转最多 10° → 以 40% 的概率水平翻转 → 转成张量 → 用 <b>ImageNet 的均值和标准差</b>标准化。验证集只缩放、中心裁剪、标准化。</p><p>为什么用 ImageNet 的均值？因为后面要借一个在 ImageNet 上训练好的网络，输入要和它当年看到的图片“口径一致”。</p><p class="note">胸片做水平翻转值得商量：正常人心脏偏左，翻转后变成“右位心”，这在真实世界里很少见。</p>`,
+      cells: [19], highlight: ["RandomRotation(10)", "RandomHorizontalFlip(p=0.4)", "mean_nums = [0.485, 0.456, 0.406]"],
+      draw(svg, ctx) {
+        const base = cxr(72, { covid: true, seed: 5 }), r = K.rng(9);
+        K.svg(svg, "text", { x: 20, y: 26, "font-size": 13 }, "每次取图都随机变一下（浏览器现场计算）");
+        const tiles = [];
+        for (let i = 0; i < 8; i++) tiles.push(PX.draw(svg, 20 + (i % 4) * 172, 40 + Math.floor(i / 4) * 150, 140, 140, base, null, 0, 1, true));
+        const labs = tiles.map((t, i) => K.svg(svg, "text", { x: 20 + (i % 4) * 172, y: 40 + Math.floor(i / 4) * 150 + 146, "font-size": 11, class: "muted" }, ""));
+        (async () => {
+          for (let round = 0; round < 2; round++) for (let i = 0; i < 8; i++) {
+            const p = { rot: (r() * 2 - 1) * 10, flip: r() < 0.4, fill: 0 };
+            tiles[i].setAttribute("href", PX.toURL(PX.affine(base, p), null, 0, 1));
+            labs[i].textContent = `转 ${p.rot.toFixed(0)}°${p.flip ? "，左右翻（心脏到了右边）" : ""}`;
+            if (!(await ctx.wait(120))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "切出 20% 当验证集", kicker: "第 20–23 格 · 训练 / 验证", at: 20,
+      html: `<p><code>load_split_train_test</code> 用同一个文件夹建两个 <code>ImageFolder</code>：一个配训练变换、一个配验证变换。然后把所有图片编号打乱，前 20% 当验证、后 80% 当训练，用 <code>SubsetRandomSampler</code> 分别取，每批 8 张。</p><p>类别名按文件夹名的字母顺序：<code>covid19</code> 是 0，<code>normal</code> 是 1。第 23 格取一批训练图拼成网格看看。</p><p>注意：验证集和训练集来自同样的两个来源，所以验证分数也会受到“捷径”的影响，看不出模型是不是真学会了认新冠。</p>`,
+      cells: [21], highlight: ["SubsetRandomSampler", "np.random.shuffle(indices)"],
+      draw(svg, ctx) {
+        const r = K.rng(2), dots = [];
+        for (let i = 0; i < 60; i++) dots.push({ c: i < 25 ? 0 : 1, v: r() < 0.2 });
+        dots.sort(() => r() - 0.5);
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13 }, "打乱编号 → 前 20% 验证，后 80% 训练（每个点一张图，示意）");
+        const els = dots.map((d, i) => K.svg(svg, "circle", { cx: 40 + (i % 20) * 32, cy: 70 + Math.floor(i / 20) * 32, r: 11, fill: d.c ? "var(--c1)" : "var(--c6)", opacity: 0.85 }));
+        K.svg(svg, "text", { x: 40, y: 200, "font-size": 13, "font-weight": 700 }, "训练 80%");
+        K.svg(svg, "text", { x: 520, y: 200, "font-size": 13, "font-weight": 700 }, "验证 20%");
+        K.svg(svg, "text", { x: 30, y: 330, "font-size": 12, class: "muted" }, "红 = covid19（0），蓝 = normal（1）");
+        const n = dots.length, nv = Math.floor(n * 0.2);
+        ctx.wait(500).then((ok) => ok && ctx.tween(1200, (t) => els.forEach((e, i) => {
+          const isV = i < nv, j = isV ? i : i - nv;
+          const tx = isV ? 520 + (j % 4) * 28 : 40 + (j % 16) * 27, ty = 222 + Math.floor(j / (isV ? 4 : 16)) * 27;
+          e.setAttribute("cx", K.lerp(40 + (i % 20) * 32, tx, t)); e.setAttribute("cy", K.lerp(70 + Math.floor(i / 20) * 32, ty, t));
+        })));
+      },
+    },
+    {
+      title: "DenseNet-121：借来的老专家，全部重新训练", kicker: "第 24–30 格 · 迁移学习", at: 24,
+      html: `<p>作者选了 <b>DenseNet-121</b>，加载在 ImageNet 上训练好的权重，把最后的 <code>classifier</code> 换成一个输出 2 类的全连接层。</p><p>DenseNet 的特点是<b>密集连接</b>：每一层都能直接拿到前面所有层的输出（动画里的弧线），特征可以被反复利用，参数相对少。</p><p>和很多教程只训练最后一层不同，作者让<b>所有层都可训练</b>，理由是医学图像和日常照片差别大。第 30 格打印了可训练参数的数量。损失用交叉熵，优化器 Adam(1e-3)，再配一个 StepLR 学习率调度器。</p>`,
+      cells: [28, 30], highlight: ["models.densenet121(pretrained=pretrained)", "model.classifier = nn.Linear(num_ftrs, len(class_names))", "StepLR(optimizer, step_size=7, gamma=0.1)"],
+      draw(svg, ctx) {
+        const xs = [60, 170, 280, 390, 500];
+        const nodes = xs.map((x, i) => K.node(svg, x - 35, 160, 70, 60, i ? "层 " + i : "输入", { fill: "var(--panel-2)" }));
+        const arcs = [];
+        for (let i = 0; i < 5; i++) for (let j = i + 1; j < 5; j++) {
+          const x1 = xs[i], x2 = xs[j], h = 30 + (j - i) * 26;
+          arcs.push(K.svg(svg, "path", { d: `M${x1},160 Q${(x1 + x2) / 2},${160 - h * 1.6} ${x2},160`, fill: "none", stroke: "var(--c1)", "stroke-width": 1.6, opacity: 0 }));
+        }
+        const head = K.node(svg, 590, 160, 110, 60, "新分类层\n→ 2 类", { stroke: "var(--c6)", bold: true });
+        head.style.opacity = 0;
+        K.arrow(svg, 536, 190, 588, 190);
+        K.svg(svg, "text", { x: 30, y: 270, "font-size": 12.5 }, "密集连接：每一层都接收前面所有层的输出（示意 1 个密集块）");
+        K.svg(svg, "text", { x: 30, y: 292, "font-size": 12.5, fill: "var(--accent)" }, "作者的选择：所有层都参与训练（没有冻结）");
+        ctx.tween(1600, (t) => arcs.forEach((a, i) => K.set(a, { opacity: K.clamp(t * arcs.length - i, 0, 1) * 0.8 }))).then((ok) => ok && ctx.tween(500, (t) => (head.style.opacity = t)));
+      },
+    },
+    {
+      title: "手写训练循环，顺便算 Kappa", kicker: "第 31–32 格 · 训练循环", at: 31,
+      html: `<p>作者不用任何封装，自己写训练循环：每轮先训练再验证；每个批次清零梯度 → 前向 → 算损失 → 反向传播 → 更新参数。验证时额外算 <b>Cohen's Kappa</b>：衡量预测和真实答案的一致程度，扣掉了“瞎猜也能碰对”的部分，1 是完全一致，0 和瞎猜一样。</p><p>保存规则：验证损失比之前都低，就记下这一轮的参数（作者叫它早停，其实是“保留最好的那一轮”）。</p><p class="callout warn">隐藏 bug：<code>scheduler.step()</code> 写在批次循环里，于是 <code>StepLR(step_size=7)</code> 变成每 7 个<b>批次</b>就把学习率乘 0.1，而不是注释说的每 7 轮。下面的实验可以看到后果。</p>`,
+      cells: [32], highlight: ["scheduler.step()", "cohen_kappa_score", "if phase == 'val' and epoch_loss < best_loss:"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 580, h: 230 }, [0, 80], [-10, -2.8], { xlabel: "批次（每批 8 张）", ylabel: "学习率（log10）", xticks: 8, yfmt: (v) => v.toFixed(0) });
+        const ep = 25;
+        const lrA = (b) => Math.log10(1e-3 * Math.pow(0.1, Math.floor(Math.floor(b / ep) / 7)));
+        const lrB = (b) => Math.max(-10, Math.log10(1e-3 * Math.pow(0.1, Math.floor(b / 7))));
+        const pA = K.svg(svg, "path", { fill: "none", stroke: "var(--good)", "stroke-width": 2.5 }), pB = K.svg(svg, "path", { fill: "none", stroke: "var(--bad)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 380, y: 60, "font-size": 12.5, fill: "var(--good)" }, "注释的本意：每 7 轮衰减一次");
+        K.svg(svg, "text", { x: 380, y: 80, "font-size": 12.5, fill: "var(--bad)" }, "实际代码：每 7 个批次衰减一次");
+        K.svg(svg, "text", { x: 70, y: 320, "font-size": 11.5, class: "muted" }, "示意：假设每轮 25 个批次；实际批次数取决于新冠图片的数量");
+        ctx.tween(2000, (t) => { const n = Math.round(80 * t); let a = "", b = ""; for (let i = 0; i <= n; i++) { a += (a ? "L" : "M") + ax.sx(i) + "," + ax.sy(lrA(i)); b += (b ? "L" : "M") + ax.sx(i) + "," + ax.sy(lrB(i)); } pA.setAttribute("d", a); pB.setAttribute("d", b); });
+      },
+    },
+    {
+      title: "训练 10 轮，看看预测", kicker: "第 33–37 格 · 训练", at: 33,
+      html: `<p>作者说因为 Kaggle 的时间限制只训练 10 轮。训练结束后，<code>visualize_model</code> 从验证集里取 6 张图，标出真实类别和预测类别。</p><p>动画示意这个过程：每张图旁边写着“实际 / 预测”。如果模型学到的是捷径，它在这里的表现依然会很好看，因为验证集也来自同样的两个来源。</p>`,
+      cells: [36, 34], highlight: ["num_epochs=10"],
+      draw(svg, ctx) {
+        const items = [[true, true], [false, false], [true, true], [false, false], [false, true], [true, true]];
+        items.forEach((it, i) => {
+          const x = 20 + (i % 3) * 230, y = 40 + Math.floor(i / 3) * 150;
+          const e = PX.draw(svg, x, y, 110, 110, cxr(48, it[0] ? { covid: true, seed: 60 + i } : { child: true, seed: 70 + i }), null, 0, 1, true);
+          const t = K.svg(svg, "text", { x: x + 120, y: y + 40, "font-size": 12.5 }, `实际：${it[0] ? "covid19" : "normal"}`);
+          const p = K.svg(svg, "text", { x: x + 120, y: y + 64, "font-size": 12.5, "font-weight": 700, fill: it[0] === it[1] ? "var(--good)" : "var(--bad)" }, `预测：${it[1] ? "covid19" : "normal"}`);
+          [e, t, p].forEach((q) => (q.style.opacity = 0));
+          ctx.wait(i * 300).then((ok) => ok && ctx.tween(300, (k) => [e, t, p].forEach((q) => (q.style.opacity = k))));
+        });
+        K.svg(svg, "text", { x: 20, y: 335, "font-size": 11.5, class: "muted" }, "示意结果，不是作者的真实输出");
+      },
+    },
+    {
+      title: "换一个数据库当测试集", kicker: "第 38–44 格 · 测试", at: 38,
+      html: `<p>作者用第三个来源做测试：Kaggle 上的 COVID-19 Radiography Database，从 COVID-19 和 NORMAL 两个文件夹<b>各取前 100 张</b>。测试变换只缩放和标准化，然后逐张预测，收集真实标签和预测标签。</p><p>这比在验证集上评估更有说服力，因为图片来自没见过的数据库。但要注意两点：这个数据库本身也是从多个公开来源汇总的，它的 COVID 图片<b>可能和训练用的 GitHub 库有重叠</b>，作者没有检查；只取“前 100 张”也不是随机抽样。</p>`,
+      cells: [41, 43], highlight: ["os.listdir(COVID_TEST)[:100]", "torch.log_softmax"],
+      draw(svg, ctx) {
+        const src = [["GitHub COVID 库", 30, "var(--c6)"], ["儿童肺炎数据集", 30, "var(--c1)"], ["COVID-19 Radiography DB", 470, "var(--c4)"]];
+        K.node(svg, 30, 40, 200, 50, src[0][0], { stroke: src[0][2] });
+        K.node(svg, 30, 120, 200, 50, src[1][0], { stroke: src[1][2] });
+        K.node(svg, 470, 80, 220, 50, src[2][0], { stroke: src[2][2] });
+        K.node(svg, 270, 80, 140, 50, "训练 + 验证", { bold: true });
+        K.arrow(svg, 230, 65, 268, 98); K.arrow(svg, 230, 145, 268, 112);
+        const tests = K.node(svg, 470, 200, 220, 50, "测试：各取前 100 张", { bold: true, stroke: "var(--c4)" });
+        K.arrow(svg, 580, 130, 580, 198);
+        const q = K.svg(svg, "text", { x: 270, y: 300, "font-size": 12.5, fill: "var(--warn)" }, "？ 测试库里的 COVID 图片，会不会和训练用的 GitHub 库有重复");
+        q.style.opacity = 0; tests.style.opacity = 0;
+        ctx.wait(600).then((ok) => ok && ctx.tween(500, (t) => (tests.style.opacity = t))).then((ok) => ok && ctx.tween(500, (t) => (q.style.opacity = t)));
+      },
+    },
+    {
+      title: "分类报告和混淆矩阵", kicker: "第 45–48 格 · 评估", at: 45,
+      html: `<p><code>classification_report</code> 给出每一类的精确率、召回率、F1；再画混淆矩阵，并在下方标注准确率。最后保存模型权重 <code>best_model.pth</code>。</p><p>在医学里，对“新冠”这一类：<b>召回率</b>（敏感度）= 新冠病人里被认出来的比例，漏掉的人可能继续传播；<b>特异度</b> = 正常人里被正确判为正常的比例，误判的人会被不必要地隔离。</p><p class="note">混淆矩阵的标签顺序是 <code>['covid19','normal']</code>，和 ImageFolder 的编号一致。具体数字在运行输出里，这里不列。</p>`,
+      cells: [45, 47], highlight: ["classification_report", "target_names = ['covid19','normal']"],
+      draw(svg, ctx) {
+        const L = [["真 covid19\n判 covid19", "抓到了", "var(--c3)"], ["真 covid19\n判 normal", "漏掉了：可能继续传播", "var(--bad)"], ["真 normal\n判 covid19", "误报：不必要的隔离", "var(--warn)"], ["真 normal\n判 normal", "正确放行", "var(--c3)"]];
+        L.forEach((d, i) => {
+          const x = 60 + (i % 2) * 150, y = 40 + Math.floor(i / 2) * 140;
+          const g = K.node(svg, x, y, 140, 130, d[0], { fill: `color-mix(in srgb, ${d[2]} 18%, var(--panel))`, stroke: d[2] });
+          const t = K.svg(svg, "text", { x: 400, y: 80 + i * 50, "font-size": 13, fill: d[2], "font-weight": 700 }, d[1]);
+          g.style.opacity = 0; t.style.opacity = 0;
+          ctx.wait(i * 350).then((ok) => ok && ctx.tween(350, (k) => { g.style.opacity = k; t.style.opacity = k; }));
+        });
+        K.svg(svg, "text", { x: 400, y: 300, "font-size": 12, class: "muted" }, "敏感度 = 左上 ÷（左上 + 右上）");
+        K.svg(svg, "text", { x: 400, y: 320, "font-size": 12, class: "muted" }, "特异度 = 右下 ÷（左下 + 右下）");
+      },
+    },
+    {
+      title: "推理：在 CPU 上给一张新图打分", kicker: "第 49–53 格 · 部署", at: 49,
+      html: `<p>作者演示如何“上线”：重新建一个不带预训练权重的 DenseNet-121，加载刚才保存的参数，切到 <code>eval()</code> 模式，放在 CPU 上。<code>predict(img_path)</code> 读一张图 → 同样的测试变换 → 加一个批次维度 → 前向 → 取分数最高的类别。</p><p>为什么强调 CPU？真正部署到网页或手机时，往往没有 GPU。</p><p class="note">函数里算了 <code>score</code> 却没用；<code>Variable</code> 是旧版 PyTorch 的写法，现在直接用张量即可。真实部署还应该输出概率、记录模型版本，并说明“仅供参考”。</p>`,
+      cells: [50, 52], highlight: ["map_location='cpu'", "inf_model.eval()", "def predict(img_path):"],
+      draw(svg, ctx) {
+        const nodes = [["一张新胸片", 20], ["Resize 150\n标准化", 160], ["unsqueeze\n→ 1×3×150×150", 300], ["DenseNet-121\n（CPU）", 450], ["预测：\ncovid19 / normal", 590]];
+        const els = nodes.map((n, i) => { const g = K.svg(svg, "g"); K.node(g, n[1], 140, 120, 64, n[0], { fs: 12, bold: i === 4 }); if (i) K.arrow(g, n[1] - 18, 172, n[1] - 2, 172); g.style.opacity = 0; return g; });
+        PX.draw(svg, 30, 40, 90, 90, cxr(40, { covid: true, seed: 99 }), null, 0, 1, true);
+        K.svg(svg, "text", { x: 20, y: 260, "font-size": 12.5, class: "muted" }, "和训练时一样的预处理，才能得到一致的结果（流程示意）");
+        (async () => { for (const g of els) { if (!(await ctx.tween(300, (t) => (g.style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      title: "作者的提醒：别拿它诊断病人", kicker: "第 54–55 格 · 结语", at: 54,
+      html: `<p>作者庆祝完成了“能帮忙诊断新冠的 AI”，但紧接着写下一段重要的警告：<b>这个模型是用很少的数据训练的，不能用来诊断真实病人，也不能声称它是新的基线</b>；除非你是医学专家并获得本国医学委员会批准，否则不能把它宣传成诊断工具。</p><p>这是整份 notebook 最值得记住的一句话。后来有研究者（Roberts 等，2021 年发表于 Nature Machine Intelligence）系统回顾了大量用胸片、CT 识别新冠的机器学习研究，发现普遍存在数据来源偏差、测试不严格等问题，没有一项能直接用于临床。</p>`,
+      cells: [55],
+      draw(svg, ctx) {
+        const items = ["数据量够不够？", "两类图片是否同源？", "测试集是否来自独立医院？", "有没有和医生比较？", "是否经过监管审批？"];
+        K.svg(svg, "text", { x: 30, y: 34, "font-size": 14, "font-weight": 700 }, "医学 AI 上临床前的检查清单（示意）");
+        const els = items.map((t, i) => {
+          const g = K.svg(svg, "g");
+          K.svg(g, "rect", { x: 30, y: 54 + i * 52, width: 30, height: 30, rx: 5, fill: "none", stroke: "var(--ink-3)", "stroke-width": 2 });
+          K.svg(g, "text", { x: 75, y: 75 + i * 52, "font-size": 14 }, t);
+          const x = K.svg(g, "text", { x: 36, y: 77 + i * 52, "font-size": 18, "font-weight": 700, fill: "var(--bad)" }, "✗");
+          x.style.opacity = 0;
+          return x;
+        });
+        K.svg(svg, "text", { x: 420, y: 150, "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "本 notebook：这几项大多还做不到");
+        K.svg(svg, "text", { x: 420, y: 176, "font-size": 12.5, class: "muted" }, "所以作者说：只用于学习 PyTorch");
+        (async () => { for (const x of els) { if (!(await ctx.tween(300, (t) => (x.style.opacity = t)))) return; } })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：捷径学习 ---------- */
+  function trainLR(X, y, epochs) {
+    let w = [0, 0], b = 0;
+    for (let e = 0; e < epochs; e++) {
+      let g0 = 0, g1 = 0, gb = 0;
+      for (let i = 0; i < X.length; i++) { const p = K.sigmoid(w[0] * X[i][0] + w[1] * X[i][1] + b), d = p - y[i]; g0 += d * X[i][0]; g1 += d * X[i][1]; gb += d; }
+      w[0] -= (0.5 * g0) / X.length; w[1] -= (0.5 * g1) / X.length; b -= (0.5 * gb) / X.length;
+    }
+    return { w, b };
+  }
+  K.lab(document.getElementById("lab1"), {
+    width: 660, height: 360,
+    controls: [
+      { id: "conf", label: "训练集里“来源”和“标签”绑定的程度", min: 0.5, max: 1, step: 0.01, value: 1, fmt: (v) => Math.round(v * 100) + "%" },
+      { id: "sig", label: "真正的肺部病变信号有多强", min: 0, max: 2.5, step: 0.1, value: 0.8, fmt: (v) => v.toFixed(1) },
+      { id: "srcsig", label: "来源差异有多明显（体型、设备、标记）", min: 0, max: 3, step: 0.1, value: 2.5, fmt: (v) => v.toFixed(1) },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "浏览器里模拟：每张胸片用两个数概括，横轴是“肺部病变信号”，纵轴是“来源特征”（成人多院 vs 儿童单院）。在训练集上现场训练逻辑回归，再在两个测试集上评估：同分布测试（像作者的验证集，来源和标签依旧绑定）和公平测试（两类都来自同一来源）。绑定 100% 时，看模型主要靠哪条轴。",
+    render(svg, v) {
+      const r = K.rng(31 + v.seed * 7);
+      const gen = (n, bind) => { const X = [], y = []; for (let i = 0; i < n; i++) { const c = r() < 0.5 ? 1 : 0; const src = r() < bind ? c : 1 - c; X.push([(c ? v.sig : -v.sig) * 0.5 + K.randn(r), (src ? v.srcsig : -v.srcsig) * 0.5 + K.randn(r) * 0.6]); y.push(c); } return { X, y }; };
+      const tr = gen(300, v.conf), te1 = gen(400, v.conf), te2 = gen(400, 0.5);
+      const m = trainLR(tr.X, tr.y, 300);
+      const acc = (d) => d.X.reduce((a, x, i) => a + ((K.sigmoid(m.w[0] * x[0] + m.w[1] * x[1] + m.b) > 0.5 ? 1 : 0) === d.y[i] ? 1 : 0), 0) / d.X.length;
+      const ax = K.axes(svg, { x: 50, y: 15, w: 330, h: 300 }, [-4, 4], [-4, 4], { xticks: 0, yticks: 0, xlabel: "肺部病变信号 →", ylabel: "来源特征 ↑（上=成人多院）" });
+      tr.X.forEach((x, i) => K.svg(svg, "circle", { cx: ax.sx(K.clamp(x[0], -4, 4)), cy: ax.sy(K.clamp(x[1], -4, 4)), r: 3, fill: tr.y[i] ? "var(--c6)" : "var(--c1)", opacity: 0.65 }));
+      if (Math.abs(m.w[1]) > 1e-6) { const yA = (-m.b - m.w[0] * -4) / m.w[1], yB = (-m.b - m.w[0] * 4) / m.w[1]; K.svg(svg, "line", { x1: ax.sx(-4), y1: ax.sy(yA), x2: ax.sx(4), y2: ax.sy(yB), stroke: "var(--ink)", "stroke-width": 2 }); }
+      else K.svg(svg, "line", { x1: ax.sx(-m.b / (m.w[0] || 1e-6)), x2: ax.sx(-m.b / (m.w[0] || 1e-6)), y1: 15, y2: 315, stroke: "var(--ink)", "stroke-width": 2 });
+      const tot = Math.abs(m.w[0]) + Math.abs(m.w[1]) || 1;
+      K.svg(svg, "text", { x: 410, y: 40, "font-size": 12.5, fill: "var(--c6)" }, "● covid19   ");
+      K.svg(svg, "text", { x: 500, y: 40, "font-size": 12.5, fill: "var(--c1)" }, "● normal（训练集）");
+      K.svg(svg, "text", { x: 410, y: 80, "font-size": 13, "font-weight": 700 }, "模型更依赖哪条线索？");
+      const bars = [["病变信号", Math.abs(m.w[0]) / tot, "var(--c3)"], ["来源特征", Math.abs(m.w[1]) / tot, "var(--warn)"]];
+      bars.forEach((b, i) => { K.svg(svg, "text", { x: 410, y: 116 + i * 40, "font-size": 12.5 }, b[0]); K.svg(svg, "rect", { x: 480, y: 102 + i * 40, width: 160, height: 20, rx: 4, fill: "var(--panel-2)" }); K.svg(svg, "rect", { x: 480, y: 102 + i * 40, width: 160 * b[1], height: 20, rx: 4, fill: b[2] }); });
+      K.svg(svg, "text", { x: 410, y: 220, "font-size": 12, class: "muted" }, "黑线 = 模型的决策边界。");
+      K.svg(svg, "text", { x: 410, y: 240, "font-size": 12, class: "muted" }, "线越“横”，越是在按来源分。");
+      const a1 = acc(te1), a2 = acc(te2);
+      return { readout: [
+        { k: "同分布测试准确率", v: (a1 * 100).toFixed(1) + "%" },
+        { k: "公平测试准确率（两类同源）", v: (a2 * 100).toFixed(1) + "%", color: a1 - a2 > 0.1 ? "var(--bad)" : "var(--good)" },
+        { k: "差距", v: ((a1 - a2) * 100).toFixed(1) + " 个百分点" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：StepLR 放在哪一层循环 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 660, height: 330,
+    controls: [
+      { id: "where", label: "scheduler.step() 写在哪里", value: "batch", options: [["batch", "批次循环里（原代码）"], ["epoch", "轮次循环里（注释的本意）"]] },
+      { id: "nb", label: "每轮多少个批次", min: 5, max: 80, step: 1, value: 50 },
+      { id: "step", label: "step_size", min: 1, max: 10, step: 1, value: 7 },
+      { id: "gamma", label: "gamma（每次乘多少）", min: 0.1, max: 0.9, step: 0.05, value: 0.1, fmt: (v) => v.toFixed(2) },
+    ],
+    note: "浏览器里真跑 10 轮：用 SGD 在一个简单的二次“损失碗”上从远处出发往谷底走，学习率按右侧设置衰减（起点 1e-3，为了看得清，乘了 100 倍步长）。看批次循环写法下，学习率多快就“掉到地板上”、损失是不是还没降完就停了。",
+    render(svg, v) {
+      const E = 10, total = E * v.nb;
+      let x = 6, lr0 = 1e-3;
+      const LR = [], L = [];
+      for (let b = 0; b < total; b++) {
+        const k = v.where === "batch" ? Math.floor(b / v.step) : Math.floor(Math.floor(b / v.nb) / v.step);
+        const lr = lr0 * Math.pow(v.gamma, k);
+        x -= lr * 100 * 2 * x * 0.1;
+        LR.push(Math.max(-12, Math.log10(lr))); L.push(x * x);
+      }
+      const ax1 = K.axes(svg, { x: 60, y: 20, w: 260, h: 230 }, [0, total], [-12, -2.5], { xticks: 2, yticks: 4, xlabel: "批次", ylabel: "学习率 log10", yfmt: (q) => q.toFixed(0) });
+      K.svg(svg, "path", { d: LR.map((q, i) => (i ? "L" : "M") + ax1.sx(i) + "," + ax1.sy(q)).join(""), fill: "none", stroke: "var(--c2)", "stroke-width": 2 });
+      const ax2 = K.axes(svg, { x: 390, y: 20, w: 250, h: 230 }, [0, total], [0, 36], { xticks: 2, yticks: 3, xlabel: "批次", ylabel: "损失" });
+      K.svg(svg, "path", { d: L.map((q, i) => (i ? "L" : "M") + ax2.sx(i) + "," + ax2.sy(q)).join(""), fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+      for (let e = 1; e < E; e++) { K.svg(svg, "line", { x1: ax2.sx(e * v.nb), x2: ax2.sx(e * v.nb), y1: 20, y2: 250, stroke: "var(--line)", "stroke-dasharray": "2 3" }); }
+      K.svg(svg, "text", { x: 390, y: 300, "font-size": 11.5, class: "muted" }, "竖虚线 = 每一轮的分界（共 10 轮）");
+      const lastLR = Math.pow(10, LR[LR.length - 1]);
+      return { readout: [
+        { k: "最后的学习率", v: lastLR < 1e-11 ? "< 1e-11" : lastLR.toExponential(1), color: lastLR < 1e-6 ? "var(--bad)" : "var(--good)" },
+        { k: "第 1 轮结束时学习率", v: Math.pow(10, LR[Math.min(LR.length - 1, v.nb - 1)]).toExponential(1) },
+        { k: "最终损失", v: L[L.length - 1].toFixed(2), color: L[L.length - 1] > 1 ? "var(--bad)" : "var(--good)" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

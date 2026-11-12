@@ -1,0 +1,579 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vision Transformer</title>
+<meta name="description" content="Kaggle 案例拆解：Vision Transformer 入门——把图片切成 16×16 的小块当作“单词”，用自注意力做分类；在木薯叶病害数据上用预训练 ViT-B/16 + TPU 微调的基线。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">图像 · 多分类 · Transformer 进入视觉</div>
+  <h1>Vision Transformer：一张图值 16×16 个词</h1>
+  <p class="en">Vision Transformer (ViT): Tutorial + Baseline</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">Vision Transformer</span><span class="tag method">自注意力 Q·K·V</span><span class="tag method">多头注意力</span><span class="tag method">Patch 切分 + 位置编码</span>
+    <span class="tag method">[CLS] 分类标记</span><span class="tag method">迁移学习 timm</span><span class="tag method">数据增强</span><span class="tag method">TPU 8 核并行</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Abhinand</b></span>
+    <span>Kaggle 点赞 <b>2,308</b>（2026-11 抓取）</span>
+    <span>比赛 <b>Cassava Leaf Disease Classification</b></span>
+    <span><a href="https://www.kaggle.com/code/abhinand05/vision-transformer-vit-tutorial-baseline" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">农户手机拍的木薯叶片照片</div><p>按比赛数据说明，训练集约 2.1 万张，分 5 类：4 种病害（细菌性枯萎、褐条病、绿斑驳病、花叶病）和健康，类别很不均衡。作者统一缩放到 224×224。<span data-cell="12">出处</span> <span data-cell="15">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这片叶子属于 5 类中的哪一类</div><p>标准的图像多分类。模型最后一层换成 5 个输出，用交叉熵损失训练。<span data-cell="20">出处</span> <span data-cell="22">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">不用卷积，用 Transformer 看图</div><p>前半部分讲原理：Transformer 编码器、自注意力，以及 ViT 怎样把图片切成 16×16 的块当“单词”。后半部分用 timm 库加载预训练的 ViT-B/16，在 TPU 8 个核上微调 10 轮。<span data-cell="5">出处</span> <span data-cell="23">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一份讲清原理的教程 + 可跑的基线</div><p>作者把它定位为“教程 + 基线”，重点在讲解 ViT 的工作方式。每轮的损失和准确率会在训练时打印，但没有写进文字，这里不列分数。<span data-cell="1">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛 <b>Cassava Leaf Disease Classification</b>：乌干达农户拍摄的木薯叶片照片，由专家标注。以下规模来自比赛数据说明。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">训练图片</div><div class="v">约 21,000 张</div></div>
+        <div class="stat-tile"><div class="k">类别</div><div class="v">5</div></div>
+        <div class="stat-tile"><div class="k">送进模型的尺寸</div><div class="v">224×224</div></div>
+        <div class="stat-tile"><div class="k">验证集</div><div class="v">分层 10%</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">图片数与类别来自比赛数据说明；尺寸见 <span data-cell="12">第 12 格</span>，划分见 <span data-cell="16">第 16 格</span>，类别分布作者在 <span data-cell="15">第 15 格</span> 画了柱状图。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">train.csv 的字段</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>image_id</code></td><td>图片文件名，对应 train_images 文件夹里的 jpg</td><td>文本</td></tr>
+        <tr><td><code>label</code></td><td><b>要预测的答案</b>：0 细菌性枯萎、1 褐条病、2 绿斑驳病、3 花叶病、4 健康</td><td>类别</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">读入见 <span data-cell="13">第 13 格</span>；类别含义来自比赛数据说明。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+      <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+      <p class="lead"></p>
+      <div id="pipe"></div>
+      <div data-at="5">
+    <h3>动手试试 B · 切 patch，点一块看它的注意力 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="4">
+    <h3>动手试试 A · 缩放点积注意力：Q·K → softmax → 加权平均 V <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+    <section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者的设置与说明</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>ViT 只用 Transformer 的编码器；图片切成 16×16 或 32×32 的块，展平后线性嵌入，加可学习的位置编码和一个类似 BERT 的特殊标记</td><td><span data-cell="5">第 5 格</span></td></tr>
+        <tr><td>论文中 ViT 在浅层就能关注到相距很远的区域，这是相对 CNN（初始感受野有限）的优势</td><td><span data-cell="5">第 5 格</span></td></tr>
+        <tr><td>超参数：图片 224、batch 16、学习率 2e-5、10 轮</td><td><span data-cell="12">第 12 格</span></td></tr>
+        <tr><td>分层抽 10% 做验证集</td><td><span data-cell="16">第 16 格</span></td></tr>
+        <tr><td>模型：timm 的 vit_base_patch16_224，读入预训练权重，分类头换成 5 类</td><td><span data-cell="20">第 20 格</span> <span data-cell="22">第 22 格</span></td></tr>
+        <tr><td>在 8 个 TPU 核上并行训练，学习率按核数放大</td><td><span data-cell="23">第 23 格</span> <span data-cell="24">第 24 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">每轮的训练/验证损失和准确率由代码打印在运行输出里，Kaggle 下载的源码不带输出，作者文字里也没写，所以这里不列分数。另外注意：第 21 格里“保存最佳模型”的那行被注释掉了，而且 <code>valid_loss_min</code> 每轮都被覆盖，所以实际保存的是最后一轮的模型（第 23 格）。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>拍一张木薯叶片，判断是哪种病或是否健康；换掉分类头和数据，就能做任何图像分类。</li>
+        <li><b>同类问题：</b>农作物病害识别、医学影像分类、遥感地物分类、工业质检。ViT 的思路也延伸到目标检测（DETR）、分割（SegFormer）和图文模型（CLIP）。</li>
+        <li><b>可迁移的套路：</b>用 timm 一行加载预训练模型 → 换分类头 → 小学习率微调；数据增强 + ImageNet 均值方差归一化；分层抽样划分验证集。</li>
+        <li><b>什么时候选 ViT：</b>有大规模预训练权重、数据量较大时效果好；数据少又从零训练时，CNN 往往更稳，因为 CNN 自带“局部性”这种先验。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>Transformer 编码器原理 <span data-cell="4">第 4 格</span></li>
+        <li>ViT 结构 <span data-cell="5">第 5 格</span></li>
+        <li>分层划分 <span data-cell="16">第 16 格</span></li>
+        <li>增强：翻转、随机缩放裁剪、归一化 <span data-cell="18">第 18 格</span></li>
+        <li>ViTBase16 类与训练/验证循环 <span data-cell="20">第 20 格</span></li>
+        <li>TPU 训练：fit_tpu、分布式采样、多进程 <span data-cell="21">第 21 格</span> <span data-cell="23">第 23 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>224×224 的图切成 16×16 的块得到 196 个 token。如果直接把每个像素当 token，注意力矩阵有多大？为什么 ViT 要切块？</li>
+      <li>自注意力本身不知道 token 的先后顺序。把 196 个 patch 打乱顺序再送进去，没有位置编码时输出会怎样？</li>
+      <li>CNN 的卷积核天然只看局部，ViT 从第一层起就能看全图。这种差别在数据少时是优点还是缺点？</li>
+      <li>为什么用一个额外的 [CLS] 标记来做分类，而不是把 196 个 patch 的输出取平均？两种做法各有什么道理？</li>
+      <li>木薯数据类别很不均衡。作者用了分层抽样，但损失函数没有加权，评估也只看准确率。你会怎样改进？</li>
+      <li>8 个 TPU 核并行时学习率乘以 8。这条经验规则背后的道理是什么？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Abhinand，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。ViT 原论文：Dosovitskiy et al., “An Image is Worth 16x16 Words”, 2020；Transformer：Vaswani et al., “Attention Is All You Need”, 2017。
+</footer>
+</main>
+
+<script src="nb/vit-cassava-tutorial.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 代码生成的叶片图（RGB，S×S） ---------- */
+  const S = 64;
+  function leaf(seed, sick) {
+    const r = K.rng(seed), d = new Float32Array(S * S * 3);
+    const spots = Array.from({ length: sick ? 7 : 0 }, () => [14 + r() * 36, 14 + r() * 36, 2 + r() * 3]);
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      const u = (x - 32) / 26, v = (y - 32) / 16, rot = (u + v * 0.3) * (u + v * 0.3) + (v - u * 0.2) * (v - u * 0.2);
+      let c = [0.86, 0.82, 0.7]; // 背景（泥土色）
+      if (rot < 1) {
+        const vein = Math.abs(y - 32 - (x - 32) * 0.25) < 0.9 || (Math.abs(((x + y * 0.6) % 9) - 4.5) < 0.6 && rot < 0.8);
+        c = vein ? [0.55, 0.75, 0.35] : [0.2 + 0.05 * r(), 0.55 + 0.06 * r(), 0.18];
+        spots.forEach(([sx, sy, sr]) => { const dd = Math.hypot(x - sx, y - sy); if (dd < sr) c = [0.75, 0.68, 0.2]; else if (dd < sr + 1.2) c = [0.45, 0.32, 0.12]; });
+      }
+      d.set(c, (y * S + x) * 3);
+    }
+    return d;
+  }
+  function img(svg, data, x, y, w, attrs) {
+    const cv = document.createElement("canvas"); cv.width = cv.height = S;
+    const g = cv.getContext("2d"), im = g.createImageData(S, S);
+    for (let i = 0; i < S * S; i++) { for (let k = 0; k < 3; k++) im.data[i * 4 + k] = Math.round(K.clamp(data[i * 3 + k], 0, 1) * 255); im.data[i * 4 + 3] = 255; }
+    g.putImageData(im, 0, 0);
+    const e = K.svg(svg, "image", Object.assign({ x, y, width: w, height: w, preserveAspectRatio: "none" }, attrs || {}));
+    e.setAttribute("href", cv.toDataURL());
+    return e;
+  }
+  /* 截取 patch 作为独立图片 */
+  function patchImg(svg, data, px, py, ps, x, y, w) {
+    const cv = document.createElement("canvas"); cv.width = cv.height = ps;
+    const g = cv.getContext("2d"), im = g.createImageData(ps, ps);
+    for (let j = 0; j < ps; j++) for (let i = 0; i < ps; i++) { const s = ((py + j) * S + px + i) * 3, t = (j * ps + i) * 4; for (let k = 0; k < 3; k++) im.data[t + k] = Math.round(data[s + k] * 255); im.data[t + 3] = 255; }
+    g.putImageData(im, 0, 0);
+    const e = K.svg(svg, "image", { x, y, width: w, height: w, preserveAspectRatio: "none" });
+    e.setAttribute("href", cv.toDataURL());
+    return e;
+  }
+  const L0 = leaf(3, true);
+  const softmax = (a) => { const m = Math.max(...a), e = a.map((x) => Math.exp(x - m)), z = e.reduce((p, q) => p + q); return e.map((x) => x / z); };
+
+  const steps = [
+    {
+      title: "从 Transformer 说起", at: 0, notes: {"0": "复制作者的插图、安装代码格式化插件，和模型无关。"}, kicker: "第 0–3 格 · 背景",
+      html: `<p>Transformer 原本是为机器翻译设计的（2017 年“Attention is all you need”）。之前的 RNN/LSTM 必须<b>一个词一个词顺序处理</b>，离得远的词信息要传很多步，容易丢失，也难以并行。</p><p>Transformer 去掉了循环，用<b>自注意力</b>让每个词一步就能直接看到句子里所有其他词：依赖关系是“全范围”的，而且所有词可以同时计算。ViT 只需要用到它的<b>编码器</b>部分。</p>`,
+      cells: [4],
+      draw(svg, ctx) {
+        const w = ["the", "cat", "sat", "on", "mat"];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "RNN：顺序传递，一次一步");
+        K.svg(svg, "text", { x: 30, y: 190, "font-size": 13, "font-weight": 700 }, "自注意力：每个词直接连到所有词，同时计算");
+        const r1 = w.map((t, i) => K.node(svg, 40 + i * 130, 60, 90, 36, t, { fs: 13 }));
+        const a1 = []; for (let i = 0; i < 4; i++) { const a = K.arrow(svg, 130 + i * 130, 78, 168 + i * 130, 78, { color: "var(--c4)", sw: 2 }); a.style.opacity = 0.15; a1.push(a); }
+        const pos = w.map((t, i) => [85 + i * 130, 290]);
+        const lines = [];
+        for (let i = 0; i < 5; i++) for (let j = i + 1; j < 5; j++) { const mx = (pos[i][0] + pos[j][0]) / 2, h = 18 + (j - i) * 18; lines.push(K.svg(svg, "path", { d: `M${pos[i][0]},${pos[i][1] - 18} Q${mx},${pos[i][1] - 18 - h * 1.6} ${pos[j][0]},${pos[j][1] - 18}`, fill: "none", stroke: "var(--accent)", "stroke-width": 1.6, opacity: 0 })); }
+        w.forEach((t, i) => K.node(svg, 40 + i * 130, 272, 90, 36, t, { fs: 13 }));
+        (async () => {
+          for (const a of a1) if (!(await ctx.tween(350, (u) => (a.style.opacity = 0.15 + 0.85 * u)))) return;
+          await ctx.tween(800, (u) => lines.forEach((l) => (l.style.opacity = u * 0.8)));
+        })();
+      },
+    },
+    {
+      title: "自注意力：Q·K 打分，softmax，再乘 V", at: 4, kicker: "第 4 格（上） · 注意力机制",
+      html: `<p>每个词的向量被三个可学习的矩阵分别变成 <b>Query</b>（我在找什么）、<b>Key</b>（我能提供什么）、<b>Value</b>（我的内容）。作者用搜索引擎打比方：你的查询和网页的关键词比对，再返回内容。</p><ol class="tight"><li>Q 和每个 K 做点积，得到分数矩阵：词 i 应该多关注词 j；</li><li>除以 √d（d 是向量维度），防止数值太大导致梯度不稳定；</li><li>softmax 把分数变成和为 1 的权重；</li><li>用这些权重对 V 加权平均，得到新的表示。</li></ol>`,
+      cells: [4], highlight: ["Query, Key and Value", "scaled down", "softmaxed"],
+      draw(svg, ctx) {
+        const toks = ["the", "cat", "sat", "on", "mat"];
+        const vec = [[0.2, 0.1], [1, 0.3], [0.4, 1], [0.1, 0.3], [0.9, 0.5]];
+        const n = 5, cs = 40, ox = 120, oy = 60;
+        K.svg(svg, "text", { x: ox + 100, y: 30, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, "分数矩阵 Q·Kᵀ / √d → softmax");
+        toks.forEach((t, i) => { K.svg(svg, "text", { x: ox - 8, y: oy + i * cs + 25, "text-anchor": "end", "font-size": 12 }, t); K.svg(svg, "text", { x: ox + i * cs + cs / 2, y: oy - 6, "text-anchor": "middle", "font-size": 12 }, t); });
+        const S2 = vec.map((q) => vec.map((k) => (q[0] * k[0] + q[1] * k[1]) * 3 / Math.sqrt(2)));
+        const A = S2.map(softmax);
+        const cells = [];
+        for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) { const g = K.node(svg, ox + j * cs, oy + i * cs, cs - 3, cs - 3, "", { fs: 10, rx: 3, fill: "var(--panel-2)" }); cells.push(g); }
+        const info = K.svg(svg, "text", { x: 400, y: 80, "font-size": 13 }, "");
+        const info2 = K.svg(svg, "text", { x: 400, y: 104, "font-size": 12, class: "muted" }, "");
+        const barsG = K.svg(svg, "g");
+        (async () => {
+          for (let i = 0; i < n; i++) {
+            info.textContent = `第 ${i + 1} 行：“${toks[i]}”对每个词的注意力`;
+            info2.textContent = "颜色越深 = 权重越大；每行加起来等于 1";
+            for (let j = 0; j < n; j++) { const c = cells[i * n + j]; c.querySelector("rect").style.fill = K.heat(A[i][j] * 1.6); c.querySelector("text").textContent = A[i][j].toFixed(2); }
+            barsG.innerHTML = "";
+            K.svg(barsG, "text", { x: 400, y: 150, "font-size": 12, "font-weight": 700 }, `新的“${toks[i]}” = Σ 权重 × V`);
+            A[i].forEach((p, j) => { K.svg(barsG, "text", { x: 440, y: 180 + j * 26, "text-anchor": "end", "font-size": 12 }, toks[j]); K.svg(barsG, "rect", { x: 450, y: 168 + j * 26, width: p * 240, height: 18, rx: 3, fill: "var(--accent)", "fill-opacity": 0.75 }); });
+            if (!(await ctx.wait(1100))) return;
+          }
+        })();
+        K.svg(svg, "text", { x: 120, y: 330, "font-size": 11, class: "muted" }, "词向量为示意的二维数字，Q、K、V 取同一向量（真实模型里由三个矩阵分别变换）");
+      },
+    },
+    {
+      title: "编码器块：多头、残差、LayerNorm、前馈", at: 4, kicker: "第 4 格（下） · Transformer 编码器",
+      html: `<p>一个编码器块的流程（作者的第 9–13 点）：</p><ul class="tight"><li><b>多头注意力</b>：并行做多组注意力，每组关注不同的关系，结果拼接后再过一个线性层；</li><li><b>残差连接 + LayerNorm</b>：把输入直接加到输出上（帮助梯度流动），再按每个 token 自己的维度做归一化（稳定训练）；</li><li><b>逐位置前馈网络</b>：对每个 token 单独做两层全连接，得到更丰富的表示；再做一次残差 + LayerNorm。</li></ul><p>这样的块堆叠很多层（ViT-Base 是 12 层）。</p>`,
+      cells: [4], highlight: ["residual connection", "LayerNorm", "feed forward"],
+      draw(svg, ctx) {
+        const items = [
+          K.node(svg, 40, 260, 140, 40, "输入 token 序列", { fs: 12 }),
+          K.node(svg, 40, 180, 140, 46, "多头注意力\n（如 12 个头并行）", { fs: 12, fill: "color-mix(in srgb, var(--c4) 20%, var(--panel))", stroke: "var(--c4)" }),
+          K.node(svg, 40, 110, 140, 36, "＋ 残差 · LayerNorm", { fs: 12, fill: "var(--panel-2)" }),
+          K.node(svg, 40, 56, 140, 36, "前馈网络 MLP", { fs: 12, fill: "color-mix(in srgb, var(--c3) 20%, var(--panel))", stroke: "var(--c3)" }),
+          K.node(svg, 40, 6, 140, 34, "＋ 残差 · LayerNorm", { fs: 12, fill: "var(--panel-2)" }),
+        ];
+        const arrs = [K.arrow(svg, 110, 258, 110, 228), K.arrow(svg, 110, 178, 110, 148), K.arrow(svg, 110, 108, 110, 94), K.arrow(svg, 110, 54, 110, 42)];
+        const res1 = K.svg(svg, "path", { d: "M180,280 L210,280 L210,128 L182,128", fill: "none", stroke: "var(--c2)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+        const res2 = K.svg(svg, "path", { d: "M180,128 L230,128 L230,23 L182,23", fill: "none", stroke: "var(--c2)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+        [...items, ...arrs, res1, res2].forEach((e) => (e.style.opacity = 0));
+        // 多头示意：4 个头的小注意力图
+        const heads = [];
+        for (let h = 0; h < 4; h++) {
+          const g = K.svg(svg, "g"); const ox = 290 + h * 105, oy = 90, r = K.rng(h + 3);
+          K.svg(g, "text", { x: ox + 40, y: oy - 10, "text-anchor": "middle", "font-size": 12, "font-weight": 700, fill: K.colors[h] }, `头 ${h + 1}`);
+          for (let i = 0; i < 5; i++) { const row = softmax(Array.from({ length: 5 }, (_, j) => (h === 0 ? (i === j ? 3 : 0) : h === 1 ? (j === 0 ? 2.5 : 0) : h === 2 ? (Math.abs(i - j) === 1 ? 2.5 : 0) : r() * 3))); row.forEach((p, j) => K.svg(g, "rect", { x: ox + j * 16, y: oy + i * 16, width: 15, height: 15, fill: `color-mix(in srgb, ${K.colors[h]} ${Math.round(p * 100)}%, var(--panel))` })); }
+          g.style.opacity = 0; heads.push(g);
+        }
+        K.svg(svg, "text", { x: 290, y: 220, "font-size": 12 }, "不同的头学到不同的关注方式（示意）：");
+        K.svg(svg, "text", { x: 290, y: 242, "font-size": 12, class: "muted" }, "头1 看自己 · 头2 看第一个 token · 头3 看相邻 · 头4 混合");
+        K.svg(svg, "text", { x: 240, y: 300, "font-size": 12, fill: "var(--c2)" }, "橙色虚线 = 残差连接");
+        (async () => {
+          const seq = [[items[0]], [arrs[0], items[1]], [res1, arrs[1], items[2]], [arrs[2], items[3]], [res2, arrs[3], items[4]]];
+          for (const g of seq) { if (!(await ctx.tween(300, (u) => g.forEach((e) => (e.style.opacity = u))))) return; if (g.includes(items[1])) for (const h of heads) if (!(await ctx.tween(200, (u) => (h.style.opacity = u)))) return; }
+        })();
+      },
+    },
+    {
+      title: "把图片切成 16×16 的块", at: 5, kicker: "第 5 格（一） · ViT 核心想法",
+      html: `<p>直接把每个像素当作一个词不可行：224×224 有 5 万多个像素，两两之间算注意力是 25 亿对。ViT 的做法是把图片切成固定大小的<b>块</b>（patch），每块 16×16 像素，一共 (224/16)² = <b>196 块</b>，每块就是一个“词”。论文标题“一张图值 16×16 个词”由此而来。</p><p>然后把每一块的像素<b>展平</b>成一条长向量：16 × 16 × 3 个颜色通道 = 768 个数。</p>`,
+      cells: [5], highlight: ["fixed size patches", "16x16", "unrolled"],
+      draw(svg, ctx) {
+        img(svg, L0, 20, 40, 224);
+        K.svg(svg, "text", { x: 132, y: 30, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, "224×224 输入（示意叶片）");
+        const n = 14, cs = 224 / n, lines = [];
+        for (let i = 1; i < n; i++) { lines.push(K.svg(svg, "line", { x1: 20 + i * cs, y1: 40, x2: 20 + i * cs, y2: 264, stroke: "var(--panel)", "stroke-width": 1.2, opacity: 0 })); lines.push(K.svg(svg, "line", { x1: 20, y1: 40 + i * cs, x2: 244, y2: 40 + i * cs, stroke: "var(--panel)", "stroke-width": 1.2, opacity: 0 })); }
+        const ps = S / n; // 每块在 64 像素图上约 4.57
+        const out = [];
+        const order = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].map((k) => 6 * n + k);
+        order.forEach((k, j) => {
+          const px = Math.floor((k % n) * ps), py = Math.floor(Math.floor(k / n) * ps);
+          const e = patchImg(svg, L0, px, py, Math.max(4, Math.round(ps)), 290 + j * 30, 140, 26); e.style.opacity = 0; out.push(e);
+        });
+        const hl = K.svg(svg, "rect", { x: 20, y: 40 + 6 * cs, width: cs, height: cs, fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 }); hl.style.opacity = 0;
+        K.svg(svg, "text", { x: 290, y: 128, "font-size": 12 }, "第 7 行的 14 块，按顺序排成序列：");
+        K.svg(svg, "text", { x: 290, y: 200, "font-size": 13, "font-weight": 700 }, "14 × 14 = 196 块 → 196 个 token");
+        K.svg(svg, "text", { x: 290, y: 226, "font-size": 13, "font-family": "var(--mono)" }, "每块展平：16 × 16 × 3 = 768 个数");
+        const vec = K.svg(svg, "g"); for (let i = 0; i < 48; i++) K.svg(vec, "rect", { x: 290 + i * 8.5, y: 246, width: 7.5, height: 18, fill: K.heat(((i * 29) % 13) / 13) }); vec.style.opacity = 0;
+        (async () => {
+          if (!(await ctx.tween(600, (u) => lines.forEach((l) => (l.style.opacity = u))))) return;
+          hl.style.opacity = 1;
+          for (let j = 0; j < out.length; j++) { hl.setAttribute("x", 20 + j * cs); if (!(await ctx.tween(120, (u) => (out[j].style.opacity = u)))) return; }
+          await ctx.tween(400, (u) => (vec.style.opacity = u));
+        })();
+      },
+    },
+    {
+      title: "线性嵌入 + 位置编码 + [CLS]", at: 5, kicker: "第 5 格（二） · 输入序列",
+      html: `<p>每块的 768 维像素向量乘一个<b>可学习的嵌入矩阵</b>，变成“patch 嵌入”。</p><p>自注意力本身不关心顺序，打乱 196 块结果不变，所以要给每块加上<b>位置编码</b>，告诉模型这块原来在哪；ViT 的位置编码也是学出来的，而不是写死的公式。</p><p>序列最前面再加一个特殊的 <b>[CLS] 标记</b>（和 BERT 一样），它不对应任何图块，专门用来汇总全图信息做分类。最终序列长度 197。</p>`,
+      cells: [5], highlight: ["positional embedding", "special token", "embedding matrix"],
+      draw(svg, ctx) {
+        const n = 7, w = 70, ox = 110;
+        K.svg(svg, "text", { x: 20, y: 60, "font-size": 12 }, "patch 嵌入");
+        K.svg(svg, "text", { x: 20, y: 150, "font-size": 12 }, "＋ 位置编码");
+        K.svg(svg, "text", { x: 20, y: 250, "font-size": 12 }, "= 输入序列");
+        const pe = [], emb = [], sum = [];
+        for (let i = 0; i < n; i++) {
+          const x = ox + i * (w + 14), isCls = i === 0;
+          const g1 = K.svg(svg, "g");
+          if (isCls) K.node(g1, x, 36, w, 40, "[CLS]", { fs: 12, bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+          else { const px = Math.floor(((i + 20) % 14) * (S / 14)), py = Math.floor(6 * (S / 14)); patchImg(g1, L0, px, py, 4, x + 15, 36, 40); }
+          g1.style.opacity = 0; emb.push(g1);
+          const g2 = K.svg(svg, "g");
+          for (let k = 0; k < 8; k++) K.svg(g2, "rect", { x: x + k * 8.5, y: 130, width: 7.5, height: 26, fill: K.heat(0.5 + 0.5 * Math.sin(i * 0.9 + k * 0.7), true) });
+          K.svg(g2, "text", { x: x + w / 2, y: 176, "text-anchor": "middle", "font-size": 11, class: "muted" }, `位置 ${i}`);
+          g2.style.opacity = 0; pe.push(g2);
+          const g3 = K.node(svg, x, 226, w, 40, isCls ? "[CLS]+p0" : `块${i}+p${i}`, { fs: 11, fill: isCls ? "var(--accent-soft)" : "color-mix(in srgb, var(--c1) 20%, var(--panel))", stroke: isCls ? "var(--accent)" : "var(--c1)" });
+          g3.style.opacity = 0; sum.push(g3);
+        }
+        K.svg(svg, "text", { x: ox + n * (w + 14) - 10, y: 252, "font-size": 16 }, "…");
+        K.svg(svg, "text", { x: 110, y: 310, "font-size": 12, class: "muted" }, "序列长度 = 1 个 [CLS] + 196 个 patch = 197；每个 token 都是 768 维（ViT-Base）");
+        (async () => {
+          for (const e of emb) if (!(await ctx.tween(150, (u) => (e.style.opacity = u)))) return;
+          for (const e of pe) if (!(await ctx.tween(150, (u) => (e.style.opacity = u)))) return;
+          for (const e of sum) if (!(await ctx.tween(150, (u) => (e.style.opacity = u)))) return;
+        })();
+      },
+    },
+    {
+      title: "编码器 → [CLS] → 分类头", at: 5, notes: {"6": "作者请读者点赞的提示，和模型无关。"}, kicker: "第 5–6 格 · 输出",
+      html: `<p>197 个 token 一起通过多层 Transformer 编码器，每层每个 token 都能和所有其他 token 交换信息。最后只取 <b>[CLS] 位置的输出</b>，接一个小的前馈网络（分类头）得到每类的分数。</p><p>作者特别提到论文里的发现：ViT 在<b>最初几层</b>就有一些注意力头关注很远的区域，而 CNN 起初只能看局部的小感受野，要靠层层堆叠才能看到全图。</p>`,
+      cells: [5], highlight: ["Feed Forward Neural Network", "attention distance"],
+      draw(svg, ctx) {
+        const n = 14, cs = 16, ox = 30, oy = 50;
+        img(svg, L0, ox, oy, n * cs);
+        for (let i = 1; i < n; i++) { K.svg(svg, "line", { x1: ox + i * cs, y1: oy, x2: ox + i * cs, y2: oy + n * cs, stroke: "var(--panel)", opacity: 0.5 }); K.svg(svg, "line", { x1: ox, y1: oy + i * cs, x2: ox + n * cs, y2: oy + i * cs, stroke: "var(--panel)", opacity: 0.5 }); }
+        const cls = K.node(svg, 330, 140, 80, 44, "[CLS]", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const r = K.rng(4), lines = [];
+        for (let k = 0; k < 196; k += 3) { const x = ox + (k % n) * cs + 8, y = oy + Math.floor(k / n) * cs + 8; lines.push([K.svg(svg, "line", { x1: x, y1: y, x2: 330, y2: 162, stroke: "var(--accent)", "stroke-width": 0.5 + r() * 2, opacity: 0 }), 0.15 + r() * 0.6]); }
+        K.svg(svg, "text", { x: 30, y: 36, "font-size": 12, "font-weight": 700 }, "196 个 patch");
+        K.svg(svg, "text", { x: 330, y: 205, "font-size": 11, class: "muted" }, "线越粗 = 注意力越大（示意）");
+        const head = K.node(svg, 450, 140, 110, 44, "MLP 分类头\n768 → 5", { fs: 12, fill: "color-mix(in srgb, var(--c3) 20%, var(--panel))", stroke: "var(--c3)" });
+        K.arrow(svg, 410, 162, 448, 162);
+        const cls5 = ["细菌性枯萎", "褐条病", "绿斑驳病", "花叶病", "健康"], pr = [0.05, 0.08, 0.06, 0.71, 0.1];
+        const bars = cls5.map((c, i) => { K.svg(svg, "text", { x: 640, y: 92 + i * 34, "text-anchor": "end", "font-size": 11 }, c); return K.svg(svg, "rect", { x: 646, y: 80 + i * 34, width: 0, height: 18, rx: 3, fill: i === 3 ? "var(--accent)" : "var(--ink-3)" }); });
+        K.arrow(svg, 560, 162, 580, 162);
+        K.svg(svg, "text", { x: 590, y: 270, "font-size": 11, class: "muted" }, "概率为示意");
+        ctx.tween(1200, (u) => lines.forEach(([l, o]) => (l.style.opacity = o * u))).then((ok) => ok && ctx.tween(700, (u) => bars.forEach((b, i) => b.setAttribute("width", pr[i] * 60 * u))));
+      },
+    },
+    {
+      title: "比赛数据与超参数", at: 7, notes: {"10": "让 TPU 用更省内存的 bfloat16 半精度计算。", "11": "固定随机种子，保证每次运行结果尽量一样。"}, kicker: "第 7–16 格 · 准备",
+      html: `<p>进入代码部分。作者先安装 PyTorch 的 TPU 支持（torch-xla）和 <b>timm</b>（一个收集了大量预训练图像模型的库），固定随机种子保证可复现。</p><p>超参数：图片 224×224、batch 16、学习率 <b>2e-5</b>（微调预训练模型通常用很小的学习率）、10 轮。读入 <code>train.csv</code>（图片名 + 标签 0–4），画出类别分布，再用 <code>stratify</code> <b>分层抽样</b>出 10% 做验证集，保证验证集里各类比例和训练集一致。</p>`,
+      cells: [12, 16], highlight: ["LR = 2e-05", "N_EPOCHS = 10", "stratify=df.label.values", "test_size=0.1"],
+      draw(svg, ctx) {
+        const share = [0.05, 0.1, 0.11, 0.61, 0.12], names = ["0 枯萎", "1 褐条", "2 绿斑驳", "3 花叶", "4 健康"];
+        const ax = K.axes(svg, { x: 60, y: 30, w: 300, h: 230 }, [0, 5], [0, 0.7], { xticks: 0, yticks: 0 });
+        const bars = share.map((s, i) => { K.svg(svg, "text", { x: 60 + i * 60 + 27, y: 278, "text-anchor": "middle", "font-size": 11 }, names[i]); return K.svg(svg, "rect", { x: 60 + i * 60 + 5, y: 260, width: 44, height: 0, rx: 3, fill: i === 3 ? "var(--c2)" : "var(--c1)" }); });
+        K.svg(svg, "text", { x: 60, y: 306, "font-size": 11, class: "muted" }, "类别分布示意：花叶病占大多数（以比赛数据为准）");
+        const tr = [], va = [];
+        share.forEach((s, i) => {
+          tr.push(K.svg(svg, "rect", { x: 420, y: 60 + i * 44, width: 0, height: 26, fill: i === 3 ? "var(--c2)" : "var(--c1)", "fill-opacity": 0.7 }));
+          va.push(K.svg(svg, "rect", { x: 640, y: 60 + i * 44, width: 0, height: 26, fill: i === 3 ? "var(--c2)" : "var(--c1)" }));
+          K.svg(svg, "text", { x: 414, y: 78 + i * 44, "text-anchor": "end", "font-size": 11 }, names[i]);
+        });
+        K.svg(svg, "text", { x: 420, y: 44, "font-size": 12, "font-weight": 700 }, "训练 90%");
+        K.svg(svg, "text", { x: 640, y: 44, "font-size": 12, "font-weight": 700 }, "验证 10%");
+        K.svg(svg, "text", { x: 420, y: 300, "font-size": 12 }, "分层抽样：两边各类比例相同");
+        ctx.tween(900, (u) => bars.forEach((b, i) => { const h = (share[i] / 0.7) * 230 * u; b.setAttribute("y", 260 - h); b.setAttribute("height", h); }))
+          .then((ok) => ok && ctx.tween(900, (u) => share.forEach((s, i) => { tr[i].setAttribute("width", s * 300 * u); va[i].setAttribute("width", s * 60 * u); })));
+      },
+    },
+    {
+      title: "数据增强与归一化", at: 17, kicker: "第 17–18 格 · 预处理",
+      html: `<p><code>CassavaDataset</code> 按需读图。训练集的变换：缩放到 224 → 以 0.3 的概率<b>水平翻转</b>、0.3 的概率<b>竖直翻转</b> → <b>随机缩放裁剪</b>（随机截取一块再放大回 224）→ 转张量 → 用 ImageNet 的均值和标准差<b>归一化</b>。</p><p>增强让模型每轮看到的图略有不同，减少过拟合；归一化使用 ImageNet 的统计量，是因为预训练权重就是在这种输入分布下学到的。验证集只缩放和归一化，不做随机变换。</p>`,
+      cells: [18], highlight: ["RandomHorizontalFlip(p=0.3)", "RandomVerticalFlip(p=0.3)", "RandomResizedCrop", "Normalize((0.485, 0.456, 0.406)"],
+      draw(svg, ctx) {
+        const r = K.rng(9);
+        img(svg, L0, 30, 60, 160);
+        K.svg(svg, "text", { x: 110, y: 50, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, "原图");
+        const slots = [];
+        for (let i = 0; i < 6; i++) {
+          const x = 240 + (i % 3) * 155, y = 30 + Math.floor(i / 3) * 155;
+          const hf = r() < 0.3, vf = r() < 0.3, sc = 1 + r() * 0.8, ox = r() * (sc - 1), oy = r() * (sc - 1);
+          const g = K.svg(svg, "g");
+          const clip = "clip" + i + Math.floor(r() * 1e6);
+          const cp = K.svg(g, "clipPath", { id: clip }); K.svg(cp, "rect", { x, y, width: 130, height: 130 });
+          const inner = K.svg(g, "g", { "clip-path": `url(#${clip})` });
+          const t = `translate(${x + (hf ? 130 : 0)},${y + (vf ? 130 : 0)}) scale(${hf ? -1 : 1},${vf ? -1 : 1})`;
+          const gg = K.svg(inner, "g", { transform: t });
+          img(gg, L0, -ox * 130, -oy * 130, 130 * sc);
+          K.svg(g, "text", { x: x + 65, y: y + 146, "text-anchor": "middle", "font-size": 10, class: "muted" }, `${hf ? "水平翻转 " : ""}${vf ? "竖直翻转 " : ""}裁剪×${sc.toFixed(1)}`);
+          g.style.opacity = 0; slots.push(g);
+        }
+        (async () => { for (const g of slots) if (!(await ctx.tween(260, (u) => (g.style.opacity = u)))) return; })();
+      },
+    },
+    {
+      title: "加载预训练 ViT-B/16，换分类头", at: 19, kicker: "第 19–20 格 · 迁移学习",
+      html: `<p><code>timm.create_model("vit_base_patch16_224")</code> 建出 ViT-Base（patch 16、输入 224），再用 <code>load_state_dict</code> 读入附带数据集里的预训练权重（因为比赛环境不能联网下载）。</p><p>原模型的分类头输出 ImageNet 的 1000 类，作者把它换成 <code>nn.Linear(in_features, 5)</code>。整个网络<b>都参与训练</b>（没有冻结），只是学习率很小，让预训练学到的通用视觉特征只被轻微调整。</p>`,
+      cells: [20, 22], highlight: ["timm.create_model(\"vit_base_patch16_224\"", "load_state_dict", "nn.Linear(self.model.head.in_features, n_classes)"],
+      draw(svg, ctx) {
+        const bl = [];
+        for (let i = 0; i < 12; i++) bl.push(K.svg(svg, "rect", { x: 140 + i * 30, y: 110, width: 24, height: 100, rx: 4, fill: "color-mix(in srgb, var(--c4) 30%, var(--panel))", stroke: "var(--c4)" }));
+        K.node(svg, 20, 130, 100, 60, "patch 嵌入\n+ 位置编码", { fs: 11 });
+        K.svg(svg, "text", { x: 315, y: 98, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, "12 层 Transformer 编码器（预训练权重）");
+        const old = K.node(svg, 530, 120, 140, 40, "head: 768 → 1000", { fs: 12, fill: "var(--panel-2)" });
+        const neu = K.node(svg, 530, 180, 140, 40, "head: 768 → 5", { fs: 12, bold: true, fill: "color-mix(in srgb, var(--c3) 25%, var(--panel))", stroke: "var(--c3)" });
+        neu.style.opacity = 0;
+        K.arrow(svg, 502, 160, 528, 150);
+        const cross = K.svg(svg, "path", { d: "M530,120 L670,160 M670,120 L530,160", stroke: "var(--bad)", "stroke-width": 3, opacity: 0 });
+        const w = K.node(svg, 140, 250, 360, 40, "jx_vit_base_p16_224-80ecf9dd.pth（离线读入）", { fs: 12, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const fl = K.svg(svg, "g");
+        ctx.tween(1000, (u) => bl.forEach((b, i) => (b.style.fill = `color-mix(in srgb, var(--c4) ${Math.round(30 + 40 * K.clamp(u * 12 - i, 0, 1))}%, var(--panel))`)))
+          .then((ok) => ok && ctx.tween(400, (u) => (cross.style.opacity = u)))
+          .then((ok) => ok && ctx.tween(400, (u) => (neu.style.opacity = u)))
+          .then((ok) => { if (ok) K.svg(svg, "text", { x: 320, y: 320, "text-anchor": "middle", "font-size": 12 }, "全部层都继续训练（学习率 2e-5），新分类头从零学起"); });
+      },
+    },
+    {
+      title: "TPU 8 核并行训练", at: 23, kicker: "第 23–25 格 · 并行训练",
+      html: `<p>作者用 Kaggle 的 TPU（谷歌的张量处理器，有 8 个核）。<code>xmp.spawn(..., nprocs=8)</code> 启动 8 个进程，<code>DistributedSampler</code> 把训练数据分成 8 份，每个核处理自己的一份。每一步各核分别算梯度，<code>xm.optimizer_step</code> 把 8 份梯度<b>平均</b>后同步更新同一套参数。</p><p>因为等效 batch 变成了 16 × 8 = 128，学习率也按核数放大：<code>lr = LR × 8</code>。环境变量 <code>XLA_USE_BF16</code> 让 TPU 用更省内存的 bfloat16 半精度计算。</p>`,
+      cells: [23, 24], highlight: ["lr = LR * xm.xrt_world_size()", "DistributedSampler", "nprocs=8", "xm.optimizer_step"],
+      draw(svg, ctx) {
+        K.node(svg, 20, 150, 110, 50, "训练数据", { bold: true });
+        const cores = [];
+        for (let c = 0; c < 8; c++) { const y = 18 + c * 40; cores.push(K.node(svg, 260, y, 120, 32, `TPU 核 ${c + 1}`, { fs: 12, fill: "color-mix(in srgb, var(--c1) 18%, var(--panel))", stroke: "var(--c1)" })); K.arrow(svg, 130, 175, 256, y + 16, { color: "var(--line)" }); }
+        const avg = K.node(svg, 470, 140, 120, 60, "平均 8 份梯度", { fs: 12, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const dots = [];
+        for (let c = 0; c < 8; c++) { K.arrow(svg, 380, 34 + c * 40, 466, 170, { color: "var(--line)" }); dots.push(K.svg(svg, "circle", { cx: 380, cy: 34 + c * 40, r: 0, fill: "var(--c2)" })); }
+        const upd = K.node(svg, 610, 145, 100, 50, "同一套参数\n一起更新", { fs: 11 });
+        K.arrow(svg, 590, 170, 608, 170);
+        K.svg(svg, "text", { x: 140, y: 340, "font-size": 12 }, "batch 16 / 核 × 8 核 = 等效 batch 128 → 学习率 2e-5 × 8");
+        (async () => {
+          for (let round = 0; round < 3; round++) {
+            if (!(await ctx.tween(500, (u) => cores.forEach((g, c) => (g.querySelector("rect").style.fill = `color-mix(in srgb, var(--c1) ${Math.round(18 + 40 * u)}%, var(--panel))`))))) return;
+            if (!(await ctx.tween(600, (u) => dots.forEach((d, c) => { d.setAttribute("r", 5); d.setAttribute("cx", 380 + 86 * u); d.setAttribute("cy", K.lerp(34 + c * 40, 170, u)); })))) return;
+            dots.forEach((d) => d.setAttribute("r", 0));
+            cores.forEach((g) => (g.querySelector("rect").style.fill = "color-mix(in srgb, var(--c1) 18%, var(--panel))"));
+            if (!(await ctx.tween(300, (u) => (upd.querySelector("rect").style.fill = `color-mix(in srgb, var(--good) ${Math.round(40 * (1 - u))}%, var(--panel-2))`)))) return;
+          }
+        })();
+      },
+    },
+    {
+      title: "训练与验证循环", at: 21, notes: {"22": "在这里创建模型：加载预训练权重，分类头改成 5 类（见上一章）。"}, kicker: "第 21–22 格 · 训练循环",
+      html: `<p><code>train_one_epoch</code>：清零梯度 → 前向 → 交叉熵损失 → 反向传播 → 记录准确率 → 更新参数（TPU 上每 20 个 batch 打印一次损失）。<code>validate_one_epoch</code>：切到 <code>eval</code> 模式，在 <code>no_grad</code> 下只做前向，统计损失和准确率。<code>fit_tpu</code> 把两者循环 10 轮并记录日志。</p><p>读代码时值得注意的两个小问题：保存最佳模型的语句被注释掉了；<code>valid_loss_min = valid_loss</code> 写在 if 外面，每轮都会被覆盖，“验证损失下降”的判断其实变成了“比上一轮低”。训练结束后保存的是最后一轮的权重。</p>`,
+      cells: [21], highlight: ["valid_loss_min = valid_loss", "#                 xm.save(model.state_dict(), 'best_model.pth')", "torch.no_grad()"],
+      draw(svg, ctx) {
+        const loop = [["取一个 batch", 360, 40], ["前向 → 输出 5 类分数", 560, 120], ["交叉熵损失", 520, 240], ["反向传播求梯度", 200, 240], ["优化器更新参数", 160, 120]];
+        const nodes = loop.map((d) => K.node(svg, d[1] - 80, d[2] - 20, 160, 40, d[0], { fs: 12 }));
+        for (let i = 0; i < loop.length; i++) { const a = loop[i], b = loop[(i + 1) % loop.length]; K.arrow(svg, a[1] + (b[1] - a[1]) * 0.35, a[2] + (b[2] - a[2]) * 0.35 + 4, a[1] + (b[1] - a[1]) * 0.65, a[2] + (b[2] - a[2]) * 0.65 + 4, { color: "var(--ink-3)" }); }
+        const cnt = K.svg(svg, "text", { x: 360, y: 150, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 360, y: 172, "text-anchor": "middle", "font-size": 11, class: "muted" }, "每轮结束后在验证集上评估");
+        K.svg(svg, "text", { x: 360, y: 320, "text-anchor": "middle", "font-size": 12, fill: "var(--warn)" }, "注意：best_model 的保存被注释掉，最终保存的是最后一轮");
+        (async () => {
+          for (let ep = 1; ep <= 10; ep++) {
+            cnt.textContent = `第 ${ep} / 10 轮`;
+            for (let i = 0; i < nodes.length; i++) {
+              nodes[i].querySelector("rect").style.stroke = "var(--accent)"; nodes[i].querySelector("rect").style.strokeWidth = 3;
+              if (!(await ctx.wait(ep < 3 ? 220 : 60))) return;
+              nodes[i].querySelector("rect").style.stroke = "var(--line)"; nodes[i].querySelector("rect").style.strokeWidth = 1.2;
+            }
+          }
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：切 patch + 自注意力 ---------- */
+  const labState = { sel: null };
+  const lab1 = K.lab(document.getElementById("lab1"), {
+    width: 660, height: 360,
+    controls: [
+      { id: "ps", label: "patch 边长（像素，原图 64×64 示意）", value: "8", options: [["4", "4（16×16 = 256 块）"], ["8", "8（8×8 = 64 块）"], ["16", "16（4×4 = 16 块）"]] },
+      { id: "pos", label: "位置编码的权重", min: 0, max: 3, step: 0.1, value: 1, fmt: (v) => v.toFixed(1) },
+      { id: "temp", label: "注意力尖锐程度（1/√d 的倍数）", min: 0.5, max: 8, step: 0.1, value: 3, fmt: (v) => v.toFixed(1) },
+      { id: "sick", label: "叶片", value: "1", options: [["1", "有病斑的叶片"], ["0", "健康叶片"]] },
+    ],
+    note: "点击左图任意一块，右图显示它对所有块的注意力权重（softmax 后，和为 1）。每块的特征 = [平均颜色、颜色标准差] + 位置编码×权重；Q = K = 特征，分数 = Q·K × 尖锐程度。位置编码权重大时更关注附近的块，为 0 时只看颜色相似度，与距离无关。",
+    render(svg, v) {
+      const data = leaf(3, v.sick === "1"), ps = +v.ps, n = S / ps, N = n * n;
+      const feats = [];
+      for (let py = 0; py < n; py++) for (let px = 0; px < n; px++) {
+        const m = [0, 0, 0], q = [0, 0, 0];
+        for (let j = 0; j < ps; j++) for (let i = 0; i < ps; i++) { const s = ((py * ps + j) * S + px * ps + i) * 3; for (let k = 0; k < 3; k++) { m[k] += data[s + k]; q[k] += data[s + k] ** 2; } }
+        const cnt = ps * ps, mean = m.map((x) => x / cnt), sd = q.map((x, k) => Math.sqrt(Math.max(0, x / cnt - mean[k] ** 2)));
+        const pe = [];
+        for (let f = 0; f < 3; f++) { pe.push(Math.sin(((px + 0.5) / n) * Math.PI * (f + 1)), Math.cos(((px + 0.5) / n) * Math.PI * (f + 1)), Math.sin(((py + 0.5) / n) * Math.PI * (f + 1)), Math.cos(((py + 0.5) / n) * Math.PI * (f + 1))); }
+        feats.push(mean.map((x) => x * 3).concat(sd.map((x) => x * 3), pe.map((x) => x * v.pos * 0.5)));
+      }
+      if (labState.sel == null || labState.sel >= N || labState.n !== n) { labState.sel = Math.floor(n / 2) * n + Math.floor(n / 3); labState.n = n; }
+      const qv = feats[labState.sel];
+      const scores = feats.map((k) => k.reduce((a, x, i) => a + x * qv[i], 0) * v.temp / Math.sqrt(qv.length));
+      const A = softmax(scores);
+      const W = 300, cs = W / n;
+      img(svg, data, 10, 30, W);
+      K.svg(svg, "text", { x: 10, y: 20, "font-size": 12, "font-weight": 700 }, "点一块作为 Query");
+      K.svg(svg, "text", { x: 350, y: 20, "font-size": 12, "font-weight": 700 }, "它对每一块的注意力权重");
+      for (let i = 1; i < n; i++) { K.svg(svg, "line", { x1: 10 + i * cs, y1: 30, x2: 10 + i * cs, y2: 330, stroke: "var(--panel)", "stroke-width": 1 }); K.svg(svg, "line", { x1: 10, y1: 30 + i * cs, x2: 310, y2: 30 + i * cs, stroke: "var(--panel)", "stroke-width": 1 }); }
+      const sx = labState.sel % n, sy = Math.floor(labState.sel / n);
+      K.svg(svg, "rect", { x: 10 + sx * cs, y: 30 + sy * cs, width: cs, height: cs, fill: "none", stroke: "var(--accent)", "stroke-width": 3 });
+      const mx = Math.max(...A);
+      img(svg, data, 350, 30, W, { opacity: 0.35 });
+      A.forEach((p, i) => { const x = i % n, y = Math.floor(i / n); K.svg(svg, "rect", { x: 350 + x * cs, y: 30 + y * cs, width: cs - 0.5, height: cs - 0.5, fill: "var(--c6)", "fill-opacity": 0.85 * (p / mx) }); if (n <= 8) K.svg(svg, "text", { x: 350 + x * cs + cs / 2, y: 30 + y * cs + cs / 2 + 4, "text-anchor": "middle", "font-size": n <= 4 ? 13 : 9 }, (p * 100).toFixed(1)); });
+      K.svg(svg, "rect", { x: 350 + sx * cs, y: 30 + sy * cs, width: cs, height: cs, fill: "none", stroke: "var(--accent)", "stroke-width": 3 });
+      K.svg(svg, "text", { x: 350, y: 350, "font-size": 11, class: "muted" }, n <= 8 ? "格内数字 = 权重 %，越红越大" : "越红权重越大");
+      const ent = -A.reduce((a, p) => a + (p > 0 ? p * Math.log(p) : 0), 0) / Math.log(N);
+      return { readout: [
+        { k: "patch 数 / 序列长度", v: `${N} / ${N + 1}` },
+        { k: "注意力矩阵大小", v: `${N + 1}×${N + 1} = ${((N + 1) ** 2).toLocaleString()}` },
+        { k: "按像素算则为", v: `${(S * S).toLocaleString()}² ≈ ${((S * S) ** 2 / 1e6).toFixed(1)} 百万` },
+        { k: "权重分散度（0 集中 – 1 均匀）", v: ent.toFixed(2) },
+      ] };
+    },
+  });
+  (function () {
+    const host = document.getElementById("lab1").querySelector(".svgbox");
+    host.style.cursor = "pointer";
+    host.addEventListener("click", (e) => {
+      const s = host.querySelector("svg"), r = s.getBoundingClientRect();
+      const x = ((e.clientX - r.left) / r.width) * 660 - 10, y = ((e.clientY - r.top) / r.height) * 360 - 30;
+      if (x < 0 || y < 0 || x >= 300 || y >= 300) return;
+      const n = labState.n || 8;
+      labState.sel = Math.floor(y / (300 / n)) * n + Math.floor(x / (300 / n));
+      lab1.update();
+    });
+  })();
+
+  /* ---------- 实验 B：缩放点积注意力 ---------- */
+  const TOK = [["叶脉", [1.0, 0.2]], ["病斑", [-0.3, 1.1]], ["叶边", [0.8, -0.6]], ["背景", [-1.0, -0.4]], ["病斑2", [-0.1, 0.9]]];
+  K.lab(document.getElementById("lab2"), {
+    width: 660, height: 330,
+    controls: [
+      { id: "ang", label: "Query 的方向（度）", min: 0, max: 359, step: 1, value: 100 },
+      { id: "len", label: "Query 的长度", min: 0, max: 4, step: 0.1, value: 1.5, fmt: (v) => v.toFixed(1) },
+      { id: "scale", label: "是否除以 √d", value: "1", options: [["1", "除以 √d（d = 2）"], ["0", "不除（分数更大，softmax 更尖）"]] },
+    ],
+    note: "5 个 token 的 Key 和 Value 都取左图的二维向量。分数 = Q·K（÷√d），softmax 得权重，输出 = Σ 权重 × V（绿色箭头）。把 Query 转向“病斑”方向，输出就靠近两个病斑 token；Query 越长，注意力越集中。",
+    render(svg, v) {
+      const a = (v.ang * Math.PI) / 180, q = [Math.cos(a) * v.len, Math.sin(a) * v.len];
+      const sc = TOK.map(([, k]) => (q[0] * k[0] + q[1] * k[1]) / (v.scale === "1" ? Math.SQRT2 : 1));
+      const A = softmax(sc);
+      const out = [0, 1].map((d) => TOK.reduce((s, [, k], i) => s + A[i] * k[d], 0));
+      const cx = 170, cy = 165, R = 110;
+      K.svg(svg, "circle", { cx, cy, r: R, fill: "none", stroke: "var(--line)", "stroke-dasharray": "3 4" });
+      K.svg(svg, "line", { x1: cx - 150, y1: cy, x2: cx + 150, y2: cy, stroke: "var(--line)" });
+      K.svg(svg, "line", { x1: cx, y1: cy - 150, x2: cx, y2: cy + 150, stroke: "var(--line)" });
+      TOK.forEach(([nm, k], i) => { K.arrow(svg, cx, cy, cx + k[0] * R, cy - k[1] * R, { color: K.colors[i], sw: 1.5 + A[i] * 6 }); K.svg(svg, "text", { x: cx + k[0] * R * 1.12, y: cy - k[1] * R * 1.12 + 4, "text-anchor": "middle", "font-size": 12, fill: K.colors[i], "font-weight": 700 }, nm); });
+      const ql = Math.min(1.35, v.len / 2);
+      K.arrow(svg, cx, cy, cx + Math.cos(a) * R * ql, cy - Math.sin(a) * R * ql, { color: "var(--ink)", sw: 3, dash: "6 3" });
+      K.svg(svg, "text", { x: cx + Math.cos(a) * R * ql * 1.1, y: cy - Math.sin(a) * R * ql * 1.1 - 6, "font-size": 12, "font-weight": 700 }, "Q");
+      K.arrow(svg, cx, cy, cx + out[0] * R, cy - out[1] * R, { color: "var(--good)", sw: 3.5 });
+      K.svg(svg, "text", { x: cx + out[0] * R + 6, y: cy - out[1] * R + 14, "font-size": 12, fill: "var(--good)", "font-weight": 700 }, "输出");
+      K.svg(svg, "text", { x: 360, y: 30, "font-size": 12, "font-weight": 700 }, "分数 → softmax 权重");
+      TOK.forEach(([nm], i) => {
+        const y = 50 + i * 46;
+        K.svg(svg, "text", { x: 410, y: y + 17, "text-anchor": "end", "font-size": 12, fill: K.colors[i] }, nm);
+        K.svg(svg, "text", { x: 418, y: y + 17, "font-size": 11, "font-family": "var(--mono)" }, sc[i].toFixed(2));
+        K.svg(svg, "rect", { x: 470, y: y + 4, width: 170 * A[i], height: 18, rx: 3, fill: K.colors[i], "fill-opacity": 0.8 });
+        K.svg(svg, "text", { x: 474 + 170 * A[i], y: y + 17, "font-size": 11 }, (A[i] * 100).toFixed(1) + "%");
+      });
+      K.svg(svg, "text", { x: 360, y: 300, "font-size": 11, class: "muted" }, "中间一列是 Q·K（÷√d）的分数");
+      return { readout: [
+        { k: "最大权重", v: (Math.max(...A) * 100).toFixed(1) + "%" },
+        { k: "关注最多的 token", v: TOK[A.indexOf(Math.max(...A))][0] },
+        { k: "输出向量", v: `(${out[0].toFixed(2)}, ${out[1].toFixed(2)})` },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

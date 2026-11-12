@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>航班延误预测</title>
+<meta name="description" content="Kaggle 案例拆解：用美国 2015 年 1 月的航班记录，看延误怎么分布、为什么一天里越来越晚，再用多项式回归、交叉验证和岭回归预测起飞延误。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格数据 · 回归 · 交通出行</div>
+  <h1>航班延误预测：飞机为什么越到晚上越晚</h1>
+  <p class="en">Predicting flight delays [Tutorial]</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">探索性分析</span><span class="tag method">指数分布拟合</span><span class="tag method">线性回归</span>
+    <span class="tag method">多项式回归</span><span class="tag method">交叉验证</span><span class="tag method">独热编码</span><span class="tag method">岭回归</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Fabien Daniel</b></span>
+    <span>Kaggle 点赞 <b>3,101</b>（2026-11 抓取）</span>
+    <span>数据集 <b>usdot/flight-delays</b></span>
+    <span><a href="https://www.kaggle.com/code/fabiendaniel/predicting-flight-delays-tutorial" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">美国 2015 年的国内航班记录</div><p>每行一次航班：哪家公司、从哪飞到哪、计划几点起飞、实际晚了几分钟。全年 580 多万次，作者只取 1 月来分析。<span data-cell="5">出处</span> <span data-cell="9">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">某个时刻起飞的航班平均会晚几分钟</div><p>目标是起飞延误 <code>DEPARTURE_DELAY</code>（实际起飞减计划起飞，单位分钟）。用 1 月前三周训练，预测最后一周。<span data-cell="68">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">先看图找规律，再一步步加复杂度</div><p>按公司、机场、航线、时刻做统计和画图；然后从“一家公司一个机场”的线性回归，到多项式回归 + 交叉验证，再到“所有机场”的独热编码 + 岭回归。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">起飞时刻是关键，正则化是救命稻草</div><p>作者发现平均延误随一天的时刻几乎单调上升，傍晚可到约 30 分钟 <span data-cell="68">出处</span>；不加正则的多项式在测试集上 MSE 超过 500，加岭回归后回到合理水平。<span data-cell="129">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>2015 Flight Delays and Cancellations</b>，来自美国交通部（US DOT）运输统计局的准点率记录。主表 <code>flights.csv</code> 一行一次航班，另有 <code>airports.csv</code>（机场名称、城市、经纬度）和 <code>airlines.csv</code>（公司代码与全名）两张小表。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">2015 全年航班（行）</div><div class="v">580 万+</div></div>
+        <div class="stat-tile"><div class="k">字段数（列）</div><div class="v">31</div></div>
+        <div class="stat-tile"><div class="k">1 月子集里的机场</div><div class="v">312</div></div>
+        <div class="stat-tile"><div class="k">航空公司</div><div class="v">14</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">行数和列数见作者第 5 格的说明 <span data-cell="5">出处</span>；“312 个机场 × 14 家公司”见第 53 格 <span data-cell="53">出处</span>。作者为节省计算时间只保留了 1 月的航班 <span data-cell="9">出处</span>，各列缺失比例都很低（填充率 &gt; 97%），所以直接删掉了有缺失的行 <span data-cell="21">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">本案例用到的列</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>YEAR, MONTH, DAY, DAY_OF_WEEK</code></td><td>航班日期、星期几</td><td>整数</td></tr>
+        <tr><td><code>AIRLINE</code></td><td>航空公司代码（如 AA = 美国航空）</td><td>类别</td></tr>
+        <tr><td><code>ORIGIN_AIRPORT</code> / <code>DESTINATION_AIRPORT</code></td><td>出发 / 到达机场的三字码</td><td>类别</td></tr>
+        <tr><td><code>SCHEDULED_DEPARTURE</code> / <code>SCHEDULED_ARRIVAL</code></td><td>计划起飞 / 到达时刻，写成 HHMM 数字（1435 = 14:35）</td><td>时刻</td></tr>
+        <tr><td><code>DEPARTURE_TIME</code> / <code>ARRIVAL_TIME</code></td><td>实际起飞 / 到达时刻（不带日期，作者因此不用它们）</td><td>时刻</td></tr>
+        <tr><td><code>DEPARTURE_DELAY</code></td><td><b>要预测的答案</b>：实际起飞比计划晚了几分钟，提前为负数</td><td>数值（分钟）</td></tr>
+        <tr><td><code>ARRIVAL_DELAY</code></td><td>到达晚了几分钟</td><td>数值（分钟）</td></tr>
+        <tr><td><code>DISTANCE</code></td><td>飞行距离（英里）</td><td>数值</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">列的含义照作者第 5 格的说明翻译 <span data-cell="5">出处</span>。其余列（滑行时间、各类延误原因、取消、改航等）在第 18 格被删掉 <span data-cell="18">出处</span>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="67">
+    <h3>动手试试 A · 延误的连锁反应 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="87">
+    <h3>动手试试 B · 多项式阶数：随机切一刀 vs 交叉验证 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="134">
+    <h3>动手试试 C · 岭回归给系数套上缰绳 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>除夏威夷航空、阿拉斯加航空外，各公司平均起飞延误大约 11 ± 7 分钟；平均值低是因为大多数航班准时起飞，但偶尔会有几十个小时的极端延误</td><td><span data-cell="32">第 32 格</span></td></tr>
+        <tr><td>超过 45 分钟的大延误只占百分之几，但各公司比例不同</td><td><span data-cell="34">第 34 格</span></td></tr>
+        <tr><td>用指数分布拟合延误分布来排名：夏威夷航空、达美航空前两名，西南航空第三，SkyWest 最差</td><td><span data-cell="39">第 39 格</span></td></tr>
+        <tr><td>到达延误一般比起飞延误小，说明航空公司会在空中“追时间”</td><td><span data-cell="42">第 42 格</span></td></tr>
+        <tr><td>丹佛、芝加哥、纽约等机场更容易晚，波特兰、奥克兰多准时；模型要分公司、分机场</td><td><span data-cell="55">第 55 格</span></td></tr>
+        <tr><td>平均延误随起飞时刻几乎单调上升，早上准点，傍晚可到约 30 分钟</td><td><span data-cell="68">第 68 格</span></td></tr>
+        <tr><td>不去掉 1 小时以上的极端延误，拟合出来的预测在全天都高出约 10 分钟（作者特意挑的样本少的例子）</td><td><span data-cell="79">第 79 格</span></td></tr>
+        <tr><td>随机切分时，最佳多项式阶数随切法变化；用交叉验证选出 2 阶</td><td><span data-cell="84">第 84 格</span>、<span data-cell="88">第 88 格</span></td></tr>
+        <tr><td>所有机场合起来拟合 2 阶多项式，测试集 MSE 大于 500（具体值随切分而变），原因是外推；加岭回归后分数回到合理范围</td><td><span data-cell="129">第 129 格</span>、<span data-cell="135">第 135 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">除了“MSE 大于 500”这一句，各模型在最后一周上的 MSE、换算成的“平均差几分钟”、误差超过 15 分钟的比例，都写在运行输出里。Kaggle 下载的源码不带输出，作者文字里也没写具体数值，这里不列分数。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给定公司、出发机场、计划起飞（和到达）时刻，估计这一类航班平均会晚多少分钟。</li>
+        <li><b>同类问题：</b>公交到站晚点、地铁高峰拥挤度、快递当日派送是否超时、医院门诊下午排队越来越长，都是“一天里越积越多”的排队问题。</li>
+        <li><b>可迁移的套路：</b>按时间切训练 / 测试（用过去预测未来）→ 先处理极端值 → 用交叉验证定模型复杂度 → 有外推风险时加正则化。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>时间整理：HHMM 转时刻、24:00 进到第二天 <span data-cell="14">第 14 格</span></li>
+        <li>分组统计与延误分级（&lt;5、5–45、&gt;45 分钟）<span data-cell="33">第 33 格</span></li>
+        <li>指数分布拟合 <code>a·exp(−x/b)</code> <span data-cell="36">第 36 格</span></li>
+        <li>线性回归 <span data-cell="75">第 75 格</span>、多项式回归 <span data-cell="81">第 81 格</span></li>
+        <li>K 折交叉验证 <span data-cell="85">第 85 格</span></li>
+        <li>独热编码 <span data-cell="108">第 108 格</span>、岭回归与网格搜索 <span data-cell="136">第 136 格</span></li>
+      </ul>
+      <h3>原 notebook 里值得注意的问题</h3>
+      <ul class="tight">
+        <li>第 163–164 格算“误差超过 15 分钟的比例”和画散点图时用的是 <code>predictions</code>，那是模型 2 在第 110 格的结果，不是模型 3 的 <code>result</code>，所以模型 3 的这两项结果是错的。<span data-cell="163">第 163 格</span></li>
+        <li>第 69 格训练集取 <code>&lt; 1 月 23 日</code>、测试集取 <code>&gt; 1 月 23 日</code>，23 日当天哪边都不在。<span data-cell="69">第 69 格</span></li>
+        <li>第 73 格 <code>df2.dropna(how='any')</code> 没有赋值回去，这一行不起作用（好在后面求平均会自动跳过空值）。<span data-cell="73">第 73 格</span></li>
+        <li>第 136、155 格用 <code>X_test</code> 挑选阶数和 α，它实际扮演的是验证集；第 90 格文字说 K = 50，代码里是 10 折。</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者用 1 月前三周预测最后一周，而不是随机打乱切分。如果随机切分，测试分数会变好还是变差？哪种更接近真实使用场景？</li>
+      <li>作者删掉了 1 小时以上的延误再建模。对旅客来说，最想提前知道的恰恰是“会不会晚很久”。这样做合理吗？还有什么别的处理办法？</li>
+      <li>平均延误一天里越来越大，你能想出几种原因？哪些是“连锁反应”，哪些是别的原因（比如天气、机场拥挤）？数据里哪一列能帮你验证？</li>
+      <li>模型只用了公司、机场和时刻，没有用天气、星期几（模型 3 算了 weekday 却没用）。你会先加哪个特征？为什么？</li>
+      <li>第 163 格用错了变量。如果你是审稿人，怎样的检查习惯能更早发现这种错误？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Fabien Daniel，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：U.S. Department of Transportation, 2015 Flight Delays and Cancellations。
+</footer>
+</main>
+
+<script src="nb/flight-delay-prediction.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const FAST = location.hash === "#fast";
+
+  /* ---------- 数学小工具 ---------- */
+  // 解线性方程组（高斯消元，部分主元）
+  function solve(A, b) {
+    const n = b.length, M = A.map((r, i) => r.concat([b[i]]));
+    for (let c = 0; c < n; c++) {
+      let p = c;
+      for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+      [M[c], M[p]] = [M[p], M[c]];
+      const d = M[c][c] || 1e-12;
+      for (let r = 0; r < n; r++) if (r !== c) { const f = M[r][c] / d; for (let k = c; k <= n; k++) M[r][k] -= f * M[c][k]; }
+    }
+    return M.map((r, i) => r[n] / (r[i] || 1e-12));
+  }
+  // 时刻（小时）缩放到 [-1,1] 附近
+  const U = (h) => (h - 14) / 8;
+  // 多项式（可选岭惩罚，不惩罚截距）
+  function polyfit(xs, ys, deg, alpha) {
+    const P = deg + 1, A = Array.from({ length: P }, () => new Array(P).fill(0)), b = new Array(P).fill(0);
+    xs.forEach((x, i) => {
+      const u = U(x), pw = [1];
+      for (let k = 1; k < P; k++) pw.push(pw[k - 1] * u);
+      for (let r = 0; r < P; r++) { b[r] += pw[r] * ys[i]; for (let c = 0; c < P; c++) A[r][c] += pw[r] * pw[c]; }
+    });
+    for (let k = 1; k < P; k++) A[k][k] += (alpha || 0) * xs.length + 1e-9;
+    return solve(A, b);
+  }
+  const peval = (w, x) => { const u = U(x); let s = 0, p = 1; w.forEach((c) => { s += c * p; p *= u; }); return s; };
+  const mse = (w, xs, ys) => xs.reduce((s, x, i) => s + (peval(w, x) - ys[i]) ** 2, 0) / Math.max(1, xs.length);
+  const hhmm = (h) => { const H = Math.floor(h), M = Math.round((h - H) * 60); return String(H).padStart(2, "0") + ":" + String(M).padStart(2, "0"); };
+
+  // 模拟“某公司某机场各起飞时刻的平均延误”：随时刻上升 + 噪声（示意）
+  function slotData(seed, n, h0, h1, noise) {
+    const r = K.rng(seed), xs = [], ys = [];
+    for (let i = 0; i < n; i++) {
+      const h = h0 + (h1 - h0) * (i + r() * 0.8) / n;
+      xs.push(h); ys.push(2 + 0.12 * (h - 6) * (h - 6) + K.randn(r) * noise);
+    }
+    return { xs, ys };
+  }
+
+  const steps = [
+    {
+      title: "580 万次航班先看个全貌", kicker: "第 4–8 格 · 读数据与概览",
+      html: `<p>作者读入 <code>flights.csv</code>，打印每列的类型和空值数量：2015 年记录了 580 多万次航班，31 个变量 <span data-cell="5">第 5 格</span>。</p><p>接着读入机场表，用 <code>value_counts()</code> 数出每个机场全年起飞了多少次，在美国地图上按次数分档画成大小、颜色不同的圆点（1–100、100–1000……一直到 100 万）。动画里的位置和数量是示意。</p>`,
+      cells: [4, 8], highlight: ["value_counts()", "size_limits"],
+      draw(svg, ctx) {
+        const r = K.rng(4), pts = [];
+        const lims = [1, 100, 1000, 10000, 100000, 1000000], cols = ["var(--c4)", "var(--c6)", "var(--c3)", "var(--c5)", "var(--c2)", "var(--c1)"];
+        K.svg(svg, "rect", { x: 40, y: 40, width: 470, height: 260, rx: 30, fill: "var(--panel-2)", stroke: "var(--line)" });
+        K.svg(svg, "text", { x: 275, y: 30, "text-anchor": "middle", "font-size": 13, class: "muted" }, "每个机场一年起飞多少次（示意地图）");
+        for (let i = 0; i < 70; i++) {
+          const n = Math.pow(10, 0.3 + r() * r() * 5.6), lvl = Math.min(4, Math.floor(Math.log10(n)));
+          pts.push({ x: 70 + r() * 410, y: 65 + r() * 210, lvl, n });
+        }
+        const els = pts.map((p) => K.svg(svg, "circle", { cx: p.x, cy: p.y, r: 0, fill: cols[p.lvl], opacity: 0.75, stroke: "var(--panel)" }));
+        for (let k = 0; k < 5; k++) {
+          K.svg(svg, "circle", { cx: 545, cy: 70 + k * 44, r: 3 + k * 3.2, fill: cols[k], opacity: 0.8 });
+          K.svg(svg, "text", { x: 575, y: 74 + k * 44, "font-size": 12 }, `${lims[k].toLocaleString()} – ${lims[k + 1].toLocaleString()} 次`);
+        }
+        ctx.tween(FAST ? 1 : 1800, (t) => els.forEach((e, i) => e.setAttribute("r", K.clamp(t * 70 - i, 0, 1) * (3 + pts[i].lvl * 3.2))));
+      },
+    },
+    {
+      title: "只留 1 月，把时刻整理好", at: 9, kicker: "第 9–22 格 · 清洗",
+      html: `<p>数据太大，作者只保留 1 月的航班 <span data-cell="9">第 9 格</span>。然后处理时间：</p><ul class="tight"><li>年、月、日三列合成一个日期；</li><li><code>SCHEDULED_DEPARTURE</code> 存的是 1435 这种数字，前两位是小时、后两位是分钟，转成 14:35；</li><li>2400 表示午夜，要换成“第二天 00:00”。</li></ul><p>作者还指出实际起飞时刻不带日期：计划 0:05、实际 23:54，分不清是提前还是晚了一整天，所以后面只用“延误分钟数”这一列 <span data-cell="17">第 17 格</span>。最后删掉不用的列，各列填充率都在 97% 以上，直接删掉含空值的行。</p>`,
+      cells: [10, 14, 22], highlight: ["df['MONTH'] == 1", "if chaine == 2400: chaine = 0", "days=1", "dropna"],
+      notes: { 18: "删掉滑行时间、各类延误原因、取消、改航等这次不用的列", 20: "填充率 = 非空行数 ÷ 总行数" },
+      draw(svg, ctx) {
+        const rows = [["0005", "0:05"], ["1435", "14:35"], ["0930", "9:30"], ["2400", "次日 0:00"], ["", "（空）"]];
+        K.svg(svg, "text", { x: 60, y: 36, "font-size": 13, class: "muted" }, "原始 HHMM 数字");
+        K.svg(svg, "text", { x: 420, y: 36, "font-size": 13, class: "muted" }, "整理后的时刻");
+        const out = [];
+        rows.forEach((d, i) => {
+          const y = 60 + i * 52;
+          K.node(svg, 60, y, 150, 38, d[0] || "  ", { fs: 16 });
+          const a = K.arrow(svg, 220, y + 19, 400, y + 19); a.style.opacity = 0;
+          const g = K.node(svg, 420, y, 170, 38, d[1], { fs: 15, fill: i === 4 ? "color-mix(in srgb, var(--bad) 15%, var(--panel))" : i === 3 ? "color-mix(in srgb, var(--warn) 18%, var(--panel))" : "color-mix(in srgb, var(--c3) 14%, var(--panel))", stroke: i === 4 ? "var(--bad)" : i === 3 ? "var(--warn)" : "var(--c3)" });
+          g.style.opacity = 0; out.push([a, g]);
+        });
+        const del = K.svg(svg, "text", { x: 600, y: 285, "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "← 删掉这一行");
+        del.style.opacity = 0;
+        const note = K.svg(svg, "text", { x: 600, y: 233, "font-size": 12, fill: "var(--warn)" }, "← 日期 +1 天");
+        note.style.opacity = 0;
+        (async () => {
+          for (let i = 0; i < out.length; i++) if (!(await ctx.tween(FAST ? 1 : 420, (t) => { out[i][0].style.opacity = t; out[i][1].style.opacity = t; }))) return;
+          if (!(await ctx.tween(FAST ? 1 : 400, (t) => { note.style.opacity = t; del.style.opacity = t; }))) return;
+        })();
+      },
+    },
+    {
+      title: "航空公司比一比：大多数准点，少数晚很久", at: 23, kicker: "第 23–34 格 · 分组统计",
+      html: `<p>作者按航空公司分组，算每家起飞延误的最小、最大、次数和平均 <span data-cell="29">第 29 格</span>，再画饼图和散点。结论：除夏威夷、阿拉斯加航空外，平均延误大约 <b>11 ± 7 分钟</b>；但偶尔会有几十个小时的极端延误 <span data-cell="32">第 32 格</span>。</p><p>然后把每次航班分成三档：<b>准点（&lt;5 分钟）</b>、<b>小延误（5–45 分钟）</b>、<b>大延误（&gt;45 分钟）</b> <span data-cell="33">第 33 格</span>。大延误只占百分之几，但各家比例差别不小。条形长度是示意。</p>`,
+      cells: [29, 33], highlight: ["get_stats", "delay_type = lambda x:((0,1)[x > 5],2)[x > 45]"],
+      draw(svg, ctx) {
+        const names = ["公司 A", "公司 B", "公司 C", "公司 D", "公司 E", "公司 F"];
+        const r = K.rng(12), data = names.map(() => { const big = 0.03 + r() * 0.07, small = 0.18 + r() * 0.17; return [1 - big - small, small, big]; });
+        const cols = ["var(--c3)", "var(--warn)", "var(--bad)"], labs = ["准点 <5 分钟", "小延误 5–45", "大延误 >45"];
+        labs.forEach((l, k) => { K.svg(svg, "rect", { x: 120 + k * 170, y: 16, width: 14, height: 14, fill: cols[k] }); K.svg(svg, "text", { x: 140 + k * 170, y: 28, "font-size": 12 }, l); });
+        const bars = data.map((d, i) => {
+          const y = 52 + i * 44;
+          K.svg(svg, "text", { x: 100, y: y + 20, "text-anchor": "end", "font-size": 13 }, names[i]);
+          return d.map((v, k) => K.svg(svg, "rect", { x: 110, y, width: 0, height: 28, fill: cols[k] }));
+        });
+        K.svg(svg, "text", { x: 110, y: 330, "font-size": 12, class: "muted" }, "每条 = 一家公司全部航班的 100%（示意比例）");
+        ctx.tween(FAST ? 1 : 1600, (t) => bars.forEach((bs, i) => { let x = 110; bs.forEach((b, k) => { const w = data[i][k] * 560 * t; b.setAttribute("x", x); b.setAttribute("width", w); x += w; }); }));
+      },
+    },
+    {
+      title: "延误分布：用指数曲线给公司排名", at: 35, kicker: "第 35–42 格 · 分布拟合",
+      html: `<p>只看 15 分钟到 3 小时之间的延误，画出每家公司的直方图，用 <code>f(x) = a·exp(−x/b)</code> 去拟合 <span data-cell="36">第 36 格</span>。曲线下降得越快（a 大、b 小），说明大延误越少。</p><p>按这个排名，夏威夷航空、达美航空最好，西南航空第三，SkyWest 最差 <span data-cell="39">第 39 格</span>。</p><p>作者还比较了起飞和到达延误：到达延误一般更小，说明飞机会在空中“追时间” <span data-cell="42">第 42 格</span>。</p>`,
+      cells: [36, 41], highlight: ["a * np.exp(-x/b)", "curve_fit"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [15, 180], [0, 1], { yticks: 0, xlabel: "起飞延误（分钟，示意直方图）" });
+        const r = K.rng(8), bTrue = 38, bins = [];
+        for (let x = 15; x < 180; x += 7.5) bins.push({ x, h: Math.exp(-(x - 15) / bTrue) * (0.9 + r() * 0.2) });
+        const rects = bins.map((d) => K.svg(svg, "rect", { x: ax.sx(d.x) + 1, y: ax.sy(0), width: ax.sx(d.x + 7.5) - ax.sx(d.x) - 2, height: 0, fill: "var(--c1)", opacity: 0.55 }));
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 3 });
+        const lab = K.svg(svg, "text", { x: 440, y: 70, "font-size": 15, "font-weight": 700, fill: "var(--c6)" }, "");
+        const curve = (b) => { let d = ""; for (let x = 15; x <= 180; x += 2) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(Math.exp(-(x - 15) / b)); return d; };
+        ctx.tween(FAST ? 1 : 900, (t) => rects.forEach((e, i) => { const h = (ax.sy(0) - ax.sy(bins[i].h)) * t; e.setAttribute("y", ax.sy(0) - h); e.setAttribute("height", h); }))
+          .then((ok) => ok && ctx.tween(FAST ? 1 : 1800, (t) => { const b = K.lerp(110, bTrue, t); path.setAttribute("d", curve(b)); lab.textContent = `拟合中：b = ${b.toFixed(0)} 分钟`; }))
+          .then((ok) => { if (ok) lab.textContent = `b = ${bTrue}：b 越小，大延误越少`; });
+      },
+    },
+    {
+      title: "机场和航线：哪里更容易晚", at: 43, kicker: "第 43–60 格 · 机场与航线",
+      html: `<p>1 月数据里有 312 个机场、14 家公司 <span data-cell="53">第 53 格</span>。作者先数每家公司飞了多少个机场，画出三家公司的航线地图；再算“每家公司 × 每个机场”的平均延误，画成热力图 <span data-cell="52">第 52 格</span>。</p><p>热力图告诉我们：丹佛、芝加哥、纽约更容易晚，波特兰、奥克兰多准时；同一个机场，不同公司也差很多 <span data-cell="55">第 55 格</span>。所以模型要<b>分公司、分机场</b>。</p><p>再细到航线（A→B）：同一出发地，去不同目的地的平均延误也不一样，比如纽约、迈阿密出发的航线在 0 到约 20 分钟之间 <span data-cell="60">第 60 格</span>。</p>`,
+      cells: [44, 52, 57], highlight: ["groupby(df['ORIGIN_AIRPORT'])", "trajet"],
+      draw(svg, ctx) {
+        const rowsN = ["丹佛", "芝加哥", "纽约", "迈阿密", "波特兰", "奥克兰"], colsN = ["A", "B", "C", "D", "E", "F", "G", "H"];
+        const r = K.rng(31), base = [0.75, 0.7, 0.65, 0.45, 0.15, 0.12], cb = colsN.map(() => r() * 0.4 - 0.15);
+        K.svg(svg, "text", { x: 360, y: 24, "text-anchor": "middle", "font-size": 13, class: "muted" }, "平均起飞延误：机场 × 航空公司（颜色越深越晚，示意）");
+        const cells = [];
+        rowsN.forEach((rn, i) => {
+          K.svg(svg, "text", { x: 150, y: 62 + i * 42, "text-anchor": "end", "font-size": 13 }, rn);
+          colsN.forEach((cn, j) => {
+            const v = K.clamp(base[i] + cb[j] + (r() - 0.5) * 0.25, 0, 1);
+            const c = K.svg(svg, "rect", { x: 160 + j * 52, y: 40 + i * 42, width: 48, height: 38, rx: 4, fill: K.heat(v), opacity: 0 });
+            cells.push({ c, j });
+          });
+        });
+        colsN.forEach((cn, j) => K.svg(svg, "text", { x: 184 + j * 52, y: 312, "text-anchor": "middle", "font-size": 12 }, "公司" + cn));
+        K.svg(svg, "text", { x: 600, y: 80, "font-size": 12 }, "↑ 行看机场");
+        K.svg(svg, "text", { x: 600, y: 100, "font-size": 12 }, "→ 列看公司");
+        ctx.tween(FAST ? 1 : 1800, (t) => cells.forEach((d) => (d.c.style.opacity = K.clamp(t * 9 - d.j, 0, 1))));
+      },
+    },
+    {
+      title: "一天之中，延误越积越多", at: 61, kicker: "第 61–68 格 · 时间规律",
+      html: `<p>作者挑西南航空在一个机场的航班，按日期画出延误，发现<b>白天和夜里交替的周期</b>：夜里机场几乎停摆，第二天重新开始 <span data-cell="64">第 64 格</span>。</p><p>把整个月按“几点起飞”汇总，再用二次曲线拟合 <span data-cell="65">第 65 格</span>：早上基本准点，平均延误几乎一路涨到傍晚的约 30 分钟，换别的机场和公司也差不多 <span data-cell="68">第 68 格</span>。</p><p>一个直观原因是<b>连锁反应</b>：同一架飞机一天要飞好几段，上一段晚到，下一段就晚飞。动画里的飞机在每一站都把晚点“传”给下一班。下面的实验 A 可以亲手模拟。</p>`,
+      cells: [62, 65], highlight: ["func2", "curve_fit"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 13, class: "muted" }, "一架飞机一天飞 5 段：灰 = 计划，橙 = 实际（示意）");
+        const ax = K.axes(svg, { x: 60, y: 40, w: 620, h: 120 }, [6, 24], [0, 1], { yticks: 0, xticks: 6, xfmt: (v) => v.toFixed(0) + "点" });
+        const legs = [], own = [8, 3, 12, 2, 6];
+        let delay = 0;
+        for (let k = 0; k < 5; k++) {
+          const s = 6.5 + k * 3.3, d = 2.2;
+          delay = Math.max(0, delay - 10) + own[k];  // 过站缓冲 10 分钟
+          legs.push({ s, d, delay });
+        }
+        legs.forEach((L, k) => {
+          K.svg(svg, "rect", { x: ax.sx(L.s), y: 70, width: ax.sx(L.s + L.d) - ax.sx(L.s), height: 18, rx: 4, fill: "var(--ink-3)", opacity: 0.35 });
+          L.el = K.svg(svg, "rect", { x: ax.sx(L.s), y: 100, width: ax.sx(L.s + L.d) - ax.sx(L.s), height: 18, rx: 4, fill: "var(--warn)", opacity: 0 });
+          L.tx = K.svg(svg, "text", { x: ax.sx(L.s), y: 136, "font-size": 12, fill: "var(--warn)" }, "");
+        });
+        const ax2 = K.axes(svg, { x: 60, y: 190, w: 620, h: 110 }, [6, 24], [0, 35], { xticks: 6, yticks: 2, xfmt: (v) => v.toFixed(0) + "点", ylabel: "平均延误" });
+        const line = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 3 });
+        (async () => {
+          for (const L of legs) {
+            if (!(await ctx.tween(FAST ? 1 : 500, (t) => { L.el.style.opacity = t; L.el.setAttribute("x", ax.sx(L.s + (L.delay / 60) * t)); }))) return;
+            L.tx.textContent = `晚 ${L.delay} 分`;
+          }
+          await ctx.tween(FAST ? 1 : 1200, (t) => { let d = ""; for (let h = 6; h <= 6 + 18 * t; h += 0.25) d += (d ? "L" : "M") + ax2.sx(h) + "," + ax2.sy(Math.min(35, 1 + 0.1 * (h - 6) * (h - 6))); line.setAttribute("d", d); });
+        })();
+      },
+    },
+    {
+      title: "按日期切分：前三周学，最后一周考", at: 69, kicker: "第 69 格 · 训练 / 测试",
+      html: `<p>建模目标：用 3 周的数据预测接下来一周的延误 <span data-cell="68">第 68 格</span>。于是 1 月 23 日之前的航班做训练集，之后的做测试集 <span data-cell="69">第 69 格</span>。</p><p>这比随机打乱更贴近真实用法：我们总是用过去预测未来。</p><p class="callout warn">细节：代码写的是 <code>&lt; 1月23日</code> 和 <code>&gt; 1月23日</code>，23 日当天的航班两边都没有放进去。</p>`,
+      cells: [69], highlight: ["datetime.date(2015, 1, 23)"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 360, y: 26, "text-anchor": "middle", "font-size": 14, "font-weight": 700 }, "2015 年 1 月");
+        const els = [];
+        for (let d = 1; d <= 31; d++) {
+          const col = (d + 3) % 7, row = Math.floor((d + 3) / 7);  // 1 月 1 日是周四
+          const fill = d < 23 ? "color-mix(in srgb, var(--c1) 22%, var(--panel))" : d === 23 ? "var(--panel-2)" : "color-mix(in srgb, var(--c2) 25%, var(--panel))";
+          const g = K.node(svg, 130 + col * 66, 40 + row * 52, 60, 44, String(d), { fill, stroke: d === 23 ? "var(--bad)" : "var(--line)", fs: 15 });
+          g.style.opacity = 0; els.push(g);
+        }
+        K.svg(svg, "text", { x: 20, y: 330, "font-size": 13, fill: "var(--c1)", "font-weight": 700 }, "■ 训练：1–22 日");
+        K.svg(svg, "text", { x: 200, y: 330, "font-size": 13, fill: "var(--c2)", "font-weight": 700 }, "■ 测试：24–31 日");
+        K.svg(svg, "text", { x: 380, y: 330, "font-size": 13, fill: "var(--bad)" }, "□ 23 日：两边都没取到");
+        ctx.tween(FAST ? 1 : 1600, (t) => els.forEach((e, i) => (e.style.opacity = K.clamp(t * 31 - i, 0, 1))));
+      },
+    },
+    {
+      title: "模型 1 的两个陷阱：样本少、极端值", at: 70, kicker: "第 70–79 格 · 线性回归",
+      html: `<p>先做最简单的“玩具模型”：<b>只看一家公司（美国航空）在一个机场</b>，把同一起飞时刻的航班延误取平均，再用<b>线性回归</b>画一条直线 <span data-cell="75">第 75 格</span>。</p><p>作者马上指出两个坑：</p><ul class="tight"><li>有的机场一个月只有几次航班，根本没法回归 <span data-cell="72">第 72 格</span>；</li><li>几小时的极端延误（天气、故障）会把平均值拉高。以费城为例，不去掉超过 1 小时的延误，直线在全天都高出约 10 分钟 <span data-cell="79">第 79 格</span>。</li></ul><p>动画：红色的两个极端点出现时，蓝线被拽高；去掉它们后得到绿线。</p>`,
+      cells: [71, 73, 77], highlight: ["x if x < 60 else np.nan", "LinearRegression"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 20, w: 600, h: 270 }, [6, 22], [-10, 200], { xticks: 8, yticks: 4, xfmt: (v) => v.toFixed(0) + "点", ylabel: "延误（分钟）" });
+        const r = K.rng(5), xs = [], ys = [];
+        for (let i = 0; i < 26; i++) { const h = 6.5 + i * 0.58; xs.push(h); ys.push(Math.max(-5, 2 + 1.6 * (h - 6) + K.randn(r) * 9)); }
+        const ext = [[9.5, 180], [17, 160]];
+        xs.forEach((x, i) => K.svg(svg, "circle", { cx: ax.sx(x), cy: ax.sy(ys[i]), r: 4, fill: "var(--ink-3)", opacity: 0.7 }));
+        const ee = ext.map((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(p[1]), r: 0, fill: "var(--bad)" }));
+        const fitL = (X, Y) => { const w = polyfit(X, Y, 1, 0); return K.svg(svg, "line", { x1: ax.sx(6), y1: ax.sy(peval(w, 6)), x2: ax.sx(22), y2: ax.sy(peval(w, 22)), "stroke-width": 3, opacity: 0 }); };
+        const blue = fitL(xs.concat(ext.map((p) => p[0])), ys.concat(ext.map((p) => p[1]))); blue.style.stroke = "var(--c1)";
+        const green = fitL(xs, ys); green.style.stroke = "var(--c3)";
+        const t1 = K.svg(svg, "text", { x: 80, y: 40, "font-size": 13, fill: "var(--c1)", "font-weight": 700 }, "含极端延误的直线");
+        const t2 = K.svg(svg, "text", { x: 80, y: 60, "font-size": 13, fill: "var(--c3)", "font-weight": 700 }, "去掉 >1 小时后的直线");
+        t1.style.opacity = t2.style.opacity = 0;
+        ctx.tween(FAST ? 1 : 600, (t) => ee.forEach((e) => e.setAttribute("r", 6 * t)))
+          .then((ok) => ok && ctx.tween(FAST ? 1 : 700, (t) => { blue.style.opacity = t; t1.style.opacity = t; }))
+          .then((ok) => ok && ctx.wait(FAST ? 1 : 600))
+          .then((ok) => ok && ctx.tween(FAST ? 1 : 800, (t) => { ee.forEach((e) => (e.style.opacity = 1 - 0.8 * t)); green.style.opacity = t; t2.style.opacity = t; }));
+      },
+    },
+    {
+      title: "多项式阶数：切法不同，结论不同", at: 80, kicker: "第 80–84 格 · 多项式回归",
+      html: `<p>直线太死板，可以换成弯曲的<b>多项式</b>：1 阶是直线，2 阶是抛物线，阶数越高越弯。阶数怎么定？最直接的办法是切出 30% 做测试，看哪个阶数测试误差（MSE，误差平方的平均）最小。</p><p>作者在纳什维尔机场上反复随机切分，发现：<b>换一种切法，“最佳阶数”就可能从 1 变成 2、3</b> <span data-cell="84">第 84 格</span>。原因是数据点少，一刀切下去，测试集里的点碰巧落在哪段时刻，结论就跟着变 <span data-cell="80">第 80 格</span>。</p>`,
+      cells: [81, 83], highlight: ["train_test_split(self.X, self.Y, test_size=0.3)", "PolynomialFeatures"],
+      draw(svg, ctx) {
+        const D = slotData(77, 22, 6, 22, 5);
+        const cols = ["var(--c1)", "var(--c3)", "var(--c6)"];
+        const panels = [0, 1, 2].map((p) => {
+          const x0 = 20 + p * 235;
+          const ax = K.axes(svg, { x: x0 + 20, y: 40, w: 200, h: 220 }, [6, 22], [-10, 40], { xticks: 0, yticks: 0 });
+          return { ax, x0 };
+        });
+        const seeds = [3, 11, 29];
+        const res = [];
+        panels.forEach((P, p) => {
+          const r = K.rng(seeds[p]);
+          const isTe = D.xs.map(() => r() < 0.3);
+          const tx = D.xs.filter((_, i) => !isTe[i]), ty = D.ys.filter((_, i) => !isTe[i]);
+          const vx = D.xs.filter((_, i) => isTe[i]), vy = D.ys.filter((_, i) => isTe[i]);
+          const fits = [1, 2, 3].map((n) => polyfit(tx, ty, n, 0));
+          const sc = fits.map((w) => mse(w, vx, vy));
+          const best = sc.indexOf(Math.min(...sc));
+          D.xs.forEach((x, i) => K.svg(svg, "circle", { cx: P.ax.sx(x), cy: P.ax.sy(D.ys[i]), r: 3, fill: isTe[i] ? "var(--c2)" : "var(--ink-3)", opacity: 0.8 }));
+          const paths = fits.map((w, k) => { let d = ""; for (let h = 6; h <= 22; h += 0.25) d += (d ? "L" : "M") + P.ax.sx(h) + "," + P.ax.sy(K.clamp(peval(w, h), -10, 40)); return K.svg(svg, "path", { d, fill: "none", stroke: cols[k], "stroke-width": k === best ? 3.5 : 1.2, opacity: 0 }); });
+          const lab = K.svg(svg, "text", { x: P.x0 + 120, y: 290, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: cols[best] }, `这一刀：最佳 n = ${best + 1}`);
+          K.svg(svg, "text", { x: P.x0 + 120, y: 30, "text-anchor": "middle", "font-size": 12, class: "muted" }, `随机切分 #${p + 1}`);
+          lab.style.opacity = 0;
+          res.push({ paths, lab });
+        });
+        K.svg(svg, "text", { x: 20, y: 325, "font-size": 12, class: "muted" }, "灰点=训练，橙点=测试；蓝/绿/红=1/2/3 阶，粗线=这次测试 MSE 最小（浏览器内现算，数据为示意）");
+        (async () => {
+          for (const R of res) {
+            if (!(await ctx.tween(FAST ? 1 : 700, (t) => R.paths.forEach((p) => (p.style.opacity = t))))) return;
+            R.lab.style.opacity = 1;
+          }
+        })();
+      },
+    },
+    {
+      title: "交叉验证：轮流当考官，选出 2 阶", at: 85, kicker: "第 85–101 格 · K 折交叉验证",
+      html: `<p>解决办法是<b>K 折交叉验证</b>：把数据分成 10 份，轮流拿 1 份当测试、其余 9 份训练，10 次的误差取平均。每个点都当过一次“考题”，结论不再取决于某一刀切在哪 <span data-cell="86">第 86 格</span>。</p><p>对 1–7 阶逐个算交叉验证 MSE，作者得到 <b>2 阶最好</b> <span data-cell="88">第 88 格</span>，再用全部训练数据拟合 2 阶曲线，最后在 1 月最后一周上测试，并把 MSE 开根号换算成“平均差几分钟” <span data-cell="99">第 99 格</span>。</p>`,
+      cells: [85, 87, 98], highlight: ["cross_val_score", "nb_folds = 10", "np.sqrt(score)"],
+      draw(svg, ctx) {
+        const K10 = 10, rows = [];
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 13, class: "muted" }, "10 折交叉验证：每一轮换一份当测试（橙色）");
+        for (let k = 0; k < K10; k++) {
+          const cells = [];
+          for (let j = 0; j < K10; j++) cells.push(K.svg(svg, "rect", { x: 70 + j * 46, y: 36 + k * 28, width: 42, height: 22, rx: 3, fill: "var(--panel-2)", stroke: "var(--line)" }));
+          K.svg(svg, "text", { x: 60, y: 52 + k * 28, "text-anchor": "end", "font-size": 11, class: "muted" }, `第${k + 1}轮`);
+          rows.push(cells);
+        }
+        const sc = K.svg(svg, "text", { x: 560, y: 120, "font-size": 14, "font-weight": 700 }, "");
+        const sc2 = K.svg(svg, "text", { x: 560, y: 150, "font-size": 12, class: "muted" }, "");
+        (async () => {
+          for (let k = 0; k < K10; k++) {
+            if (!(await ctx.tween(FAST ? 1 : 260, (t) => rows[k].forEach((c, j) => { c.style.fill = j === k ? `color-mix(in srgb, var(--c2) ${Math.round(60 * t)}%, var(--panel))` : `color-mix(in srgb, var(--c1) ${Math.round(25 * t)}%, var(--panel))`; })))) return;
+            sc.textContent = `已完成 ${k + 1} / 10 轮`;
+          }
+          sc2.textContent = "10 个误差取平均 = CV 分数";
+        })();
+      },
+    },
+    {
+      title: "模型 2：一家公司、所有机场", at: 102, kicker: "第 102–121 格 · 独热编码",
+      html: `<p>一个机场一个模型，样本少的机场预测会很差。作者改为<b>美国航空的所有机场一起拟合</b>，让数据多的机场“帮”数据少的机场 <span data-cell="102">第 102 格</span>。</p><p>机场是名字，不能直接放进公式，于是用<b>独热编码</b>：有 M 个机场就开 M 列，是哪个机场那一列填 1，其余填 0 <span data-cell="107">第 107 格</span>。再拼上起飞时刻，做线性回归和 2 阶多项式回归。</p><p>作者用“预测和实际差超过 15 分钟的比例”直观看效果，发现两种模型都<b>低估大延误</b> <span data-cell="113">第 113 格</span>，多项式只是略好一点 <span data-cell="118">第 118 格</span>。</p>`,
+      cells: [103, 106, 108, 110], highlight: ["OneHotEncoder", "np.hstack((onehot_encoded, b))"],
+      draw(svg, ctx) {
+        const ap = ["ORD", "DFW", "MIA", "ORD", "LAX", "DFW"], uniq = ["DFW", "LAX", "MIA", "ORD"], tm = ["7:10", "9:45", "12:30", "15:05", "18:20", "21:40"];
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 13, class: "muted" }, "机场名 → 独热编码的 0/1 列 + 起飞时刻");
+        K.node(svg, 30, 40, 90, 30, "机场", { bold: true }); K.node(svg, 125, 40, 90, 30, "时刻", { bold: true });
+        ap.forEach((a, i) => { K.node(svg, 30, 76 + i * 38, 90, 32, a); K.node(svg, 125, 76 + i * 38, 90, 32, tm[i]); });
+        const heads = uniq.map((u, j) => { const g = K.node(svg, 300 + j * 80, 40, 74, 30, u, { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" }); g.style.opacity = 0; return g; });
+        const th = K.node(svg, 630, 40, 70, 30, "时刻", { bold: true }); th.style.opacity = 0;
+        const cells = [];
+        ap.forEach((a, i) => {
+          uniq.forEach((u, j) => { const g = K.node(svg, 300 + j * 80, 76 + i * 38, 74, 32, a === u ? "1" : "0", { fill: a === u ? "color-mix(in srgb, var(--c3) 25%, var(--panel))" : "var(--panel)", bold: a === u }); g.style.opacity = 0; cells.push({ g, i }); });
+          const g = K.node(svg, 630, 76 + i * 38, 70, 32, tm[i]); g.style.opacity = 0; cells.push({ g, i });
+        });
+        const arr = K.arrow(svg, 222, 180, 290, 180); arr.style.opacity = 0;
+        ctx.tween(FAST ? 1 : 500, (t) => { arr.style.opacity = t; heads.forEach((h) => (h.style.opacity = t)); th.style.opacity = t; })
+          .then((ok) => ok && ctx.tween(FAST ? 1 : 1500, (t) => cells.forEach((c) => (c.g.style.opacity = K.clamp(t * 6 - c.i, 0, 1)))));
+      },
+    },
+    {
+      title: "过拟合与岭回归", at: 122, kicker: "第 122–147 格 · 正则化",
+      html: `<p>前面的模型都是在训练数据上自己考自己。作者这次切出 30% 做测试：2 阶多项式在测试集上 <b>MSE 大于 500</b>，非常糟 <span data-cell="129">第 129 格</span>。</p><p>逐项检查误差后发现：测试集里有些数据在训练集里找不到同类，模型只能<b>外推</b>；过拟合的模型系数很大，一外推就飞出天际 <span data-cell="131">第 131 格</span>。</p><p>解决办法是<b>岭回归</b>：在误差之外，再对“系数太大”罚分 <span data-cell="132">第 132 格</span>。然后用网格搜索在阶数 1–2、α 从 0 到 1.8 之间挑最好的组合 <span data-cell="136">第 136 格</span>，最后同样在 1 月最后一周上测试。动画：没有惩罚的曲线在数据范围外剧烈甩动，加了惩罚后被“拉平”。</p>`,
+      cells: [128, 132, 136, 144], highlight: ["Ridge(alpha=0.3,normalize=True)", "parameters = [alpha/10, pol_order]"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 20, w: 600, h: 270 }, [5, 24], [-20, 80], { xticks: 0, yticks: 4, ylabel: "平均延误" });
+        const D = slotData(9, 14, 6, 19, 4);
+        D.xs.forEach((x, i) => K.svg(svg, "circle", { cx: ax.sx(x), cy: ax.sy(D.ys[i]), r: 4, fill: "var(--ink-3)" }));
+        K.svg(svg, "rect", { x: ax.sx(19.5), y: 20, width: ax.sx(24) - ax.sx(19.5), height: 270, fill: "var(--warn)", opacity: 0.08 });
+        K.svg(svg, "text", { x: ax.sx(21.7), y: 40, "text-anchor": "middle", "font-size": 12, fill: "var(--warn)" }, "训练里没有的时段");
+        const w0 = polyfit(D.xs, D.ys, 7, 0), w1 = polyfit(D.xs, D.ys, 7, 0.02);
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 3 });
+        const lab = K.svg(svg, "text", { x: 80, y: 40, "font-size": 14, "font-weight": 700 }, "");
+        const draw = (t) => { let d = ""; for (let h = 5.5; h <= 23.5; h += 0.1) { const y = K.clamp(K.lerp(peval(w0, h), peval(w1, h), t), -20, 80); d += (d ? "L" : "M") + ax.sx(h) + "," + ax.sy(y); } path.setAttribute("d", d); };
+        draw(0); lab.textContent = "7 阶，无惩罚：一到外推区就乱甩"; lab.style.fill = "var(--c6)";
+        ctx.wait(FAST ? 1 : 1400).then((ok) => ok && ctx.tween(FAST ? 1 : 1800, (t) => { draw(t); path.style.stroke = t > 0.5 ? "var(--c3)" : "var(--c6)"; }))
+          .then((ok) => { if (ok) { lab.textContent = "加岭回归惩罚：曲线被拉平，外推稳多了"; lab.style.fill = "var(--c3)"; } });
+        K.svg(svg, "text", { x: 60, y: 325, "font-size": 12, class: "muted" }, "两条曲线都是浏览器里用同一批示意数据现场拟合的");
+      },
+    },
+    {
+      title: "模型 3：把到达时间也算进来", at: 148, kicker: "第 148–166 格 · 加入目的地信息",
+      html: `<p>模型 2 只按起飞时刻分组，去不同目的地的航班被混在一起。模型 3 改按“起飞时刻 + 到达时刻 + 出发机场”分组，相当于把航线信息也带进来 <span data-cell="148">第 148 格</span>。特征 = 出发机场独热编码 + 起飞时刻 + 到达时刻 <span data-cell="152">第 152 格</span>。同样先删 1 小时以上的延误，用网格搜索挑阶数和 α，在最后一周上测试。</p><p class="callout warn">原 notebook 的错误：第 163–164 格计算“误差超过 15 分钟的比例”和画散点图时，用的是模型 2 留下的变量 <code>predictions</code>，而模型 3 的预测保存在 <code>result</code> 里。所以这两项结果不是模型 3 的。另外第 149 格算了星期几 <code>weekday</code>，但后面没有用。</p><p>作者在结语里强调了正则化的重要性，并提到 Lasso、Elastic Net 等其他正则方法也许更合适 <span data-cell="165">第 165 格</span>。</p>`,
+      cells: [149, 152, 160, 163], highlight: ["heure_arrivee", "predictions[i]", "weekday"],
+      notes: { 164: "⚠ 这一格同样用的是 predictions（模型 2 的结果），画出来的不是模型 3" },
+      draw(svg, ctx) {
+        const parts = [["出发机场 0/1 列 ×M", "var(--c1)", 260], ["起飞时刻", "var(--c3)", 120], ["到达时刻（新）", "var(--c2)", 140]];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "模型 2 与模型 3 的输入对比");
+        K.svg(svg, "text", { x: 30, y: 78, "font-size": 13, "font-weight": 700 }, "模型 2");
+        K.svg(svg, "text", { x: 30, y: 158, "font-size": 13, "font-weight": 700 }, "模型 3");
+        let x = 100; parts.slice(0, 2).forEach((p) => { K.node(svg, x, 56, p[2] - 6, 36, p[0], { fill: `color-mix(in srgb, ${p[1]} 18%, var(--panel))`, stroke: p[1] }); x += p[2]; });
+        x = 100; const g3 = parts.map((p) => { const g = K.node(svg, x, 136, p[2] - 6, 36, p[0], { fill: `color-mix(in srgb, ${p[1]} 18%, var(--panel))`, stroke: p[1] }); x += p[2]; g.style.opacity = 0; return g; });
+        const bug = K.node(svg, 100, 220, 520, 70, "第 163 格：abs(val − predictions[i]) > 15\npredictions 是模型 2 的旧结果 → 统计对象错了", { fill: "color-mix(in srgb, var(--bad) 14%, var(--panel))", stroke: "var(--bad)" });
+        bug.style.opacity = 0;
+        (async () => {
+          for (const g of g3) if (!(await ctx.tween(FAST ? 1 : 450, (t) => (g.style.opacity = t)))) return;
+          await ctx.wait(FAST ? 1 : 500);
+          await ctx.tween(FAST ? 1 : 600, (t) => (bug.style.opacity = t));
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：延误的连锁反应 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "legs", label: "每架飞机一天飞几段", min: 2, max: 8, step: 1, value: 5 },
+      { id: "buf", label: "过站时预留的富余时间（分钟）", min: 0, max: 40, step: 1, value: 10 },
+      { id: "p", label: "每一段遇到意外（天气、故障、旅客晚到）的概率", min: 0.05, max: 0.5, step: 0.01, value: 0.2, fmt: (v) => Math.round(v * 100) + "%" },
+      { id: "seed", label: "换一批随机", button: true },
+    ],
+    note: "浏览器里模拟 500 架飞机一天的航班：每段自身的延误随机产生，上一段晚到的时间扣掉富余时间后传给下一段。柱子是各时段起飞航班的平均起飞延误。“准点”按作者第 33 格的划分：延误 < 5 分钟。",
+    render(svg, v) {
+      const r = K.rng(500 + v.seed * 13), N = 500, legs = v.legs;
+      const bins = Array.from({ length: 16 }, () => ({ s: 0, n: 0 }));
+      let first = 0, last = 0, ontime = 0, total = 0;
+      let example = [];
+      for (let a = 0; a < N; a++) {
+        let carry = 0; const start = 6 + r() * 3, slot = (21.5 - start) / (legs - 1);  // 首班 6–9 点之间，最后一班在 21:30 前
+        for (let k = 0; k < legs; k++) {
+          const own = r() < v.p ? -Math.log(1 - r()) * 35 : Math.max(0, K.randn(r) * 3);
+          const dep = Math.max(0, carry - (k ? v.buf : 0)) + own;
+          const h = start + k * slot;
+          const bi = K.clamp(Math.floor(h - 6), 0, 15);
+          bins[bi].s += dep; bins[bi].n++;
+          if (k === 0) first += dep; if (k === legs - 1) last += dep;
+          if (dep < 5) ontime++; total++;
+          if (a === 0) example.push({ h, dep });
+          carry = Math.max(0, dep - 5);  // 空中能追回约 5 分钟
+        }
+      }
+      const ax = K.axes(svg, { x: 55, y: 20, w: 560, h: 230 }, [6, 22], [0, 60], { xticks: 8, yticks: 4, xfmt: (x) => x.toFixed(0) + "点", ylabel: "平均起飞延误（分钟）" });
+      bins.forEach((b, i) => {
+        if (!b.n) return;
+        const m = Math.min(60, b.s / b.n);
+        K.svg(svg, "rect", { x: ax.sx(6 + i) + 3, y: ax.sy(m), width: ax.sx(7) - ax.sx(6) - 6, height: ax.sy(0) - ax.sy(m), rx: 3, fill: K.heat(m / 45) , stroke: "var(--c1)", "stroke-width": 0.6 });
+      });
+      // 示例飞机
+      K.svg(svg, "text", { x: 55, y: 292, "font-size": 12, class: "muted" }, "其中一架飞机的每段起飞延误：");
+      example.forEach((e, k) => {
+        K.svg(svg, "rect", { x: 55 + k * 72, y: 302, width: 64, height: 30, rx: 5, fill: e.dep < 5 ? "color-mix(in srgb, var(--c3) 20%, var(--panel))" : "color-mix(in srgb, var(--warn) 25%, var(--panel))", stroke: e.dep < 5 ? "var(--c3)" : "var(--warn)" });
+        K.svg(svg, "text", { x: 87 + k * 72, y: 322, "text-anchor": "middle", "font-size": 12 }, `${hhmm(e.h)} ${Math.round(e.dep)}′`);
+        if (k) K.svg(svg, "text", { x: 52 + k * 72, y: 322, "text-anchor": "middle", "font-size": 11, class: "muted" }, "→");
+      });
+      return { readout: [
+        { k: "第一段平均延误", v: (first / N).toFixed(1) + " 分" },
+        { k: "最后一段平均延误", v: (last / N).toFixed(1) + " 分", color: last > first * 1.5 ? "var(--bad)" : "var(--good)" },
+        { k: "准点率（<5 分钟）", v: ((ontime / total) * 100).toFixed(1) + "%" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：随机切分 vs 交叉验证选阶数 ---------- */
+  const DB = slotData(2014, 30, 6, 22, 5.5);
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "deg", label: "多项式阶数 n（曲线显示用）", min: 1, max: 7, step: 1, value: 2 },
+      { id: "split", label: "重新随机切一刀（70% 训练 / 30% 测试）", button: true },
+    ],
+    note: "30 个点是示意的“各起飞时刻平均延误”（真实规律是 2 阶抛物线 + 噪声）。右侧柱子是现场算出的 1–7 阶误差：橙色 = 这一刀的测试 MSE，蓝色 = 10 折交叉验证 MSE（折的划分固定）。多点几次“重新切”，看橙色的最低点跳不跳、蓝色的最低点跳不跳。",
+    render(svg, v) {
+      const r = K.rng(77 + v.split * 31), n = DB.xs.length;
+      const isTe = DB.xs.map(() => r() < 0.3);
+      const pick = (m) => [DB.xs.filter((_, i) => m(i)), DB.ys.filter((_, i) => m(i))];
+      const [tx, ty] = pick((i) => !isTe[i]), [vx, vy] = pick((i) => isTe[i]);
+      const splitScore = [], cvScore = [];
+      for (let d = 1; d <= 7; d++) {
+        splitScore.push(mse(polyfit(tx, ty, d, 0), vx, vy));
+        let s = 0;
+        for (let f = 0; f < 10; f++) { const [a, b] = pick((i) => i % 10 !== f), [c, e] = pick((i) => i % 10 === f); s += mse(polyfit(a, b, d, 0), c, e); }
+        cvScore.push(s / 10);
+      }
+      const ax = K.axes(svg, { x: 45, y: 20, w: 330, h: 300 }, [6, 22], [-15, 45], { xticks: 4, yticks: 4, xfmt: (x) => x.toFixed(0) + "点", ylabel: "平均延误（分钟）" });
+      const w = polyfit(tx, ty, v.deg, 0);
+      let d = ""; for (let h = 6; h <= 22; h += 0.1) d += (d ? "L" : "M") + ax.sx(h) + "," + ax.sy(K.clamp(peval(w, h), -15, 45));
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+      DB.xs.forEach((x, i) => K.svg(svg, "circle", { cx: ax.sx(x), cy: ax.sy(DB.ys[i]), r: 4, fill: isTe[i] ? "var(--c2)" : "var(--ink-3)", stroke: "var(--panel)" }));
+      K.svg(svg, "text", { x: 50, y: 365, "font-size": 12, class: "muted" }, "灰点=训练  橙点=测试  红线=用训练点拟合的 n 阶曲线");
+      // 右侧柱状
+      const mx = Math.max(...splitScore.slice(0, 7), ...cvScore) , cap = Math.min(mx, 120);
+      const bx = 420, bw = 200, bh = 300;
+      K.svg(svg, "text", { x: bx + bw / 2, y: 16, "text-anchor": "middle", "font-size": 12 }, "各阶数的 MSE（越低越好）");
+      const bs = splitScore.indexOf(Math.min(...splitScore)), bc = cvScore.indexOf(Math.min(...cvScore));
+      for (let k = 0; k < 7; k++) {
+        const y = 30 + k * 40, s1 = Math.min(splitScore[k], cap) / cap * (bw - 40), s2 = Math.min(cvScore[k], cap) / cap * (bw - 40);
+        K.svg(svg, "text", { x: bx - 4, y: y + 16, "text-anchor": "end", "font-size": 12, "font-weight": k + 1 === v.deg ? 700 : 400 }, "n=" + (k + 1));
+        K.svg(svg, "rect", { x: bx, y, width: s1, height: 13, fill: "var(--c2)", opacity: k === bs ? 1 : 0.45 });
+        K.svg(svg, "rect", { x: bx, y: y + 15, width: s2, height: 13, fill: "var(--c1)", opacity: k === bc ? 1 : 0.45 });
+        if (k === bs) K.svg(svg, "text", { x: bx + s1 + 4, y: y + 11, "font-size": 11, fill: "var(--c2)" }, "最低");
+        if (k === bc) K.svg(svg, "text", { x: bx + s2 + 4, y: y + 26, "font-size": 11, fill: "var(--c1)" }, "最低");
+      }
+      return { readout: [
+        { k: "这一刀选出的阶数", v: "n = " + (bs + 1), color: "var(--c2)" },
+        { k: "交叉验证选出的阶数", v: "n = " + (bc + 1), color: "var(--c1)" },
+        { k: `n=${v.deg} 测试 MSE`, v: splitScore[v.deg - 1].toFixed(1) },
+        { k: `n=${v.deg} CV MSE`, v: cvScore[v.deg - 1].toFixed(1) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：岭回归与外推 ---------- */
+  const TR = slotData(31, 22, 6, 19, 5), TE = slotData(32, 8, 19, 23, 5);
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "deg", label: "多项式阶数 n", min: 1, max: 8, step: 1, value: 6 },
+      { id: "la", label: "岭回归惩罚强度 α（最左 = 不惩罚）", min: -6, max: 1, step: 0.1, value: -6, fmt: (v) => (v <= -5.95 ? "0（普通多项式）" : Math.pow(10, v).toExponential(1)) },
+    ],
+    note: "训练点只覆盖 6–19 点（灰），测试点在 19–23 点（橙），模型必须外推，就像作者第 131 格说的情况。先把阶数调到 6–8、α 拉到最左，看测试 MSE；再慢慢把 α 往右拉。拉太大又会怎样？",
+    render(svg, v) {
+      const alpha = v.la <= -5.95 ? 0 : Math.pow(10, v.la);
+      const w = polyfit(TR.xs, TR.ys, v.deg, alpha);
+      const ax = K.axes(svg, { x: 55, y: 20, w: 560, h: 290 }, [6, 23], [-20, 90], { xticks: 8, yticks: 4, xfmt: (x) => x.toFixed(0) + "点", ylabel: "平均延误（分钟）" });
+      K.svg(svg, "rect", { x: ax.sx(19), y: 20, width: ax.sx(23) - ax.sx(19), height: 290, fill: "var(--warn)", opacity: 0.08 });
+      let d = ""; for (let h = 6; h <= 23; h += 0.05) d += (d ? "L" : "M") + ax.sx(h) + "," + ax.sy(K.clamp(peval(w, h), -20, 90));
+      K.svg(svg, "path", { d, fill: "none", stroke: alpha ? "var(--c3)" : "var(--c6)", "stroke-width": 2.5 });
+      TR.xs.forEach((x, i) => K.svg(svg, "circle", { cx: ax.sx(x), cy: ax.sy(TR.ys[i]), r: 4, fill: "var(--ink-3)" }));
+      TE.xs.forEach((x, i) => K.svg(svg, "circle", { cx: ax.sx(x), cy: ax.sy(TE.ys[i]), r: 5, fill: "var(--c2)", stroke: "var(--panel)" }));
+      K.svg(svg, "text", { x: 60, y: 348, "font-size": 12, class: "muted" }, "灰点=训练（6–19 点）  橙点=测试（19–23 点，训练里没见过）  阴影=外推区");
+      const big = Math.max(...w.slice(1).map(Math.abs));
+      const te = mse(w, TE.xs, TE.ys);
+      return { readout: [
+        { k: "训练 MSE", v: mse(w, TR.xs, TR.ys).toFixed(1) },
+        { k: "测试 MSE（外推）", v: te > 1e5 ? "> 100000" : te.toFixed(1), color: te > 200 ? "var(--bad)" : "var(--good)" },
+        { k: "最大系数绝对值", v: big > 1e4 ? big.toExponential(1) : big.toFixed(1) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

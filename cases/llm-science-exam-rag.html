@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>大模型考科学</title>
+<meta name="description" content="Kaggle 案例拆解：让 700 亿参数的大模型在一张 16GB 显卡上做科学选择题——维基百科检索增强（RAG）、向量检索 FAISS、逐层加载、共享前缀 KV 缓存、MAP@3 评分。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">文本 · 五选一排序 · 大模型 + 检索增强</div>
+  <h1>开卷考试的大模型：先翻维基百科，再一题一题答</h1>
+  <p class="en">Platypus2-70B + Wikipedia RAG</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">检索增强 RAG</span><span class="tag method">句向量 bge-small</span><span class="tag method">FAISS 向量检索</span>
+    <span class="tag method">Platypus2-70B</span><span class="tag method">逐层加载</span><span class="tag method">共享前缀 KV 缓存</span><span class="tag method">双卡并行</span><span class="tag method">MAP@3</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>simjeg</b></span>
+    <span>Kaggle 点赞 <b>1,260</b>（2026-11 抓取）</span>
+    <span>数据 <b>Kaggle - LLM Science Exam（比赛）</b> + 维基百科段落库</span>
+    <span><a href="https://www.kaggle.com/code/simjeg/platypus2-70b-with-wikipedia-rag" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">科学选择题：题干 + A~E 五个选项</div><p>每题一个题干 <code>prompt</code> 和五个选项，训练集还给出正确答案 <code>answer</code>。<span data-cell="6">出处</span> <span data-cell="11">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">按可能性排出前 3 个选项</div><p>提交形如 “A B C”，用 MAP@3 评分：第 1 个就对得 1 分，第 2 个对得 1/2，第 3 个对得 1/3。<span data-cell="11">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">先检索资料，再让 70B 大模型判断</div><p>用小模型把题目变成向量，在维基百科段落库里找最像的 5 段当参考；再让 Platypus2-70B 对每个选项回答“对 / 不对”，按得分排序。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">在两张 16GB 显卡上跑 70B 模型</div><p>办法是一层一层地加载权重、题目公共部分只算一次。notebook 文字里没有写分数（在运行输出里）。<span data-cell="7">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">比赛 <b>Kaggle - LLM Science Exam</b> 让模型做科学类选择题。除了比赛给的题目表，作者还挂了几个公开数据集：维基百科段落库（已经做好的向量索引）、bge-small 句向量模型、微调过的 Platypus2-70B 权重（分三部分）。下面只列 notebook 里出现的信息。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">关键规模</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">可见测试集题数</div><div class="v">200</div></div>
+        <div class="stat-tile"><div class="k">每题检索段落数</div><div class="v">5</div></div>
+        <div class="stat-tile"><div class="k">参考资料上限（词元）</div><div class="v">1,400</div></div>
+        <div class="stat-tile"><div class="k">模型参数量</div><div class="v">70B</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">200 来自 <span data-cell="3">第 3 格</span> 的判断 <code>len(df) != 200</code>（题目文件是 200 行时就跳过计算）；5 段与 1400 见 <span data-cell="2">第 2 格</span>，作者注释还写了 5 段资料的长度中位数约 1100 词元（四分位 900–1400）；70B 见标题。正式测试集有多少题、维基段落库有多大，notebook 没有写。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>id</code></td><td>题号（读入时设为索引）</td><td>整数</td></tr>
+        <tr><td><code>prompt</code></td><td>题干，一道科学问题</td><td>文本</td></tr>
+        <tr><td><code>A</code> … <code>E</code></td><td>五个候选答案</td><td>文本</td></tr>
+        <tr><td><code>answer</code></td><td><b>要预测的答案</b>：正确选项的字母（只在训练集里有）</td><td>A~E</td></tr>
+        <tr><td><code>context</code></td><td>作者新加的列：检索到的 5 段维基百科，每段前面加 “-”</td><td>文本</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">列名见 <span data-cell="3">第 3 格</span>、<span data-cell="6">第 6 格</span>、<span data-cell="11">第 11 格</span>。源码不带运行输出，这里不举具体题目。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="6">
+    <h3>动手试试 A · 迷你检索：题目该怎么写，才能翻到对的那页 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labRet"></div>
+  </div>
+  <div data-at="11">
+    <h3>动手试试 B · MAP@3：排第几才算对 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="labMap"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的信息</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>检索时把题干和五个选项拼在一起做查询，比只用题干效果更好</td><td><span data-cell="6">第 6 格</span></td></tr>
+        <tr><td>取 5 段资料时，资料长度中位数约 1100 词元（Q1 900，Q3 1400）</td><td><span data-cell="2">第 2 格</span></td></tr>
+        <tr><td>为了在单张 T4 上跑 70B，按层、按样本逐个计算</td><td><span data-cell="7">第 7 格</span></td></tr>
+        <tr><td>使用的是 SUStech 团队微调过的模型；零样本版本见第 15 版 notebook</td><td><span data-cell="7">第 7 格</span></td></tr>
+        <tr><td>把 FAISS 索引放到 GPU 上会显存溢出，而且在 CPU 上也不算慢</td><td><span data-cell="6">第 6 格</span></td></tr>
+        <tr><td>可见测试集时跳过计算，避免提交时白跑 3 小时（技巧来自 CPMP）</td><td><span data-cell="3">第 3 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">作者在第 11 格写了打印训练集准确率和 MAP@3 的代码，但具体数值在运行输出里，Kaggle 下载的源码不带输出，作者文字里也没写，所以这里不列分数。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一道选择题和一个资料库，先找出相关资料，再判断每个选项的可信程度，输出排序。</li>
+        <li><b>同类问题：</b>企业知识库问答、法律 / 医学条文查询、教材答疑助手、客服机器人……凡是“大模型记不全、但资料库里有”的问题，都可以先检索再回答。</li>
+        <li><b>可迁移的套路：</b>小模型做向量检索 → 拼成“指令 + 资料 + 问题 + 候选答案”的提示词 → 大模型逐个候选打分 → 排序；显存不够时逐层加载、共享公共前缀。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>离线安装 faiss、transformers 等 <span data-cell="1">第 1 格</span></li>
+        <li>句向量：bge-small-en-v1.5，pooler 输出 + L2 归一化 <span data-cell="5">第 5 格</span></li>
+        <li>检索：FAISS 索引取最近 5 段 <span data-cell="6">第 6 格</span></li>
+        <li>逐层加载权重 + 后台线程预取 <span data-cell="9">第 9 格</span> <span data-cell="10">第 10 格</span></li>
+        <li>共享前缀的 KV 缓存，5 个选项一起算 <span data-cell="10">第 10 格</span></li>
+        <li>提示词、双卡并行、取前 3 名 <span data-cell="11">第 11 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者发现“题干 + 五个选项”一起检索比只用题干好。为什么？会不会因为错误选项也被拿去检索，反而找到误导性的资料？</li>
+      <li>如果维基百科里根本没有这道题的答案，RAG 还有用吗？模型这时应该怎么办？</li>
+      <li>每个选项单独问一遍“对不对”，和一次性给五个选项让模型选，各有什么好处和坏处？</li>
+      <li>逐层加载让 70B 模型能在小显卡上跑，代价是什么？什么情况下这种做法就不划算了？</li>
+      <li>MAP@3 允许“第二个才对”也得分。和只看第一个对不对相比，它鼓励模型怎样排序？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 simjeg（检索部分改编自 MGöksu 与 MB 的 notebook，个别改动来自 CPMP、treesky），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Kaggle 比赛 Kaggle - LLM Science Exam。
+</footer>
+</main>
+
+<script src="nb/llm-science-exam-rag.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const FAST = location.hash === "#fast";
+
+  const steps = [
+    {
+      at: 0, title: "开场：离线装好工具", kicker: "第 0–1 格 · 准备",
+      html: `<p>比赛要求提交时<b>不能联网</b>，所以作者把 faiss（向量检索库）、datasets、optimum、transformers 的安装包事先上传成 Kaggle 数据集，再用 <code>pip install --no-deps</code> 从本地装。</p><p>整份 notebook 只有两大步：① 维基百科检索增强（RAG）；② 运行 Platypus2-70B。动画就是这条流水线。</p>`,
+      cells: [0, 1],
+      draw(svg, ctx) {
+        const ns = [["选择题\n题干 + A~E", 20, "var(--c1)"], ["小模型\n变成向量", 160, "var(--c3)"], ["维基段落库\n找最像的 5 段", 300, "var(--c4)"], ["70B 大模型\n每个选项对不对", 440, "var(--c2)"], ["排序\n取前 3 名", 590, "var(--good)"]];
+        const g = ns.map(([t, x, c]) => { const e = K.node(svg, x, 130, 118, 70, t, { stroke: c, fill: `color-mix(in srgb, ${c} 14%, var(--panel))` }); e.style.opacity = 0; return e; });
+        const ar = [0, 1, 2, 3].map((i) => { const a = K.arrow(svg, ns[i][1] + 118, 165, ns[i + 1][1] - 2, 165); a.style.opacity = 0; return a; });
+        K.svg(svg, "text", { x: 20, y: 90, "font-size": 13, fill: "var(--c4)", "font-weight": 700 }, "① RAG：先翻资料");
+        K.svg(svg, "text", { x: 440, y: 90, "font-size": 13, fill: "var(--c2)", "font-weight": 700 }, "② 大模型判断");
+        K.svg(svg, "text", { x: 20, y: 290, "font-size": 12, class: "muted" }, "提交时不能联网：所有安装包、模型、资料库都提前作为数据集挂进来");
+        (async () => { for (let i = 0; i < 5; i++) { if (!(await ctx.tween(300, (t) => (g[i].style.opacity = t)))) return; if (i < 4 && !(await ctx.tween(200, (t) => (ar[i].style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      title: "几个关键参数", kicker: "第 2 格 · 常量",
+      html: `<p>检索部分：每题取 <code>NUM_TITLES = 5</code> 段维基百科，句向量模型最多读 512 个词元。大模型部分：测试题分成 5 批，整个提示词最长 4096 个词元，其中参考资料最多 <code>MAX_CONTEXT = 1400</code> 个。</p><p>作者在注释里给了一组实测数据：取 5 段时，资料长度的中位数约 1100 个词元，四分之一的题在 900 以下，四分之三在 1400 以下。所以 1400 的上限基本不会截掉太多。</p>`,
+      cells: [2], highlight: ["NUM_TITLES = 5", "MAX_CONTEXT = 1400", "# With NUM_TITLES = 5, the median lenght of a context if 1100 tokens (Q1: 900, Q3: 1400)"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 40, w: 600, h: 60 }, [0, 2000], [0, 1], { yticks: 0, xticks: 4, xlabel: "5 段资料的总长度（词元）" });
+        const box = K.svg(svg, "rect", { x: ax.sx(900), y: 50, width: 0, height: 40, fill: "color-mix(in srgb, var(--c1) 25%, var(--panel))", stroke: "var(--c1)" });
+        const med = K.svg(svg, "line", { x1: ax.sx(1100), x2: ax.sx(1100), y1: 50, y2: 90, stroke: "var(--c1)", "stroke-width": 3, opacity: 0 });
+        const cut = K.svg(svg, "line", { x1: ax.sx(1400), x2: ax.sx(1400), y1: 30, y2: 110, stroke: "var(--bad)", "stroke-width": 2, "stroke-dasharray": "5 3", opacity: 0 });
+        K.svg(svg, "text", { x: ax.sx(900), y: 44, "font-size": 11 }, "Q1 900");
+        K.svg(svg, "text", { x: ax.sx(1100), y: 44, "font-size": 11, "text-anchor": "middle" }, "中位 1100");
+        K.svg(svg, "text", { x: ax.sx(1400) + 4, y: 28, "font-size": 11, fill: "var(--bad)" }, "MAX_CONTEXT 1400 ≈ Q3");
+        const total = [["系统指令 + 参考资料", 1400, "var(--c4)"], ["问题", 200, "var(--c1)"], ["5 个选项（后缀）", 300, "var(--c2)"]];
+        let x = 60;
+        K.svg(svg, "text", { x: 60, y: 200, "font-size": 13, "font-weight": 700 }, "一道题的提示词，总长不超过 MAX_LENGTH = 4096（长度示意）");
+        const segs = total.map(([t, w, c]) => { const e = K.svg(svg, "rect", { x, y: 215, width: 0, height: 40, fill: c }); const lab = K.svg(svg, "text", { x: x + 4, y: 275, "font-size": 11 }, t); x += w * 0.3; e.w = w * 0.3; return e; });
+        (async () => {
+          if (!(await ctx.tween(700, (t) => box.setAttribute("width", (ax.sx(1400) - ax.sx(900)) * t)))) return;
+          if (!(await ctx.tween(300, (t) => { med.style.opacity = t; cut.style.opacity = t; }))) return;
+          for (const s of segs) if (!(await ctx.tween(400, (t) => s.setAttribute("width", s.w * t)))) return;
+        })();
+      },
+    },
+    {
+      title: "读考题：提交时别白跑 3 小时", kicker: "第 3 格 · 读数据",
+      html: `<p>读入 <code>test.csv</code>。Kaggle 的代码比赛会把 notebook 运行两次：一次在你能看到的测试文件上（200 题），一次在隐藏的正式测试集上。</p><p>作者借用 CPMP 的技巧：<code>IS_TEST_SET = len(df) != 200</code>。如果读到的还是那 200 题，就跳过 3 个小时的计算，直接写一个占位答案；真正打分时题目数不同，才会认真跑。注释里也留了“改用训练集看效果”的开关。</p>`,
+      cells: [3], highlight: ["IS_TEST_SET = len(df) != 200"],
+      draw(svg, ctx) {
+        K.node(svg, 40, 60, 200, 60, "读到 test.csv", { bold: true });
+        K.node(svg, 300, 60, 160, 60, "有 200 行吗？", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        K.arrow(svg, 240, 90, 298, 90);
+        const yes = K.node(svg, 520, 20, 180, 60, "是：可见的样例\n写 “A B C” 占位，秒完", {});
+        const no = K.node(svg, 520, 130, 180, 60, "不是：正式测试集\n检索 + 70B，跑几小时", { stroke: "var(--c2)" });
+        const a1 = K.arrow(svg, 460, 80, 518, 50), a2 = K.arrow(svg, 460, 100, 518, 160);
+        [yes, no, a1, a2].forEach((e) => (e.style.opacity = 0));
+        const clock = K.svg(svg, "text", { x: 40, y: 260, "font-size": 15 }, "");
+        (async () => {
+          for (const e of [a1, yes, a2, no]) if (!(await ctx.tween(350, (t) => (e.style.opacity = t)))) return;
+          clock.textContent = "省下的是调试时每次提交都要等的那 3 小时";
+        })();
+      },
+    },
+    {
+      title: "RAG 第一步：把句子变成向量", kicker: "第 4–5 格 · 句向量模型",
+      html: `<p><b>RAG（检索增强生成）</b>：大模型的记忆有限，先从资料库里把相关内容找出来，放进提示词里给它“开卷”看。</p><p>找资料要先把文字变成向量。作者自己写了一个精简的 <code>SentenceTransformer</code> 类：用 bge-small-en-v1.5 读入句子（前面加上 “Represent this sentence for searching relevant passages:” 这个固定前缀），取 pooler 输出，再做 L2 归一化（把向量长度缩放成 1），这样两个向量的点积就等于它们夹角的余弦，越大越相似。</p>`,
+      cells: [5], highlight: ["\"Represent this sentence for searching relevant passages: \" + x", "e = F.normalize(e, p=2, dim=1)"],
+      draw(svg, ctx) {
+        const cx = 200, cy = 175, R = 120;
+        K.svg(svg, "circle", { cx, cy, r: R, fill: "none", stroke: "var(--line)", "stroke-dasharray": "4 4" });
+        K.svg(svg, "text", { x: cx, y: cy + R + 26, "text-anchor": "middle", "font-size": 12, class: "muted" }, "归一化后，所有向量都落在半径 1 的圆上（示意 2 维）");
+        const pts = [["题目", -0.3, "var(--c2)"], ["光合作用段落", -0.15, "var(--c3)"], ["火山段落", 1.6, "var(--c4)"], ["黑洞段落", 2.7, "var(--c1)"]];
+        const els = pts.map(([t, a, c], i) => {
+          const L = 0.5 + i * 0.5;
+          const ar = K.arrow(svg, cx, cy, cx + Math.cos(a) * R * L, cy - Math.sin(a) * R * L, { color: c, sw: 2.2 });
+          const tx = K.svg(svg, "text", { x: cx + Math.cos(a) * R * L * 1.05, y: cy - Math.sin(a) * R * L * 1.05, "font-size": 12, fill: c }, t);
+          return { ar, tx, a, L, c };
+        });
+        K.svg(svg, "text", { x: 400, y: 80, "font-size": 13, "font-weight": 700 }, "相似度 = 余弦 = 归一化向量的点积");
+        const res = K.svg(svg, "text", { x: 400, y: 120, "font-size": 13 }, "");
+        ctx.wait(700).then((ok) => ok && ctx.tween(FAST ? 10 : 1500, (t) => els.forEach((e) => {
+          const L = K.lerp(e.L, 1, t), x2 = cx + Math.cos(e.a) * R * L, y2 = cy - Math.sin(e.a) * R * L;
+          e.ar.querySelector("line").setAttribute("x2", x2); e.ar.querySelector("line").setAttribute("y2", y2);
+          const p = e.ar.querySelector("path"), s = 7;
+          p.setAttribute("d", `M${x2},${y2} L${x2 - s * Math.cos(-e.a - 0.4)},${y2 - s * Math.sin(-e.a - 0.4)} L${x2 - s * Math.cos(-e.a + 0.4)},${y2 - s * Math.sin(-e.a + 0.4)} Z`);
+          e.tx.setAttribute("x", cx + Math.cos(e.a) * R * L * 1.08); e.tx.setAttribute("y", cy - Math.sin(e.a) * R * L * 1.08);
+        }))).then((ok) => { if (ok) pts.slice(1).forEach(([t, a], i) => K.svg(svg, "text", { x: 400, y: 120 + i * 26, "font-size": 13 }, `题目 vs ${t}：${Math.cos(a - pts[0][1]).toFixed(2)}`)); });
+      },
+    },
+    {
+      title: "检索：在维基百科里找最像的 5 段", kicker: "第 6 格 · FAISS 检索",
+      html: `<p>每道题把<b>题干和五个选项拼成一句</b>做查询（作者注释：比只用题干效果好），算出向量，交给 FAISS 在预先建好的维基百科向量索引里找最近的 5 段，再从段落库取出原文，用 “-” 开头逐段拼成 <code>context</code> 列。</p><p>做完立刻删掉索引和模型、清空内存，给后面的大模型腾地方。作者还提到：把索引搬到 GPU 会显存溢出，而在 CPU 上也不算慢。</p>`,
+      cells: [6], highlight: ["\" \".join([row[\"prompt\"], row[\"A\"], row[\"B\"], row[\"C\"], row[\"D\"], row[\"E\"]])", "faiss_index.search(np.float32(prompt_embeddings), NUM_TITLES)"],
+      draw(svg, ctx) {
+        const r = K.rng(14), P = [];
+        for (let i = 0; i < 70; i++) P.push([60 + r() * 380, 30 + r() * 280]);
+        const q = [250, 170];
+        const d = P.map((p) => Math.hypot(p[0] - q[0], p[1] - q[1]));
+        const order = d.map((x, i) => i).sort((a, b) => d[a] - d[b]);
+        const dots = P.map((p) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 3, fill: "var(--ink-3)", opacity: 0.5 }));
+        K.svg(svg, "circle", { cx: q[0], cy: q[1], r: 7, fill: "var(--c2)" });
+        K.svg(svg, "text", { x: q[0] + 10, y: q[1] - 8, "font-size": 12, fill: "var(--c2)" }, "这道题");
+        const ring = K.svg(svg, "circle", { cx: q[0], cy: q[1], r: 0, fill: "none", stroke: "var(--c2)", "stroke-dasharray": "4 3" });
+        K.svg(svg, "text", { x: 60, y: 330, "font-size": 12, class: "muted" }, "灰点 = 维基百科段落的向量（示意）");
+        const list = K.svg(svg, "g");
+        K.svg(svg, "text", { x: 480, y: 50, "font-size": 13, "font-weight": 700 }, "context =");
+        ctx.tween(FAST ? 10 : 1800, (t) => {
+          const rad = t * d[order[4]];
+          ring.setAttribute("r", rad);
+          order.slice(0, 5).forEach((i, k) => { if (d[i] <= rad + 0.01) K.set(dots[i], { fill: "var(--c4)", opacity: 1, r: 5 }); });
+        }).then((ok) => { if (!ok) return; order.slice(0, 5).forEach((i, k) => K.node(list, 480, 64 + k * 46, 210, 38, `-第 ${k + 1} 近的段落`, { fs: 12, stroke: "var(--c4)" })); });
+      },
+    },
+    {
+      title: "70B 大模型塞不进显卡：逐层加载", kicker: "第 7–8 格 · 思路",
+      html: `<p>Platypus2-70B 有 700 亿个参数，用半精度存也要 100 多 GB，而 Kaggle 的 T4 显卡只有 16GB。作者的办法：<b>不把整个模型放进显卡，而是一层一层来</b>，把一层的权重搬进显卡，让所有题目都过一遍这一层，再把这一层扔掉，换下一层。</p><p>第 8 格把三个数据集里的权重文件链接到缓存目录，假装成“已经下载好的模型”。使用的是 SUStech 团队微调过的版本。</p>`,
+      cells: [7, 8], highlight: ["checkpoint_path / path.name).symlink_to(path)"],
+      draw(svg, ctx) {
+        const n = 12;
+        const layers = [];
+        for (let i = 0; i < n; i++) layers.push(K.svg(svg, "rect", { x: 30 + i * 30, y: 60, width: 24, height: 120, rx: 3, fill: "var(--panel-2)", stroke: "var(--line)" }));
+        K.svg(svg, "text", { x: 30, y: 46, "font-size": 12, class: "muted" }, "硬盘上的模型：很多层（示意画 12 层）");
+        const gpu = K.svg(svg, "rect", { x: 470, y: 50, width: 200, height: 140, rx: 10, fill: "none", stroke: "var(--accent)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 570, y: 42, "text-anchor": "middle", "font-size": 12, fill: "var(--accent)" }, "显卡 16GB：一次只放一层");
+        const cur = K.svg(svg, "rect", { x: 560, y: 70, width: 24, height: 100, rx: 3, fill: "var(--c2)", opacity: 0 });
+        const acts = K.svg(svg, "text", { x: 470, y: 230, "font-size": 13 }, "");
+        K.svg(svg, "text", { x: 30, y: 230, "font-size": 13 }, "所有题目的中间结果一直留在显卡上，");
+        K.svg(svg, "text", { x: 30, y: 252, "font-size": 13 }, "每次只换“这一层的权重”。");
+        (async () => {
+          for (let i = 0; i < n; i++) {
+            K.set(layers[i], { fill: "var(--c2)" });
+            if (!(await ctx.tween(FAST ? 1 : 160, (t) => (cur.style.opacity = t)))) return;
+            acts.textContent = `第 ${i + 1} 层：200 题全部算过 → 删掉这一层`;
+            if (!(await ctx.wait(FAST ? 1 : 120))) return;
+            K.set(layers[i], { fill: "var(--panel-2)", opacity: 0.4 });
+            cur.style.opacity = 0;
+          }
+          acts.textContent = "最后一层算完，得到每个选项的分数";
+        })();
+        gpu.style.opacity = 1;
+      },
+    },
+    {
+      title: "后台线程：两张卡共用一次读盘", kicker: "第 9 格 · WeightsLoader",
+      html: `<p>Kaggle 给了两张 T4，作者让两张卡各处理一半题目。但两张卡要用<b>同一层</b>的权重，如果各读一次硬盘就浪费了时间。</p><p><code>WeightsLoader</code> 用一个“条件变量”协调：每张卡报告“我要第 k 层”，等两张卡都报到了，才从硬盘读一次，然后把同一份权重交给两张卡。代码里的断言保证两张卡请求的是同一层。</p>`,
+      cells: [9], highlight: ["if all(self.states.values()):", "assert len(set(self.states.values())) == 1"],
+      draw(svg, ctx) {
+        const disk = K.node(svg, 40, 130, 130, 70, "硬盘\n第 k 层权重", { bold: true });
+        const lo = K.node(svg, 270, 130, 150, 70, "WeightsLoader\n等两张卡都报到", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const g0 = K.node(svg, 540, 50, 140, 60, "GPU 0\n题目 1~100", {});
+        const g1 = K.node(svg, 540, 220, 140, 60, "GPU 1\n题目 101~200", {});
+        const req0 = K.arrow(svg, 538, 85, 422, 150, { dash: "4 3", color: "var(--c1)" }), req1 = K.arrow(svg, 538, 245, 422, 180, { dash: "4 3", color: "var(--c1)" });
+        const read = K.arrow(svg, 170, 165, 268, 165, { color: "var(--c2)", sw: 3 });
+        const give0 = K.arrow(svg, 422, 155, 538, 75, { color: "var(--c3)", sw: 2 }), give1 = K.arrow(svg, 422, 175, 538, 255, { color: "var(--c3)", sw: 2 });
+        const lab = K.svg(svg, "text", { x: 270, y: 320, "font-size": 13 }, "");
+        [req0, req1, read, give0, give1].forEach((e) => (e.style.opacity = 0));
+        (async () => {
+          lab.textContent = "① 两张卡都说：我要第 k 层";
+          if (!(await ctx.tween(500, (t) => (req0.style.opacity = req1.style.opacity = t)))) return;
+          lab.textContent = "② 读一次硬盘";
+          if (!(await ctx.tween(500, (t) => (read.style.opacity = t)))) return;
+          lab.textContent = "③ 同一份权重发给两张卡";
+          await ctx.tween(500, (t) => (give0.style.opacity = give1.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "ShardedLlama：题目公共部分只算一次", kicker: "第 10 格 · 共享前缀 KV 缓存",
+      html: `<p>每道题要问 5 次（每个选项一次），但 5 次的前半段完全一样：指令 + 参考资料 + 问题，只有最后的选项不同。作者把提示词拆成<b>前缀（prefix）</b>和 5 个<b>后缀（suffix）</b>。</p><p>每一层先算前缀，留下它的“键值缓存”（KV cache，可以理解为这一层对前文的笔记），再让 5 个后缀<b>共享这份笔记</b>一起算。资料有一千多词元、选项只有几十个，这样省掉了大约五分之四的计算。最后只取每个后缀最后一个词元的输出，经过替换过的输出头得到分数。另外还用后台线程提前加载下一层，边算边读。</p>`,
+      cells: [10], highlight: ["new_prefix, (k_cache, v_cache) = layer(prefix, use_cache=True", "kv_cache = (k_cache.expand(n_suffixes, -1, -1, -1), v_cache.expand(n_suffixes, -1, -1, -1))", "future = executor.submit(self.load_layer_to_cpu, self.layer_names[i + 1])"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "不共享：每个选项都把长长的前缀再算一遍");
+        K.svg(svg, "text", { x: 30, y: 190, "font-size": 13, "font-weight": 700, fill: "var(--good)" }, "共享：前缀算一次，5 个选项接在后面");
+        const letters = "ABCDE";
+        const rowsA = [];
+        for (let i = 0; i < 5; i++) {
+          rowsA.push(K.svg(svg, "rect", { x: 30, y: 40 + i * 26, width: 0, height: 20, rx: 3, fill: "var(--c4)" }));
+          rowsA.push(K.svg(svg, "rect", { x: 330, y: 40 + i * 26, width: 0, height: 20, rx: 3, fill: "var(--c2)" }));
+          K.svg(svg, "text", { x: 400, y: 55 + i * 26, "font-size": 11 }, letters[i]);
+        }
+        const pre = K.svg(svg, "rect", { x: 30, y: 230, width: 0, height: 40, rx: 3, fill: "var(--c4)" });
+        K.svg(svg, "text", { x: 40, y: 290, "font-size": 11, class: "muted" }, "前缀 = 指令 + 资料 + 问题（约 1000+ 词元）");
+        const suf = [];
+        for (let i = 0; i < 5; i++) { suf.push(K.svg(svg, "rect", { x: 334, y: 205 + i * 22, width: 0, height: 18, rx: 3, fill: "var(--c2)" })); K.svg(svg, "text", { x: 404, y: 219 + i * 22, "font-size": 11 }, letters[i]); }
+        const c1 = K.svg(svg, "text", { x: 470, y: 100, "font-size": 14 }, ""), c2 = K.svg(svg, "text", { x: 470, y: 260, "font-size": 14, fill: "var(--good)" }, "");
+        (async () => {
+          for (let i = 0; i < 5; i++) if (!(await ctx.tween(FAST ? 1 : 300, (t) => { rowsA[2 * i].setAttribute("width", 296 * t); rowsA[2 * i + 1].setAttribute("width", 60 * t); }))) return;
+          c1.textContent = "计算量 ≈ 5 × (前缀 + 选项)";
+          if (!(await ctx.tween(FAST ? 1 : 400, (t) => pre.setAttribute("width", 296 * t)))) return;
+          await ctx.tween(FAST ? 1 : 400, (t) => suf.forEach((s) => s.setAttribute("width", 60 * t)));
+          c2.textContent = "计算量 ≈ 前缀 + 5 × 选项";
+        })();
+      },
+    },
+    {
+      title: "提示词与打分：每个选项问一次“对不对”", kicker: "第 11 格 · 运行与输出",
+      html: `<p>提示词是 Alpaca 风格：“下面是一条指令……”，指令是<b>“分析下面的问题和答案，答案正确回答 yes，不正确回答 no；可以参考维基百科背景资料，即使它们不一定相关”</b>。接着是检索到的资料、问题 “Question: …”、候选答案 “Proposed answer: …”。</p><p>两张卡各算一半题目，每题得到 5 个分数，从高到低取前三个字母作为提交，如 “C A D”。如果读的是训练集，还会统计第 1/2/3 名命中的题数，并算出准确率和 MAP@3。</p>`,
+      cells: [11], highlight: ["If the answer is correct, respond yes, if it is not correct respond no.", "top3 = np.argsort(scores)[::-1]", "map3"],
+      draw(svg, ctx) {
+        const L = "ABCDE", sc = [0.31, 0.12, 0.87, 0.45, 0.05];
+        K.node(svg, 30, 30, 300, 110, "指令：答案对就说 yes，不对说 no\n资料：- 维基段落 ×5\nQuestion: ……\nProposed answer: [选项]", { fs: 12 });
+        const bars = sc.map((s, i) => {
+          K.svg(svg, "text", { x: 380, y: 52 + i * 34, "font-size": 13, "font-weight": 700 }, L[i]);
+          return K.svg(svg, "rect", { x: 400, y: 38 + i * 34, width: 0, height: 20, rx: 3, fill: "var(--c1)" });
+        });
+        K.svg(svg, "text", { x: 400, y: 26, "font-size": 12, class: "muted" }, "每个选项的得分（示意）");
+        const out = K.svg(svg, "text", { x: 30, y: 250, "font-size": 22, "font-weight": 700, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 30, y: 210, "font-size": 13 }, "提交 prediction（前 3 名）：");
+        (async () => {
+          for (let i = 0; i < 5; i++) if (!(await ctx.tween(FAST ? 1 : 300, (t) => bars[i].setAttribute("width", 260 * sc[i] * t)))) return;
+          const top = sc.map((s, i) => i).sort((a, b) => sc[b] - sc[a]).slice(0, 3);
+          top.forEach((i, k) => K.set(bars[i], { fill: ["var(--good)", "var(--c3)", "var(--c4)"][k] }));
+          out.textContent = top.map((i) => L[i]).join(" ");
+        })();
+      },
+    },
+  ];
+  if (FAST) steps.forEach((s) => { const d = s.draw; if (d) s.draw = (svg, ctx) => d(svg, Object.assign({}, ctx, { wait: () => Promise.resolve(ctx.alive()), tween: (ms, fn) => { fn(1, 1); return Promise.resolve(ctx.alive()); } })); });
+  K.pipeline(document.getElementById("pipe"), steps);
+  if (FAST) document.querySelectorAll('.ch-cells .cell').forEach((e) => (e.style.display = 'none'));
+
+  /* ---------- 实验 A：迷你检索（词袋 + TF-IDF 余弦） ---------- */
+  const DOCS = [
+    ["光合作用", "plants use sunlight water and carbon dioxide to make glucose and release oxygen in chloroplasts"],
+    ["细胞呼吸", "cells break down glucose with oxygen to release energy as atp in mitochondria and produce carbon dioxide"],
+    ["火山", "a volcano erupts when magma from the mantle rises through the crust and releases lava ash and gas"],
+    ["板块构造", "the crust is divided into tectonic plates that move slowly over the mantle causing earthquakes"],
+    ["黑洞", "a black hole is a region of spacetime where gravity is so strong that not even light can escape"],
+    ["恒星演化", "stars fuse hydrogen into helium and massive stars may end as supernova neutron star or black hole"],
+    ["DNA", "dna is a double helix made of nucleotides that stores genetic information in the cell nucleus"],
+    ["牛顿定律", "newton laws describe force mass and acceleration an object stays at rest unless a force acts on it"],
+    ["电磁感应", "a changing magnetic field induces an electric current in a wire as described by faraday law"],
+    ["酸碱", "acids release hydrogen ions in water and bases accept them the ph scale measures acidity"],
+  ];
+  const QS = [
+    { q: "which organelle produces most of the energy of the cell", opts: ["chloroplast", "mitochondria", "nucleus", "ribosome", "vacuole"], gold: 1 },
+    { q: "what can escape from inside the event horizon", opts: ["light", "nothing", "gravity waves", "neutrinos", "x rays"], gold: 1 },
+    { q: "what causes earthquakes", opts: ["moving tectonic plates", "the moon", "lava ash", "ocean tides", "magnetic field"], gold: 0 },
+  ];
+  const tok = (s) => s.toLowerCase().split(/[^a-z]+/).filter((w) => w.length > 2 && !["the", "and", "are", "for", "with", "what", "which", "from", "that", "can", "most", "into", "inside", "may"].includes(w));
+  const df = {};
+  DOCS.forEach(([, t]) => new Set(tok(t)).forEach((w) => (df[w] = (df[w] || 0) + 1)));
+  const vec = (words) => { const v = {}; words.forEach((w) => (v[w] = (v[w] || 0) + Math.log(1 + DOCS.length / (1 + (df[w] || 0))))); return v; };
+  const cos = (a, b) => { let s = 0, na = 0, nb = 0; for (const k in a) { na += a[k] * a[k]; if (b[k]) s += a[k] * b[k]; } for (const k in b) nb += b[k] * b[k]; return na && nb ? s / Math.sqrt(na * nb) : 0; };
+  const DV = DOCS.map(([, t]) => vec(tok(t)));
+  K.lab(document.getElementById("labRet"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "qi", label: "选一道示意题", value: "0", options: QS.map((q, i) => [String(i), q.q]) },
+      { id: "mode", label: "用什么去检索", value: "all", options: [["prompt", "只用题干"], ["all", "题干 + 五个选项（作者的做法）"]] },
+      { id: "k", label: "取前几段（NUM_TITLES）", min: 1, max: 5, step: 1, value: 3 },
+    ],
+    note: "资料库是我们写的 10 段英文小短文（不是比赛数据），题目也是示意题。浏览器现场把文字切成词、按 TF-IDF 加权、算余弦相似度，取最像的 k 段。注意绿色那段是包含正确答案的段落（★ 标在正确选项上）。",
+    render(svg, v) {
+      const Q = QS[+v.qi], gold = { 0: 1, 1: 4, 2: 3 }[v.qi];
+      const words = tok(Q.q).concat(v.mode === "all" ? tok(Q.opts.join(" ")) : []);
+      const qv = vec(words);
+      const sims = DV.map((d) => cos(qv, d));
+      const order = sims.map((s, i) => i).sort((a, b) => sims[b] - sims[a]);
+      const mx = Math.max(0.01, ...sims);
+      DOCS.forEach(([name], i) => {
+        const y = 14 + i * 26, rank = order.indexOf(i), picked = rank < v.k;
+        K.svg(svg, "text", { x: 90, y: y + 15, "text-anchor": "end", "font-size": 12, fill: i === gold ? "var(--good)" : "var(--ink)" }, name);
+        K.svg(svg, "rect", { x: 98, y, width: Math.max(1, 300 * sims[i] / mx), height: 18, rx: 3, fill: picked ? (i === gold ? "var(--good)" : "var(--c4)") : "var(--line)" });
+        K.svg(svg, "text", { x: 104 + 300 * sims[i] / mx, y: y + 14, "font-size": 11, class: "muted" }, sims[i].toFixed(2) + (picked ? `  第${rank + 1}` : ""));
+      });
+      const ol = Q.opts.map((o, i) => "ABCDE"[i] + ". " + o + (i === Q.gold ? " ★" : ""));
+      K.svg(svg, "text", { x: 20, y: 286, "font-size": 12, class: "muted" }, "选项：" + ol.slice(0, 3).join("  "));
+      K.svg(svg, "text", { x: 20, y: 304, "font-size": 12, class: "muted" }, "　　　" + ol.slice(3).join("  "));
+      K.svg(svg, "text", { x: 20, y: 324, "font-size": 12, class: "muted" }, "查询词：" + words.slice(0, 9).join(" ") + (words.length > 9 ? " …" : ""));
+      const hit = order.slice(0, v.k).includes(gold);
+      return { readout: [
+        { k: "正确段落排第几", v: "第 " + (order.indexOf(gold) + 1) + " 名", color: order.indexOf(gold) < v.k ? "var(--good)" : "var(--bad)" },
+        { k: `前 ${v.k} 段里有没有它`, v: hit ? "有 ✓" : "没有", color: hit ? "var(--good)" : "var(--bad)" },
+        { k: "交给大模型的资料段数", v: v.k },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：MAP@3 ---------- */
+  K.lab(document.getElementById("labMap"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "skill", label: "模型水平：正确选项平均高出多少分", min: 0, max: 3, step: 0.1, value: 1.2, fmt: (x) => x.toFixed(1) },
+      { id: "n", label: "题目数", min: 20, max: 400, step: 20, value: 200 },
+      { id: "seed", label: "重新抽样", button: true },
+    ],
+    note: "浏览器现场模拟：每题 5 个选项各给一个随机分数，正确选项额外加上“模型水平”。照第 11 格的做法取分数前三名，按 MAP@3 计分：第 1 名对得 1 分，第 2 名对得 1/2，第 3 名对得 1/3，否则 0 分，再对所有题取平均。",
+    render(svg, v) {
+      const r = K.rng(300 + v.seed * 7 + v.n);
+      let t1 = 0, t2 = 0, t3 = 0;
+      const ex = [];
+      for (let q = 0; q < v.n; q++) {
+        const g = Math.floor(r() * 5), s = [0, 1, 2, 3, 4].map((i) => K.randn(r) + (i === g ? v.skill : 0));
+        const top = [0, 1, 2, 3, 4].sort((a, b) => s[b] - s[a]).slice(0, 3);
+        const pos = top.indexOf(g);
+        if (pos === 0) t1++; else if (pos === 1) t2++; else if (pos === 2) t3++;
+        if (q < 6) ex.push({ g, top, pos });
+      }
+      const map3 = (t1 + t2 / 2 + t3 / 3) / v.n;
+      ex.forEach((e, i) => {
+        const y = 20 + i * 34;
+        K.svg(svg, "text", { x: 20, y: y + 16, "font-size": 12 }, `第 ${i + 1} 题  答案 ${"ABCDE"[e.g]}`);
+        e.top.forEach((c, k) => K.node(svg, 140 + k * 46, y, 40, 24, "ABCDE"[c], { fs: 12, fill: c === e.g ? "color-mix(in srgb, var(--good) 30%, var(--panel))" : "var(--panel-2)", stroke: c === e.g ? "var(--good)" : "var(--line)" }));
+        K.svg(svg, "text", { x: 290, y: y + 16, "font-size": 12, fill: e.pos >= 0 ? "var(--good)" : "var(--bad)" }, e.pos === 0 ? "得 1 分" : e.pos === 1 ? "得 1/2" : e.pos === 2 ? "得 1/3" : "得 0 分");
+      });
+      const bars = [["第 1 名命中", t1, "var(--good)"], ["第 2 名命中", t2, "var(--c3)"], ["第 3 名命中", t3, "var(--c4)"], ["前 3 都没有", v.n - t1 - t2 - t3, "var(--bad)"]];
+      K.bars(svg, { x: 360, y: 20, w: 270, h: 200 }, bars.map(([label, value, color]) => ({ label, value, color })), { horizontal: true, labelWidth: 90, max: v.n, fmt: (x) => String(x) });
+      return { readout: [
+        { k: "准确率（只看第 1 名）", v: ((t1 / v.n) * 100).toFixed(1) + "%" },
+        { k: "MAP@3", v: map3.toFixed(3), color: "var(--accent)" },
+        { k: "前 3 名覆盖率", v: (((t1 + t2 + t3) / v.n) * 100).toFixed(1) + "%" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

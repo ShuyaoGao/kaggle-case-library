@@ -1,0 +1,633 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>刷卡交易图反欺诈</title>
+<meta name="description" content="Kaggle 案例拆解：把 IBM 模拟信用卡交易变成“卡—商户”多重图，再用全连接网络和归纳式 GraphSAGE（HinSAGE）识别欺诈交易，并指出原 notebook 中特征与标签错位等问题。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格 → 图 · 边 / 节点分类 · 信用卡反欺诈</div>
+  <h1>把刷卡记录连成一张网，再找出盗刷</h1>
+  <p class="en">Fraud detection with GNN</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span><span class="tag ml">机器学习</span>
+    <span class="tag method">表格转图</span><span class="tag method">二部多重图</span><span class="tag method">NetworkX</span>
+    <span class="tag method">全连接网络</span><span class="tag method">三部异构图</span><span class="tag method">HinSAGE（异构 GraphSAGE）</span><span class="tag method">归纳式学习</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Jawher Jabri</b></span>
+    <span>Kaggle 点赞 <b>369</b>（2026-11 抓取）</span>
+    <span>数据集 <b>ealtman2019/credit-card-transactions</b>（IBM 模拟数据）</span>
+    <span><a href="https://www.kaggle.com/code/jawherjabri/fraud-detection-with-gnn" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">IBM 生成的模拟刷卡流水</div><p>每行一笔交易：哪个用户的哪张卡、在哪个商户、什么时间、多少钱、有没有报错。作者抽了 10 万行。<span data-cell="7">出处</span> <span data-cell="10">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这笔交易是不是欺诈（Is Fraud?）</div><p>全量数据里欺诈约 3 万笔，只占 0.1%。<span data-cell="7">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">表格变成“卡—商户”图，再试两种模型</div><p>方法一：多重图的边特征喂给一个两层全连接网络；方法二：客户—交易—商户三部图上的 HinSAGE（异构 GraphSAGE）。<span data-cell="33">出处</span> <span data-cell="53">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">只给出训练过程，没有测试分数</div><p>方法一只打印训练损失，方法二训练完就结束，两种方法都没有在测试集上评估。这里不列分数。<span data-cell="52">出处</span> <span data-cell="64">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">IBM 为研究欺诈检测<b>生成的模拟数据</b>，不对应任何真实客户或银行（作者第 7 格说明）。全量规模来自作者第 7 格；本 notebook 只随机抽了 10 万行（第 11 格）。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况（全量）</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">交易</div><div class="v">2,400 万</div></div>
+        <div class="stat-tile"><div class="k">商户</div><div class="v">6,000</div></div>
+        <div class="stat-tile"><div class="k">卡</div><div class="v">10 万</div></div>
+        <div class="stat-tile"><div class="k">欺诈</div><div class="v" style="color:var(--c6)">3 万（0.1%）</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">见 <span data-cell="7">第 7 格</span>。作者抽样 10 万行后检查了其中欺诈的行数（<span data-cell="13">第 13 格</span>，结果在运行输出里）。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么（从作者代码里用到的列整理）</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>作者怎么处理</th></tr>
+        <tr><td><code>User</code>、<code>Card</code></td><td>用户编号、该用户的第几张卡</td><td>拼成 <code>card_id</code></td></tr>
+        <tr><td><code>Year</code> <code>Month</code> <code>Day</code> <code>Time</code></td><td>交易日期和时刻</td><td>时刻拆成小时、分钟</td></tr>
+        <tr><td><code>Amount</code></td><td>金额（带 $ 符号的文本）</td><td>去掉 $ 转成数字</td></tr>
+        <tr><td><code>Use Chip</code></td><td>刷卡方式（芯片 / 磁条 / 线上等）</td><td>编码成数字</td></tr>
+        <tr><td><code>Merchant Name</code></td><td>商户编号</td><td>作为图上的商户节点</td></tr>
+        <tr><td><code>Merchant City</code> <code>State</code> <code>Zip</code></td><td>商户所在城市、州、邮编</td><td>城市编码；州和邮编删掉</td></tr>
+        <tr><td><code>MCC</code></td><td>商户类别码（如超市、加油站）</td><td>保留</td></tr>
+        <tr><td><code>Errors?</code></td><td>交易报错（密码错、余额不足等）</td><td>空值填“No error”后编码</td></tr>
+        <tr><td><code>Is Fraud?</code></td><td><b>要预测的答案</b>：Yes / No</td><td>转成 1 / 0</td></tr>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="50">
+    <h3>动手试试 A · 特征和标签错位了会怎样 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="52">
+    <h3>动手试试 B · 只看这一笔 vs 也看卡和商户的“邻居” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="64">
+    <h3>动手试试 C · GraphSAGE 的邻居采样：[2, 32] 是什么意思 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者做了什么、说了什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>欺诈数据通常极不平衡、标注不全；规则系统和只看单笔交易的模型容易漏掉复杂的欺诈链条</td><td><span data-cell="2">第 2–3 格</span></td></tr>
+        <tr><td>同一张卡可以在同一商户刷多次，所以用多重图（两点之间允许多条边）</td><td><span data-cell="34">第 34 格</span></td></tr>
+        <tr><td>方法一：两层全连接网络，训练 201 轮，每 20 轮打印损失</td><td><span data-cell="52">第 52 格</span></td></tr>
+        <tr><td>方法二：参照论文 Inductive Graph Representation Learning for fraud detection，用客户—交易—商户三部图 + HinSAGE 学交易的 64 维表示</td><td><span data-cell="54">第 54 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">两种方法都只有训练步骤：方法一打印的是训练损失，方法二训练 10 轮后 notebook 就结束了，留出的 30% “归纳数据”没有被用来测试。作者没有给出任何准确率、召回率之类的分数，这里也不列。</p>
+      <h3>读代码时发现的问题</h3>
+      <ul class="tight">
+        <li><b>特征与标签错位</b>：第 49 格的特征 <code>x</code> 按 <code>G.edges()</code> 的顺序排列（多重图按节点分组遍历边，先列完第一张卡的所有交易，再下一张卡……），第 50 格的标签 <code>target</code> 却按原表的行顺序排列，两者不是一一对应的（实验 A）。</li>
+        <li><b>名字叫 GNN，其实不是图神经网络</b>：<code>FraudGNN</code> 只是两层全连接网络，输入是每条边自己的属性，没有用到任何邻居信息（作者第 48 格自己也写了“simple feedforward neural network”）。</li>
+        <li><b>没有测试</b>：方法一在全部数据上训练、没有切分；方法二切出的 30% 没有使用。</li>
+        <li><b>第 37 格每行末尾多了逗号</b>，<code>year = row["Year"],</code> 让每个属性都变成了只有一个元素的元组，第 49 格又专门写了一行代码把元组拆开。</li>
+        <li><b>第 39 格把整张图转成稠密邻接矩阵</b>，节点一多会占用大量内存，而后面并没有用到它。</li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>一笔新刷卡交易进来，结合这张卡最近的行为、这个商户最近被盗刷的情况，给出欺诈风险分。</li>
+        <li><b>同类问题：</b>电商“买家—店铺”刷单、外卖“骑手—商家”作弊、保险“投保人—医院”骗保：都是两类实体之间的交易网。</li>
+        <li><b>可迁移的套路：</b>把交易表里的两个 ID 列当节点、每行当边（或当中间节点）→ 用邻居的历史统计做特征 → 新交易进来时用归纳式模型直接算，不用整图重训。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>清洗：拼 card_id、金额去 $、拆时刻、填空值、删列、标签编码 <span data-cell="16">第 16–28 格</span></li>
+        <li>NetworkX 多重图：卡、商户为节点，每笔交易一条边 <span data-cell="35">第 35 格</span> <span data-cell="37">第 37 格</span></li>
+        <li>方法一：两层全连接网络 + BCEWithLogitsLoss + Adam <span data-cell="49">第 49 格</span> <span data-cell="51">第 51 格</span></li>
+        <li>方法二：inductiveGRL 库的 GraphConstruction 建三部图 <span data-cell="63">第 63 格</span></li>
+        <li>HinSAGE：每层采样 [2, 32] 个邻居，嵌入 64 维 <span data-cell="64">第 64 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>同一份刷卡流水，可以画成“卡—商户”二部图，也可以画成“客户—交易—商户”三部图。两种画法各适合预测什么？</li>
+      <li>一个只看单笔交易属性的模型，为什么可能漏掉“同一个商户在一周内被大量盗刷”这种模式？</li>
+      <li>作者的方法一没有切测试集。训练损失一直下降，能说明模型抓欺诈很准吗？</li>
+      <li>“归纳式”（新节点来了直接算）和“直推式”（整张图一起训练）各有什么好处？银行每天都有新卡、新交易，你会选哪种？</li>
+      <li>欺诈只占 0.1%。如果给你一个准确率 99.9% 的模型，你会先问哪两个问题？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Jawher Jabri，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：IBM TabFormer 模拟信用卡交易（Kaggle：ealtman2019/credit-card-transactions）。
+</footer>
+</main>
+
+<script src="nb/card-fraud-transaction-graph.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* ===== 本页图神经网络小工具（页面专用，不改共用文件） ===== */
+  const G = {};
+  /* 自查开关：网址带 ?fast 时用定时器代替 requestAnimationFrame（无界面截图时动画也能播完），并折叠代码 */
+  G.fast = /[?&]fast/.test(location.search);
+  if (G.fast) window.requestAnimationFrame = (cb) => setTimeout(() => cb(performance.now()), 8);
+  G.selfcheck = function () {
+    if (!G.fast) return;
+    setTimeout(() => {
+      if (/[?&]labs/.test(location.search)) {
+        const box = document.createElement("div"); const m = document.querySelector("main"); m.insertBefore(box, m.firstChild);
+        document.querySelectorAll(".inline-lab").forEach((x) => box.appendChild(x));
+        return;
+      }
+      if (/[?&]nofold/.test(location.search)) return;
+      const b = document.querySelector('[data-a="fold"]'); if (b) b.click();
+    }, 50);
+  };
+  /* 随机“社团图”：n 个点、k 类；同类连边概率 pIn，异类 pOut */
+  G.make = function (seed, n, k, pIn, pOut) {
+    const r = K.rng(seed), cls = [], edges = [], adj = Array.from({ length: n }, () => []);
+    for (let i = 0; i < n; i++) cls.push(i % k);
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+      if (r() < (cls[i] === cls[j] ? pIn : pOut)) { edges.push([i, j]); adj[i].push(j); adj[j].push(i); }
+    }
+    // 保证没有孤立点：孤立点随机连一个同类点
+    for (let i = 0; i < n; i++) if (!adj[i].length) {
+      let j = i; while (j === i || cls[j] !== cls[i]) j = Math.floor(r() * n);
+      edges.push([i, j]); adj[i].push(j); adj[j].push(i);
+    }
+    return { n, k, cls, edges, adj };
+  };
+  G.grav = 1;
+  /* 简单力导向布局（确定性），返回 [[x,y]...] 落在 box 里 */
+  G.layout = function (g, box, seed, iters) {
+    const r = K.rng(seed || 1), n = g.n, P = [];
+    for (let i = 0; i < n; i++) {
+      const a = (2 * Math.PI * g.cls[i]) / Math.max(1, g.k) + r() * 1.2, d = 0.25 + r() * 0.2;
+      P.push([0.5 + Math.cos(a) * d, 0.5 + Math.sin(a) * d]);
+    }
+    const it = iters || 160, kk = 0.6 / Math.sqrt(n);
+    for (let t = 0; t < it; t++) {
+      const D = P.map(() => [0, 0]), temp = 0.05 * (1 - t / it) + 0.002;
+      for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+        let dx = P[i][0] - P[j][0], dy = P[i][1] - P[j][1], d2 = dx * dx + dy * dy + 1e-6, f = (kk * kk) / d2;
+        D[i][0] += dx * f; D[i][1] += dy * f; D[j][0] -= dx * f; D[j][1] -= dy * f;
+      }
+      g.edges.forEach(([a, b]) => {
+        const dx = P[a][0] - P[b][0], dy = P[a][1] - P[b][1], d = Math.sqrt(dx * dx + dy * dy) + 1e-6, f = d / kk;
+        D[a][0] -= (dx / d) * f * d; D[a][1] -= (dy / d) * f * d; D[b][0] += (dx / d) * f * d; D[b][1] += (dy / d) * f * d;
+      });
+      for (let i = 0; i < n; i++) {
+        D[i][0] += (0.5 - P[i][0]) * G.grav; D[i][1] += (0.5 - P[i][1]) * G.grav;
+        const L = Math.sqrt(D[i][0] ** 2 + D[i][1] ** 2) + 1e-9, s = Math.min(L, temp);
+        P[i][0] = K.clamp(P[i][0] + (D[i][0] / L) * s + 0, -2, 3);
+        P[i][1] = K.clamp(P[i][1] + (D[i][1] / L) * s + 0, -2, 3);
+      }
+    }
+    const xs = P.map((p) => p[0]), ys = P.map((p) => p[1]);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys), m = 10;
+    return P.map(([x, y]) => [box.x + m + ((x - x0) / (x1 - x0 || 1)) * (box.w - 2 * m), box.y + m + ((y - y0) / (y1 - y0 || 1)) * (box.h - 2 * m)]);
+  };
+  /* 画图：返回 {nodes, lines} */
+  G.draw = function (svg, g, pos, opt) {
+    opt = opt || {};
+    const lines = g.edges.map(([a, b]) => K.svg(svg, "line", { x1: pos[a][0], y1: pos[a][1], x2: pos[b][0], y2: pos[b][1], stroke: "var(--line)", "stroke-width": opt.ew || 1.2 }));
+    const nodes = pos.map((p, i) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: opt.r || 6, fill: opt.fill ? opt.fill(i) : K.colors[g.cls[i] % 6], stroke: "var(--panel)", "stroke-width": 1.5 }));
+    return { nodes, lines };
+  };
+  /* 一个“消息”小圆点沿边从 a 飞到 b */
+  G.fly = function (svg, ctx, pa, pb, color, ms) {
+    const d = K.svg(svg, "circle", { cx: pa[0], cy: pa[1], r: 4, fill: color || "var(--accent)" });
+    return ctx.tween(ms || 600, (t) => { d.setAttribute("cx", K.lerp(pa[0], pb[0], t)); d.setAttribute("cy", K.lerp(pa[1], pb[1], t)); }).then((ok) => { d.remove(); return ok; });
+  };
+  /* 一轮消息传递：H 是每个点的向量；mode = mean / sum / max；self 是否带上自己 */
+  G.prop = function (H, adj, mode, self) {
+    return H.map((h, i) => {
+      const nb = self ? adj[i].concat([i]) : adj[i];
+      if (!nb.length) return h.slice();
+      const out = h.map(() => (mode === "max" ? -Infinity : 0));
+      nb.forEach((j) => H[j].forEach((v, d) => { if (mode === "max") out[d] = Math.max(out[d], v); else out[d] += v; }));
+      if (mode === "mean") return out.map((v) => v / nb.length);
+      return out;
+    });
+  };
+  /* GCN 式对称归一化传播：D^-1/2 (A+I) D^-1/2 H */
+  G.gcn = function (H, adj) {
+    const deg = adj.map((a) => a.length + 1);
+    return H.map((h, i) => {
+      const out = h.map((v) => v / deg[i]);
+      adj[i].forEach((j) => { const w = 1 / Math.sqrt(deg[i] * deg[j]); H[j].forEach((v, d) => (out[d] += w * v)); });
+      return out;
+    });
+  };
+  /* 多分类逻辑回归（softmax），全批量梯度下降 */
+  G.softmaxFit = function (X, y, K_, epochs, lr, l2) {
+    const D = X[0].length, W = Array.from({ length: K_ }, () => new Array(D + 1).fill(0));
+    for (let e = 0; e < epochs; e++) {
+      const Gr = W.map((w) => w.map(() => 0));
+      for (let i = 0; i < X.length; i++) {
+        const p = G.softmaxP(W, X[i]);
+        for (let c = 0; c < K_; c++) { const g = p[c] - (y[i] === c ? 1 : 0); for (let d = 0; d < D; d++) Gr[c][d] += g * X[i][d]; Gr[c][D] += g; }
+      }
+      for (let c = 0; c < K_; c++) for (let d = 0; d <= D; d++) W[c][d] -= lr * (Gr[c][d] / X.length + (d < D ? (l2 || 0) * W[c][d] : 0));
+    }
+    return W;
+  };
+  G.softmaxP = function (W, x) {
+    const z = W.map((w) => { let s = w[w.length - 1]; for (let d = 0; d < x.length; d++) s += w[d] * x[d]; return s; });
+    const m = Math.max(...z), ex = z.map((v) => Math.exp(v - m)), S = ex.reduce((a, b) => a + b, 0);
+    return ex.map((v) => v / S);
+  };
+  G.argmax = (a) => a.reduce((bi, v, i) => (v > a[bi] ? i : bi), 0);
+  /* 一圈圈扩散的“跳数”环 */
+  G.ring = function (svg, p, r, color) { return K.svg(svg, "circle", { cx: p[0], cy: p[1], r, fill: "none", stroke: color || "var(--accent)", "stroke-width": 2, "stroke-dasharray": "5 4" }); };
+  /* 小工具：节点向量 → 颜色（取最大类的颜色，透明度=置信度） */
+  G.paint = function (el, vec) {
+    const s = vec.reduce((a, b) => a + Math.max(0, b), 0) || 1, c = G.argmax(vec), conf = Math.max(0, vec[c]) / s;
+    K.set(el, { fill: K.colors[c % 6], "fill-opacity": 0.25 + 0.75 * conf });
+  };
+
+
+  const CARD = "var(--c1)", MER = "var(--c2)", TX = "var(--c4)", BAD = "var(--c6)";
+  /* 模拟“卡—商户”交易：部分商户被盗刷，欺诈交易集中在这些商户、金额偏大、时间偏深夜 */
+  function makeTx(seed, nCard, nMer, nTx, nBad, strength) {
+    const r = K.rng(seed), bad = new Set();
+    while (bad.size < nBad) bad.add(Math.floor(r() * nMer));
+    const T = [];
+    for (let t = 0; t < nTx; t++) {
+      const c = Math.floor(r() * nCard);
+      const m = Math.floor(Math.pow(r(), 1.4) * nMer);
+      const p = bad.has(m) ? 0.04 + 0.5 * strength : 0.01;
+      const y = r() < p ? 1 : 0;
+      const amt = Math.log(20 + r() * 80) + (y ? 0.5 * K.randn(r) + 0.35 : 0.5 * K.randn(r));
+      const hour = y ? (r() < 0.5 ? r() * 6 : r() * 24) : 6 + r() * 17;
+      T.push({ c, m, y, amt, hour: hour / 24 });
+    }
+    return { T, bad };
+  }
+  const auc = (s, y) => { const P = s.map((v, i) => [v, y[i]]).sort((a, b) => a[0] - b[0]); let rk = 0, sp = 0, np = 0, nn = 0; P.forEach(([, yy], i) => { if (yy) { sp += i + 1; np++; } else nn++; }); return np && nn ? (sp - (np * (np + 1)) / 2) / (np * nn) : 0.5; };
+
+  const steps = [
+    {
+      at: 0, title: "开场：为什么要用图来抓欺诈", kicker: "第 0–8 格 · 背景介绍",
+      html: `<p>作者先用几段文字讲背景：欺诈手法不断变化；数据极不平衡、标注不全；银行还要求能解释“为什么判它是欺诈”。</p><p>核心观点在第 5 格：XGBoost 这类传统模型<b>一次只看一笔交易</b>，图方法还会看这笔交易周围的卡、商户和其他交易。多层图卷积能让一个节点“看到”好几跳之外的信息，从而发现骗子为了掩人耳目绕的长链条。</p>`,
+      cells: [5, 7, 9],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 40, y: 34, "font-size": 14, "font-weight": 700 }, "传统模型：一次只看一行");
+        for (let i = 0; i < 5; i++) { const g = K.node(svg, 40, 50 + i * 50, 250, 38, `交易 ${i + 1}：卡 · 商户 · 金额 · 时间`, { fs: 11, stroke: i === 2 ? BAD : "var(--line)", sw: i === 2 ? 2 : 1 }); }
+        K.svg(svg, "text", { x: 400, y: 34, "font-size": 14, "font-weight": 700 }, "图方法：还看周围");
+        const C = [[420, 100], [420, 200], [420, 290]], M = [[640, 110], [640, 250]];
+        const E = [[0, 0], [1, 0], [1, 1], [2, 1], [0, 1]];
+        const lines = E.map(([c, m]) => K.svg(svg, "line", { x1: C[c][0], y1: C[c][1], x2: M[m][0], y2: M[m][1], stroke: "var(--line)", "stroke-width": 2 }));
+        C.forEach((p, i) => { K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 15, fill: CARD }); K.svg(svg, "text", { x: p[0] - 24, y: p[1] + 5, "text-anchor": "end", "font-size": 12 }, "卡" + (i + 1)); });
+        M.forEach((p, i) => { K.svg(svg, "rect", { x: p[0] - 14, y: p[1] - 14, width: 28, height: 28, rx: 4, fill: MER }); K.svg(svg, "text", { x: p[0] + 22, y: p[1] + 5, "font-size": 12 }, "商户" + (i + 1)); });
+        ctx.wait(500).then((ok) => ok && ctx.tween(1200, (t) => { K.set(lines[2], { stroke: t > 0.3 ? BAD : "var(--line)", "stroke-width": 2 + 2 * t }); K.set(lines[3], { stroke: t > 0.6 ? BAD : "var(--line)", "stroke-width": 2 + 2 * t }); K.set(lines[4], { stroke: t > 0.9 ? BAD : "var(--line)", "stroke-width": 2 + 2 * t }); }));
+        K.svg(svg, "text", { x: 400, y: 330, "font-size": 12, fill: BAD }, "商户 2 连着多笔可疑交易 → 新来的交易也要多看一眼（示意）");
+      },
+    },
+    {
+      title: "读入 10 万条交易，查缺失值", kicker: "第 9–14 格 · 读数据",
+      html: `<p>全量 2,400 万行太大，作者说受硬件限制，只随机抽 <b>10 万行</b>（第 10–11 格），然后看列信息、数一数抽到的欺诈有多少行（第 13 格），再画出每列缺失值的比例（第 14 格）。</p><p>抽样要确认欺诈样本没有被抽没：全量里欺诈只有 0.1%，10 万行里大约只剩一百来行。</p>`,
+      cells: [11, 12, 13, 14], highlight: ["sample(n=100000", "isnull"],
+      draw(svg, ctx) {
+        const r = K.rng(2), dots = [];
+        for (let i = 0; i < 400; i++) dots.push(K.svg(svg, "circle", { cx: 30 + (i % 40) * 10, cy: 40 + Math.floor(i / 40) * 12, r: 3, fill: "var(--ink-3)", opacity: 0.4 }));
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 12, class: "muted" }, "2,400 万笔 → 随机抽 10 万笔");
+        const hit = []; for (let i = 0; i < 400; i++) if (r() < 0.15) hit.push(i);
+        ctx.wait(400).then((ok) => ok && ctx.tween(900, (t) => hit.forEach((i, k) => { if (k / hit.length < t) K.set(dots[i], { fill: "var(--accent)", opacity: 1 }); })));
+        K.svg(svg, "text", { x: 460, y: 50, "font-size": 13, "font-weight": 700 }, "缺失值比例（示意）");
+        const cols = ["Zip", "Merchant State", "Errors?", "其余列"], v = [0.12, 0.11, 0.98, 0];
+        const bars = K.bars(svg, { x: 460, y: 70, w: 250, h: 160 }, cols.map((c, i) => ({ label: c, value: 0, color: "var(--warn)" })), { horizontal: true, labelWidth: 100, max: 1, fmt: (x) => (x * 100).toFixed(0) + "%" });
+        ctx.wait(1300).then((ok) => ok && ctx.tween(900, (t) => bars.forEach((b, i) => { b.rect.setAttribute("width", 100 * v[i] * t); b.text.setAttribute("x", 560 + 100 * v[i] * t + 6); b.text.textContent = Math.round(v[i] * t * 100) + "%"; })));
+        K.svg(svg, "text", { x: 460, y: 270, "font-size": 11, class: "muted" }, "Errors? 大多为空 = 没有报错（比例为示意）");
+      },
+    },
+    {
+      title: "造出 card_id，整理金额和时间", kicker: "第 15–22 格 · 清洗",
+      html: `<p>一个用户可以有好几张卡，所以作者把 <code>User</code> 和 <code>Card</code> 拼成 <code>card_id</code>，<b>一张卡一个节点</b>（第 15–16 格）。</p><p>金额是 “$12.50” 这样的文本，去掉 $ 才能变成数字（第 18 格）；时刻 “13:47” 拆成小时 13 和分钟 47（第 19 格）。然后删掉原来的 Time、User、Card 三列。</p>`,
+      cells: [16, 18, 19, 22], highlight: ['df["card_id"]', 'replace("$","")', 'str [0:2]'],
+      draw(svg, ctx) {
+        const rows = [["User", "0"], ["Card", "2"], ["Amount", "$134.09"], ["Time", "06:21"]];
+        rows.forEach(([k, v], i) => { K.svg(svg, "text", { x: 40, y: 60 + i * 50, "font-size": 13, class: "muted" }, k); K.node(svg, 120, 40 + i * 50, 120, 32, v, { fs: 13 }); });
+        K.svg(svg, "text", { x: 40, y: 30, "font-size": 12, class: "muted" }, "一行原始记录（示意值）");
+        const out = [["card_id", "0_2", 0, 1], ["Amount", "134.09", 2], ["Hour / Minute", "06 / 21", 3]];
+        out.forEach(([k, v, a, b], i) => {
+          const y = 60 + i * 80;
+          const g = K.node(svg, 470, y, 160, 40, v, { fs: 14, bold: true, stroke: "var(--accent)" });
+          K.svg(svg, "text", { x: 470, y: y - 6, "font-size": 12, class: "muted" }, k);
+          g.style.opacity = 0;
+          const arr = [a].concat(b != null ? [b] : []).map((ri) => K.arrow(svg, 242, 56 + ri * 50, 468, y + 20, { color: "var(--accent)" }));
+          arr.forEach((x) => (x.style.opacity = 0));
+          ctx.wait(400 + i * 600).then((ok) => ok && ctx.tween(500, (t) => { g.style.opacity = t; arr.forEach((x) => (x.style.opacity = t)); }));
+        });
+      },
+    },
+    {
+      title: "填空值、删列、编码", kicker: "第 23–30 格 · 编码",
+      html: `<p>“Errors?” 为空表示没有报错，作者填成 “No error”（第 24 格）；邮编和州有缺失，作者认为可以从城市推出来，直接删掉（第 25–26 格）；标签 Yes/No 变成 1/0（第 27 格）。</p><p>城市、刷卡方式、报错类型用 <code>LabelEncoder</code> 编成整数（第 28 格）：每个不同的取值分配一个编号。</p>`,
+      cells: [24, 26, 27, 28], highlight: ["fillna", "LabelEncoder"],
+      draw(svg, ctx) {
+        const vals = ["Swipe Transaction", "Chip Transaction", "Online Transaction", "Chip Transaction", "Swipe Transaction"];
+        const codes = { "Chip Transaction": 0, "Online Transaction": 1, "Swipe Transaction": 2 };
+        K.svg(svg, "text", { x: 40, y: 34, "font-size": 13, "font-weight": 700 }, "Use Chip（示意取值）");
+        K.svg(svg, "text", { x: 470, y: 34, "font-size": 13, "font-weight": 700 }, "编码后");
+        vals.forEach((v, i) => {
+          K.node(svg, 40, 50 + i * 54, 220, 38, v, { fs: 12 });
+          const t = K.svg(svg, "text", { x: 500, y: 74 + i * 54, "font-size": 20, "font-family": "var(--mono)", "font-weight": 700, fill: K.colors[codes[v]] }, codes[v]);
+          t.style.opacity = 0;
+          const a = K.arrow(svg, 262, 69 + i * 54, 480, 69 + i * 54, { color: "var(--line)" });
+          a.style.opacity = 0;
+          ctx.wait(300 + i * 300).then((ok) => ok && ctx.tween(300, (u) => { t.style.opacity = u; a.style.opacity = u; }));
+        });
+        K.svg(svg, "text", { x: 560, y: 120, "font-size": 11, class: "muted" }, "按字母顺序编号");
+        K.svg(svg, "text", { x: 560, y: 136, "font-size": 11, class: "muted" }, "数字大小没有含义");
+      },
+    },
+    {
+      title: "二部多重图：卡 ↔ 商户", kicker: "第 31–35 格 · 建图",
+      html: `<p>作者把表格变成图：<b>卡和商户是两类节点</b>，每笔交易是连接一张卡和一个商户的边（第 32 格）。卡只连商户、商户只连卡，这种图叫<b>二部图</b>。</p><p>同一张卡可能在同一家店刷好几次，所以两点之间允许有多条边，叫<b>多重图</b>（<code>nx.MultiGraph</code>，第 34–35 格）。每个节点带一个 <code>type</code> 属性区分是卡还是商户。</p>`,
+      cells: [35], highlight: ["MultiGraph", "type='card_id'", "type='merchant_name'"],
+      draw(svg, ctx) {
+        const C = [0, 1, 2, 3].map((i) => [150, 60 + i * 72]), M = [0, 1, 2].map((i) => [560, 90 + i * 85]);
+        const E = [[0, 0], [0, 0], [0, 1], [1, 1], [2, 1], [2, 2], [3, 2], [3, 2], [3, 2]];
+        C.forEach((p, i) => { K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 16, fill: CARD }); K.svg(svg, "text", { x: p[0] - 26, y: p[1] + 5, "text-anchor": "end", "font-size": 12 }, "卡 " + (i + 1)); });
+        M.forEach((p, i) => { K.svg(svg, "rect", { x: p[0] - 16, y: p[1] - 16, width: 32, height: 32, rx: 5, fill: MER }); K.svg(svg, "text", { x: p[0] + 26, y: p[1] + 5, "font-size": 12 }, "商户 " + (i + 1)); });
+        const seen = {};
+        (async () => {
+          for (const [c, m] of E) {
+            const k = c + "_" + m; seen[k] = (seen[k] || 0) + 1; const bend = (seen[k] - 1) * 18 - 0;
+            const a = C[c], b = M[m], mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2 - bend;
+            const p = K.svg(svg, "path", { d: `M${a[0] + 16},${a[1]} Q${mx},${my} ${b[0] - 16},${b[1]}`, fill: "none", stroke: "var(--accent)", "stroke-width": 1.6 });
+            p.style.opacity = 0;
+            if (!(await ctx.tween(260, (t) => (p.style.opacity = t)))) return;
+          }
+        })();
+        K.svg(svg, "text", { x: 250, y: 330, "font-size": 12, class: "muted" }, "卡 4 在商户 3 刷了 3 次 → 两点之间 3 条边（多重图）");
+      },
+    },
+    {
+      title: "一笔交易一条边，再数点和边", kicker: "第 36–40 格 · 边属性",
+      html: `<p>第 37 格逐行遍历表格，为每笔交易在“卡—商户”之间加一条边，并把年、月、日、时、分、金额、刷卡方式、城市、报错、MCC 这 10 个字段<b>挂在边上当属性</b>。</p><p>随后数节点数和边数（第 38 格），又把整张图转成稠密的邻接矩阵（第 39–40 格）。小提醒：第 37 格每行末尾多了逗号，属性都变成了只有一个元素的元组。</p>`,
+      cells: [37, 38, 39], highlight: ["G.add_edge", "adjacency_matrix"],
+      notes: { 37: "每行末尾的逗号会把值变成 (值,) 这样的元组，第 49 格又专门把它拆开" },
+      draw(svg, ctx) {
+        const a = [120, 170], b = [600, 170];
+        K.svg(svg, "circle", { cx: a[0], cy: a[1], r: 20, fill: CARD }); K.svg(svg, "text", { x: a[0], y: a[1] + 40, "text-anchor": "middle", "font-size": 12 }, "card_id");
+        K.svg(svg, "rect", { x: b[0] - 20, y: b[1] - 20, width: 40, height: 40, rx: 6, fill: MER }); K.svg(svg, "text", { x: b[0], y: b[1] + 40, "text-anchor": "middle", "font-size": 12 }, "Merchant Name");
+        const ln = K.svg(svg, "line", { x1: a[0] + 20, y1: a[1], x2: a[0] + 20, y2: a[1], stroke: "var(--accent)", "stroke-width": 3 });
+        const attrs = ["year", "month", "day", "hour", "minute", "amount", "use_chip", "merchant_city", "errors", "mcc"];
+        const tags = attrs.map((t, i) => { const e = K.svg(svg, "text", { x: 200 + (i % 5) * 70, y: i < 5 ? 120 : 230, "font-size": 12, "font-family": "var(--mono)", fill: "var(--accent)" }, t); e.style.opacity = 0; return e; });
+        ctx.tween(700, (t) => ln.setAttribute("x2", K.lerp(a[0] + 20, b[0] - 20, t))).then((ok) => ok && ctx.tween(1200, (t) => tags.forEach((e, i) => (e.style.opacity = K.clamp(t * 10 - i, 0, 1)))));
+        K.svg(svg, "text", { x: 200, y: 300, "font-size": 12, class: "muted" }, "一笔交易 = 一条带 10 个属性的边");
+      },
+    },
+    {
+      title: "看看点和边长什么样", kicker: "第 41–47 格 · 检查图",
+      html: `<p>作者打印了前 10 个节点的类型、前 5 条边的属性（第 42–43 格），按“报错类型”统计了各有多少条边（第 45 格），最后把所有边连同属性取成一个列表 <code>edge_list</code>（第 46 格），准备喂给模型。</p><p>注意 <code>G.edges()</code> 的顺序：多重图会<b>按节点分组</b>依次列出边，先列完第一张卡的所有交易，再列下一张卡的。这个顺序和原始表格的行顺序不一样，下一章会用到这个事实。</p>`,
+      cells: [42, 43, 45, 46], highlight: ["get_node_attributes", "Counter", "G.edges(data=True)"],
+      notes: { 44: "这段说明（“边的属性”）放在了它描述的代码之后，顺序有点乱" },
+      draw(svg, ctx) {
+        const rows = [["卡A", "店1", "1"], ["卡B", "店2", "2"], ["卡A", "店3", "3"], ["卡C", "店1", "4"], ["卡B", "店1", "5"], ["卡A", "店2", "6"]];
+        K.svg(svg, "text", { x: 40, y: 30, "font-size": 13, "font-weight": 700 }, "原表顺序（行号）");
+        K.svg(svg, "text", { x: 420, y: 30, "font-size": 13, "font-weight": 700 }, "G.edges() 的顺序（按卡分组）");
+        const L = rows.map((r, i) => K.node(svg, 40, 44 + i * 44, 220, 34, `第 ${r[2]} 行：${r[0]} — ${r[1]}`, { fs: 12 }));
+        const order = rows.map((r, i) => i).sort((x, y) => rows[x][0].localeCompare(rows[y][0]) || x - y);
+        const R = order.map((ri, k) => { const g = K.node(svg, 420, 44 + k * 44, 220, 34, `第 ${rows[ri][2]} 行：${rows[ri][0]} — ${rows[ri][1]}`, { fs: 12, stroke: K.colors["ABC".indexOf(rows[ri][0][1])] }); g.style.opacity = 0; return g; });
+        (async () => { for (let k = 0; k < R.length; k++) { if (!(await ctx.tween(280, (t) => (R[k].style.opacity = t)))) return; } })();
+      },
+    },
+    {
+      title: "方法一：名叫 FraudGNN 的全连接网络", kicker: "第 48–49 格 · 模型",
+      html: `<p>作者定义了 <code>FraudGNN</code>：输入是一条边的 10 个属性，经过 <b>Linear(10→16) → ReLU → Linear(16→1)</b>，输出一个“欺诈分数”。</p><p>虽然名字里有 GNN，作者在第 48 格也写明它是“简单的前馈神经网络”：它<b>一次只看一条边自己的属性</b>，没有从邻居收集任何信息，所以本质上和对表格行做分类一样，不是图神经网络。</p>`,
+      cells: [49], highlight: ["nn.Linear(input_dim, hidden_dim)", "nn.Linear(hidden_dim, 1)"],
+      draw(svg, ctx) {
+        const L = [10, 16, 1], xs = [120, 360, 600], P = L.map((n, li) => Array.from({ length: Math.min(n, 10) }, (_, i) => [xs[li], 170 + (i - (Math.min(n, 10) - 1) / 2) * 26]));
+        for (let li = 0; li < 2; li++) P[li].forEach((a) => P[li + 1].forEach((b) => K.svg(svg, "line", { x1: a[0], y1: a[1], x2: b[0], y2: b[1], stroke: "var(--line)" })));
+        const cs = P.map((ps) => ps.map((p) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 9, fill: "var(--panel-2)", stroke: "var(--ink-3)" })));
+        ["10 个边属性", "16 个隐藏单元", "欺诈分数"].forEach((t, i) => K.svg(svg, "text", { x: xs[i], y: 320, "text-anchor": "middle", "font-size": 12 }, t));
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, fill: "var(--warn)", "font-weight": 700 }, "只看这一条边自己，没有“问邻居”这一步");
+        (async () => { for (let li = 0; li < 3; li++) if (!(await ctx.tween(400, (t) => cs[li].forEach((c) => K.set(c, { fill: t > 0.5 ? "var(--accent)" : "var(--panel-2)" }))))) return; })();
+      },
+    },
+    {
+      title: "训练 201 轮：特征和标签对上了吗", kicker: "第 50–52 格 · 训练",
+      html: `<p>标签 <code>target</code> 取自表格的 “Is Fraud?” 列（第 50 格），损失函数是 <code>BCEWithLogitsLoss</code>（二分类交叉熵），Adam 学习率 0.01，训练 201 轮、每 20 轮打印一次损失（第 51–52 格）。</p><p>两个问题：①特征 <code>x</code> 是按 <code>G.edges()</code> 的顺序排的，标签按表格行序排的，<b>两者错位</b>；②全部数据都拿来训练，没有测试集，所以只能看到损失，看不出模型到底抓得准不准。</p>`,
+      cells: [50, 51, 52], highlight: ["df['Is Fraud?'].values", "BCEWithLogitsLoss", "num_epochs=201"],
+      draw(svg, ctx) {
+        const n = 8, r = K.rng(4), ys = [0, 0, 1, 0, 0, 0, 1, 0], perm = [0, 2, 5, 1, 4, 3, 7, 6];
+        K.svg(svg, "text", { x: 60, y: 30, "font-size": 13, "font-weight": 700 }, "特征 x（按 G.edges 顺序）");
+        K.svg(svg, "text", { x: 440, y: 30, "font-size": 13, "font-weight": 700 }, "标签 target（按表格顺序）");
+        for (let i = 0; i < n; i++) {
+          K.node(svg, 60, 44 + i * 34, 200, 26, `第 ${perm[i] + 1} 笔的属性`, { fs: 11, stroke: ys[perm[i]] ? BAD : "var(--line)" });
+          K.node(svg, 440, 44 + i * 34, 200, 26, `第 ${i + 1} 笔：${ys[i] ? "欺诈" : "正常"}`, { fs: 11, stroke: ys[i] ? BAD : "var(--line)" });
+        }
+        const links = [];
+        for (let i = 0; i < n; i++) { const l = K.svg(svg, "line", { x1: 262, y1: 57 + i * 34, x2: 262, y2: 57 + i * 34, stroke: perm[i] === i ? "var(--good)" : "var(--bad)", "stroke-width": 2 }); links.push(l); }
+        ctx.wait(400).then((ok) => ok && ctx.tween(1000, (t) => links.forEach((l) => l.setAttribute("x2", 262 + 176 * t))));
+        K.svg(svg, "text", { x: 280, y: 325, "font-size": 12, fill: "var(--bad)" }, "红线 = 同一行配对的特征和标签不是同一笔交易（示意）");
+      },
+    },
+    {
+      title: "方法二：归纳式学习，先切 70 / 30", kicker: "第 53–60 格 · 论文方法",
+      html: `<p>方法二照搬论文 <i>Inductive Graph Representation Learning for fraud detection</i> 的思路，用论文作者写的 <code>inductiveGRL</code> 库（第 54–56 格）。嵌入维度 64（第 57 格）。</p><p><b>归纳式</b>的意思是：模型学会的是“怎么根据邻居算出一个节点的表示”这套规则，新的交易进来，不用重新训练整张图就能直接算。作者用前 70% 的行建图训练，后 30% 留作“新数据”（第 58–59 格）。不过前面是随机抽样的，这里的前后并不代表时间先后。</p>`,
+      cells: [55, 56, 57, 59, 60], highlight: ["inductiveGRL", "embedding_size = 64", "0.7*len(df)"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 34, "font-size": 13, "font-weight": 700 }, "直推式：整张图一起训练，新点来了要重来");
+        K.svg(svg, "text", { x: 30, y: 194, "font-size": 13, "font-weight": 700 }, "归纳式：学会“怎么从邻居算表示”，新点直接套用");
+        const g = G.make(3, 14, 2, 0.4, 0.05), p1 = G.layout(g, { x: 60, y: 45, w: 280, h: 120 }, 2), p2 = G.layout(g, { x: 60, y: 205, w: 280, h: 120 }, 2);
+        G.draw(svg, g, p1, { r: 5, fill: () => TX }); G.draw(svg, g, p2, { r: 5, fill: () => TX });
+        const nw1 = [420, 105], nw2 = [420, 265];
+        const n1 = K.svg(svg, "circle", { cx: nw1[0], cy: nw1[1], r: 9, fill: "var(--warn)" }), n2 = K.svg(svg, "circle", { cx: nw2[0], cy: nw2[1], r: 9, fill: "var(--warn)" });
+        K.svg(svg, "line", { x1: nw1[0], y1: nw1[1], x2: p1[3][0], y2: p1[3][1], stroke: "var(--warn)", "stroke-dasharray": "4 3" });
+        K.svg(svg, "line", { x1: nw2[0], y1: nw2[1], x2: p2[3][0], y2: p2[3][1], stroke: "var(--warn)", "stroke-dasharray": "4 3" });
+        const t1 = K.svg(svg, "text", { x: 450, y: 110, "font-size": 13, fill: "var(--bad)" }, ""), t2 = K.svg(svg, "text", { x: 450, y: 270, "font-size": 13, fill: "var(--good)" }, "");
+        ctx.wait(600).then((ok) => { if (!ok) return; t1.textContent = "↻ 整张图重新训练"; return ctx.wait(600); }).then((ok) => { if (ok) t2.textContent = "✓ 用学到的规则直接算出表示"; });
+      },
+    },
+    {
+      title: "三部图：客户—交易—商户", kicker: "第 61–63 格 · 异构图",
+      html: `<p>这次换一种建图方式：<b>交易本身也变成节点</b>。图里有三类节点：客户（卡）、交易、商户；每笔交易节点连向它的卡和它的商户。这种节点有不同类型的图叫<b>异构图</b>（第 62–63 格）。</p><p>只有交易节点带真正的特征（金额、时间等）；卡和商户节点的特征只是一个常数 1。这样一来，两笔交易如果用了同一张卡或在同一家店，就隔着两步相连。</p>`,
+      cells: [63], highlight: ["GraphConstruction", "get_stellargraph", '"transaction":train_data.index'],
+      draw(svg, ctx) {
+        const C = [[90, 80], [90, 260]], T = [0, 1, 2, 3, 4].map((i) => [360, 50 + i * 60]), M = [[630, 100], [630, 240]];
+        const tc = [0, 0, 1, 1, 1], tm = [0, 1, 0, 1, 1];
+        T.forEach((p, i) => { K.svg(svg, "line", { x1: C[tc[i]][0], y1: C[tc[i]][1], x2: p[0], y2: p[1], stroke: "var(--line)", "stroke-width": 1.5 }); K.svg(svg, "line", { x1: M[tm[i]][0], y1: M[tm[i]][1], x2: p[0], y2: p[1], stroke: "var(--line)", "stroke-width": 1.5 }); });
+        C.forEach((p, i) => { K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 18, fill: CARD }); K.svg(svg, "text", { x: p[0], y: p[1] + 36, "text-anchor": "middle", "font-size": 12 }, "客户（卡）"); });
+        M.forEach((p) => { K.svg(svg, "rect", { x: p[0] - 18, y: p[1] - 18, width: 36, height: 36, rx: 6, fill: MER }); K.svg(svg, "text", { x: p[0], y: p[1] + 36, "text-anchor": "middle", "font-size": 12 }, "商户"); });
+        const tn = T.map((p) => K.svg(svg, "polygon", { points: `${p[0]},${p[1] - 14} ${p[0] + 14},${p[1]} ${p[0]},${p[1] + 14} ${p[0] - 14},${p[1]}`, fill: TX }));
+        K.svg(svg, "text", { x: 360, y: 340, "text-anchor": "middle", "font-size": 12 }, "◆ 交易节点（带金额、时间等特征）");
+        ctx.wait(400).then((ok) => ok && ctx.tween(900, (t) => { K.set(tn[1], { fill: t > 0.5 ? "var(--warn)" : TX }); K.set(tn[3], { fill: t > 0.5 ? "var(--warn)" : TX }); }));
+        K.svg(svg, "text", { x: 400, y: 30, "font-size": 12, fill: "var(--warn)" }, "两笔黄色交易在同一商户，隔两步相连");
+      },
+    },
+    {
+      title: "HinSAGE：采样邻居，再层层汇总", kicker: "第 64–65 格 · 训练",
+      html: `<p>HinSAGE 是 <b>GraphSAGE</b> 的异构图版本。GraphSAGE 的做法：对每个要预测的交易节点，第 1 层随机<b>采样</b>固定个数的邻居，第 2 层再从这些邻居各自的邻居里采样；然后从最外层往里一层层<b>汇总</b>（比如取平均）再变换，得到这笔交易的 64 维表示。</p><p>作者设 <code>num_samples = [2, 32]</code>：第 1 层采 2 个邻居（正好是这笔交易的卡和商户），第 2 层每个再采 32 个（这张卡的其他交易、这家店的其他交易）。训练 10 轮、批大小 5，然后 notebook 就结束了。</p>`,
+      cells: [64], highlight: ["num_samples = [2,32]", "train_hinsage", "epochs=10"],
+      draw(svg, ctx) {
+        const root = [360, 60], h1 = [[200, 170], [520, 170]];
+        const tx = K.svg(svg, "polygon", { points: `${root[0]},${root[1] - 16} ${root[0] + 16},${root[1]} ${root[0]},${root[1] + 16} ${root[0] - 16},${root[1]}`, fill: "var(--warn)" });
+        K.svg(svg, "text", { x: root[0] + 24, y: root[1] + 5, "font-size": 12 }, "要预测的交易");
+        const l1 = h1.map((p) => K.svg(svg, "line", { x1: root[0], y1: root[1], x2: p[0], y2: p[1], stroke: "var(--line)", "stroke-width": 2 }));
+        K.svg(svg, "circle", { cx: h1[0][0], cy: h1[0][1], r: 16, fill: CARD }); K.svg(svg, "rect", { x: h1[1][0] - 16, y: h1[1][1] - 16, width: 32, height: 32, rx: 5, fill: MER });
+        K.svg(svg, "text", { x: 30, y: 175, "font-size": 12, class: "muted" }, "第 1 层：采 2 个");
+        K.svg(svg, "text", { x: 30, y: 330, "font-size": 12, class: "muted" }, "第 2 层：各采 32 个（画了 8 个）");
+        const leaves = [];
+        h1.forEach((p, k) => { for (let i = 0; i < 8; i++) { const q = [p[0] - 140 + i * 40, 290]; leaves.push({ p, q, e: K.svg(svg, "line", { x1: p[0], y1: p[1], x2: q[0], y2: q[1], stroke: "var(--line)" }), d: K.svg(svg, "polygon", { points: `${q[0]},${q[1] - 7} ${q[0] + 7},${q[1]} ${q[0]},${q[1] + 7} ${q[0] - 7},${q[1]}`, fill: TX }) }); } });
+        (async () => {
+          if (!(await ctx.wait(600))) return;
+          await Promise.all(leaves.map((L) => G.fly(svg, ctx, L.q, L.p, "var(--accent)", 800)));
+          if (!ctx.alive()) return;
+          await Promise.all(h1.map((p) => G.fly(svg, ctx, p, root, "var(--accent)", 700)));
+          if (ctx.alive()) K.svg(svg, "text", { x: root[0] + 24, y: root[1] + 24, "font-size": 12, fill: "var(--accent)" }, "→ 64 维表示");
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+  G.selfcheck();
+
+  /* ---------- 实验 A：特征与标签错位 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "mode", label: "特征和标签怎么配对", value: "ok", options: [["ok", "按同一笔交易配对（正确）"], ["group", "特征按“卡”分组重排，标签按原顺序（作者的做法）"], ["shuffle", "完全随机打乱（对照）"]] },
+      { id: "s", label: "欺诈信号强度", min: 0, max: 1, step: 0.05, value: 0.6, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "重新生成", button: true },
+    ],
+    note: "浏览器里生成 3,000 笔模拟交易（约 3% 欺诈），在一半上现场训练逻辑回归（特征：金额、时刻），在另一半上算 AUC。AUC 0.5 = 和瞎猜一样。切换配对方式，看看“特征和标签不是同一笔交易”时模型还能学到什么。",
+    render(svg, v) {
+      const seed = 3 + v.seed * 7, { T } = makeTx(seed, 300, 120, 3000, 15, v.s);
+      let X = T.map((t) => [t.amt - 4, Math.min(t.hour, 1 - t.hour) * 4]), y = T.map((t) => t.y);
+      if (v.mode === "group") { const ord = T.map((t, i) => i).sort((a, b) => T[a].c - T[b].c || a - b); X = ord.map((i) => X[i]); }
+      if (v.mode === "shuffle") { const r = K.rng(seed + 9), ord = T.map((t, i) => [r(), i]).sort((a, b) => a[0] - b[0]).map((x) => x[1]); X = ord.map((i) => X[i]); }
+      const half = 1500, W = G.softmaxFit(X.slice(0, half), y.slice(0, half), 2, 150, 0.8, 0);
+      const sc = X.slice(half).map((x) => G.softmaxP(W, x)[1]), A = auc(sc, y.slice(half));
+      // 画：测试集得分分布（欺诈 vs 正常）
+      const ax = K.axes(svg, { x: 50, y: 20, w: 560, h: 230 }, [0, 1], [0, 1], { yticks: 0, xlabel: "模型给出的欺诈分数（按排名归一化）" });
+      const rk = sc.map((s, i) => [s, i]).sort((a, b) => a[0] - b[0]); const pos = new Array(sc.length); rk.forEach(([, i], k) => (pos[i] = k / sc.length));
+      const yt = y.slice(half), r = K.rng(1);
+      pos.forEach((p, i) => { if (!yt[i] && r() > 0.25) return; K.svg(svg, "circle", { cx: ax.sx(p), cy: yt[i] ? 70 + r() * 50 : 160 + r() * 70, r: yt[i] ? 3.5 : 2, fill: yt[i] ? BAD : "var(--ink-3)", opacity: yt[i] ? 0.9 : 0.4 }); });
+      K.svg(svg, "text", { x: 56, y: 60, "font-size": 12, fill: BAD }, "欺诈交易");
+      K.svg(svg, "text", { x: 56, y: 150, "font-size": 12, class: "muted" }, "正常交易（抽 1/4 显示）");
+      K.svg(svg, "text", { x: 50, y: 305, "font-size": 12, class: "muted" }, "红点越靠右，说明模型越会把欺诈排在前面");
+      return { readout: [
+        { k: "测试 AUC", v: A.toFixed(3), color: A > 0.7 ? "var(--good)" : "var(--bad)" },
+        { k: "解读", v: A > 0.7 ? "学到了规律" : A > 0.58 ? "只学到一点" : "≈ 瞎猜" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：边特征 vs 加上邻居（卡、商户）统计 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "s", label: "被盗刷商户的“集中程度”", min: 0, max: 1, step: 0.05, value: 0.5, fmt: (v) => v.toFixed(2) },
+      { id: "nb", label: "被盗刷的商户数（共 120 家）", min: 2, max: 40, step: 1, value: 10 },
+      { id: "seed", label: "重新生成", button: true },
+    ],
+    note: "按时间先后切：前 60% 交易训练，后 40% 测试。模型 1 只用这笔交易自己的金额和时刻（像方法一）；模型 2 再加两个“邻居特征”：这家商户、这张卡在训练期里的历史欺诈率（相当于沿“交易—商户—交易”走两步收集标签信息，是消息传递最简单的形式）。看集中程度和商户数变化时，两个模型的差距怎么变。",
+    render(svg, v) {
+      const seed = 11 + v.seed * 5, { T, bad } = makeTx(seed, 400, 120, 5000, v.nb, v.s);
+      const cut = 3000, mS = {}, cS = {};
+      T.slice(0, cut).forEach((t) => { (mS[t.m] = mS[t.m] || [0, 0]); mS[t.m][0] += t.y; mS[t.m][1]++; (cS[t.c] = cS[t.c] || [0, 0]); cS[t.c][0] += t.y; cS[t.c][1]++; });
+      const rate = (S, k) => { const s = S[k] || [0, 0]; return (s[0] + 0.02 * 5) / (s[1] + 5); };
+      const f1 = (t) => [t.amt - 4, Math.min(t.hour, 1 - t.hour) * 4];
+      const f2 = (t, loo) => f1(t).concat([Math.log(rate(mS, t.m) / 0.02) , Math.log(rate(cS, t.c) / 0.02)]);
+      // 训练集里的邻居特征要去掉这笔自己的标签（留一法），避免偷看答案
+      const f2tr = (t) => { mS[t.m][0] -= t.y; mS[t.m][1]--; cS[t.c][0] -= t.y; cS[t.c][1]--; const x = f2(t); mS[t.m][0] += t.y; mS[t.m][1]++; cS[t.c][0] += t.y; cS[t.c][1]++; return x; };
+      const tr = T.slice(0, cut), te = T.slice(cut), yTr = tr.map((t) => t.y), yTe = te.map((t) => t.y);
+      const W1 = G.softmaxFit(tr.map(f1), yTr, 2, 150, 0.8, 0), W2 = G.softmaxFit(tr.map(f2tr), yTr, 2, 150, 0.8, 0);
+      const A1 = auc(te.map((t) => G.softmaxP(W1, f1(t))[1]), yTe), A2 = auc(te.map((t) => G.softmaxP(W2, f2(t))[1]), yTe);
+      // 召回率@前 5%
+      const topk = (sc) => { const k = Math.round(sc.length * 0.05), idx = sc.map((s, i) => [s, i]).sort((a, b) => b[0] - a[0]).slice(0, k); const tot = yTe.reduce((a, b) => a + b, 0); return tot ? idx.filter(([, i]) => yTe[i]).length / tot : 0; };
+      const R1 = topk(te.map((t) => G.softmaxP(W1, f1(t))[1])), R2 = topk(te.map((t) => G.softmaxP(W2, f2(t))[1]));
+      const ax = K.axes(svg, { x: 60, y: 20, w: 540, h: 250 }, [0, 4], [0, 1], { xticks: 0, yticks: 4, yfmt: (x) => x.toFixed(2) });
+      [[A1, "AUC · 只看本笔", "var(--ink-3)"], [A2, "AUC · 加邻居", "var(--accent)"], [R1, "前5%召回 · 只看本笔", "var(--ink-3)"], [R2, "前5%召回 · 加邻居", "var(--accent)"]].forEach(([val, nm, c], i) => {
+        K.svg(svg, "rect", { x: ax.sx(i + 0.15), y: ax.sy(val), width: ax.sx(0.7) - ax.sx(0), height: ax.sy(0) - ax.sy(val), fill: c, rx: 3 });
+        K.svg(svg, "text", { x: ax.sx(i + 0.5), y: ax.sy(val) - 6, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, val.toFixed(2));
+        K.svg(svg, "text", { x: ax.sx(i + 0.5), y: 290, "text-anchor": "middle", "font-size": 11 }, nm);
+      });
+      const nf = yTe.reduce((a, b) => a + b, 0);
+      K.svg(svg, "text", { x: 60, y: 325, "font-size": 12, class: "muted" }, `测试期 ${te.length} 笔交易中欺诈 ${nf} 笔；“前 5% 召回”= 只复核分数最高的 5% 交易能抓到几成欺诈`);
+      return { readout: [
+        { k: "AUC：只看本笔", v: A1.toFixed(3) },
+        { k: "AUC：加邻居", v: A2.toFixed(3), color: A2 > A1 ? "var(--good)" : "var(--bad)" },
+        { k: "前 5% 召回提升", v: ((R2 - R1) * 100).toFixed(0) + " 个百分点" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：GraphSAGE 邻居采样 ---------- */
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "s1", label: "第 1 层采样数", min: 1, max: 2, step: 1, value: 2 },
+      { id: "s2", label: "第 2 层每个邻居采样数", min: 1, max: 40, step: 1, value: 32 },
+      { id: "deg", label: "一家商户平均有多少笔交易", min: 5, max: 200, step: 5, value: 80 },
+      { id: "seed", label: "重新采样", button: true },
+    ],
+    note: "三部图里，一笔交易只连 2 个邻居（它的卡、它的商户），所以第 1 层最多采 2 个；第 2 层从卡和商户的其他交易里各随机抽若干笔（不足就有放回地重复抽）。右边是抽到的“第 2 层交易”里有多少是真正不同的交易：采样数越大，看得越全，但计算量也越大。",
+    render(svg, v) {
+      const r = K.rng(77 + v.seed * 3), cardDeg = 12, merDeg = v.deg;
+      const root = [320, 40], h1 = v.s1 === 2 ? [[170, 150, "卡", cardDeg], [470, 150, "商户", merDeg]] : [[320, 150, "卡", cardDeg]];
+      K.svg(svg, "polygon", { points: `${root[0]},${root[1] - 14} ${root[0] + 14},${root[1]} ${root[0]},${root[1] + 14} ${root[0] - 14},${root[1]}`, fill: "var(--warn)" });
+      let total = 0, uniq = 0;
+      h1.forEach(([x, y, nm, deg], k) => {
+        K.svg(svg, "line", { x1: root[0], y1: root[1], x2: x, y2: y, stroke: "var(--ink-3)", "stroke-width": 2 });
+        if (nm === "卡") K.svg(svg, "circle", { cx: x, cy: y, r: 14, fill: CARD }); else K.svg(svg, "rect", { x: x - 14, y: y - 14, width: 28, height: 28, rx: 4, fill: MER });
+        K.svg(svg, "text", { x: x, y: y - 22, "text-anchor": "middle", "font-size": 11 }, `${nm}（共 ${deg} 笔交易）`);
+        const picks = []; for (let i = 0; i < v.s2; i++) picks.push(Math.floor(r() * deg));
+        const set = new Set(picks); total += picks.length; uniq += set.size;
+        const shown = Math.min(v.s2, 20), w = 130;
+        for (let i = 0; i < shown; i++) {
+          const qx = x - w + (2 * w * i) / Math.max(1, shown - 1), qy = 260 + (i % 2) * 22;
+          K.svg(svg, "line", { x1: x, y1: y, x2: qx, y2: qy, stroke: "var(--line)" });
+          const dup = picks.indexOf(picks[i]) !== i;
+          K.svg(svg, "polygon", { points: `${qx},${qy - 6} ${qx + 6},${qy} ${qx},${qy + 6} ${qx - 6},${qy}`, fill: dup ? "var(--ink-3)" : TX });
+        }
+        if (v.s2 > shown) K.svg(svg, "text", { x, y: 312, "text-anchor": "middle", "font-size": 11, class: "muted" }, `（只画了 ${shown} 个）`);
+      });
+      K.svg(svg, "text", { x: 20, y: 345, "font-size": 11, class: "muted" }, "灰色菱形 = 重复抽到的同一笔交易");
+      const cover = h1.reduce((s, [, , , deg]) => s + deg, 0);
+      return { readout: [
+        { k: "第 2 层抽样次数", v: String(total) },
+        { k: "其中不同的交易", v: String(uniq) },
+        { k: "覆盖了 2 跳邻居的", v: ((uniq / cover) * 100).toFixed(0) + "%" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

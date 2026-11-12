@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LoRA 微调大模型</title>
+<meta name="description" content="Kaggle 案例拆解：用 KerasNLP 对 Gemma 2B 做 LoRA 低秩微调，用 Dolly 15k 的 1000 条指令数据，让模型从“续写文字”变成“按指令回答”。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">文本 · 生成式大模型 · 参数高效微调</div>
+  <h1>只训练 0.05% 的参数：用 LoRA 教 Gemma 听指令</h1>
+  <p class="en">Fine-tune Gemma models in Keras using LoRA</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">大语言模型 Gemma 2B</span><span class="tag method">因果语言模型</span><span class="tag method">指令微调</span>
+    <span class="tag method">LoRA 低秩适配</span><span class="tag method">AdamW</span><span class="tag method">KerasNLP / Keras 3 (JAX)</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Nilay Chauhan</b>（内容来自 Google 官方 Gemma 教程）</span>
+    <span>Kaggle 点赞 <b>4,888</b>（2026-11 抓取）</span>
+    <span>数据集 <b>databricks/databricks-dolly-15k</b> · 模型 <b>gemma_2b_en</b></span>
+    <span><a href="https://www.kaggle.com/code/nilaychauhan/fine-tune-gemma-models-in-keras-using-lora" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">人写的“指令 → 回答”对</div><p>Databricks Dolly 15k：约 15000 条人工编写的提示/回答，专门用于微调大模型。作者去掉带参考材料（context）的样本，只取前 1000 条，套成统一模板。<span data-cell="15">出处</span></p></div>
+    <div class="card panel"><h3>要学会什么</h3><div class="big">按指令给出有用的回答</div><p>预训练好的 Gemma 只会“接着往下写”。微调后，给它一个 <code>Instruction</code>，它应该在 <code>Response</code> 后面写出贴题的回答。<span data-cell="4">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">冻结原模型，旁路加小矩阵</div><p><b>LoRA</b>：原来的权重一个都不动，在旁边加两个很“瘦”的矩阵 B·A（秩 r = 4），只训练它们。再用 AdamW、学习率 5e-5 训练 1 轮。<span data-cell="27">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">可训练参数从 25 亿降到 130 万</div><p>开启 LoRA 后可训练参数从 2.5B 降到 1.3M <span data-cell="28">出处</span>。微调后，“去欧洲玩什么”会推荐具体地点，给小孩讲光合作用也用了更简单的话。<span data-cell="36">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">训练数据是 Databricks Dolly 15k：员工手写的“指令 → 回答”对，专门用于让大模型学会按指令回答。另一个“原料”是预训练好的 Gemma 2B 模型。以下信息来自 notebook 文字与代码。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">Dolly 原始规模</div><div class="v">约 15,000 对</div></div>
+        <div class="stat-tile"><div class="k">本例实际使用</div><div class="v">1,000 条</div></div>
+        <div class="stat-tile"><div class="k">模型参数</div><div class="v">约 25 亿</div></div>
+        <div class="stat-tile"><div class="k">每条最长</div><div class="v">512 词元</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">“15,000 条高质量人工编写的提示/回答对”见第 4 格 <span data-cell="4">出处</span>；去掉带 context 的样本后只取前 1000 条，见第 15 格 <span data-cell="15">出处</span>；2.5B 参数见第 28 格 <span data-cell="28">出处</span>；序列长度 512 见第 29 格 <span data-cell="29">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每条样本的字段</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>字段</th><th>含义</th><th>本例怎么用</th></tr>
+        <tr><td><code>instruction</code></td><td>人写的指令或问题</td><td>填进模板的 Instruction 部分</td></tr>
+        <tr><td><code>context</code></td><td>可选的参考材料（有些样本有）</td><td>有 context 的样本全部跳过</td></tr>
+        <tr><td><code>response</code></td><td>人写的回答，<b>模型要学着写出来的部分</b></td><td>填进模板的 Response 部分</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">字段名见第 15 格代码 <span data-cell="15">出处</span>。每条样本最后变成一段纯文本：“Instruction:（换行）指令（空一行）Response:（换行）回答”。这里没有单独的“答案列”：模型学的是“接着写下一个词”，整段文本本身既是题目也是答案。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="26">
+    <h3>动手试试 A · 低秩近似：秩 r 够不够用？ <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="28">
+    <h3>动手试试 B · LoRA 参数量计算器 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+</section>
+
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>开启 LoRA（rank=4）后，可训练参数从 25 亿降到 130 万</td><td><span data-cell="28">第 28 格</span></td></tr>
+        <tr><td>微调前：问“去欧洲旅行该做什么”，模型只回答“建议去欧洲旅行”</td><td><span data-cell="22">第 22 格</span></td></tr>
+        <tr><td>微调前：给小孩讲光合作用，回答里有叶绿素、葡萄糖等小孩难懂的词</td><td><span data-cell="25">第 25 格</span></td></tr>
+        <tr><td>微调后：会推荐欧洲的具体游览地点</td><td><span data-cell="33">第 33 格</span></td></tr>
+        <tr><td>微调后：用更简单的话解释光合作用</td><td><span data-cell="36">第 36 格</span></td></tr>
+        <tr><td>为了演示只用了少量数据、1 轮、低秩；想更好可以加数据、加轮数、提高秩、调学习率和权重衰减</td><td><span data-cell="37">第 37 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">生成的原文和训练损失在运行输出里，Kaggle 下载的源码不带输出。这里只转述作者文字里的描述，没有给出模型回答原文或分数。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能做什么：</b>用几百到几千条自己领域的问答，让开源大模型学会特定的回答风格或任务格式，而且只需保存几 MB 的 LoRA 权重。</li>
+        <li><b>同类问题：</b>客服问答机器人、医疗/法律等专业领域助手、按公司模板写报告、情感分析等分类任务、代码补全风格定制。</li>
+        <li><b>可迁移套路：</b>统一提示模板 → 加载预训练模型 → 微调前先测几个问题作对照 → 开 LoRA（从小 rank 起步）→ 限制序列长度控制显存 → 微调后用同样问题再测。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>Keras 3 多后端，选 JAX <span data-cell="10">第 10 格</span></li>
+        <li>Dolly 15k 过滤 + 模板化，取 1000 条 <span data-cell="15">第 15 格</span></li>
+        <li><code>GemmaCausalLM.from_preset("gemma_2b_en")</code> <span data-cell="17">第 17 格</span></li>
+        <li><code>enable_lora(rank=4)</code> <span data-cell="27">第 27 格</span></li>
+        <li>序列长 512、AdamW(5e-5, 0.01)、bias/scale 不做权重衰减、1 轮 <span data-cell="29">第 29 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>只训练 130 万个参数，为什么就能明显改变一个 25 亿参数模型的行为？“微调需要的改变是低秩的”这个假设合理吗？</li>
+      <li>作者把带 context 的样本全部丢掉了。如果想让模型学会“根据给定材料回答”，模板应该怎么改？</li>
+      <li>作者的“效果评价”只是看了两个问题的回答。这样的评价有什么问题？你会怎样更客观地比较微调前后？</li>
+      <li>为什么 bias 和 LayerNorm 的 scale 不做权重衰减？如果对它们也做衰减会怎样？</li>
+      <li>LoRA 的秩 r 从 4 提到 64，参数量和效果会怎样变化？结合实验 A、B 讨论“秩越大越好”对不对。</li>
+    </ol>
+  </div>
+</section>
+
+
+<footer class="foot">
+  原 notebook 作者 Nilay Chauhan（Kaggle），内容基于 Google LLC 的 Gemma LoRA 官方教程（Apache 2.0）。版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：Databricks Dolly 15k（CC BY-SA 3.0）；模型：Google Gemma 2B。
+</footer>
+</main>
+
+<script src="nb/gemma-lora-finetune.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  function gridMatrix(svg, x0, y0, rows, cols, cs, colorFn) {
+    const cells = [];
+    for (let i = 0; i < rows; i++) for (let j = 0; j < cols; j++) cells.push(K.svg(svg, "rect", { x: x0 + j * cs, y: y0 + i * cs, width: cs - 1, height: cs - 1, fill: colorFn(i, j) }));
+    return cells;
+  }
+  function textBubble(svg, x, y, w, lines, opt) {
+    opt = opt || {};
+    const g = K.svg(svg, "g");
+    K.svg(g, "rect", { x, y, width: w, height: 18 + lines.length * 19, rx: 10, fill: opt.fill || "var(--panel-2)", stroke: opt.stroke || "var(--line)" });
+    lines.forEach((l, i) => K.svg(g, "text", { x: x + 12, y: y + 22 + i * 19, "font-size": 13, "font-family": opt.mono ? "var(--mono)" : null, fill: opt.color || "var(--ink)" }, l));
+    return g;
+  }
+
+  const steps = [
+    {
+      at: 0, title: "预训练 + 微调：两段式", kicker: "第 0–6 格 · 背景",
+      html: `<p>大语言模型先在海量文本上做<b>自监督预训练</b>（不用人工标注，靠“猜下一个词”），学到通用知识；再用小得多的领域数据做<b>微调</b>，适配具体任务。</p><p>因为微调数据比预训练数据小得多，把所有参数都更新一遍（全量微调）往往没必要。这就是 LoRA 的出发点。</p>`,
+      cells: [4], highlight: [],
+      draw(svg, ctx) {
+        const big = K.node(svg, 20, 60, 200, 110, "海量文本\n（网页、书籍…）", { fill: "color-mix(in srgb, var(--c1) 14%, var(--panel))", stroke: "var(--c1)" });
+        const pre = K.node(svg, 260, 80, 180, 70, "预训练\n“猜下一个词”", { bold: true });
+        const base = K.node(svg, 480, 70, 200, 90, "基础模型\nGemma 2B", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const small = K.node(svg, 20, 220, 200, 80, "Dolly 指令数据\n（取 1000 条）", { fill: "color-mix(in srgb, var(--c2) 14%, var(--panel))", stroke: "var(--c2)" });
+        const ft = K.node(svg, 260, 225, 180, 70, "微调（LoRA）", { bold: true });
+        const out = K.node(svg, 480, 220, 200, 80, "会听指令的模型", { bold: true, fill: "color-mix(in srgb, var(--good) 18%, var(--panel))", stroke: "var(--good)" });
+        const ar = [K.arrow(svg, 220, 115, 258, 115), K.arrow(svg, 440, 115, 478, 115), K.arrow(svg, 220, 260, 258, 260), K.arrow(svg, 580, 160, 580, 218), K.arrow(svg, 440, 260, 478, 260)];
+        const all = [big, pre, ar[0], ar[1], base, small, ar[2], ft, ar[3], ar[4], out];
+        all.forEach((e) => (e.style.opacity = 0));
+        K.svg(svg, "text", { x: 20, y: 40, "font-size": 12, class: "muted" }, "方块大小只示意数据量的悬殊");
+        (async () => { for (const e of all) if (!(await ctx.tween(230, (t) => (e.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      at: 7, title: "Keras 3：一套代码，三种后端", kicker: "第 7–12 格 · 环境",
+      html: `<p>作者安装 <code>keras-nlp</code> 和 Keras 3。Keras 3 是“多后端”框架：同一份模型代码可以跑在 TensorFlow、JAX 或 PyTorch 上。这里通过环境变量 <code>KERAS_BACKEND="jax"</code> 选 JAX。</p><p>另一个环境变量让 JAX 预先占用全部显存（<code>MEM_FRACTION=1.00</code>），避免显存碎片。这两行必须写在 <code>import keras</code> 之前才生效。</p>`,
+      cells: [10], highlight: ['os.environ["KERAS_BACKEND"] = "jax"', "XLA_PYTHON_CLIENT_MEM_FRACTION"],
+      draw(svg, ctx) {
+        K.node(svg, 220, 30, 280, 60, "你的模型代码（KerasNLP / Keras 3）", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const be = [["TensorFlow", "var(--c2)"], ["JAX", "var(--c3)"], ["PyTorch", "var(--c6)"]];
+        const nodes = be.map((b, i) => K.node(svg, 60 + i * 220, 200, 160, 60, b[0], { stroke: b[1], fill: `color-mix(in srgb, ${b[1]} 10%, var(--panel))` }));
+        const ar = be.map((b, i) => K.arrow(svg, 360, 92, 140 + i * 220, 196, { color: "var(--ink-3)", dash: "4 4" }));
+        K.svg(svg, "text", { x: 60, y: 300, "font-size": 13, "font-family": "var(--mono)" }, 'os.environ["KERAS_BACKEND"] = "jax"');
+        ctx.wait(700).then((ok) => { if (!ok) return; ar[1].querySelector("line").style.stroke = "var(--c3)"; ar[1].querySelector("line").style.strokeWidth = 3; ar[1].querySelector("line").style.strokeDasharray = ""; nodes[1].querySelector("rect").style.strokeWidth = 3; [0, 2].forEach((i) => (nodes[i].style.opacity = 0.35)); });
+      },
+    },
+    {
+      at: 13, title: "准备数据：过滤 + 模板 + 取 1000 条", kicker: "第 13–15 格 · 数据",
+      html: `<p>Dolly 每条样本有 instruction、context、response 等字段。作者为了简单，<b>跳过所有带 context 的样本</b>，再把剩下的套进统一模板：</p><pre>Instruction:\n{instruction}\n\nResponse:\n{response}</pre><p>为了跑得快，只取前 <b>1000</b> 条。统一模板很重要：推理时也用同一个模板、把 Response 留空，模型就知道该在哪里开始回答。</p>`,
+      cells: [15], highlight: ['if features["context"]:', "template =", "data[:1000]"],
+      draw(svg, ctx) {
+        const rows = [["What is a dispersive prism?", "有 context", false], ["Why can camels survive…", "", true], ["Who wrote Hamlet?", "", true], ["Summarize this passage…", "有 context", false], ["Give me ideas for a party", "", true]];
+        K.svg(svg, "text", { x: 20, y: 26, "font-size": 12, class: "muted" }, "Dolly 原始 JSON（示意，问题文字为举例）");
+        const els = rows.map((r, i) => {
+          const y = 40 + i * 52;
+          const g = K.node(svg, 20, y, 290, 42, `{"instruction": "${r[0]}" …}`, { fs: 11 });
+          const tag = r[1] ? K.svg(svg, "text", { x: 320, y: y + 26, "font-size": 12, fill: "var(--bad)" }, "✗ " + r[1]) : null;
+          if (tag) tag.style.opacity = 0;
+          return { g, tag, keep: r[2], y };
+        });
+        const tpl = textBubble(svg, 420, 70, 280, ["Instruction:", "Why can camels survive…", "", "Response:", "Camels use the fat in…"], { mono: true, fill: "color-mix(in srgb, var(--good) 10%, var(--panel))", stroke: "var(--good)" });
+        tpl.style.opacity = 0;
+        K.svg(svg, "text", { x: 420, y: 60, "font-size": 12, class: "muted" }, "套用模板后的一条训练文本");
+        const cnt = K.svg(svg, "text", { x: 420, y: 250, "font-size": 15, "font-weight": 700 }, "");
+        (async () => {
+          for (const e of els) {
+            if (!(await ctx.wait(300))) return;
+            if (!e.keep) { e.tag.style.opacity = 1; e.g.style.opacity = 0.3; } else e.g.querySelector("rect").style.stroke = "var(--good)";
+          }
+          if (!(await ctx.tween(500, (t) => (tpl.style.opacity = t)))) return;
+          cnt.textContent = "… 只保留前 1000 条";
+        })();
+      },
+    },
+    {
+      at: 16, title: "加载 Gemma 2B：一个“猜下一个词”的模型", kicker: "第 16–18 格 · 模型",
+      html: `<p><code>GemmaCausalLM.from_preset("gemma_2b_en")</code> 一行加载架构和权重。“2b”指约 20 亿参数（作者另提到 7B 版本需要更大的 GPU）。</p><p><b>因果语言模型</b>（Causal LM）：根据前面的词元预测下一个词元，只能看左边、不能偷看右边。生成文本就是“预测一个、接上、再预测”的循环。动画中候选词和概率是示意。</p>`,
+      cells: [17], highlight: ["GemmaCausalLM.from_preset", "gemma_2b_en"],
+      draw(svg, ctx) {
+        const toks = ["Instruction:", "Explain", "rain", "…", "Response:", "Rain", "forms", "when", "water", "vapor"];
+        const cand = [[["Rain", 0.41], ["It", 0.22], ["The", 0.15]], [["forms", 0.37], ["is", 0.30], ["falls", 0.12]], [["when", 0.52], ["from", 0.2], ["as", 0.1]], [["water", 0.44], ["clouds", 0.25], ["warm", 0.08]], [["vapor", 0.6], ["droplets", 0.2], ["in", 0.05]]];
+        let x = 20; const boxes = [];
+        toks.forEach((t, i) => { const w = 12 + t.length * 8.5; const g = K.node(svg, x, 40, w, 36, t, { fs: 13, fill: i < 5 ? "var(--panel-2)" : "color-mix(in srgb, var(--accent) 18%, var(--panel))", stroke: i < 5 ? "var(--line)" : "var(--accent)" }); if (i >= 5) g.style.opacity = 0; boxes.push({ g, x, w }); x += w + 6; });
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 12, class: "muted" }, "提示词（灰）+ 逐个生成的词元（蓝）");
+        const bars = [0, 1, 2].map((k) => ({ r: K.svg(svg, "rect", { x: 200, y: 150 + k * 50, width: 0, height: 32, rx: 4, fill: k ? "var(--ink-3)" : "var(--accent)" }), t: K.svg(svg, "text", { x: 190, y: 172 + k * 50, "text-anchor": "end", "font-size": 14 }, ""), p: K.svg(svg, "text", { x: 210, y: 172 + k * 50, "font-size": 13 }, "") }));
+        K.svg(svg, "text", { x: 20, y: 130, "font-size": 13, "font-weight": 700 }, "模型给出的下一个词元概率（示意）");
+        const arrow = K.svg(svg, "text", { x: 0, y: 100, "font-size": 18, fill: "var(--accent)" }, "↑");
+        (async () => {
+          for (let s = 0; s < cand.length; s++) {
+            const bx = boxes[5 + s]; arrow.setAttribute("x", bx.x + bx.w / 2 - 5);
+            if (!(await ctx.tween(500, (t) => bars.forEach((b, k) => { b.r.setAttribute("width", cand[s][k][1] * 700 * t); b.t.textContent = cand[s][k][0]; b.p.setAttribute("x", 206 + cand[s][k][1] * 700 * t); b.p.textContent = (cand[s][k][1] * t).toFixed(2); })))) return;
+            if (!(await ctx.tween(300, (t) => (bx.g.style.opacity = t)))) return;
+            if (!(await ctx.wait(300))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 19, title: "微调前先测一测", kicker: "第 19–25 格 · 对照组",
+      html: `<p>微调前先用同一个模板提两个问题，Response 留空，<code>max_length=256</code>，作为对照：</p><ul class="tight"><li>“去欧洲旅行该做什么？”作者的描述：模型<b>只是建议你去欧洲旅行</b>，没给具体内容。</li><li>“用小孩能懂的方式解释光合作用。”作者的描述：回答里有<b>叶绿素、葡萄糖</b>这类小孩难懂的词。</li></ul><p>先留对照组，微调后才能比较。动画里的气泡只转述作者的文字，不是模型原文。</p>`,
+      cells: [21, 22, 24, 25], highlight: ['response=""', "max_length=256"],
+      draw(svg, ctx) {
+        const q1 = textBubble(svg, 20, 30, 330, ["Instruction:", "What should I do on a trip to Europe?", "Response:", "▌"], { mono: true });
+        const a1 = textBubble(svg, 380, 40, 320, ["作者描述：只是建议“去欧洲旅行”，", "没有具体推荐"], { fill: "color-mix(in srgb, var(--warn) 14%, var(--panel))", stroke: "var(--warn)" });
+        const q2 = textBubble(svg, 20, 180, 330, ["Instruction:", "Explain photosynthesis in a way", "that a child could understand.", "Response:", "▌"], { mono: true });
+        const a2 = textBubble(svg, 380, 200, 320, ["作者描述：出现了 chlorophyll、", "glucose 等小孩难懂的词"], { fill: "color-mix(in srgb, var(--warn) 14%, var(--panel))", stroke: "var(--warn)" });
+        [a1, a2].forEach((e) => (e.style.opacity = 0));
+        ctx.wait(500).then((ok) => ok && ctx.tween(500, (t) => (a1.style.opacity = t))).then((ok) => ok && ctx.tween(500, (t) => (a2.style.opacity = t)));
+      },
+    },
+    {
+      at: 26, title: "全量微调太贵：先把原模型冻住", kicker: "第 4、26 格 · 动机",
+      html: `<p>全量微调要给 25 亿个参数都算梯度，还要为每个参数保存优化器状态（AdamW 每个参数要额外存两个数），显存和存储都很吃紧，而且每个任务都得存一整份模型。</p><p>LoRA 的做法：<b>原始权重全部冻结</b>（灰色，不更新），只在旁边插入少量新权重（彩色）。作者原话：这样训练更快、更省显存，保存的权重只有几百 MB 量级。</p>`,
+      cells: [], highlight: [],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 14, "font-weight": 700 }, "全量微调：全部参数都要训练");
+        K.svg(svg, "text", { x: 390, y: 30, "font-size": 14, "font-weight": 700 }, "LoRA：冻结原权重 + 小旁路");
+        const r = K.rng(3);
+        const L = gridMatrix(svg, 30, 50, 16, 16, 17, () => K.heat(0.3 + 0.6 * r()));
+        const R = gridMatrix(svg, 390, 50, 16, 16, 17, () => K.heat(0.3 + 0.6 * r()));
+        const A = gridMatrix(svg, 390, 330 - 40, 1, 16, 17, () => "var(--c2)");
+        const B = gridMatrix(svg, 670, 50, 16, 1, 17, () => "var(--c2)");
+        [...A, ...B].forEach((e) => (e.style.opacity = 0));
+        K.svg(svg, "text", { x: 30, y: 336, "font-size": 12, class: "muted" }, "每格 = 一个参数（示意）");
+        ctx.wait(600).then((ok) => ok && ctx.tween(900, (t) => R.forEach((e) => (e.style.fill = `color-mix(in srgb, var(--ink-3) ${Math.round(t * 70)}%, ${e.style.fill.includes("color-mix") ? "var(--panel-2)" : "var(--panel-2)"})`))))
+          .then((ok) => ok && ctx.tween(700, (t) => [...A, ...B].forEach((e) => (e.style.opacity = t))));
+      },
+    },
+    {
+      at: 26, title: "LoRA：W 不动，旁边加 B·A", kicker: "第 26 格 · 核心原理",
+      html: `<p>对一个 d×d 的权重矩阵 W，LoRA 不直接改它，而是学一个增量 ΔW = <b>B · A</b>，其中 A 是 r×d、B 是 d×r，r 远小于 d（作者用 r = 4）。前向计算变成：</p><p style="text-align:center"><b>h = W·x + B·(A·x)</b></p><p>输入 x 同时走两条路：主路经过冻结的 W，旁路先被 A 压到 r 维，再被 B 还原到 d 维，两者相加。参数量从 d² 变成 2·d·r。按 LoRA 论文的做法，B 初始化为 0，所以训练刚开始时模型和原来完全一样。</p>`,
+      cells: [26], highlight: [],
+      draw(svg, ctx) {
+        const xIn = K.node(svg, 20, 150, 70, 50, "x\n(d 维)", { bold: true });
+        const W = K.node(svg, 200, 40, 170, 130, "W  (d×d)\n冻结 ❄", { fill: "color-mix(in srgb, var(--ink-3) 25%, var(--panel))", stroke: "var(--ink-3)", bold: true });
+        const A = K.node(svg, 170, 225, 120, 40, "A  (r×d)", { fill: "color-mix(in srgb, var(--c2) 22%, var(--panel))", stroke: "var(--c2)", bold: true });
+        const mid = K.node(svg, 320, 230, 40, 30, "r", { fs: 12 });
+        const B = K.node(svg, 390, 200, 40, 90, "B\nd×r", { fill: "color-mix(in srgb, var(--c2) 22%, var(--panel))", stroke: "var(--c2)", bold: true, fs: 12 });
+        const plus = K.svg(svg, "circle", { cx: 520, cy: 175, r: 22, fill: "var(--panel-2)", stroke: "var(--ink)" });
+        K.svg(svg, "text", { x: 520, y: 182, "text-anchor": "middle", "font-size": 22 }, "+");
+        K.node(svg, 600, 150, 90, 50, "h", { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        [K.arrow(svg, 90, 165, 198, 110), K.arrow(svg, 90, 185, 168, 245), K.arrow(svg, 370, 110, 500, 165), K.arrow(svg, 290, 245, 318, 245), K.arrow(svg, 360, 245, 388, 245), K.arrow(svg, 430, 245, 502, 188), K.arrow(svg, 542, 175, 598, 175)];
+        K.svg(svg, "text", { x: 200, y: 320, "font-size": 13, fill: "var(--c2)" }, "只训练 A、B：参数量 2·d·r");
+        const d1 = K.svg(svg, "circle", { r: 7, fill: "var(--ink-3)" }), d2 = K.svg(svg, "circle", { r: 7, fill: "var(--c2)" });
+        const path1 = [[90, 175], [285, 105], [500, 170], [645, 175]], path2 = [[90, 175], [230, 245], [340, 245], [410, 245], [505, 185], [645, 175]];
+        const along = (P, t) => { const seg = (P.length - 1) * t, k = Math.min(P.length - 2, Math.floor(seg)), u = seg - k; return [K.lerp(P[k][0], P[k + 1][0], u), K.lerp(P[k][1], P[k + 1][1], u)]; };
+        (async () => {
+          for (let rep = 0; rep < 3; rep++) {
+            if (!(await ctx.tween(1600, (t) => { const a = along(path1, t), b = along(path2, t); d1.setAttribute("cx", a[0]); d1.setAttribute("cy", a[1]); d2.setAttribute("cx", b[0]); d2.setAttribute("cy", b[1]); }))) return;
+            if (!(await ctx.wait(300))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 27, title: "enable_lora(rank=4)：2.5B → 1.3M", kicker: "第 27–28 格 · 一行开启",
+      html: `<p>KerasNLP 里只需一行 <code>gemma_lm.backbone.enable_lora(rank=4)</code>，它会给模型内部的注意力层加上 LoRA 旁路并冻结原权重。再 <code>summary()</code> 一下就能看到变化：</p><p style="text-align:center"><b>可训练参数：约 25 亿 → 约 130 万</b> <span data-cell="28">第 28 格</span></p><p>130 万 ÷ 25 亿 ≈ 0.05%。作者建议 rank 从 4、8、16 这样的小值开始试，效果不够再逐步增大。</p>`,
+      cells: [27, 28], highlight: ["enable_lora(rank=4)"],
+      draw(svg, ctx) {
+        const full = 2.5e9, lora = 1.3e6;
+        const ax = { x: 120, w: 540 }, sx = (v) => ax.w * (Math.log10(v) - 3) / (Math.log10(full) - 3);
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 12, class: "muted" }, "可训练参数（对数刻度，1 千 ~ 25 亿）；数字来自作者第 28 格");
+        [1e3, 1e6, 1e9].forEach((v) => { K.svg(svg, "line", { x1: ax.x + sx(v), x2: ax.x + sx(v), y1: 50, y2: 250, stroke: "var(--line)", "stroke-dasharray": "3 3" }); K.svg(svg, "text", { x: ax.x + sx(v), y: 268, "text-anchor": "middle", "font-size": 12, class: "muted" }, v === 1e3 ? "1 千" : v === 1e6 ? "100 万" : "10 亿"); });
+        K.svg(svg, "text", { x: 110, y: 100, "text-anchor": "end", "font-size": 13 }, "全量微调");
+        K.svg(svg, "text", { x: 110, y: 200, "text-anchor": "end", "font-size": 13 }, "LoRA r=4");
+        const b1 = K.svg(svg, "rect", { x: ax.x, y: 76, width: 0, height: 40, rx: 4, fill: "var(--ink-3)" });
+        const b2 = K.svg(svg, "rect", { x: ax.x, y: 176, width: 0, height: 40, rx: 4, fill: "var(--c2)" });
+        const t1 = K.svg(svg, "text", { x: ax.x, y: 70, "font-size": 13, "font-weight": 700 }, "");
+        const t2 = K.svg(svg, "text", { x: ax.x, y: 170, "font-size": 13, "font-weight": 700, fill: "var(--c2)" }, "");
+        K.svg(svg, "text", { x: 20, y: 310, "font-size": 14 }, `比例：1.3M ÷ 2.5B ≈ ${((lora / full) * 100).toFixed(3)}%`);
+        ctx.tween(1400, (t) => { b1.setAttribute("width", sx(full) * t); b2.setAttribute("width", sx(lora) * t); }).then((ok) => { if (ok) { t1.textContent = "≈ 2.5B（25 亿）"; t2.textContent = "≈ 1.3M（130 万）"; } });
+      },
+    },
+    {
+      at: 29, title: "训练在算什么：每个位置猜下一个词元", kicker: "第 29 格 · 损失函数",
+      html: `<p>因果语言模型的训练样本“自带答案”：把同一段文本错开一位，<b>第 t 个位置的目标就是第 t+1 个词元</b>。模型在每个位置输出一个覆盖整个词表的概率分布，正确词元的概率越高，交叉熵损失 −log p 越小。</p><p>整段 “Instruction … Response …” 都参与计算，模型由此学会：看到 Response: 之后，要写出贴合指令的回答。动画中的概率是示意。</p>`,
+      cells: [], highlight: ["SparseCategoricalCrossentropy(from_logits=True)"],
+      draw(svg, ctx) {
+        const toks = ["Response:", "Camels", "store", "fat", "in", "humps"], probs = [0.08, 0.31, 0.55, 0.62, 0.71];
+        const cw = 110, x0 = 30;
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 12, class: "muted" }, "输入（上）与目标（下）：错开一位");
+        const ins = toks.slice(0, 5).map((t, i) => K.node(svg, x0 + i * cw, 44, cw - 10, 36, t, { fs: 13 }));
+        const tgs = toks.slice(1).map((t, i) => { const g = K.node(svg, x0 + i * cw, 150, cw - 10, 36, t, { fs: 13, fill: "color-mix(in srgb, var(--c3) 16%, var(--panel))", stroke: "var(--c3)" }); g.style.opacity = 0; return g; });
+        const ars = toks.slice(1).map((_, i) => { const a = K.arrow(svg, x0 + i * cw + 50, 82, x0 + i * cw + 50, 146); a.style.opacity = 0; return a; });
+        const bars = probs.map((p, i) => ({ r: K.svg(svg, "rect", { x: x0 + i * cw + 20, y: 300, width: 60, height: 0, fill: "var(--accent)" }), t: K.svg(svg, "text", { x: x0 + i * cw + 50, y: 316, "text-anchor": "middle", "font-size": 11 }, ""), t2: K.svg(svg, "text", { x: x0 + i * cw + 50, y: 332, "text-anchor": "middle", "font-size": 11, class: "muted" }, ""), p }));
+        K.svg(svg, "text", { x: 20, y: 214, "font-size": 12, class: "muted" }, "模型给正确词元的概率 p（示意）及损失 −log p");
+        (async () => {
+          for (let i = 0; i < 5; i++) {
+            if (!(await ctx.tween(300, (t) => { ars[i].style.opacity = t; tgs[i].style.opacity = t; }))) return;
+            const b = bars[i];
+            if (!(await ctx.tween(300, (t) => { b.r.setAttribute("y", 300 - b.p * 80 * t); b.r.setAttribute("height", b.p * 80 * t); }))) return;
+            b.t.textContent = `p = ${b.p}`; b.t2.textContent = `损失 ${(-Math.log(b.p)).toFixed(2)}`;
+          }
+        })();
+      },
+    },
+    {
+      at: 29, title: "训练设置：512 长度、AdamW、1 轮", kicker: "第 29 格 · 训练配置",
+      html: `<ul class="tight"><li><b>序列长度 512</b>：超出的部分截断，控制显存。</li><li><b>AdamW</b>（学习率 5e-5，权重衰减 0.01）：Transformer 常用的优化器，“权重衰减”把权重往 0 拉一点，防止过拟合。</li><li><b>bias、scale 不做衰减</b>：偏置和 LayerNorm 的缩放参数不需要这种约束。</li><li>损失：<code>SparseCategoricalCrossentropy(from_logits=True)</code>，即“下一个词元”的多分类交叉熵。</li><li><code>fit(data, epochs=1, batch_size=1)</code>：1000 条样本，每次 1 条，训练 1 轮。</li></ul>`,
+      cells: [29], highlight: ["sequence_length = 512", "AdamW", "exclude_from_weight_decay", "epochs=1, batch_size=1"],
+      draw(svg, ctx) {
+        const n = 30, cw = 21, x0 = 20;
+        K.svg(svg, "text", { x: x0, y: 30, "font-size": 12, class: "muted" }, "一条训练文本切成词元（示意：一格 = 一个词元）");
+        const cells = []; for (let i = 0; i < n; i++) cells.push(K.svg(svg, "rect", { x: x0 + i * cw, y: 40, width: cw - 2, height: 30, rx: 3, fill: i < 22 ? "color-mix(in srgb, var(--c1) 30%, var(--panel))" : "color-mix(in srgb, var(--c6) 30%, var(--panel))" }));
+        const cut = K.svg(svg, "line", { x1: x0 + 22 * cw - 1, x2: x0 + 22 * cw - 1, y1: 34, y2: 78, stroke: "var(--bad)", "stroke-width": 3 });
+        K.svg(svg, "text", { x: x0 + 22 * cw + 4, y: 94, "font-size": 12, fill: "var(--bad)" }, "超过 512 截断（示意位置）");
+        K.svg(svg, "text", { x: x0, y: 140, "font-size": 14, "font-weight": 700 }, "AdamW 更新（示意一个权重）");
+        const ax = K.axes(svg, { x: 60, y: 160, w: 600, h: 140 }, [0, 100], [-1, 1], { xlabel: "训练步", yticks: 2 });
+        const r = K.rng(5); let w = 0.9, w2 = 0.9; const p1 = [], p2 = [];
+        for (let s = 0; s <= 100; s++) { const g = 0.02 * K.randn(r); w = w - g; w2 = w2 - g - 0.01 * w2; p1.push(w); p2.push(w2); }
+        const l1 = K.svg(svg, "path", { fill: "none", stroke: "var(--ink-3)", "stroke-width": 2 }), l2 = K.svg(svg, "path", { fill: "none", stroke: "var(--c3)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 470, y: 180, "font-size": 12, fill: "var(--ink-3)" }, "— 不衰减（bias、scale）");
+        K.svg(svg, "text", { x: 470, y: 198, "font-size": 12, fill: "var(--c3)" }, "— 带权重衰减");
+        ctx.tween(2000, (t, raw) => { const m = Math.floor(raw * 100); let a = "", b = ""; for (let s = 0; s <= m; s++) { a += (a ? "L" : "M") + ax.sx(s) + "," + ax.sy(p1[s]); b += (b ? "L" : "M") + ax.sx(s) + "," + ax.sy(p2[s]); } l1.setAttribute("d", a); l2.setAttribute("d", b); });
+      },
+    },
+    {
+      at: 30, title: "微调后再测同样的问题", kicker: "第 30–38 格 · 效果",
+      html: `<p>用完全相同的模板和问题再生成一次。作者的描述：</p><ul class="tight"><li>欧洲旅行：<b>开始推荐具体的游览地点</b> <span data-cell="33">第 33 格</span></li><li>光合作用：<b>用了更简单的说法</b> <span data-cell="36">第 36 格</span></li></ul><p>作者也提醒这只是演示：数据少、只训练 1 轮、秩很低。想要更好的效果可以增加数据、多训练几轮、提高 LoRA 秩，或调整学习率和权重衰减。<span data-cell="37">第 37 格</span></p>`,
+      cells: [32, 35, 37], highlight: [],
+      draw(svg, ctx) {
+        const rows = [["欧洲旅行", "只说“去欧洲旅行”", "推荐具体游览地点"], ["给小孩讲光合作用", "用了叶绿素、葡萄糖等难词", "用更简单的话解释"]];
+        K.svg(svg, "text", { x: 200, y: 36, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--warn)" }, "微调前");
+        K.svg(svg, "text", { x: 520, y: 36, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "var(--good)" }, "微调后（LoRA r=4，1 轮）");
+        const after = rows.map((r, i) => {
+          const y = 60 + i * 120;
+          K.svg(svg, "text", { x: 20, y: y + 20, "font-size": 13, "font-weight": 700 }, r[0]);
+          textBubble(svg, 60, y + 32, 280, [r[1]], { fill: "color-mix(in srgb, var(--warn) 12%, var(--panel))", stroke: "var(--warn)" });
+          const b = textBubble(svg, 380, y + 32, 290, [r[2]], { fill: "color-mix(in srgb, var(--good) 12%, var(--panel))", stroke: "var(--good)" });
+          b.style.opacity = 0; return b;
+        });
+        K.svg(svg, "text", { x: 20, y: 320, "font-size": 12, class: "muted" }, "气泡内容转述自作者第 22、25、33、36 格的文字说明");
+        ctx.wait(500).then((ok) => ok && ctx.tween(700, (t) => after.forEach((b, i) => (b.style.opacity = K.clamp(t * 2 - i, 0, 1)))));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：LoRA 参数量计算器 ---------- */
+  const fmtN = (n) => (n >= 1e9 ? (n / 1e9).toFixed(2) + "B" : n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : String(Math.round(n)));
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "d", label: "隐藏维度 d", min: 512, max: 8192, step: 256, value: 2048 },
+      { id: "L", label: "Transformer 层数", min: 4, max: 80, step: 1, value: 18 },
+      { id: "r", label: "LoRA 秩 r", min: 1, max: 256, step: 1, value: 4 },
+      { id: "where", label: "给哪些矩阵加 LoRA", value: "qv", options: [["qv", "注意力的 Q、V（常见默认）"], ["qkvo", "注意力的 Q、K、V、O"], ["all", "注意力 + MLP（3 个 d×4d 矩阵）"]] },
+    ],
+    note: "按“标准 Transformer”近似计算：注意力每个矩阵 d×d，MLP 每个矩阵 d×4d；一个 m×n 矩阵的 LoRA 参数为 r·(m+n)。这只是通用估算，不等于 Gemma 的真实结构（Gemma 2B 用多查询注意力等设计，所以和作者的 1.3M 不会完全一致）。显存一栏按 AdamW 每个可训练参数额外存 2 个 fp32 状态 + 1 个 fp32 梯度估算。",
+    render(svg, v) {
+      const mats = v.where === "qv" ? [[v.d, v.d], [v.d, v.d]] : v.where === "qkvo" ? [[v.d, v.d], [v.d, v.d], [v.d, v.d], [v.d, v.d]] : [[v.d, v.d], [v.d, v.d], [v.d, v.d], [v.d, v.d], [v.d, 4 * v.d], [v.d, 4 * v.d], [4 * v.d, v.d]];
+      const full = v.L * mats.reduce((s, [m, n]) => s + m * n, 0), lora = v.L * mats.reduce((s, [m, n]) => s + v.r * (m + n), 0);
+      const optMem = (n) => (n * 12) / 1e9;
+      const S = 200, sc = S / v.d, rw = Math.max(2, v.r * sc);
+      K.svg(svg, "text", { x: 20, y: 24, "font-size": 13, "font-weight": 700 }, "一个 d×d 矩阵（按比例画）");
+      K.svg(svg, "rect", { x: 20, y: 40, width: S, height: S, fill: "color-mix(in srgb, var(--ink-3) 25%, var(--panel))", stroke: "var(--ink-3)" });
+      K.svg(svg, "text", { x: 120, y: 145, "text-anchor": "middle", "font-size": 14 }, `W：${fmtN(v.d * v.d)}`);
+      K.svg(svg, "text", { x: 250, y: 145, "font-size": 20 }, "≈");
+      K.svg(svg, "rect", { x: 290, y: 40, width: Math.min(rw, 200), height: S, fill: "var(--c2)" });
+      K.svg(svg, "rect", { x: 300 + Math.min(rw, 200), y: 40, width: S, height: Math.min(rw, 200), fill: "var(--c2)" });
+      K.svg(svg, "text", { x: 300 + Math.min(rw, 200), y: 60 + Math.min(rw, 200), "font-size": 13 }, `B (d×${v.r}) · A (${v.r}×d) ：${fmtN(2 * v.d * v.r)}`);
+      const pct = (lora / full) * 100;
+      K.svg(svg, "text", { x: 20, y: 280, "font-size": 13 }, `被选中的矩阵共 ${mats.length} 个/层 × ${v.L} 层`);
+      K.svg(svg, "rect", { x: 20, y: 292, width: 600, height: 18, rx: 4, fill: "var(--panel-2)" });
+      K.svg(svg, "rect", { x: 20, y: 292, width: Math.max(1, 600 * Math.min(1, pct / 100)), height: 18, rx: 4, fill: "var(--c2)" });
+      K.svg(svg, "text", { x: 20, y: 326, "font-size": 12, class: "muted" }, "橙条 = LoRA 参数占这些矩阵原参数的比例");
+      return { readout: [
+        { k: "这些矩阵的原参数", v: fmtN(full) },
+        { k: "LoRA 可训练参数", v: fmtN(lora), color: "var(--c2)" },
+        { k: "占比", v: pct < 0.01 ? pct.toExponential(1) + "%" : pct.toFixed(3) + "%" },
+        { k: "优化器+梯度显存（全量 vs LoRA）", v: `${optMem(full).toFixed(1)} GB vs ${(optMem(lora) * 1000).toFixed(0)} MB` },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：低秩近似（幂迭代 SVD） ---------- */
+  function topSVD(M, r) {
+    const n = M.length, m = M[0].length, R = M.map((row) => row.slice()), comps = [];
+    const rng = K.rng(7);
+    for (let k = 0; k < r; k++) {
+      let v = Array.from({ length: m }, () => rng() - 0.5);
+      for (let it = 0; it < 60; it++) {
+        const u = R.map((row) => row.reduce((s, x, j) => s + x * v[j], 0));
+        const nv = new Array(m).fill(0); R.forEach((row, i) => row.forEach((x, j) => (nv[j] += x * u[i])));
+        const nn = Math.hypot(...nv) || 1; v = nv.map((x) => x / nn);
+      }
+      const u = R.map((row) => row.reduce((s, x, j) => s + x * v[j], 0)), sig = Math.hypot(...u) || 0;
+      const uu = u.map((x) => x / (sig || 1));
+      comps.push({ s: sig, u: uu, v });
+      for (let i = 0; i < n; i++) for (let j = 0; j < m; j++) R[i][j] -= sig * uu[i] * v[j];
+    }
+    return comps;
+  }
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 330,
+    controls: [
+      { id: "pat", label: "目标“权重更新 ΔW”的结构", value: "low", options: [["low", "真正低秩（3 个模式叠加）+ 少量噪声"], ["mid", "中等（10 个模式叠加）"], ["noise", "纯随机（满秩）"]] },
+      { id: "r", label: "LoRA 秩 r", min: 1, max: 16, step: 1, value: 3 },
+      { id: "seed", label: "换一个矩阵", button: true },
+    ],
+    note: "生成一个 32×32 的矩阵当作“微调需要的权重改变量 ΔW”，在浏览器里用幂迭代求前 r 个奇异向量，得到最优的秩 r 近似 B·A，显示还原误差。LoRA 的假设是：微调需要的 ΔW 往往接近低秩。看看三种结构下，r 小的时候误差差多少。",
+    render(svg, v) {
+      const n = 32, r = K.rng(11 + v.seed * 5), k = v.pat === "low" ? 3 : v.pat === "mid" ? 10 : 0;
+      const M = Array.from({ length: n }, () => new Array(n).fill(0));
+      for (let c = 0; c < k; c++) { const a = Array.from({ length: n }, () => K.randn(r)), b = Array.from({ length: n }, () => K.randn(r)), s = 3 / (c + 1); for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) M[i][j] += s * a[i] * b[j] / Math.sqrt(n); }
+      const noise = v.pat === "noise" ? 1 : 0.08;
+      for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) M[i][j] += noise * K.randn(r);
+      const C = topSVD(M, v.r);
+      const Ap = M.map((row, i) => row.map((_, j) => C.reduce((s, c) => s + c.s * c.u[i] * c.v[j], 0)));
+      let e = 0, t = 0; for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) { e += (M[i][j] - Ap[i][j]) ** 2; t += M[i][j] ** 2; }
+      const mx = Math.max(...M.flat().map(Math.abs));
+      const show = (X, x0, title) => { K.svg(svg, "text", { x: x0, y: 22, "font-size": 12, "font-weight": 700 }, title); X.forEach((row, i) => row.forEach((val, j) => K.svg(svg, "rect", { x: x0 + j * 6, y: 32 + i * 6, width: 6, height: 6, fill: K.heat(val / mx, true) }))); };
+      show(M, 10, "目标 ΔW（32×32）");
+      show(Ap, 220, `秩 ${v.r} 近似 B·A`);
+      show(M.map((row, i) => row.map((x, j) => x - Ap[i][j])), 430, "残差（没装下的部分）");
+      const rel = Math.sqrt(e / t);
+      K.svg(svg, "text", { x: 10, y: 260, "font-size": 12, class: "muted" }, "奇异值（前 r 个，越大越重要）：");
+      C.forEach((c, i) => K.svg(svg, "rect", { x: 10 + i * 38, y: 300 - Math.min(30, c.s / C[0].s * 30), width: 30, height: Math.min(30, c.s / C[0].s * 30), fill: "var(--c2)" }));
+      return { readout: [
+        { k: "原矩阵参数", v: n * n },
+        { k: "B·A 参数 2·32·r", v: 2 * n * v.r, color: "var(--c2)" },
+        { k: "相对误差 ‖ΔW−BA‖/‖ΔW‖", v: (rel * 100).toFixed(1) + "%", color: rel < 0.2 ? "var(--good)" : rel < 0.5 ? "var(--warn)" : "var(--bad)" },
+        { k: "保留的能量", v: ((1 - e / t) * 100).toFixed(1) + "%" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,479 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>信用评分卡</title>
+<meta name="description" content="Kaggle 案例拆解：用 Give Me Some Credit 数据做一张银行信用评分卡——数据体检、分箱、IV 选变量、WOE 编码、逻辑回归、把概率换算成 650 分制。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格数据 · 二分类 · 信贷风控</div>
+  <h1>信用评分卡：把“会不会违约”变成一张打分表</h1>
+  <p class="en">Credit ScoreCard example（原文为中文）</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">数据体检 EDA</span><span class="tag method">等频 / 等距分箱</span><span class="tag method">IV 信息值</span>
+    <span class="tag method">WOE 编码</span><span class="tag method">逻辑回归</span><span class="tag method">AUC</span><span class="tag method">PDO 分数换算</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>orange90</b></span>
+    <span>Kaggle 点赞 <b>340</b>（2026-11 抓取）</span>
+    <span>比赛 <b>GiveMeSomeCredit</b></span>
+    <span><a href="https://www.kaggle.com/code/orange90/credit-scorecard-example" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">约 15 万名借款人的信用档案</div><p>年龄、月收入、负债比、信用额度用了多少、过去两年逾期过几次……来自 2011 年 Kaggle 比赛 Give Me Some Credit。<span data-cell="4">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">未来两年会不会严重逾期（违约）</div><p>答案列 <code>SeriousDlqin2yrs</code>：1 = 两年内出现 90 天以上的逾期，0 = 没有。违约的人约占 6%。<span data-cell="8">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">银行风控的“老三样”：分箱、WOE、逻辑回归</div><p>把每个变量切成几段（分箱），用 IV 挑出最有用的 5 个变量，把每段换成 WOE 值，训练逻辑回归，再按“翻倍分”PDO 规则把模型换算成一张加减分表。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">一张可以手工查表打分的评分卡</div><p>作者抽 5 个好客户、5 个坏客户试打分：好客户都在 500 分以上，坏客户都在 500 分以下；也坦言换一批样本未必这么准。<span data-cell="97">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据来自 Kaggle 比赛 <b>Give Me Some Credit</b>（2011），训练文件 <code>cs-training.csv</code>，一行一位借款人。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">借款人（行）</div><div class="v">约 15 万</div></div>
+        <div class="stat-tile"><div class="k">特征数</div><div class="v">10</div></div>
+        <div class="stat-tile"><div class="k">违约比例</div><div class="v" style="color:var(--c6)">约 6%</div></div>
+        <div class="stat-tile"><div class="k">月收入缺失</div><div class="v" style="color:var(--warn)">29,731（19.82%）</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">违约比例与缺失数见第 8 格 <span data-cell="8">出处</span>；总行数由“29,731 条占 19.82%”推算，约 15 万。家属人数另有 3,924 条（2.61%）缺失。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>SeriousDlqin2yrs</code></td><td><b>要预测的答案</b>：两年内是否出现 90 天以上严重逾期</td><td>0/1</td></tr>
+        <tr><td><code>RevolvingUtilizationOfUnsecuredLines</code></td><td>循环额度使用率：信用卡等欠款 ÷ 总额度</td><td>比例</td></tr>
+        <tr><td><code>age</code></td><td>年龄</td><td>整数</td></tr>
+        <tr><td><code>NumberOfTime30-59DaysPastDueNotWorse</code></td><td>逾期 30–59 天的次数</td><td>整数</td></tr>
+        <tr><td><code>NumberOfTime60-89DaysPastDueNotWorse</code></td><td>逾期 60–89 天的次数</td><td>整数</td></tr>
+        <tr><td><code>NumberOfTimes90DaysLate</code></td><td>逾期 90 天以上的次数</td><td>整数</td></tr>
+        <tr><td><code>DebtRatio</code></td><td>负债比：每月要还的钱 ÷ 月收入</td><td>比例</td></tr>
+        <tr><td><code>MonthlyIncome</code></td><td>月收入（有缺失）</td><td>数值</td></tr>
+        <tr><td><code>NumberOfOpenCreditLinesAndLoans</code></td><td>正在用的贷款和信用卡数</td><td>整数</td></tr>
+        <tr><td><code>NumberRealEstateLoansOrLines</code></td><td>房产类贷款数</td><td>整数</td></tr>
+        <tr><td><code>NumberOfDependents</code></td><td>家里要供养的人数（有缺失）</td><td>整数</td></tr>
+      </table></div>
+      <p style="font-size:13px;color:var(--ink-2)">列名见第 61 格的分箱代码 <span data-cell="61">出处</span>；循环额度使用率的定义见第 8 格，其余白话含义按列名直译。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="66">
+    <h3>动手试试 A · 分箱、WOE 和 IV 现场算 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="86">
+    <h3>动手试试 B · 基准分和 PDO：违约概率怎样变成分数 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>约 6% 的人违约；月收入缺失 19.82%，家属人数缺失 2.61%</td><td><span data-cell="8">第 8 格</span></td></tr>
+        <tr><td>三个逾期次数列里出现 96、98 这种不可能的值，共 267 条；额度使用率 ≥ 13 的人违约率反而更低，建议剔除</td><td><span data-cell="8">第 8 格</span></td></tr>
+        <tr><td>按 IV &gt; 0.1 选出 5 个变量：额度使用率、30–59 天逾期次数、年龄、90 天以上逾期次数、60–89 天逾期次数</td><td><span data-cell="66">第 66 格</span></td></tr>
+        <tr><td>试过 SMOTE 过采样，没什么效果</td><td><span data-cell="75">第 75 格</span></td></tr>
+        <tr><td>评分卡基本符合预期（额度使用率越高分越低）；但 60–89 天逾期 (8, 9] 这一箱分数为 0，“完全没道理”，原因是该箱样本太少</td><td><span data-cell="91">第 91 格</span></td></tr>
+        <tr><td>抽查的 5 个好客户都在 500 分以上，5 个坏客户都在 500 分以下</td><td><span data-cell="97">第 97 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">各变量的 IV 值、模型准确率、AUC、评分卡上每一箱的分数都在运行输出里，Kaggle 下载的源码不带输出，作者的文字里也没写具体数值，所以这里不列。</p>
+      <p class="callout warn"><b>读的时候要留心：</b>① 第 72 格写“留 30% 作验证集”，第 73 格代码是 <code>test_size=0.2</code>（20%）。② 第 84 格说“赔率翻倍时分数减少 30”（PDO = 30），按通常公式 B = PDO ÷ ln2 应为约 43.28；第 86 格的 B = 72.13 对应的是 PDO = 50。③ 第 87 格生成评分卡时只用了各变量的系数，<b>没有用逻辑回归的截距</b>，A 也直接取 650，所以总分和模型的概率之间少了一个常数项。④ 第 97 格写“好的样本分数都比坏样本分数低”，结合后一句（好样本 500 以上、坏样本 500 以下），应是“高”。⑤ 第 8 格建议剔除的 96/98 异常值和额度使用率 ≥ 13 的样本，后面实际没有剔除，只做了中位数填补。⑥ 分箱和 WOE 是在<b>全部训练数据</b>上算的，然后才切验证集，验证集的信息已经混进了 WOE，验证分数会略偏乐观。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>新客户申请贷款或信用卡时，按表查出每一项的分数加总，得到一个信用分；分数低于某条线就拒绝或降低额度。</li>
+        <li><b>同类问题：</b>银行申请评分（A 卡）、贷后行为评分（B 卡）、催收评分（C 卡），消费金融、汽车金融、信用卡审批。</li>
+        <li><b>为什么银行爱用：</b>每一分都说得出理由（“因为你逾期过 2 次扣了 40 分”），方便向客户解释，也方便监管审查；比黑箱模型更容易落地。</li>
+        <li><b>可迁移的套路：</b>数据体检 → 缺失与异常处理 → 分箱 → 用 IV 选变量 → WOE 编码 → 逻辑回归 → 按基准分和 PDO 换算成分数 → 检查每一箱分数的方向是否合理。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>中位数填补缺失 <span data-cell="59">第 59 格</span></li>
+        <li>等距分箱 <code>pd.cut</code> 与等频分箱 <code>pd.qcut</code> <span data-cell="61">第 61 格</span></li>
+        <li>IV 计算函数 <span data-cell="64">第 64 格</span>，WOE 计算函数 <span data-cell="67">第 67 格</span></li>
+        <li>逻辑回归 + ROC / AUC + 混淆矩阵 <span data-cell="77">第 77 格</span> <span data-cell="80">第 80 格</span></li>
+        <li>评分卡生成与逐条打分 <span data-cell="87">第 87 格</span> <span data-cell="93">第 93 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>评分卡把年龄、逾期次数切成几段，每段一个分数。这样做丢掉了一些细节，为什么银行还愿意这样做？</li>
+      <li>60–89 天逾期 (8, 9] 这一箱只有很少的人，分数却是 0。如果你是风控经理，你会怎么调整分箱？</li>
+      <li>“年龄”是评分卡里的一项。用年龄给人打信用分公平吗？哪些变量即使有用也不应该放进评分卡？</li>
+      <li>为什么分箱和 WOE 应该只在训练集上计算？如果在全部数据上算，会对验证分数造成什么影响？</li>
+      <li>违约只占 6%。如果模型对所有人都预测“不违约”，准确率是多少？这说明第 78 格的准确率能说明什么？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 orange90（EDA 部分作者注明来自 nicholasgah 的 notebook），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据：Kaggle 比赛 Give Me Some Credit（2011）。
+</footer>
+</main>
+
+<script src="nb/credit-scorecard-woe.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  if (location.hash === "#fast") { // 自查用：动画直接跳到最后一帧
+    K.tween = (ms, fn, ctx) => { if (ctx && !ctx.alive()) return Promise.resolve(false); fn(1, 1); return Promise.resolve(true); };
+    K.wait = (ms, ctx) => Promise.resolve(!ctx || ctx.alive());
+    document.head.appendChild(K.el("style", null, ".ch-cells > .cell, .ch-cells > .cell-note { display: none }"));
+  }
+  const fade = (els, ctx, ms) => ctx.tween(ms || 500, (t) => els.forEach((e) => (e.style.opacity = t)));
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+
+  const steps = [
+    {
+      at: 0, title: "评分卡是什么", kicker: "第 0–6 格 · 背景与读数据",
+      html: `<p>作者在开头列出了目录：导入数据 → EDA（数据体检）→ 分箱 → 特征筛选 → 逻辑回归 → 评分卡转换。理论部分他写在知乎专栏里，这份 notebook 是配套例子 <span data-cell="0">出处</span>。</p><p><b>信用评分卡</b>是银行用了几十年的工具：每个客户特征按区间给分，加起来就是信用分。第 4 格读入训练集和测试集，第 5、6 格看列类型和统计摘要。</p>`,
+      cells: [0, 4],
+      draw(svg, ctx) {
+        const rows = [["基础分", "", 650], ["额度使用率", "70%–100%", -38], ["年龄", "25–40 岁", -12], ["30–59 天逾期", "1 次", -25], ["90 天以上逾期", "0 次", 8], ["60–89 天逾期", "0 次", 5]];
+        K.svg(svg, "text", { x: 40, y: 30, "font-size": 13, class: "muted" }, "一张评分卡长这样（分数全是示意）");
+        const gs = rows.map((r, i) => {
+          const g = K.svg(svg, "g"); g.style.opacity = 0;
+          K.node(g, 40, 44 + i * 40, 200, 34, r[0], { bold: i === 0 });
+          K.node(g, 246, 44 + i * 40, 130, 34, r[1] || "—");
+          K.node(g, 382, 44 + i * 40, 90, 34, (r[2] > 0 && i ? "+" : "") + r[2], { color: r[2] < 0 ? "var(--bad)" : "var(--good)", bold: true });
+          return g;
+        });
+        const total = K.svg(svg, "text", { x: 500, y: 180, "font-size": 15, "font-weight": 700 }, "");
+        const tv = K.svg(svg, "text", { x: 500, y: 216, "font-size": 30, "font-weight": 700, fill: "var(--accent)" }, "");
+        (async () => {
+          let s = 0;
+          for (let i = 0; i < gs.length; i++) {
+            if (!(await ctx.tween(320, (t) => (gs[i].style.opacity = t)))) return;
+            s += rows[i][2]; total.textContent = "加总"; tv.textContent = s + " 分";
+          }
+        })();
+      },
+    },
+    {
+      title: "数据体检：违约率与缺失值", kicker: "第 7–11 格 · EDA",
+      html: `<p>EDA 部分作者注明来自另一位 Kaggler（nicholasgah）的 notebook，第 8 格是一份很细的体检报告 <span data-cell="7">出处</span>：</p><ul class="tight"><li>约 <b>6%</b> 的人违约，好坏很不平衡</li><li>月收入缺 29,731 条（19.82%），家属人数缺 3,924 条（2.61%）</li></ul><p>第 9 格算违约率，第 11 格列出每一列缺失的数量和比例。</p>`,
+      cells: [8, 9, 11], highlight: ["Default Rate", "isnull"],
+      draw(svg, ctx) {
+        const dots = [];
+        for (let i = 0; i < 100; i++) dots.push(K.svg(svg, "circle", { cx: 50 + (i % 10) * 26, cy: 60 + Math.floor(i / 10) * 26, r: 0, fill: i < 6 ? "var(--c6)" : "var(--c1)" }));
+        K.svg(svg, "text", { x: 40, y: 34, "font-size": 13, class: "muted" }, "每 100 人约 6 人违约（红）");
+        ctx.tween(1000, (t) => dots.forEach((d, i) => d.setAttribute("r", K.clamp(t * 100 - i, 0, 1) * 9)));
+        const cols = [["MonthlyIncome", 19.82], ["NumberOfDependents", 2.61], ["其余 8 列", 0]];
+        K.svg(svg, "text", { x: 360, y: 34, "font-size": 13, class: "muted" }, "缺失比例（第 8 格）");
+        const bs = cols.map((c, i) => {
+          K.svg(svg, "text", { x: 360, y: 80 + i * 60, "font-size": 13 }, c[0]);
+          const r = K.svg(svg, "rect", { x: 360, y: 88 + i * 60, width: 0, height: 20, rx: 3, fill: "var(--warn)" });
+          const t = K.svg(svg, "text", { x: 366, y: 103 + i * 60, "font-size": 12, "font-weight": 700 }, "");
+          return { r, t, v: c[1] };
+        });
+        ctx.wait(900).then((ok) => ok && ctx.tween(900, (t) => bs.forEach((b) => { const w = b.v * 15 * t; b.r.setAttribute("width", w); b.t.setAttribute("x", 366 + w); b.t.textContent = (b.v * t).toFixed(2) + "%"; })));
+      },
+    },
+    {
+      title: "额度使用率里的怪值", kicker: "第 12–18 格 · EDA",
+      html: `<p><b>循环额度使用率</b> = 欠款 ÷ 总额度，正常在 0 到 1 之间，越高说明越“刷爆”。按理说它越大越容易违约。</p><p>但作者发现：把“最低使用率”的门槛一路往上提，到 13 以上时，这群人的违约比例反而<b>比 0–1 之间的正常人还低</b>，这不合常理，很可能是数据错误，建议剔除 ≥ 13 的样本 <span data-cell="8">出处</span>。</p>`,
+      cells: [15, 16, 17, 18], highlight: ["default_prop"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 580, h: 240 }, [0, 30], [0, 0.5], { yticks: 4, xlabel: "最低额度使用率门槛（≥ i）", ylabel: "违约比例（示意）", yfmt: (v) => Math.round(v * 100) + "%" });
+        const ys = []; for (let i = 0; i <= 30; i++) ys.push(i < 1 ? 0.07 : i < 13 ? 0.37 - i * 0.004 : 0.05 + 0.002 * (i - 13));
+        const p = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2.5 });
+        const mark = K.svg(svg, "line", { x1: ax.sx(13), x2: ax.sx(13), y1: 30, y2: 270, stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+        const lab = K.svg(svg, "text", { x: ax.sx(13) + 6, y: 50, "font-size": 13, fill: "var(--warn)", "font-weight": 700 }, "≥ 13：违约率反而掉下来 → 可疑");
+        hide([mark, lab]);
+        ctx.tween(1600, (t) => { let d = ""; for (let i = 0; i <= 30 * t; i++) d += (d ? "L" : "M") + ax.sx(i) + "," + ax.sy(ys[i]); p.setAttribute("d", d); }).then((ok) => ok && fade([mark, lab], ctx, 500));
+      },
+    },
+    {
+      title: "年龄与逾期次数里的 96、98", kicker: "第 19–29 格 · EDA",
+      html: `<p>年龄的分布总体正常，年轻人违约更多一些。三个“逾期次数”列有个怪现象：数值大于 17 的 267 条记录里，三列<b>同时等于 96 或 98</b>。两年里逾期 30 天以上 96 次，在时间上根本不可能，这些多半是系统里的特殊代码（比如“未知”）<span data-cell="8">出处</span>。</p><p>第 29 格把这些记录的三列值拼成字符串计数，确认只有这两种组合。</p>`,
+      cells: [22, 23, 28, 29], highlight: ["distinct_triples_counts"],
+      draw(svg, ctx) {
+        const vals = [0, 0, 1, 0, 2, 0, 1, 3, 0, 98, 0, 1, 96, 0, 0, 2, 98, 0];
+        K.svg(svg, "text", { x: 40, y: 30, "font-size": 13, class: "muted" }, "逾期次数（示意）：大部分是 0、1、2……");
+        const gs = vals.map((v, i) => K.node(svg, 40 + (i % 9) * 72, 50 + Math.floor(i / 9) * 60, 64, 46, String(v), { fs: 16, bold: v > 17 }));
+        const note = K.svg(svg, "text", { x: 40, y: 220, "font-size": 14, fill: "var(--warn)", "font-weight": 700 }, "两年最多 24 个月，逾期 30 天以上 96 次？不可能 → 特殊代码");
+        const note2 = K.svg(svg, "text", { x: 40, y: 250, "font-size": 13 }, "三个逾期列在这些行里同时等于 96 或 98，共 267 条（第 8 格）");
+        hide([note, note2]);
+        ctx.wait(700).then((ok) => ok && ctx.tween(700, (t) => vals.forEach((v, i) => { if (v > 17) K.set(gs[i].querySelector("rect"), { stroke: "var(--warn)", "stroke-width": 1 + 2 * t, fill: `color-mix(in srgb, var(--warn) ${Math.round(30 * t)}%, var(--panel))` }); }))).then((ok) => ok && fade([note, note2], ctx, 500));
+      },
+    },
+    {
+      title: "负债比与月收入", kicker: "第 30–45 格 · EDA",
+      html: `<p>负债比 = 每月要还的钱 ÷ 月收入。作者发现负债比最高的 2.5% 的人，“欠的钱是收入的 3490 倍以上”。再查这些人的月收入：只有 185 人填了，而且<b>不是 0 就是 1</b>，其中 164 人要么“收入 0、没违约”，要么“收入 1、违约了” <span data-cell="8">出处</span>。</p><p>这说明负债比极端大，往往是因为收入被记成了 0 或 1，分母太小。月收入本身是右偏分布，作者建议用中位数填补缺失。</p>`,
+      cells: [33, 36, 41, 45], highlight: ["quantile(0.975)"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 40, y: 34, "font-size": 14, "font-weight": 700 }, "负债比 = 每月还款 ÷ 月收入");
+        const rows = [["每月还款 3000，收入 6000", "0.5", "var(--good)"], ["每月还款 3000，收入 1", "3000", "var(--bad)"], ["每月还款 3490，收入 0 或缺失", "很大 / 无意义", "var(--bad)"]];
+        const gs = rows.map((r, i) => { const g = K.svg(svg, "g"); g.style.opacity = 0; K.node(g, 40, 60 + i * 70, 340, 50, r[0]); K.arrow(g, 384, 85 + i * 70, 430, 85 + i * 70); K.node(g, 436, 60 + i * 70, 200, 50, r[1], { color: r[2], bold: true, fs: 16 }); return g; });
+        K.svg(svg, "text", { x: 40, y: 300, "font-size": 12, class: "muted" }, "分母（收入）被记成 0 或 1，比值就会大得离谱（示意数字）");
+        (async () => { for (const g of gs) if (!(await ctx.tween(500, (t) => (g.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      title: "其余变量：贷款数与家属", kicker: "第 46–57 格 · EDA",
+      html: `<p>最后几列：在用的贷款和信用卡数量、房产类贷款数量、家属人数。作者分别看分布、只画 ≤ 10 的部分，查看极端值（房贷数 &gt; 13、家属人数 &gt; 10）的违约情况。家属人数的众数是 0，可以用 0 填补缺失 <span data-cell="8">出处</span>。</p>`,
+      cells: [47, 51, 55], highlight: ["value_counts"],
+      draw(svg, ctx) {
+        const items = [{ label: "0 人", value: 58 }, { label: "1 人", value: 18 }, { label: "2 人", value: 13 }, { label: "3 人", value: 6 }, { label: "4 人", value: 2 }, { label: "5+ 人", value: 1 }].map((d, i) => Object.assign(d, { color: i ? "var(--c1)" : "var(--accent)" }));
+        const bs = K.bars(svg, { x: 60, y: 40, w: 600, h: 240 }, items, { fmt: () => "" });
+        K.svg(svg, "text", { x: 60, y: 26, "font-size": 13, class: "muted" }, "家属人数分布（形状示意）：最多的是 0 → 缺失可以填 0");
+        bs.forEach((b) => { b.h = +b.rect.getAttribute("height"); b.y = +b.rect.getAttribute("y"); b.rect.setAttribute("height", 0); b.rect.setAttribute("y", b.y + b.h); });
+        ctx.tween(1000, (t) => bs.forEach((b) => { b.rect.setAttribute("height", b.h * t); b.rect.setAttribute("y", b.y + b.h * (1 - t)); }));
+      },
+    },
+    {
+      title: "填补缺失 + 分箱", kicker: "第 58–62 格 · 数据分箱",
+      html: `<p>先用每列的<b>中位数</b>填补所有缺失值。然后是评分卡的关键一步：<b>分箱</b>，把连续的数字切成几段。</p><ul class="tight"><li><b>等距分箱</b> <code>pd.cut</code>：按人为定的边界切，如年龄 ≤25、25–40、40–50、50–60、60–70、&gt;70；逾期次数 0、1、2……9、更多</li><li><b>等频分箱</b> <code>pd.qcut</code>：每箱人数差不多，额度使用率、负债比、月收入等切 5 箱</li></ul>`,
+      cells: [59, 60, 61], highlight: ["pd.cut", "pd.qcut", "age_bins"],
+      draw(svg, ctx) {
+        const r = K.rng(4), ages = []; for (let i = 0; i < 80; i++) ages.push(K.clamp(Math.round(52 + K.randn(r) * 14), 21, 95));
+        const ax = K.axes(svg, { x: 40, y: 40, w: 640, h: 120 }, [20, 100], [0, 1], { yticks: 0, xlabel: "年龄（示意）" });
+        const dots = ages.map((a, i) => K.svg(svg, "circle", { cx: ax.sx(a), cy: 60 + (i % 8) * 11, r: 4, fill: "var(--ink-3)", opacity: 0.7 }));
+        const edges = [25, 40, 50, 60, 70], cols = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c5)", "var(--c6)"];
+        const lines = edges.map((e) => K.svg(svg, "line", { x1: ax.sx(e), x2: ax.sx(e), y1: 160, y2: 160, stroke: "var(--warn)", "stroke-width": 2 }));
+        const labels = ["≤25", "25–40", "40–50", "50–60", "60–70", ">70"];
+        const bounds = [20, 25, 40, 50, 60, 70, 100];
+        const lb = labels.map((l, k) => K.svg(svg, "text", { x: ax.sx((bounds[k] + bounds[k + 1]) / 2), y: 220, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: cols[k] }, l));
+        hide(lb);
+        K.svg(svg, "text", { x: 40, y: 270, "font-size": 13 }, "切好以后，模型不再看“具体几岁”，只看“落在哪一箱”");
+        ctx.tween(800, (t) => lines.forEach((l) => l.setAttribute("y1", 160 - 120 * t)))
+          .then((ok) => ok && ctx.tween(700, (t) => { dots.forEach((d, i) => { let k = 0; while (k < 5 && ages[i] > edges[k]) k++; K.set(d, { fill: cols[k] }); }); lb.forEach((e) => (e.style.opacity = t)); }));
+      },
+    },
+    {
+      title: "IV：哪个变量最能分清好坏", kicker: "第 63–66 格 · 特征筛选",
+      html: `<p>每个变量分好箱后，用 <b>IV（信息值）</b>衡量它“区分好人坏人”的能力。做法是：每一箱里，坏人占全部坏人的比例记作“坏分布”，好人占全部好人的比例记作“好分布”；两者差得越多，这一箱越有区分力。IV = Σ（坏分布 − 好分布）× ln（坏分布 ÷ 好分布）。</p><p>作者只保留 <b>IV &gt; 0.1</b> 的变量，选出 5 个：额度使用率、30–59 天逾期、年龄、90 天以上逾期、60–89 天逾期 <span data-cell="66">出处</span>。业内常见的经验是 IV 小于 0.02 基本没用，0.1 以上算中等以上。</p>`,
+      cells: [64, 65, 66], highlight: ["data['IV']", "np.log(data['Distribution Bad'] / data['Distribution Good'])"],
+      draw(svg, ctx) {
+        const items = [["额度使用率", 1], ["90 天以上逾期", 0.85], ["30–59 天逾期", 0.7], ["60–89 天逾期", 0.6], ["年龄", 0.3], ["月收入", 0.12], ["负债比", 0.1], ["贷款数", 0.08], ["家属人数", 0.05], ["房贷数", 0.04]];
+        const bs = K.bars(svg, { x: 30, y: 30, w: 640, h: 280 }, items.map((d, i) => ({ label: d[0], value: d[1], color: i < 5 ? "var(--good)" : "var(--ink-3)" })), { horizontal: true, labelWidth: 120, fmt: () => "" });
+        K.svg(svg, "text", { x: 30, y: 20, "font-size": 12, class: "muted" }, "绿色 = IV > 0.1 入选的 5 个（入选名单来自第 66 格；条的长短和顺序为示意）");
+        bs.forEach((b) => { b.w = +b.rect.getAttribute("width"); b.rect.setAttribute("width", 0); });
+        ctx.tween(1200, (t) => bs.forEach((b) => b.rect.setAttribute("width", b.w * t)));
+      },
+    },
+    {
+      title: "WOE：把每一箱换成一个数", kicker: "第 67–70 格 · WOE 编码",
+      html: `<p><b>WOE（证据权重）</b> = ln（这一箱的坏分布 ÷ 好分布）。坏人在这一箱里“扎堆”，WOE 为正而且大；好人扎堆，WOE 为负。</p><p>第 68 格把选中的 5 个变量都换成 WOE 值，原来的“年龄 25–40 岁”变成了一个数字，比如 0.3。好处：每一箱都有了统一尺度的“风险分”，和违约的关系变成了直线关系，正适合下一步的逻辑回归。为了避免 ln(0)，没有坏人的箱子把坏人数当作 1。第 70 格整理出“变量—分箱—WOE”对照表。</p>`,
+      cells: [67, 68, 70], highlight: ["np.log(df_woe['bad_rate'].divide(df_woe['good_rate']", "mask(df_woe['bad']==0, 1)"],
+      draw(svg, ctx) {
+        const bins = [["0 次", 50, 30], ["1 次", 20, 25], ["2 次", 10, 18], ["3+ 次", 5, 27]];
+        const gs = bins.map((b) => b[1]), bs = bins.map((b) => b[2]);
+        const G = gs.reduce((a, b) => a + b), B = bs.reduce((a, b) => a + b);
+        K.svg(svg, "text", { x: 30, y: 26, "font-size": 13, class: "muted" }, "例：30–59 天逾期次数分 4 箱（人数为示意）");
+        const hdr = ["分箱", "好人占比", "坏人占比", "WOE = ln(坏÷好)"];
+        hdr.forEach((h, j) => K.node(svg, 30 + j * 160, 40, 150, 32, h, { bold: true, fs: 12 }));
+        const cells = [];
+        bins.forEach((b, i) => {
+          const g = b[1] / G, bd = b[2] / B, w = Math.log(bd / g);
+          const vals = [b[0], (g * 100).toFixed(0) + "%", (bd * 100).toFixed(0) + "%", (w >= 0 ? "+" : "") + w.toFixed(2)];
+          vals.forEach((v, j) => { const n = K.node(svg, 30 + j * 160, 80 + i * 40, 150, 34, v, { bold: j === 3, color: j === 3 ? (w > 0 ? "var(--bad)" : "var(--good)") : "var(--ink)" }); n.style.opacity = 0; cells.push({ n, d: i * 4 + j }); });
+        });
+        K.svg(svg, "text", { x: 30, y: 270, "font-size": 13 }, "WOE 为正（红）：坏人扎堆 → 风险高；为负（绿）：好人扎堆 → 风险低");
+        ctx.tween(1600, (t) => cells.forEach((c) => (c.n.style.opacity = K.clamp(t * 16 - c.d, 0, 1))));
+      },
+    },
+    {
+      title: "逻辑回归", kicker: "第 71–78 格 · 建模",
+      html: `<p>把 5 个 WOE 列当输入，训练<b>逻辑回归</b>：每个变量一个系数，加权求和后经过一个 S 形函数变成 0–1 之间的“违约概率”。切分时第 72 格写留 30%，代码实际是 <code>test_size=0.2</code>。作者试过 SMOTE 过采样，没效果，所以注释掉了 <span data-cell="75">出处</span>。</p><p>第 78 格算验证集准确率。提醒：违约只占 6%，全猜“不违约”准确率也有约 94%，准确率在这里参考价值不大。</p>`,
+      cells: [72, 73, 75, 77, 78], highlight: ["test_size=0.2", "LogisticRegression"],
+      draw(svg, ctx) {
+        const feats = ["WOE 额度使用率", "WOE 30–59 天逾期", "WOE 年龄", "WOE 90 天以上逾期", "WOE 60–89 天逾期"];
+        feats.forEach((f, i) => { K.node(svg, 20, 30 + i * 56, 170, 40, f, { fs: 12 }); K.arrow(svg, 190, 50 + i * 56, 300, 160); K.svg(svg, "text", { x: 230, y: 58 + i * 56 + (i - 2) * -10, "font-size": 11, class: "muted" }, "× w" + (i + 1)); });
+        K.node(svg, 300, 130, 90, 60, "Σ 加总", { bold: true });
+        K.arrow(svg, 390, 160, 430, 160);
+        const ax = K.axes(svg, { x: 440, y: 50, w: 250, h: 220 }, [-6, 6], [0, 1], { xticks: 2, yticks: 2, xlabel: "加权和", ylabel: "违约概率" });
+        const p = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--accent)", "stroke-width": 3 });
+        ctx.tween(1400, (t) => { let d = ""; for (let x = -6; x <= -6 + 12 * t; x += 0.2) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(K.sigmoid(x)); p.setAttribute("d", d); });
+      },
+    },
+    {
+      title: "AUC 与混淆矩阵", kicker: "第 79–82 格 · 评估",
+      html: `<p>比赛用 <b>AUC</b> 当评分标准，所以作者也画了 ROC 曲线：横轴是“好人被误判为坏人的比例”，纵轴是“坏人被抓到的比例”，曲线越鼓向左上角越好，曲线下面积就是 AUC，0.5 等于瞎猜，1 是完美。</p><p>第 81 格看混淆矩阵，第 82 格打印 5 个系数 <code>model.coef_</code>，下一步要用它们把模型换算成分数。</p>`,
+      cells: [80, 81, 82], highlight: ["roc_auc", "model.coef_"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 20, w: 280, h: 280 }, [0, 1], [0, 1], { xticks: 2, yticks: 2, xlabel: "误伤好人的比例", ylabel: "抓到坏人的比例" });
+        K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0), x2: ax.sx(1), y2: ax.sy(1), stroke: "var(--bad)", "stroke-dasharray": "5 3" });
+        const area = K.svg(svg, "path", { d: "", fill: "var(--accent)", "fill-opacity": 0.15 });
+        const p = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 3 });
+        ctx.tween(1400, (t) => { let d = "", a = "M" + ax.sx(0) + "," + ax.sy(0); for (let x = 0; x <= t + 1e-9; x += 0.02) { const y = Math.pow(x, 0.25); d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(y); a += "L" + ax.sx(x) + "," + ax.sy(y); } a += "L" + ax.sx(t) + "," + ax.sy(0) + "Z"; p.setAttribute("d", d); area.setAttribute("d", a); });
+        K.svg(svg, "text", { x: 400, y: 80, "font-size": 14, "font-weight": 700 }, "AUC = 蓝线下方的面积");
+        K.svg(svg, "text", { x: 400, y: 108, "font-size": 13 }, "0.5 = 瞎猜（红虚线）");
+        K.svg(svg, "text", { x: 400, y: 132, "font-size": 13 }, "1.0 = 完美区分");
+        K.svg(svg, "text", { x: 400, y: 180, "font-size": 12, class: "muted" }, "曲线形状为示意；作者的 AUC 数值");
+        K.svg(svg, "text", { x: 400, y: 198, "font-size": 12, class: "muted" }, "在运行输出里，这里不列");
+      },
+    },
+    {
+      title: "从概率到分数：基准分与 PDO", kicker: "第 83–86 格 · 评分卡转换",
+      html: `<p>评分卡的分数公式：<b>分数 = A − B × ln(坏好比)</b>。两个参数这样定：</p><ul class="tight"><li><b>基准分</b>：好坏比 20:1 时给 650 分（作者说多数风控策略这样设）</li><li><b>PDO</b>（Points to Double the Odds）：坏好比每翻一倍，分数减少多少。作者设为 30</li></ul><p>由此 B = PDO ÷ ln2。第 86 格直接写 A = 650、B = 72.13。按 PDO = 30，B 应约为 43.28；72.13 对应的是 PDO = 50。推导公式是图片，源码里看不到，下面的实验可以自己验算。</p>`,
+      cells: [84, 86], highlight: ["B =72.13", "A = 650"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 580, h: 250 }, [-4, 2], [400, 800], { xticks: 0, yticks: 4, xlabel: "坏好比（对数刻度）", ylabel: "分数" });
+        const B = 30 / Math.LN2, A = 650 + B * Math.log(1 / 20);
+        const sc = (lo) => A - B * lo;
+        const p = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--accent)", "stroke-width": 3 });
+        [1 / 40, 1 / 20, 1 / 10, 1 / 5, 1 / 2.5].forEach((o, i) => {
+          const lo = Math.log(o);
+          K.svg(svg, "text", { x: ax.sx(lo), y: 300, "text-anchor": "middle", "font-size": 12 }, "1:" + Math.round(1 / o * 10) / 10);
+          const d = K.svg(svg, "circle", { cx: ax.sx(lo), cy: ax.sy(sc(lo)), r: 0, fill: i === 1 ? "var(--good)" : "var(--c1)" });
+          const t = K.svg(svg, "text", { x: ax.sx(lo) + 8, y: ax.sy(sc(lo)) - 8, "font-size": 12, "font-weight": 700 }, "");
+          ctx.wait(1200 + i * 300).then((ok) => { if (ok) { d.setAttribute("r", 6); t.textContent = Math.round(sc(lo)) + " 分"; } });
+        });
+        K.svg(svg, "text", { x: 360, y: 50, "font-size": 13 }, "坏人比例每翻一倍 → 分数少 30（PDO = 30）");
+        K.svg(svg, "text", { x: 360, y: 72, "font-size": 12, class: "muted" }, "绿点：好坏比 20:1 时 = 650 分（按作者文字设定画出）");
+        ctx.tween(1200, (t) => { let d = ""; for (let lo = -4; lo <= -4 + 6 * t; lo += 0.1) d += (d ? "L" : "M") + ax.sx(lo) + "," + ax.sy(sc(lo)); p.setAttribute("d", d); });
+      },
+    },
+    {
+      title: "生成评分卡", kicker: "第 87–91 格 · 评分卡",
+      html: `<p>每一箱的分数 = −（该变量的系数）×（这一箱的 WOE）× B，四舍五入成整数。所有变量、所有分箱排成一张表，就是评分卡。</p><p>作者检查结果：基本符合常识，比如额度使用率越高分越低；但 60–89 天逾期在 (8, 9] 这一箱得分竟然是 0，“完全没道理”，原因是这一箱样本太少，需要重新设计分箱 <span data-cell="91">出处</span>。</p><p class="note">这里没有用到模型的截距项，A 也直接取 650。</p>`,
+      cells: [87, 88, 90, 91], highlight: ["-coef[i]*row['woe']*B"],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "每箱分数 = −系数 × WOE × B（数字为示意）");
+        const flow = [["系数 0.6", "var(--c1)"], ["× WOE +1.2", "var(--c6)"], ["× B 72.13", "var(--c2)"], ["× (−1)", "var(--ink-3)"], ["= −52 分", "var(--bad)"]];
+        const ns = flow.map((f, i) => { const g = K.node(svg, 30 + i * 136, 60, 124, 50, f[0], { stroke: f[1], bold: i === 4 }); g.style.opacity = 0; return g; });
+        const rows = [["额度使用率 0–20%", "+31"], ["额度使用率 20–50%", "+8"], ["额度使用率 50–80%", "−20"], ["额度使用率 80% 以上", "−52"], ["60–89 天逾期 (8, 9]", "0 ?!"]];
+        const rs = rows.map((r, i) => { const g = K.svg(svg, "g"); g.style.opacity = 0; K.node(g, 30, 140 + i * 38, 260, 32, r[0]); K.node(g, 296, 140 + i * 38, 90, 32, r[1], { bold: true, color: i === 4 ? "var(--warn)" : r[1][0] === "−" ? "var(--bad)" : "var(--good)" }); return g; });
+        const w = K.svg(svg, "text", { x: 400, y: 312, "font-size": 13, fill: "var(--warn)", "font-weight": 700 }, "← 样本太少的箱子，分数不可信");
+        w.style.opacity = 0;
+        (async () => {
+          for (const g of ns) if (!(await ctx.tween(220, (t) => (g.style.opacity = t)))) return;
+          for (const g of rs) if (!(await ctx.tween(220, (t) => (g.style.opacity = t)))) return;
+          await ctx.tween(400, (t) => (w.style.opacity = t));
+        })();
+      },
+    },
+    {
+      title: "给客户打分", kicker: "第 92–98 格 · 验证",
+      html: `<p>最后，从训练集中随机抽 5 个好客户、5 个坏客户，把他们的原始数值逐项对到评分卡的分箱上，查出分数，加起来再加上 A = 650。</p><p>结果：好客户都在 500 分以上，坏客户都在 500 分以下，说明评分卡有效；作者也坦言换一批样本未必这么准，但总体能识别出较多坏客户 <span data-cell="97">出处</span>。原文写“好的样本分数都比坏样本分数低”，按上下文应是“高”。</p>`,
+      cells: [93, 94, 95, 96, 97], highlight: ["calculate_score_with_card", "df['score']+A"],
+      draw(svg, ctx) {
+        const r = K.rng(3), good = [], bad = [];
+        for (let i = 0; i < 5; i++) { good.push(Math.round(560 + r() * 90)); bad.push(Math.round(390 + r() * 90)); }
+        const ax = K.axes(svg, { x: 60, y: 40, w: 600, h: 200 }, [350, 700], [0, 2], { yticks: 0, xlabel: "信用分（示意）" });
+        K.svg(svg, "line", { x1: ax.sx(500), x2: ax.sx(500), y1: 40, y2: 240, stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "5 3" });
+        K.svg(svg, "text", { x: ax.sx(500) + 5, y: 54, "font-size": 12, fill: "var(--warn)" }, "500 分");
+        K.svg(svg, "text", { x: 60, y: 30, "font-size": 13, class: "muted" }, "5 个好客户（绿）、5 个坏客户（红）的得分（数值为示意，方向按作者结论）");
+        const ds = good.map((s) => ({ s, y: 1.4, c: "var(--good)" })).concat(bad.map((s) => ({ s, y: 0.6, c: "var(--bad)" })));
+        const els = ds.map((d) => K.svg(svg, "circle", { cx: ax.sx(650), cy: ax.sy(d.y), r: 9, fill: d.c, opacity: 0.85 }));
+        ctx.tween(1600, (t) => els.forEach((e, i) => e.setAttribute("cx", ax.sx(K.lerp(650, ds[i].s, t)))));
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：分箱 / WOE / IV ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 340,
+    controls: [
+      { id: "nb", label: "分几箱", min: 2, max: 10, step: 1, value: 5 },
+      { id: "mode", label: "分箱方式", value: "q", options: [["q", "等频（qcut：每箱人数差不多）"], ["c", "等距（cut：每箱宽度一样）"]] },
+      { id: "strength", label: "额度使用率和违约的关系有多强", min: 0, max: 4, step: 0.1, value: 1.5, fmt: (v) => v.toFixed(1) },
+      { id: "seed", label: "换一批借款人", button: true },
+    ],
+    note: "模拟 3,000 名借款人：额度使用率在 0–1 之间，违约概率随使用率升高（整体违约率在百分之几到十几之间，随关系强度变化）。浏览器里现场按你的设置分箱，算每箱的坏人率、WOE 和整个变量的 IV。把“关系强度”拖到 0，IV 会掉到几乎 0；把箱数拖到 10 再选等距，看看两端的箱子人数够不够。",
+    render(svg, v) {
+      const r = K.rng(31 + v.seed * 7), n = 3000, X = [], Y = [];
+      for (let i = 0; i < n; i++) { const x = K.clamp(Math.pow(r(), 1.3), 0, 0.9999); const p = K.sigmoid(-3.9 + v.strength * (x - 0.35) * 2.2); X.push(x); Y.push(r() < p ? 1 : 0); }
+      let edges = [];
+      if (v.mode === "q") { const s = X.slice().sort((a, b) => a - b); for (let k = 1; k < v.nb; k++) edges.push(s[Math.floor((k * n) / v.nb)]); }
+      else for (let k = 1; k < v.nb; k++) edges.push(k / v.nb);
+      const bins = Array.from({ length: v.nb }, () => ({ g: 0, b: 0 }));
+      X.forEach((x, i) => { let k = 0; while (k < edges.length && x > edges[k]) k++; Y[i] ? bins[k].b++ : bins[k].g++; });
+      const G = bins.reduce((s, b) => s + b.g, 0), B = bins.reduce((s, b) => s + b.b, 0);
+      let iv = 0;
+      bins.forEach((b) => { const gd = Math.max(b.g, 0.5) / G, bd = Math.max(b.b, 0.5) / B; b.woe = Math.log(bd / gd); iv += (bd - gd) * b.woe; b.rate = b.b / Math.max(1, b.g + b.b); });
+      const maxW = Math.max(1, ...bins.map((b) => Math.abs(b.woe)));
+      const ax = K.axes(svg, { x: 60, y: 20, w: 560, h: 240 }, [0, v.nb], [-maxW * 1.1, maxW * 1.1], { xticks: 0, yticks: 4, ylabel: "WOE" });
+      K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(v.nb), y1: ax.sy(0), y2: ax.sy(0), stroke: "var(--ink-3)" });
+      const bnds = [0].concat(edges, [1]);
+      bins.forEach((b, k) => {
+        const y0 = ax.sy(0), y1 = ax.sy(b.woe);
+        K.svg(svg, "rect", { x: ax.sx(k + 0.12), width: ax.sx(0.76) - ax.sx(0), y: Math.min(y0, y1), height: Math.abs(y1 - y0), fill: b.woe > 0 ? "var(--c6)" : "var(--c3)", opacity: 0.85 });
+        K.svg(svg, "text", { x: ax.sx(k + 0.5), y: 278, "text-anchor": "middle", "font-size": 11 }, Math.round(bnds[k] * 100) + "–" + Math.round(bnds[k + 1] * 100) + "%");
+        K.svg(svg, "text", { x: ax.sx(k + 0.5), y: 294, "text-anchor": "middle", "font-size": 10, class: "muted" }, (b.g + b.b) + "人");
+        K.svg(svg, "text", { x: ax.sx(k + 0.5), y: 310, "text-anchor": "middle", "font-size": 10, fill: "var(--c6)" }, "坏 " + (b.rate * 100).toFixed(1) + "%");
+      });
+      K.svg(svg, "text", { x: 60, y: 334, "font-size": 12, class: "muted" }, "横轴：额度使用率的分箱；红柱 = 坏人扎堆（WOE > 0），绿柱 = 好人扎堆");
+      const lvl = iv < 0.02 ? "几乎没用" : iv < 0.1 ? "较弱" : iv < 0.3 ? "中等" : "很强";
+      return { readout: [
+        { k: "整体违约率", v: ((B / n) * 100).toFixed(1) + "%" },
+        { k: "IV 信息值", v: iv.toFixed(3), color: iv > 0.1 ? "var(--good)" : "var(--warn)" },
+        { k: "按常见经验", v: lvl },
+        { k: "是否入选（IV > 0.1）", v: iv > 0.1 ? "入选" : "淘汰", color: iv > 0.1 ? "var(--good)" : "var(--bad)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：基准分与 PDO ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 320,
+    controls: [
+      { id: "base", label: "基准分", min: 400, max: 800, step: 10, value: 650 },
+      { id: "odds", label: "基准分对应的好坏比（好 : 坏）", min: 1, max: 60, step: 1, value: 20, fmt: (v) => v + " : 1" },
+      { id: "pdo", label: "PDO：坏好比翻一倍，分数减少", min: 10, max: 80, step: 1, value: 30 },
+      { id: "p", label: "某位客户的违约概率", min: 0.005, max: 0.6, step: 0.005, value: 0.06, fmt: (v) => (v * 100).toFixed(1) + "%" },
+    ],
+    note: "公式：B = PDO ÷ ln2；A = 基准分 − B × ln(好坏比)；分数 = A + B × ln(好 ÷ 坏)。滑动“违约概率”看分数怎么变；把 PDO 改成 50，看看 B 是不是正好等于第 86 格的 72.13。",
+    render(svg, v) {
+      const B = v.pdo / Math.LN2, A = v.base - B * Math.log(v.odds);
+      const score = (p) => A + B * Math.log((1 - p) / p);
+      const ax = K.axes(svg, { x: 70, y: 20, w: 540, h: 240 }, [0, 0.6], [200, 900], { yticks: 4, xlabel: "违约概率", ylabel: "分数", xfmt: (q) => Math.round(q * 100) + "%" });
+      let d = ""; for (let p = 0.005; p <= 0.6; p += 0.005) d += (d ? "L" : "M") + ax.sx(p) + "," + ax.sy(K.clamp(score(p), 200, 900));
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--accent)", "stroke-width": 3 });
+      const s = score(v.p), p0 = 1 / (1 + v.odds);
+      K.svg(svg, "circle", { cx: ax.sx(p0), cy: ax.sy(K.clamp(v.base, 200, 900)), r: 6, fill: "var(--good)" });
+      K.svg(svg, "text", { x: ax.sx(p0) + 8, y: ax.sy(v.base) - 8, "font-size": 12, fill: "var(--good)" }, "基准点");
+      K.svg(svg, "circle", { cx: ax.sx(v.p), cy: ax.sy(K.clamp(s, 200, 900)), r: 7, fill: "var(--c6)" });
+      K.svg(svg, "line", { x1: ax.sx(v.p), x2: ax.sx(v.p), y1: ax.sy(200), y2: ax.sy(K.clamp(s, 200, 900)), stroke: "var(--c6)", "stroke-dasharray": "4 3" });
+      K.svg(svg, "text", { x: 70, y: 310, "font-size": 12, class: "muted" }, "违约概率越高 → 好坏比越小 → 分数越低；曲线在低概率一侧特别陡");
+      return { readout: [
+        { k: "B（每单位对数赔率的分数）", v: B.toFixed(2) },
+        { k: "A（常数项）", v: A.toFixed(1) },
+        { k: "这位客户的分数", v: Math.round(s) + " 分", color: s < 500 ? "var(--bad)" : "var(--good)" },
+        { k: "违约概率翻倍后的分数", v: Math.round(score(Math.min(0.99, v.p * 2))) + " 分" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>图神经网络入门</title>
+<meta name="description" content="Kaggle 案例拆解：从邻接矩阵、拉普拉斯矩阵和归一化讲起，手写一层 GCN，再用三层 GCN 判断 MUTAG 分子是否致突变。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">图结构数据 · 图分类 · 图神经网络</div>
+  <h1>把分子当成图：手写 GCN 判断化合物是否致突变</h1>
+  <p class="en">Graph neural network starter for beginners</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">邻接矩阵 / 度矩阵</span><span class="tag method">图拉普拉斯</span><span class="tag method">对称归一化</span>
+    <span class="tag method">切比雪夫图卷积</span><span class="tag method">GCN（Kipf &amp; Welling）</span><span class="tag method">均值池化读出</span><span class="tag method">MUTAG</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Rashmi Margani（validmodel）</b></span>
+    <span>Kaggle 点赞 <b>323</b>（2026-11 抓取）</span>
+    <span>数据集 <b>MUTAG</b>（TU Dortmund 图核基准数据集，notebook 内 wget 下载）</span>
+    <span><a href="https://www.kaggle.com/code/validmodel/graph-neural-network-starter-for-beginners" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">188 个分子，每个分子是一张图</div><p>原子是节点，化学键是边。每个原子的特征是它的元素类型（7 种，做成 One-Hot）。数据集 MUTAG 是图学习的经典基准，188 个硝基芳香化合物（数据集公开说明）。<span data-cell="20">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这个分子会不会导致基因突变</div><p>每张图一个标签，二分类（数据集公开说明：对鼠伤寒沙门氏菌是否有致突变性）。这叫<b>图分类</b>：给整张图打标签，而不是给某个节点打标签。<span data-cell="12">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">先讲矩阵，再手写 GCN</div><p>从邻接矩阵、度矩阵、拉普拉斯矩阵、归一化讲起，演示切比雪夫多项式图卷积；再用 PyTorch 手写一层 GCN（类似 Kipf 2016），堆 3 层 + 均值池化 + 全连接做分类。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">跑通完整的图分类训练</div><p>150 张图训练、其余做验证，SGD 训练 240 轮，每 10 轮打印训练/验证准确率并记录最好的验证分数。具体分数在运行输出里，源码不带。<span data-cell="22">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">MUTAG 是图分类的经典小数据集（TU Dortmund 图核基准数据集收录）：每个样本是一个分子，画成一张图。作者在第 19 格下载压缩包，第 20 格读其中 4 个文本文件。规模来自数据集说明。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">分子（图）</div><div class="v">188</div></div>
+        <div class="stat-tile"><div class="k">类别</div><div class="v">2</div></div>
+        <div class="stat-tile"><div class="k">原子类型（节点特征）</div><div class="v">7 种</div></div>
+        <div class="stat-tile"><div class="k">训练 / 验证</div><div class="v">150 / 其余</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">188 个分子、2 类、7 种原子来自数据集说明；节点特征做成 7 维 One-Hot（<code>max_node_label=7</code>）、前 150 张图做训练，见第 20 格 <span data-cell="20">出处</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">四个文件分别是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>文件</th><th>每一行是什么</th><th>用途</th></tr>
+        <tr><td><code>MUTAG_graph_indicator.txt</code></td><td>第 i 个原子属于第几个分子</td><td>把原子分到各张图</td></tr>
+        <tr><td><code>MUTAG_A.txt</code></td><td>一条边：“原子编号, 原子编号”（化学键）</td><td>邻接矩阵 A</td></tr>
+        <tr><td><code>MUTAG_node_labels.txt</code></td><td>第 i 个原子的元素类型（0–6）</td><td>节点特征 X（One-Hot）</td></tr>
+        <tr><td><code>MUTAG_graph_labels.txt</code></td><td>第 k 个分子的标签：1 或 −1（代码里把 −1 改成 0）</td><td><b>要预测的答案</b></td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">文件名和处理方式见第 20 格 <span data-cell="20">出处</span>。标签含义：是否对鼠伤寒沙门氏菌有致突变性（数据集说明）。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="18">
+    <h3>动手试试 A · GCN 一层层传播 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="22">
+    <h3>动手试试 B · 只标几个点，靠图结构猜出其余 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者的做法与要点</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>要点</th><th>出处</th></tr>
+        <tr><td>图 = 节点特征矩阵 X（N×F）+ 邻接矩阵 A（N×N）</td><td><span data-cell="2">第 2 格</span></td></tr>
+        <tr><td>拉普拉斯 L = D − A，对角线是度，相连处为 −1</td><td><span data-cell="6">第 6 格</span></td></tr>
+        <tr><td>图任务分两类：图分类（整张图一个标签，监督学习）、节点分类（大图上给节点打标签，常是半监督）</td><td><span data-cell="12">第 12 格</span></td></tr>
+        <tr><td>图算子乘以图信号 = 对每个节点的邻居做加权求和，一次矩阵乘法完成</td><td><span data-cell="14">第 14 格</span></td></tr>
+        <tr><td>GCN 层：先给 A 加自环，再做 D<sup>−½</sup>(A+I)D<sup>−½</sup>，乘上线性变换后的特征</td><td><span data-cell="18">第 18 格</span></td></tr>
+        <tr><td>模型：3 层 GCN（隐藏 128）+ ReLU + Dropout 0.5 + 节点均值池化 + 全连接 2 类；SGD lr=0.01，240 轮</td><td><span data-cell="22">第 22 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">训练/验证准确率在运行输出里，Kaggle 下载的源码不带输出，作者文字里也没写具体数值，所以这里不列分数。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>给一个新分子的结构图，输出它有致突变性的概率，帮助在合成前筛掉危险化合物。</li>
+        <li><b>同类问题：</b>药物毒性/活性预测、蛋白质功能分类、社交网络里的社区或水军识别、交易网络反欺诈、交通路网流量预测、推荐系统（用户-商品二部图）。</li>
+        <li><b>可迁移套路：</b>把实体和关系写成图 → 节点特征 + 归一化邻接矩阵 → 若干层“聚合邻居 + 线性变换 + 非线性” → 节点任务直接输出，图任务再做池化读出。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>随机邻接矩阵、度矩阵、拉普拉斯 <span data-cell="7">第 7 格</span></li>
+        <li>对称归一化 D<sup>−½</sup>AD<sup>−½</sup> <span data-cell="10">第 10 格</span></li>
+        <li>切比雪夫多项式近似的图卷积（4 阶 ≈ 4 跳）<span data-cell="16">第 16 格</span></li>
+        <li>手写 GCN 层（批量矩阵乘法 bmm）<span data-cell="18">第 18 格</span></li>
+        <li>读取 MUTAG、转成 (X, A, label) 数据集 <span data-cell="20">第 20 格</span></li>
+        <li>GNN 模型与训练循环 <span data-cell="21">第 21 格</span> <span data-cell="22">第 22 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>第 10 格的 <code>graph_lapl_norm</code> 写的是 <code>torch.ones(size) - D·A·D</code>。归一化拉普拉斯的定义是 I − D<sup>−½</sup>AD<sup>−½</sup>，这里用全 1 向量代替单位矩阵 I 会得到什么？怎么改？</li>
+      <li>第 4 格的 <code>create_adj</code> 对每个 (i, j) 独立随机取 0/1，得到的 A 对称吗？对一张“无向图”来说这说明什么？</li>
+      <li>GCN 为什么要先加自环 A + I？在实验 A 里关掉自环、只看第 1 层，中心节点自己的信息去哪了？</li>
+      <li>层数越多，每个节点看到的邻居越远。在实验 A 里把层数调到 5，所有节点的值会怎样？这种现象叫“过平滑”，它为什么会伤害分类？</li>
+      <li>作者直接用前 150 张图训练、后 38 张验证，没有打乱。如果数据文件按标签排序，会出现什么问题？小数据集上用 K 折交叉验证是否更合适？</li>
+    </ol>
+  </div>
+</section>
+
+
+<footer class="foot">
+  原 notebook 作者 Rashmi Margani（Kaggle: validmodel），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：MUTAG（Debnath et al., 1991；TU Dortmund 图核基准数据集收录）。
+</footer>
+</main>
+
+<script src="nb/gcn-mutag-graph-classification.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 小型图工具 ---------- */
+  const zeros = (n, m) => Array.from({ length: n }, () => new Array(m).fill(0));
+  function adjOf(n, edges) { const A = zeros(n, n); edges.forEach(([i, j]) => { A[i][j] = 1; A[j][i] = 1; }); return A; }
+  function normAdj(A, mode, selfLoop) {
+    const n = A.length, B = A.map((r) => r.slice());
+    if (selfLoop) for (let i = 0; i < n; i++) B[i][i] += 1;
+    const d = B.map((r) => r.reduce((a, b) => a + b, 0));
+    return B.map((r, i) => r.map((v, j) => (v === 0 ? 0 : mode === "sym" ? v / Math.sqrt(d[i] * d[j]) : mode === "row" ? v / d[i] : v)));
+  }
+  const matvec = (M, x) => M.map((r) => r.reduce((s, v, j) => s + v * x[j], 0));
+  const matmul = (A, B) => A.map((r) => B[0].map((_, j) => r.reduce((s, v, k) => s + v * B[k][j], 0)));
+  function drawGraph(svg, pos, edges, opt) {
+    opt = opt || {};
+    const E = edges.map(([i, j]) => K.svg(svg, "line", { x1: pos[i][0], y1: pos[i][1], x2: pos[j][0], y2: pos[j][1], stroke: "var(--ink-3)", "stroke-width": 1.6, opacity: 0.7 }));
+    const N = pos.map((p, i) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: opt.r || 16, fill: opt.fill ? opt.fill(i) : "var(--panel-2)", stroke: opt.stroke ? opt.stroke(i) : "var(--ink-3)", "stroke-width": 2 }));
+    const T = opt.label ? pos.map((p, i) => K.svg(svg, "text", { x: p[0], y: p[1] + 5, "text-anchor": "middle", "font-size": opt.fs || 12, "font-weight": 700 }, opt.label(i))) : [];
+    return { E, N, T };
+  }
+  function ring(n, cx, cy, R, off) { return Array.from({ length: n }, (_, i) => [cx + R * Math.cos(off + (2 * Math.PI * i) / n), cy + R * Math.sin(off + (2 * Math.PI * i) / n)]); }
+  function matrixView(svg, M, x0, y0, cs, fmt, colorFn) {
+    const cells = [];
+    M.forEach((r, i) => r.forEach((v, j) => {
+      const rect = K.svg(svg, "rect", { x: x0 + j * cs, y: y0 + i * cs, width: cs - 2, height: cs - 2, rx: 3, fill: colorFn ? colorFn(v, i, j) : v ? "color-mix(in srgb, var(--c1) 35%, var(--panel))" : "var(--panel-2)" });
+      const t = K.svg(svg, "text", { x: x0 + j * cs + cs / 2 - 1, y: y0 + i * cs + cs / 2 + 4, "text-anchor": "middle", "font-size": Math.min(13, cs * 0.4) }, fmt ? fmt(v) : v);
+      cells.push({ rect, t, i, j });
+    }));
+    return cells;
+  }
+
+  /* 示意的 5 节点图 */
+  const G5 = { n: 5, edges: [[0, 1], [0, 2], [1, 2], [2, 3], [3, 4]], pos: [[90, 90], [220, 60], [170, 190], [90, 290], [240, 290]] };
+
+  const steps = [
+    {
+      at: 0, title: "开场：七步从矩阵走到 GCN", kicker: "第 0 格 · 目录",
+      html: `<p>作者把内容分成 7 节：图数据的基本数学、图拉普拉斯、归一化、GNN 的任务类型、图卷积层的数学、通用图卷积、在小数据集上实现一跳 GCN。前面几节用随机小图演示矩阵运算，最后一节才在真实的分子数据 MUTAG 上训练。</p>`,
+      cells: [0],
+      draw(svg, ctx) {
+        const parts = ["图的数学", "拉普拉斯", "归一化", "任务类型", "图卷积数学", "切比雪夫", "GCN + MUTAG"];
+        const els = parts.map((p, i) => { const g = K.node(svg, 20 + (i % 4) * 172, 60 + Math.floor(i / 4) * 120, 156, 70, (i + 1) + ". " + p, { bold: true, stroke: K.colors[i % 6], fill: `color-mix(in srgb, ${K.colors[i % 6]} 12%, var(--panel))` }); g.style.opacity = 0; return g; });
+        K.svg(svg, "text", { x: 20, y: 40, "font-size": 13, class: "muted" }, "第 0 格的目录：前 6 节打基础，第 7 节上真实数据");
+        (async () => { for (const e of els) if (!(await ctx.tween(220, (t) => (e.style.opacity = t)))) return; })();
+      },
+    },
+    {
+      at: 1, title: "图 = 节点 + 邻接矩阵", kicker: "第 1–4 格 · 图的表示",
+      html: `<p>任何“东西 + 关系”都能画成图：词、像素、原子都可以是<b>节点</b>。连接关系用 N×N 的<b>邻接矩阵 A</b> 记录：节点 i 和 j 相连，A[i, j] = 1，否则为 0。每个节点还有 F 维特征，拼成 N×F 的矩阵 X（作者称为图“信号”）。</p><p>作者先写了 <code>create_adj</code> 随机生成一个邻接矩阵，并把对角线置 0（不连自己）。动画：每画一条边，矩阵里对称的两个格子变成 1。</p>`,
+      cells: [2, 4], highlight: ["a[a>0.5] = 1", "a[i,j] = 0"],
+      draw(svg, ctx) {
+        const A = zeros(5, 5);
+        const g = drawGraph(svg, G5.pos, G5.edges, { label: (i) => i });
+        g.E.forEach((e) => (e.style.opacity = 0));
+        const cells = matrixView(svg, A, 400, 60, 50, (v) => v);
+        K.svg(svg, "text", { x: 400, y: 44, "font-size": 13, class: "muted" }, "邻接矩阵 A（行 i，列 j）");
+        for (let k = 0; k < 5; k++) { K.svg(svg, "text", { x: 425 + k * 50, y: 330, "text-anchor": "middle", "font-size": 12, class: "muted" }, k); K.svg(svg, "text", { x: 388, y: 90 + k * 50, "text-anchor": "end", "font-size": 12, class: "muted" }, k); }
+        (async () => {
+          for (let e = 0; e < G5.edges.length; e++) {
+            const [i, j] = G5.edges[e];
+            if (!(await ctx.tween(350, (t) => (g.E[e].style.opacity = t)))) return;
+            cells.filter((c) => (c.i === i && c.j === j) || (c.i === j && c.j === i)).forEach((c) => { c.t.textContent = 1; c.rect.style.fill = "color-mix(in srgb, var(--c1) 40%, var(--panel))"; });
+            if (!(await ctx.wait(250))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 5, title: "度矩阵与图拉普拉斯 L = D − A", kicker: "第 5–7 格 · 图算子",
+      html: `<p><b>度矩阵 D</b> 是对角矩阵，对角线是每个节点连了几条边（A 的行和）。<b>拉普拉斯矩阵</b> L = D − A：对角线是度，相连的位置是 −1，不相连是 0。</p><p>L 是图上最重要的算子之一：L·x 在每个节点上算“自己 × 度 − 邻居之和”，衡量一个节点和邻居的差别，图卷积就是从它发展来的。</p>`,
+      cells: [7], highlight: ["torch.diag(a.sum(dim=-1))", "degree_matrix(a)-a"],
+      draw(svg, ctx) {
+        const A = adjOf(5, G5.edges), d = A.map((r) => r.reduce((a, b) => a + b, 0));
+        const D = A.map((r, i) => r.map((_, j) => (i === j ? d[i] : 0))), L = A.map((r, i) => r.map((v, j) => (i === j ? d[i] : -v)));
+        const cs = 36, col = (v) => (v > 0 ? "color-mix(in srgb, var(--c3) 35%, var(--panel))" : v < 0 ? "color-mix(in srgb, var(--c6) 30%, var(--panel))" : "var(--panel-2)");
+        const tit = (x, s) => K.svg(svg, "text", { x: x + 90, y: 60, "text-anchor": "middle", "font-size": 15, "font-weight": 700 }, s);
+        tit(20, "D（度）"); tit(260, "A（邻接）"); tit(500, "L = D − A");
+        K.svg(svg, "text", { x: 230, y: 170, "font-size": 22, "text-anchor": "middle" }, "−");
+        K.svg(svg, "text", { x: 470, y: 170, "font-size": 22, "text-anchor": "middle" }, "=");
+        matrixView(svg, D, 20, 76, cs, (v) => v, col);
+        matrixView(svg, A, 260, 76, cs, (v) => v, col);
+        const Lc = matrixView(svg, L, 500, 76, cs, (v) => v, col);
+        Lc.forEach((c) => { c.rect.style.opacity = 0; c.t.style.opacity = 0; });
+        K.svg(svg, "text", { x: 20, y: 300, "font-size": 13, class: "muted" }, `节点度：${d.join("、")}（对应左边小图的 0–4 号节点）`);
+        ctx.wait(500).then((ok) => ok && ctx.tween(1400, (t) => Lc.forEach((c, k) => { const o = K.clamp(t * 25 - k, 0, 1); c.rect.style.opacity = o; c.t.style.opacity = o; })));
+      },
+    },
+    {
+      at: 8, title: "同一张图，不同画法", kicker: "第 8 格 · 可视化",
+      html: `<p>作者用 networkx 把著名的 <b>Petersen 图</b>（10 个节点、15 条边）按随机、圆形、谱布局、壳层四种方式画出来。</p><p>重点：图只由“谁连谁”决定，节点画在哪里不影响图本身。所以 GNN 必须对节点的<b>编号和摆放顺序不敏感</b>（置换不变性），这也是图数据不能像图片那样直接上 CNN 的原因。动画在不同布局之间变形，连边始终不变。</p>`,
+      cells: [8], highlight: ["petersen_graph", "draw_shell", "draw_circular"],
+      draw(svg, ctx) {
+        const edges = [[0, 1], [1, 2], [2, 3], [3, 4], [4, 0], [0, 5], [1, 6], [2, 7], [3, 8], [4, 9], [5, 7], [7, 9], [9, 6], [6, 8], [8, 5]];
+        const outer = ring(5, 360, 175, 140, -Math.PI / 2), inner = ring(5, 360, 175, 65, -Math.PI / 2);
+        const shell = outer.concat(inner);
+        const circ = ring(10, 360, 175, 140, -Math.PI / 2);
+        const r = K.rng(5), rnd = Array.from({ length: 10 }, () => [160 + r() * 400, 40 + r() * 270]);
+        const layouts = [["壳层布局 draw_shell", shell], ["圆形布局 draw_circular", circ], ["随机布局 draw_random", rnd], ["壳层布局 draw_shell", shell]];
+        const g = drawGraph(svg, shell, edges, { label: (i) => i, r: 15 });
+        const lab = K.svg(svg, "text", { x: 20, y: 30, "font-size": 15, "font-weight": 700 }, layouts[0][0]);
+        K.svg(svg, "text", { x: 20, y: 330, "font-size": 12, class: "muted" }, "10 个节点、15 条边，每个节点度为 3；变的只是坐标");
+        const set = (P) => { g.N.forEach((c, i) => { c.setAttribute("cx", P[i][0]); c.setAttribute("cy", P[i][1]); g.T[i].setAttribute("x", P[i][0]); g.T[i].setAttribute("y", P[i][1] + 5); }); g.E.forEach((e, k) => { const [a, b] = edges[k]; e.setAttribute("x1", P[a][0]); e.setAttribute("y1", P[a][1]); e.setAttribute("x2", P[b][0]); e.setAttribute("y2", P[b][1]); }); };
+        (async () => {
+          for (let k = 1; k < layouts.length; k++) {
+            if (!(await ctx.wait(700))) return;
+            const A = layouts[k - 1][1], B = layouts[k][1];
+            lab.textContent = layouts[k][0];
+            if (!(await ctx.tween(1100, (t) => set(A.map((p, i) => [K.lerp(p[0], B[i][0], t), K.lerp(p[1], B[i][1], t)]))))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 9, title: "归一化：别让“大节点”嗓门太大", kicker: "第 9–10 格 · 归一化",
+      html: `<p>直接用 A 求和有个问题：邻居多的节点加起来的数值会很大，邻居少的很小，多层之后数值会爆炸或消失。作者用<b>对称归一化</b> D<sup>−½</sup> A D<sup>−½</sup>：边 (i, j) 的权重从 1 变成 1 / √(d<sub>i</sub>·d<sub>j</sub>)。</p><p>直观理解：一个“人脉很广”的节点传过来的信息要打折，因为它同时在给很多人传。动画中边的粗细和数字就是归一化后的权重。</p>`,
+      cells: [10], highlight: ["torch.pow(a.sum(dim=-1),-0.5)", "D_norm @ a @ D_norm"],
+      draw(svg, ctx) {
+        const pos = [[200, 170], [80, 70], [80, 170], [80, 270], [330, 170], [450, 100], [450, 240]];
+        const edges = [[0, 1], [0, 2], [0, 3], [0, 4], [4, 5], [4, 6], [5, 6]];
+        const A = adjOf(7, edges), d = A.map((r) => r.reduce((a, b) => a + b, 0));
+        const g = drawGraph(svg, pos, edges, { label: (i) => "d=" + d[i], r: 22, fs: 11 });
+        const labs = edges.map(([i, j]) => K.svg(svg, "text", { x: (pos[i][0] + pos[j][0]) / 2 + 4, y: (pos[i][1] + pos[j][1]) / 2 - 6, "font-size": 12, fill: "var(--accent)", "font-weight": 700 }, "1"));
+        K.svg(svg, "text", { x: 520, y: 60, "font-size": 14, "font-weight": 700 }, "边权重");
+        const t1 = K.svg(svg, "text", { x: 520, y: 90, "font-size": 13 }, "原始：全部为 1");
+        const t2 = K.svg(svg, "text", { x: 520, y: 116, "font-size": 13, fill: "var(--accent)" }, "");
+        K.svg(svg, "text", { x: 20, y: 330, "font-size": 12, class: "muted" }, "示意小图：节点里写的是度 d");
+        ctx.wait(800).then((ok) => ok && ctx.tween(1200, (t) => edges.forEach(([i, j], k) => {
+          const w = 1 / Math.sqrt(d[i] * d[j]);
+          g.E[k].style.strokeWidth = K.lerp(1.6, 1 + w * 8, t);
+          labs[k].textContent = K.lerp(1, w, t).toFixed(2);
+        }))).then((ok) => { if (ok) { t1.textContent = "归一化：1 / √(dᵢ·dⱼ)"; t2.textContent = "两个大度节点之间的边最弱"; } });
+      },
+    },
+    {
+      at: 11, title: "图上的两类任务", kicker: "第 11–12 格 · 任务类型",
+      html: `<p>作者区分了两种最常见的目标：</p><ul class="tight"><li><b>图分类</b>：有很多张小图，每张图一个标签（本案例：每个分子是否致突变），是监督学习。</li><li><b>节点分类</b>：一张大图（常超过 1000 个节点），给每个节点打标签，通常只有少数节点有标签，是半监督学习（实验 B 演示的就是这种）。</li></ul>`,
+      cells: [12], highlight: [],
+      draw(svg, ctx) {
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 14, "font-weight": 700 }, "图分类：一张图 → 一个标签");
+        const mols = [[[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 0], [2, 6]], [[0, 1], [1, 2], [2, 3], [3, 0], [1, 4]], [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 0], [0, 6], [6, 7]]];
+        const labs = ["致突变 ✓", "不致突变", "致突变 ✓"];
+        const groups = mols.map((E, m) => {
+          const n = Math.max(...E.flat()) + 1, P = ring(n, 0, 0, 34, 0).map((p, i) => [70 + m * 110 + p[0] * (i > 5 ? 1.7 : 1), 120 + p[1] * (i > 5 ? 1.7 : 1)]);
+          const g = K.svg(svg, "g");
+          drawGraph(g, P, E, { r: 7 });
+          K.svg(g, "text", { x: 70 + m * 110, y: 200, "text-anchor": "middle", "font-size": 12, fill: m === 1 ? "var(--ink-3)" : "var(--bad)", "font-weight": 700 }, labs[m]);
+          g.style.opacity = 0; return g;
+        });
+        K.svg(svg, "line", { x1: 360, x2: 360, y1: 20, y2: 320, stroke: "var(--line)" });
+        K.svg(svg, "text", { x: 380, y: 30, "font-size": 14, "font-weight": 700 }, "节点分类：一张大图 → 每个节点一个标签");
+        const r = K.rng(3), P = Array.from({ length: 22 }, (_, i) => [400 + (i < 11 ? 0 : 150) + r() * 120, 60 + r() * 240]);
+        const E = []; for (let i = 0; i < 22; i++) for (let j = i + 1; j < 22; j++) { const same = (i < 11) === (j < 11); if (r() < (same ? 0.25 : 0.02)) E.push([i, j]); }
+        const g2 = drawGraph(svg, P, E, { r: 8, fill: () => "var(--panel-2)" });
+        ctx.tween(900, (t) => groups.forEach((g, i) => (g.style.opacity = K.clamp(t * 3 - i, 0, 1)))).then((ok) => ok && ctx.tween(900, (t) => g2.N.forEach((c, i) => { if (t > i / 22) c.style.fill = i < 11 ? "var(--c1)" : "var(--c2)"; })));
+      },
+    },
+    {
+      at: 13, title: "图卷积 = 把邻居的信息加权汇总", kicker: "第 13–14 格 · 消息传递",
+      html: `<p>作者的关键一句：<b>“图算子乘以图信号，就是对每个节点的邻居做加权求和，而且一次矩阵乘法就能完成。”</b></p><p>动画：每个邻居把自己的数值（颜色）沿边“发”给中心节点，中心节点把收到的消息按归一化权重加起来，再乘上可学习的权重矩阵 W。这就是一层图卷积在一个节点上做的事，所有节点同时进行。</p>`,
+      cells: [14], highlight: [],
+      draw(svg, ctx) {
+        const c = [300, 170], nb = ring(5, 300, 170, 120, -Math.PI / 2), vals = [0.9, 0.2, 0.7, 0.4, 0.8];
+        const pos = [c].concat(nb), edges = nb.map((_, i) => [0, i + 1]);
+        const g = drawGraph(svg, pos, edges, { r: 22, fill: (i) => (i ? K.heat(vals[i - 1]) : "var(--panel-2)"), label: (i) => (i ? vals[i - 1].toFixed(1) : "?") });
+        const msgs = nb.map((p, i) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 7, fill: K.heat(vals[i]), stroke: "var(--ink)", opacity: 0 }));
+        const w = 1 / Math.sqrt(6 * 2); /* 中心度 5+自环，邻居度 1+自环 */
+        const agg = vals.reduce((a, b) => a + b * w, 0);
+        const f = K.svg(svg, "text", { x: 470, y: 120, "font-size": 14, "font-family": "var(--mono)" }, "");
+        const f2 = K.svg(svg, "text", { x: 470, y: 150, "font-size": 14, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 20, y: 330, "font-size": 12, class: "muted" }, "示意：中心节点自身值为 0，邻居各发一条消息；真实 GCN 中每个节点同时这样做");
+        (async () => {
+          if (!(await ctx.wait(400))) return;
+          msgs.forEach((m) => (m.style.opacity = 1));
+          if (!(await ctx.tween(1200, (t) => msgs.forEach((m, i) => { m.setAttribute("cx", K.lerp(nb[i][0], c[0], t)); m.setAttribute("cy", K.lerp(nb[i][1], c[1], t)); })))) return;
+          msgs.forEach((m) => (m.style.opacity = 0));
+          f.textContent = `Σ 权重×邻居 = ${agg.toFixed(2)}`;
+          f2.textContent = "再 × W，过激活函数";
+          g.N[0].style.fill = K.heat(agg / 1.5); g.T[0].textContent = agg.toFixed(2);
+        })();
+      },
+    },
+    {
+      at: 15, title: "切比雪夫图卷积：k 阶 = 看 k 跳远", kicker: "第 15–16 格 · 谱方法",
+      html: `<p>更通用的图卷积用拉普拉斯 L 的多项式：T<sub>0</sub> = X，T<sub>1</sub> = L̃X，T<sub>k</sub> = 2L̃T<sub>k−1</sub> − T<sub>k−2</sub>（<b>切比雪夫递推</b>，L̃ 是缩放到 [−1, 1] 的拉普拉斯）。每乘一次 L̃，信息就多传一跳。</p><p>作者取 <code>power_order = 4</code>，把 4 个阶次的结果拼接后接一个线性层：节点 3 个特征 × 4 阶 = 12 维 → 50 维输出。动画：以红点为中心，感受野一跳一跳扩大。</p>`,
+      cells: [16], highlight: ["T2 = 2 * torch.matmul(L_rescaled, T1) - T0", "power_order = 4"],
+      draw(svg, ctx) {
+        const r = K.rng(12), n = 26, P = [], E = [];
+        for (let i = 0; i < n; i++) { const a = r() * Math.PI * 2, rad = Math.sqrt(r()) * 150; P.push([330 + rad * Math.cos(a) * 1.6, 175 + rad * Math.sin(a)]); }
+        P[0] = [330, 175];
+        for (let i = 0; i < n; i++) { const d = P.map((p, j) => [Math.hypot(p[0] - P[i][0], p[1] - P[i][1]), j]).sort((a, b) => a[0] - b[0]); for (let k = 1; k <= 2; k++) { const j = d[k][1]; if (!E.some(([a, b]) => (a === i && b === j) || (a === j && b === i))) E.push([i, j]); } }
+        const A = adjOf(n, E), hop = new Array(n).fill(Infinity); hop[0] = 0;
+        for (let h = 0; h < 6; h++) for (let i = 0; i < n; i++) if (hop[i] === h) for (let j = 0; j < n; j++) if (A[i][j] && hop[j] > h + 1) hop[j] = h + 1;
+        const g = drawGraph(svg, P, E, { r: 9, fill: (i) => (i ? "var(--panel-2)" : "var(--c6)") });
+        const lab = K.svg(svg, "text", { x: 20, y: 30, "font-size": 15, "font-weight": 700 }, "T₀：只有自己");
+        const col = ["var(--c6)", "var(--c2)", "var(--c5)", "var(--c3)", "var(--c1)"];
+        (async () => {
+          for (let k = 1; k <= 4; k++) {
+            if (!(await ctx.wait(800))) return;
+            lab.textContent = `T${"₀₁₂₃₄"[k]}：${k} 跳以内的节点被纳入`;
+            g.N.forEach((c, i) => { if (hop[i] === k) c.style.fill = col[k]; });
+          }
+        })();
+      },
+    },
+    {
+      at: 17, title: "手写一层 GCN", kicker: "第 17–18 格 · 模型零件",
+      html: `<p>作者实现的 GCN 层（类似 Kipf &amp; Welling 2016 的论文）只有三步：</p><ol class="tight"><li>给邻接矩阵加自环：Ã = A + I（让节点保留自己的信息）</li><li>对称归一化：Â = D̃<sup>−½</sup> Ã D̃<sup>−½</sup></li><li>输出 H′ = Â · (X W)：先对特征做线性变换，再按图结构聚合</li></ol><p>用 <code>torch.bmm</code>（批量矩阵乘法）支持一次处理多张图。动画演示 Â 的构造和矩阵乘法 H′ = Â·XW 中的一行。</p>`,
+      cells: [18], highlight: ["a +=  device_as(torch.eye(size),a)", "torch.bmm(L, x)", "self.linear(X)"],
+      draw(svg, ctx) {
+        const A = adjOf(5, G5.edges), Ah = normAdj(A, "sym", true);
+        const cs = 44;
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 14, "font-weight": 700 }, "Â = D̃⁻½ (A + I) D̃⁻½");
+        const cells = matrixView(svg, A, 20, 46, cs, (v) => v, (v) => (v ? "color-mix(in srgb, var(--c1) 30%, var(--panel))" : "var(--panel-2)"));
+        const xw = [0.8, -0.3, 0.5, 1.0, -0.6];
+        K.svg(svg, "text", { x: 280, y: 30, "font-size": 14, "font-weight": 700 }, "XW");
+        const xc = matrixView(svg, xw.map((v) => [v]), 280, 46, cs, (v) => v.toFixed(1), (v) => K.heat(v, true));
+        K.svg(svg, "text", { x: 345, y: 160, "font-size": 22 }, "→");
+        K.svg(svg, "text", { x: 390, y: 30, "font-size": 14, "font-weight": 700 }, "H′ = Â · XW");
+        const H = matvec(Ah, xw);
+        const hc = matrixView(svg, H.map((v) => [v]), 390, 46, cs, () => "", (v) => "var(--panel-2)");
+        const f = K.svg(svg, "text", { x: 460, y: 120, "font-size": 13, "font-family": "var(--mono)" }, "");
+        const f2 = K.svg(svg, "text", { x: 460, y: 145, "font-size": 13, "font-family": "var(--mono)" }, "");
+        K.svg(svg, "text", { x: 20, y: 300, "font-size": 12, class: "muted" }, "示意：5 节点小图，特征已线性变换成 1 维");
+        (async () => {
+          if (!(await ctx.wait(600))) return;
+          cells.forEach((c) => { if (c.i === c.j) { c.t.textContent = 1; c.rect.style.fill = "color-mix(in srgb, var(--c3) 35%, var(--panel))"; } });
+          if (!(await ctx.wait(800))) return;
+          await ctx.tween(800, (t) => cells.forEach((c) => { const v = Ah[c.i][c.j]; if (v) c.t.textContent = K.lerp(1, v, t).toFixed(2); }));
+          for (let i = 0; i < 5; i++) {
+            if (!ctx.alive()) return;
+            cells.forEach((c) => (c.rect.style.stroke = c.i === i ? "var(--warn)" : "none"));
+            f.textContent = `第 ${i} 行：Σ Â[${i},j]·XW[j]`;
+            f2.textContent = `= ${H[i].toFixed(2)}`;
+            hc[i].t.textContent = H[i].toFixed(2); hc[i].rect.style.fill = K.heat(H[i], true);
+            if (!(await ctx.wait(650))) return;
+          }
+        })();
+      },
+    },
+    {
+      at: 19, title: "MUTAG：每个分子是一张小图", kicker: "第 19–20 格 · 数据准备",
+      html: `<p>作者用 <code>wget</code> 下载 TU Dortmund 的 MUTAG 数据，<code>load_data</code> 读 4 个文本文件：哪个原子属于哪个分子、边列表、原子类型、分子标签，拼成 networkx 图。</p><p>原子类型做成 7 维 One-Hot 作为节点特征 X，邻接矩阵 A 用 <code>to_numpy_matrix</code> 得到；标签 −1 改成 0。前 <b>150</b> 张图训练，其余做验证，批大小 1（每张图节点数不同，不方便拼批）。</p>`,
+      cells: [20], highlight: ["max_node_label=7", "split_id=150", "if label == -1"],
+      draw(svg, ctx) {
+        const types = [["C", "var(--ink-3)"], ["N", "var(--c1)"], ["O", "var(--c6)"]];
+        const P = ring(6, 200, 175, 60, -Math.PI / 2).concat(ring(6, 304, 175, 60, Math.PI / 2 - Math.PI / 3)).slice(0, 10);
+        const pos = ring(6, 180, 175, 60, Math.PI / 6).concat([[0, 0], [0, 0], [0, 0], [0, 0]]);
+        const r2 = ring(6, 284, 175, 60, Math.PI / 6);
+        pos.splice(6, 4, r2[1], r2[2], r2[3], r2[4]);
+        pos.push([340, 70], [400, 50], [400, 100]);
+        const t = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 2];
+        const edges = [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 0], [0, 6], [6, 7], [7, 8], [8, 9], [9, 5], [6, 10], [10, 11], [10, 12]];
+        const g = drawGraph(svg, pos, edges, { r: 15, fill: (i) => `color-mix(in srgb, ${types[t[i]][1]} 35%, var(--panel))`, stroke: (i) => types[t[i]][1], label: (i) => types[t[i]][0] });
+        g.N.forEach((c) => (c.style.opacity = 0)); g.T.forEach((c) => (c.style.opacity = 0)); g.E.forEach((c) => (c.style.opacity = 0));
+        K.svg(svg, "text", { x: 20, y: 30, "font-size": 13, class: "muted" }, "示意：带硝基（NO₂）的芳香环分子");
+        const X = t.map((k) => Array.from({ length: 7 }, (_, j) => (j === k ? 1 : 0)));
+        K.svg(svg, "text", { x: 470, y: 30, "font-size": 13, "font-weight": 700 }, "节点特征 X：13 × 7 One-Hot");
+        const xc = matrixView(svg, X, 470, 40, 20, (v) => (v ? 1 : ""), (v) => (v ? "color-mix(in srgb, var(--accent) 50%, var(--panel))" : "var(--panel-2)"));
+        xc.forEach((c) => (c.rect.style.opacity = 0));
+        K.svg(svg, "text", { x: 470, y: 320, "font-size": 12, class: "muted" }, "列 = 7 种原子类型");
+        ctx.tween(900, (k) => { g.N.forEach((c, i) => (c.style.opacity = K.clamp(k * 13 - i, 0, 1))); g.T.forEach((c, i) => (c.style.opacity = K.clamp(k * 13 - i, 0, 1))); })
+          .then((ok) => ok && ctx.tween(600, (k) => g.E.forEach((e) => (e.style.opacity = k))))
+          .then((ok) => ok && ctx.tween(900, (k) => xc.forEach((c) => (c.rect.style.opacity = K.clamp(k * 13 - c.i, 0, 1)))));
+      },
+    },
+    {
+      at: 21, title: "3 层 GCN + 均值池化 + 分类头", kicker: "第 21 格 · 模型",
+      html: `<p>模型 <code>GNN</code>：三层 GCN（7 → 128 → 128 → 128，训练时 <code>hidden_dim=128</code>），前两层后接 ReLU，第三层后接 Dropout(0.5)。</p><p>图分类的关键一步是<b>读出（readout）</b>：<code>x.mean(dim=1)</code> 把一张图所有节点的向量取平均，得到一个固定长度的图向量，不管分子有多少个原子；最后一个全连接层输出 2 类。动画：三层传播后节点颜色趋于融合，再汇成一个图向量。</p>`,
+      cells: [21], highlight: ["x.mean(dim=1)", "self.conv1 = GCN(in_features, hidden_dim)", "self.fc"],
+      draw(svg, ctx) {
+        const pos = ring(6, 170, 175, 80, Math.PI / 6).concat([[60, 70], [40, 300]]);
+        const edges = [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 0], [4, 6], [2, 7]];
+        const A = adjOf(8, edges), Ah = normAdj(A, "sym", true);
+        let x = [1, 0, 0, 0.2, 0, 0.9, 0, 0.5];
+        const g = drawGraph(svg, pos, edges, { r: 18, fill: (i) => K.heat(x[i]) });
+        const lab = K.svg(svg, "text", { x: 20, y: 30, "font-size": 14, "font-weight": 700 }, "输入特征（示意 1 维）");
+        const pool = K.svg(svg, "rect", { x: 420, y: 140, width: 60, height: 60, rx: 8, fill: "var(--panel-2)", stroke: "var(--accent)", "stroke-width": 2 });
+        K.svg(svg, "text", { x: 450, y: 225, "text-anchor": "middle", "font-size": 12 }, "均值池化");
+        const fc = K.node(svg, 540, 130, 140, 80, "全连接\n→ 2 类概率", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        fc.style.opacity = 0;
+        const arrows = [K.arrow(svg, 300, 170, 410, 170), K.arrow(svg, 482, 170, 536, 170)];
+        arrows.forEach((a) => (a.style.opacity = 0));
+        (async () => {
+          for (let l = 1; l <= 3; l++) {
+            if (!(await ctx.wait(700))) return;
+            const nx = matvec(Ah, x); const mx = Math.max(...nx);
+            const from = x.slice(); x = nx.map((v) => v / mx);
+            lab.textContent = `第 ${l} 层 GCN 之后`;
+            if (!(await ctx.tween(500, (t) => g.N.forEach((c, i) => (c.style.fill = K.heat(K.lerp(from[i], x[i], t))))))) return;
+          }
+          if (!(await ctx.tween(500, (t) => (arrows[0].style.opacity = t)))) return;
+          const m = x.reduce((a, b) => a + b, 0) / x.length;
+          pool.style.fill = K.heat(m);
+          if (!(await ctx.tween(500, (t) => { arrows[1].style.opacity = t; fc.style.opacity = t; }))) return;
+        })();
+      },
+    },
+    {
+      at: 22, title: "训练 240 轮，记下最好的验证分数", kicker: "第 22 格 · 训练",
+      html: `<p>损失函数是交叉熵，优化器是普通 <b>SGD</b>（学习率 0.01）。每一轮：逐张图前向、算损失、反向传播、更新参数；然后分别在训练集和验证集上算准确率，记录最好的验证准确率和对应轮数，每 10 轮打印一次。</p><p>注意 <code>test()</code> 里写死了 <code>.cuda()</code>，没有 GPU 时会报错。动画是示意曲线；作者的实际数值在运行输出里，这里不列。</p>`,
+      cells: [22], highlight: ["torch.optim.SGD(model.parameters(), lr=0.01)", "range(1, 241)", "best_val"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 600, h: 250 }, [0, 240], [0.4, 1], { xlabel: "epoch", ylabel: "准确率（示意）" });
+        const r = K.rng(4), tr = [], va = [];
+        for (let e = 0; e <= 240; e++) { tr.push(0.65 + 0.25 * (1 - Math.exp(-e / 50)) + 0.015 * K.randn(r)); va.push(0.62 + 0.18 * (1 - Math.exp(-e / 45)) + 0.04 * K.randn(r)); }
+        const p1 = K.svg(svg, "path", { fill: "none", stroke: "var(--c1)", "stroke-width": 2 }), p2 = K.svg(svg, "path", { fill: "none", stroke: "var(--c2)", "stroke-width": 2 });
+        const best = K.svg(svg, "circle", { r: 6, fill: "none", stroke: "var(--good)", "stroke-width": 3 });
+        K.svg(svg, "text", { x: 80, y: 22, "font-size": 12, fill: "var(--c1)" }, "— 训练");
+        K.svg(svg, "text", { x: 140, y: 22, "font-size": 12, fill: "var(--c2)" }, "— 验证");
+        K.svg(svg, "text", { x: 200, y: 22, "font-size": 12, fill: "var(--good)" }, "○ 迄今最好的验证分数（best_val）");
+        ctx.tween(2600, (t, raw) => {
+          const m = Math.floor(raw * 240); let d1 = "", d2 = "", bi = 0;
+          for (let e = 0; e <= m; e++) { d1 += (d1 ? "L" : "M") + ax.sx(e) + "," + ax.sy(tr[e]); d2 += (d2 ? "L" : "M") + ax.sx(e) + "," + ax.sy(va[e]); if (va[e] > va[bi]) bi = e; }
+          p1.setAttribute("d", d1); p2.setAttribute("d", d2); best.setAttribute("cx", ax.sx(bi)); best.setAttribute("cy", ax.sy(va[bi]));
+        });
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：GCN 传播 ---------- */
+  const GRAPHS = {
+    path: { name: "链", n: 8, edges: [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [6, 7]], pos: Array.from({ length: 8 }, (_, i) => [50 + i * 74, 170 + (i % 2) * 40 - 20]) },
+    star: { name: "星形", n: 9, edges: Array.from({ length: 8 }, (_, i) => [0, i + 1]), pos: [[310, 170]].concat(ring(8, 310, 170, 130, 0)) },
+    comm: { name: "两个社团", n: 12, edges: [[0, 1], [0, 2], [1, 2], [2, 3], [3, 4], [4, 5], [3, 5], [0, 5], [5, 6], [6, 7], [7, 8], [8, 9], [6, 9], [9, 10], [10, 11], [11, 6], [8, 11]], pos: ring(6, 170, 170, 95, Math.PI / 6).concat(ring(6, 450, 170, 95, Math.PI / 6)).map((p, i) => (i === 5 ? [270, 170] : i === 6 ? [350, 170] : p)) },
+    mol: { name: "分子（双环）", n: 10, edges: [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 0], [3, 6], [6, 7], [7, 8], [8, 9], [9, 4]], pos: ring(6, 230, 170, 80, Math.PI / 6).map((p) => p).concat([[369, 90], [438, 130], [438, 210], [369, 250]]) },
+  };
+  GRAPHS.mol.pos[3] = [299, 130]; GRAPHS.mol.pos[4] = [299, 210];
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "g", label: "图", value: "comm", options: Object.keys(GRAPHS).map((k) => [k, GRAPHS[k].name]) },
+      { id: "L", label: "传播层数 k（乘 k 次 Â）", min: 0, max: 8, step: 1, value: 1 },
+      { id: "norm", label: "归一化方式", value: "sym", options: [["none", "不归一化：A"], ["row", "行归一化：D⁻¹A（邻居平均）"], ["sym", "对称归一化：D⁻½AD⁻½（GCN）"]] },
+      { id: "loop", label: "自环", value: "yes", options: [["yes", "加自环 A + I"], ["no", "不加"]] },
+      { id: "init", label: "初始信号", value: "one", options: [["one", "只有 0 号节点为 1"], ["two", "两端各一个：+1 和 −1"]] },
+    ],
+    note: "每个节点只有 1 维特征（颜色：橙正蓝负，越深绝对值越大），在浏览器里按 X ← Â·X 连乘 k 次（省略了 W 和激活函数，只看“聚合”这一半）。试试：不归一化时总量会怎样增长？层数很大时各节点的值是否趋于一样（过平滑）？不加自环时链上会出现奇偶来回跳的现象。",
+    render(svg, v) {
+      const G = GRAPHS[v.g], A = adjOf(G.n, G.edges), Ah = normAdj(A, v.norm, v.loop === "yes");
+      let x = new Array(G.n).fill(0); x[0] = 1; if (v.init === "two") x[G.n - 1] = -1;
+      for (let k = 0; k < v.L; k++) x = matvec(Ah, x);
+      const mx = Math.max(1e-9, ...x.map(Math.abs));
+      drawGraph(svg, G.pos, G.edges, { r: 22, fill: (i) => K.heat(x[i] / mx, true), label: (i) => (Math.abs(x[i]) < 1e-3 ? "0" : Math.abs(x[i]) >= 100 ? x[i].toExponential(0) : x[i].toFixed(Math.abs(x[i]) >= 10 ? 0 : 2)), fs: 11 });
+      const mean = x.reduce((a, b) => a + b, 0) / G.n, sd = Math.sqrt(x.reduce((a, b) => a + (b - mean) ** 2, 0) / G.n);
+      const reached = x.filter((q) => Math.abs(q) > 1e-9).length;
+      K.svg(svg, "text", { x: 20, y: 340, "font-size": 12, class: "muted" }, `颜色按本图最大绝对值 ${mx.toPrecision(3)} 归一化显示`);
+      return { readout: [
+        { k: "信号总和 ΣX", v: (x.reduce((a, b) => a + b, 0)).toPrecision(4) },
+        { k: "被“照亮”的节点", v: reached + " / " + G.n },
+        { k: "节点间标准差", v: sd.toPrecision(3), color: sd / (Math.abs(mean) + 1e-9) < 0.1 ? "var(--warn)" : "" },
+        { k: "均值池化（图向量）", v: mean.toPrecision(3) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：SGC 半监督节点分类 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "k", label: "传播跳数 k（0 = 不用图结构）", min: 0, max: 6, step: 1, value: 2 },
+      { id: "lab", label: "每类有标签的节点数", min: 1, max: 6, step: 1, value: 2 },
+      { id: "pin", label: "社团内连边概率", min: 0.05, max: 0.5, step: 0.01, value: 0.22, fmt: (v) => v.toFixed(2) },
+      { id: "pout", label: "社团间连边概率", min: 0, max: 0.2, step: 0.005, value: 0.02, fmt: (v) => v.toFixed(3) },
+      { id: "seed", label: "重新生成图", button: true },
+    ],
+    note: "随机生成 40 个节点、两个社团的图（随机块模型）。节点特征只用 One-Hot 编号（和不少 GCN 入门例子一样，没有额外信息），先算 H = Â^k X（Â 为加自环的对称归一化邻接矩阵），再只用有标签的节点训练一个逻辑回归（梯度下降 300 步，L2 正则），预测其余节点。黑圈 = 有标签的节点，填充色 = 预测类别。",
+    render(svg, v) {
+      const n = 40, r = K.rng(500 + v.seed * 17), y = Array.from({ length: n }, (_, i) => (i < n / 2 ? 0 : 1));
+      const E = [];
+      for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) if (r() < (y[i] === y[j] ? v.pin : v.pout)) E.push([i, j]);
+      const pos = y.map((c, i) => { const a = r() * Math.PI * 2, rad = Math.sqrt(r()) * 120; return [(c ? 440 : 180) + rad * Math.cos(a), 175 + rad * Math.sin(a) * 1.15]; });
+      const A = adjOf(n, E), Ah = normAdj(A, "sym", true);
+      let H = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => (i === j ? 1 : 0)));
+      for (let k = 0; k < v.k; k++) H = matmul(Ah, H);
+      const labeled = new Set(); for (let c = 0; c < 2; c++) for (let t = 0; t < v.lab; t++) labeled.add(c * n / 2 + t * 3);
+      let w = new Array(n).fill(0), b = 0;
+      const L = [...labeled];
+      for (let it = 0; it < 300; it++) {
+        const g = new Array(n).fill(0); let gb = 0;
+        L.forEach((i) => { const z = H[i].reduce((s, h, j) => s + h * w[j], b), d = K.sigmoid(z) - y[i]; H[i].forEach((h, j) => (g[j] += d * h)); gb += d; });
+        w = w.map((wj, j) => wj - 1.0 * (g[j] / L.length + 0.001 * wj)); b -= (1.0 * gb) / L.length;
+      }
+      const p = H.map((h) => K.sigmoid(h.reduce((s, q, j) => s + q * w[j], b)));
+      let correct = 0, tot = 0;
+      p.forEach((q, i) => { if (!labeled.has(i)) { tot++; if ((q > 0.5 ? 1 : 0) === y[i]) correct++; } });
+      E.forEach(([i, j]) => K.svg(svg, "line", { x1: pos[i][0], y1: pos[i][1], x2: pos[j][0], y2: pos[j][1], stroke: y[i] === y[j] ? "var(--line)" : "var(--warn)", "stroke-width": y[i] === y[j] ? 1 : 1.5 }));
+      pos.forEach((q, i) => K.svg(svg, "circle", { cx: q[0], cy: q[1], r: labeled.has(i) ? 10 : 8, fill: Math.abs(p[i] - 0.5) < 0.02 ? "var(--panel-2)" : p[i] > 0.5 ? "var(--c2)" : "var(--c1)", "fill-opacity": 0.35 + 0.65 * Math.min(1, Math.abs(p[i] - 0.5) * 4), stroke: labeled.has(i) ? "var(--ink)" : "none", "stroke-width": 3 }));
+      K.svg(svg, "text", { x: 120, y: 24, "font-size": 13, "font-weight": 700, fill: "var(--c1)" }, "真实：社团 A");
+      K.svg(svg, "text", { x: 400, y: 24, "font-size": 13, "font-weight": 700, fill: "var(--c2)" }, "真实：社团 B");
+      K.svg(svg, "text", { x: 20, y: 368, "font-size": 12, class: "muted" }, "灰线：社团内连边；橙黄色线：跨社团连边。灰色节点 = 模型无法判断（概率≈0.5）");
+      const undecided = p.filter((q, i) => !labeled.has(i) && Math.abs(q - 0.5) < 0.02).length;
+      return { readout: [
+        { k: "未标注节点准确率", v: ((correct / tot) * 100).toFixed(1) + "%", color: correct / tot > 0.85 ? "var(--good)" : correct / tot > 0.65 ? "var(--warn)" : "var(--bad)" },
+        { k: "有标签节点", v: labeled.size + " / " + n },
+        { k: "无法判断的节点", v: undecided },
+        { k: "边数（跨社团）", v: `${E.length}（${E.filter(([i, j]) => y[i] !== y[j]).length}）` },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

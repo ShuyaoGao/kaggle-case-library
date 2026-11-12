@@ -1,0 +1,704 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>纽约出租车车费</title>
+<meta name="description" content="Kaggle 案例拆解：只给上下车的经纬度和时间，怎样从地图里挖出预测车费的线索：边界框、水面掩膜、密度网格、球面距离、机场固定价、曼哈顿街道方向与线性回归基线。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">经纬度 + 时间 · 回归 · 地理空间探索</div>
+  <h1>纽约出租车车费：从地图里找出决定价钱的线索</h1>
+  <p class="en">NYC Taxi Fare - Data Exploration</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span><span class="tag dm">数据挖掘</span>
+    <span class="tag method">边界框过滤</span><span class="tag method">水面掩膜</span><span class="tag method">网格密度图</span>
+    <span class="tag method">Haversine 球面距离</span><span class="tag method">机场固定价</span><span class="tag method">行程方向</span><span class="tag method">线性回归</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Albert van Breemen</b></span>
+    <span>Kaggle 点赞 <b>1,652</b>（2026-11 抓取）</span>
+    <span>数据 <b>比赛 new-york-city-taxi-fare-prediction</b></span>
+    <span><a href="https://www.kaggle.com/code/breemen/nyc-taxi-fare-data-exploration" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">纽约出租车的一趟趟行程</div><p>每趟只有上车时间、上车和下车的经度纬度、乘客人数，以及答案“车费”。作者只读了训练集的前 200 万行来探索。<span data-cell="3">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">这一趟要付多少美元（fare_amount）</div><p>这是<b>回归</b>问题：答案是一个连续的数，不是类别。作者先算了一个参照：车费平均约 11.4 美元，标准差约 9.9 美元，模型的误差要比 9.9 小才算有用。<span data-cell="6">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">先把经纬度“画到地图上看”</div><p>用测试集范围定边界框、用陆地掩膜去掉落在水里的点、按网格数密度、算球面距离、找三个机场的固定价、分析曼哈顿街道方向，最后用线性回归做基线。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">线性基线约 5 分，作者后来的模型曾排第 1</div><p>线性回归基线在 Kaggle 上得分“大约 5”（RMSE，越小越好）<span data-cell="112">出处</span>；作者说用这份探索的发现训练的模型在 2018-08-07 排到第 1，LB 2.88396。<span data-cell="0">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据来自 Kaggle 的练习赛 <b>New York City Taxi Fare Prediction</b>。下面的文件大小来自 Kaggle 比赛文件列表（2026-11 用官方命令行查询），列名来自作者代码里实际用到的字段。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">train.csv 大小</div><div class="v">约 5.7 GB</div></div>
+        <div class="stat-tile"><div class="k">test.csv 大小</div><div class="v">约 0.98 MB</div></div>
+        <div class="stat-tile"><div class="k">作者读入的训练行数</div><div class="v">200 万</div></div>
+        <div class="stat-tile"><div class="k">平均车费 / 标准差</div><div class="v" style="font-size:20px">≈ $11.4 / $9.9</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">训练集太大，作者只读前 200 万行 <span data-cell="3">出处</span>；平均值和标准差是作者用 50 万行时写下的 <span data-cell="6">出处</span>。注意：文字说 50 万行，代码读的是 200 万行，两处对不上。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>key</code></td><td>每趟行程的编号（提交时用）</td><td>文本</td></tr>
+        <tr><td><code>pickup_datetime</code></td><td>上车的日期和时间</td><td>时间</td></tr>
+        <tr><td><code>pickup_longitude</code> / <code>pickup_latitude</code></td><td>上车点的经度、纬度</td><td>数值（度）</td></tr>
+        <tr><td><code>dropoff_longitude</code> / <code>dropoff_latitude</code></td><td>下车点的经度、纬度</td><td>数值（度）</td></tr>
+        <tr><td><code>passenger_count</code></td><td>乘客人数</td><td>整数</td></tr>
+        <tr><td><code>fare_amount</code></td><td><b>要预测的答案</b>：车费（美元），只在训练集里有</td><td>数值</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)">没有“行驶距离”“行驶时间”这样的列。所有和“远近”有关的信息，都要从四个经纬度数字里自己算出来，这正是本案例的看点。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="41">
+    <h3>动手试试 A · 去掉水里的点，再按网格数密度 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="94">
+    <h3>动手试试 B · 在斜着的街道上，方向为什么影响车费 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="105">
+    <h3>动手试试 C · 线性回归基线：加哪些特征误差会变小 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>车费有负数、坐标有离谱值（不在纽约），要清理</td><td><span data-cell="6">第 6 格</span></td></tr>
+        <tr><td>车费直方图在 40–60 美元之间有小尖峰，可能是机场固定价</td><td><span data-cell="9">第 9 格</span></td></tr>
+        <tr><td>上下车点集中在曼哈顿和三个机场（JFK、纽瓦克、拉瓜迪亚）</td><td><span data-cell="42">第 42 格</span></td></tr>
+        <tr><td>距离和车费大致成线性关系，平均约 5 美元 / 英里</td><td><span data-cell="59">第 59 格</span></td></tr>
+        <tr><td>每英里车费随年份、随一天中的小时变化（堵车影响时长）</td><td><span data-cell="72">第 72 格</span></td></tr>
+        <tr><td>去掉机场行程后，车费主要取决于行驶距离，不太取决于上车位置</td><td><span data-cell="88">第 88 格</span></td></tr>
+        <tr><td>同样直线距离，沿街道方向（约 60° 或 −120°）的平均车费最低</td><td><span data-cell="95">第 95 格</span></td></tr>
+        <tr><td>线性回归基线 Kaggle 得分约 5</td><td><span data-cell="112">第 112 格</span></td></tr>
+        <tr><td>作者用这些发现训练的模型在 2018-08-07 排名第 1（LB 2.88396）</td><td><span data-cell="0">第 0 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">图表和中间分数在运行输出里，Kaggle 下载的源码不带输出，这里只列作者文字里写明的数字。第 1 名的模型不在这份 notebook 里，作者没有公开它的做法。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>输入上下车坐标和时间，估算车费；同样的思路可以估算外卖配送费、快递时效、网约车到达时间。</li>
+        <li><b>同类问题：</b>凡是数据里只有“点的位置”的问题，如房价、门店选址、共享单车调度。</li>
+        <li><b>可迁移的套路：</b>先画到地图上看 → 用地理常识去掉不可能的点 → 从坐标派生距离、到地标的距离、方向等特征 → 先用简单模型做基线。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>边界框过滤：用测试集坐标范围 <span data-cell="19">第 19 格</span></li>
+        <li>水面掩膜：经纬度换成图片像素坐标再查表 <span data-cell="31">第 31 格</span></li>
+        <li>密度网格：<code>np.digitize</code> 分箱、按平方英里归一 <span data-cell="40">第 40 格</span></li>
+        <li>Haversine 球面距离 <span data-cell="40">第 40 格</span></li>
+        <li>到机场、到市中心的距离特征 <span data-cell="81">第 81 格</span></li>
+        <li>行程方向角 <span data-cell="92">第 92 格</span></li>
+        <li>线性回归 + 标准化 + 多次随机切分看 RMSE 稳定性 <span data-cell="105">第 105 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者用<b>测试集</b>的坐标范围来定训练数据的边界框。这算不算“偷看考卷”？为什么在这里可以接受？</li>
+      <li>直线距离（球面距离）和真实的行车距离差在哪里？为什么短途行程的“每英里车费”波动更大？</li>
+      <li>第 97 格里，测试集的“到市中心距离”用的是<b>下车点</b>，而训练集（第 77 格）用的是<b>上车点</b>。这会造成什么问题？这次为什么没造成影响？</li>
+      <li>基线模型只用了年份、小时、距离、人数四个特征。根据前面的地图分析，你会先加哪一个新特征？</li>
+      <li>出租车轨迹会暴露乘客的住址和行踪。如果你是数据发布方，公开前要做哪些处理？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Albert van Breemen，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意；地图为手绘简化轮廓，不是真实比例的地图。数据：Kaggle 比赛 New York City Taxi Fare Prediction。
+</footer>
+</main>
+
+<script src="nb/nyc-taxi-fare-geo-eda.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+
+  /* ---------- 简化的纽约轮廓（手绘示意，经度, 纬度） ---------- */
+  const LAND = {
+    nj: [[-74.32,40.48],[-74.32,40.95],[-73.92,40.95],[-73.95,40.86],[-74.0,40.79],[-74.025,40.74],[-74.04,40.70],[-74.07,40.665],[-74.14,40.645],[-74.2,40.6],[-74.26,40.52],[-74.28,40.48]],
+    si: [[-74.25,40.50],[-74.19,40.52],[-74.06,40.60],[-74.05,40.635],[-74.12,40.645],[-74.2,40.63],[-74.25,40.54]],
+    man: [[-74.018,40.700],[-74.013,40.716],[-74.010,40.752],[-73.995,40.773],[-73.968,40.812],[-73.947,40.849],[-73.928,40.874],[-73.910,40.873],[-73.934,40.835],[-73.930,40.800],[-73.943,40.776],[-73.972,40.745],[-73.971,40.727],[-73.978,40.711],[-74.000,40.704]],
+    li: [[-74.035,40.64],[-74.02,40.68],[-73.995,40.70],[-73.965,40.712],[-73.958,40.742],[-73.935,40.775],[-73.91,40.79],[-73.86,40.79],[-73.82,40.80],[-73.76,40.81],[-73.68,40.83],[-73.68,40.60],[-73.76,40.62],[-73.80,40.64],[-73.86,40.625],[-73.92,40.585],[-74.0,40.572],[-74.03,40.59]],
+    bx: [[-73.93,40.805],[-73.88,40.80],[-73.80,40.815],[-73.78,40.88],[-73.84,40.91],[-73.92,40.915],[-73.915,40.875],[-73.925,40.835]],
+  };
+  const PLACES = { JFK: [-73.7822, 40.6442], LGA: [-73.87, 40.77], EWR: [-74.175, 40.69], NYC: [-74.0064, 40.7142] };
+  function proj(box, BB) {
+    // 等距圆柱投影：经度方向乘 cos(纬度) 修正，保证横竖比例接近真实
+    const k = Math.cos(((BB[2] + BB[3]) / 2) * Math.PI / 180);
+    const wDeg = (BB[1] - BB[0]) * k, hDeg = BB[3] - BB[2];
+    const s = Math.min(box.w / wDeg, box.h / hDeg);
+    const ox = box.x + (box.w - wDeg * s) / 2, oy = box.y + (box.h - hDeg * s) / 2;
+    return { x: (lon) => ox + (lon - BB[0]) * k * s, y: (lat) => oy + (BB[3] - lat) * s, w: wDeg * s, h: hDeg * s, ox, oy };
+  }
+  function drawLand(svg, P, opt) {
+    opt = opt || {};
+    Object.values(LAND).forEach((poly) => {
+      const d = poly.map((p, i) => (i ? "L" : "M") + P.x(p[0]).toFixed(1) + "," + P.y(p[1]).toFixed(1)).join("") + "Z";
+      K.svg(svg, "path", { d, fill: opt.fill || "color-mix(in srgb, var(--c3) 12%, var(--panel))", stroke: "var(--ink-3)", "stroke-width": 0.8 });
+    });
+  }
+  function inPoly(pt, poly) {
+    let c = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const a = poly[i], b = poly[j];
+      if ((a[1] > pt[1]) !== (b[1] > pt[1]) && pt[0] < ((b[0] - a[0]) * (pt[1] - a[1])) / (b[1] - a[1]) + a[0]) c = !c;
+    }
+    return c;
+  }
+  const onLand = (p) => Object.values(LAND).some((poly) => inPoly(p, poly));
+  function hav(lat1, lon1, lat2, lon2) {
+    const p = Math.PI / 180;
+    const a = 0.5 - Math.cos((lat2 - lat1) * p) / 2 + Math.cos(lat1 * p) * Math.cos(lat2 * p) * (1 - Math.cos((lon2 - lon1) * p)) / 2;
+    return 0.6213712 * 12742 * Math.asin(Math.sqrt(a));
+  }
+  /* 模拟的上车点：曼哈顿沿街道方向密集、三个机场成团、少量散点（含落在水里的噪声） */
+  function simPickups(seed, n) {
+    const r = K.rng(seed), pts = [];
+    const ang = (29 * Math.PI) / 180; // 曼哈顿大道偏北约 29°
+    for (let i = 0; i < n; i++) {
+      const u = r();
+      let lon, lat;
+      if (u < 0.66) { const t = K.randn(r) * 0.025 + 0.03, s = K.randn(r) * 0.006; lat = 40.735 + t * Math.cos(ang) - s * Math.sin(ang) * 0.76; lon = -73.99 + (t * Math.sin(ang) + s * Math.cos(ang)) / 0.76; }
+      else if (u < 0.74) { const a = [PLACES.JFK, PLACES.LGA, PLACES.EWR][Math.floor(r() * 3)]; lon = a[0] + K.randn(r) * 0.006; lat = a[1] + K.randn(r) * 0.005; }
+      else if (u < 0.95) { lon = -73.98 + K.randn(r) * 0.06; lat = 40.70 + K.randn(r) * 0.045; }
+      else { lon = -74.3 + r() * 0.6; lat = 40.5 + r() * 0.42; }
+      pts.push([lon, lat]);
+    }
+    return pts;
+  }
+
+  const BB = [-74.3, -73.7, 40.5, 40.92];
+
+  const steps = [
+    {
+      at: 0, title: "开场：只读一部分数据", kicker: "第 0–6 格 · 读数据、看统计",
+      html: `<p>训练集有 5 GB 多，一次读进内存太吃力。作者的习惯是：先读一部分（代码里是前 200 万行）把探索代码写好，以后再用更多行重跑。<span data-cell="2">第 2 格</span></p><p>读完先看三样：前几行长什么样、每列是什么类型、每列的统计量（<code>describe()</code>）。作者马上发现：有负的车费，还有经纬度离谱到不在纽约的点。</p>`,
+      cells: [3, 5],
+      draw(svg, ctx) {
+        K.node(svg, 30, 120, 170, 100, "train.csv\n约 5.7 GB", { bold: true });
+        const bar = K.svg(svg, "rect", { x: 30, y: 240, width: 0, height: 14, rx: 4, fill: "var(--accent)" });
+        K.svg(svg, "rect", { x: 30, y: 240, width: 170, height: 14, rx: 4, fill: "none", stroke: "var(--line)" });
+        K.svg(svg, "text", { x: 30, y: 276, "font-size": 12, class: "muted" }, "只读开头的一部分（nrows）");
+        const ar = K.arrow(svg, 205, 170, 300, 170); ar.style.opacity = 0;
+        const cols = ["key", "时间", "上车经度", "上车纬度", "下车经度", "下车纬度", "人数", "车费"];
+        const cells = [];
+        cols.forEach((c, j) => {
+          const x = 310 + j * 50;
+          cells.push(K.svg(svg, "rect", { x, y: 100, width: 48, height: 26, fill: j === 7 ? "color-mix(in srgb, var(--c2) 20%, var(--panel))" : "var(--panel-2)", stroke: "var(--line)" }));
+          K.svg(svg, "text", { x: x + 24, y: 117, "text-anchor": "middle", "font-size": 10 }, c);
+          for (let i = 0; i < 5; i++) cells.push(K.svg(svg, "rect", { x, y: 128 + i * 22, width: 48, height: 20, fill: "var(--panel)", stroke: "var(--line)", opacity: 0 }));
+        });
+        const warn = K.svg(svg, "text", { x: 310, y: 268, "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "describe()：最小车费是负数？经纬度最大值不在纽约？");
+        warn.style.opacity = 0;
+        ctx.tween(1200, (t) => bar.setAttribute("width", 170 * 0.35 * t))
+          .then((ok) => ok && ctx.tween(400, (t) => (ar.style.opacity = t)))
+          .then((ok) => ok && ctx.tween(900, (t) => cells.forEach((c) => { if (c.style.opacity !== "") c.style.opacity = t; })))
+          .then((ok) => ok && ctx.tween(500, (t) => (warn.style.opacity = t)));
+      },
+    },
+    {
+      title: "清理：负车费、缺失值，再看分布", kicker: "第 7–15 格 · 清理、直方图、测试集",
+      html: `<p>负的车费不合常理，作者直接删掉。然后画 100 美元以下车费的直方图：大部分行程在十几美元以内，长长的尾巴拖向高价。</p><p>作者注意到 40–60 美元之间有几个<b>小尖峰</b>，猜测是“去机场一口价”。这个猜测后面会用地图来验证。<span data-cell="9">第 9 格</span></p><p>接着检查空值（有就整行删掉，数据量大，删几行无所谓），再读入测试集对比统计量。测试集没有车费这一列，那正是要预测的。</p>`,
+      cells: [7, 8, 12],
+      draw(svg, ctx) {
+        const r = K.rng(4), vals = [];
+        for (let i = 0; i < 1600; i++) vals.push(Math.max(2.5, Math.exp(K.randn(r) * 0.55 + 2.2)));
+        for (let i = 0; i < 70; i++) vals.push(52 + K.randn(r) * 0.4);
+        for (let i = 0; i < 25; i++) vals.push(45 + K.randn(r) * 0.4);
+        const bins = new Array(50).fill(0);
+        vals.forEach((v) => { if (v < 100) bins[Math.floor(v / 2)]++; });
+        const mx = Math.max(...bins);
+        const ax = K.axes(svg, { x: 50, y: 30, w: 630, h: 250 }, [0, 100], [0, mx], { yticks: 0, xlabel: "车费（美元，示意数据）" });
+        const rs = bins.map((b, i) => K.svg(svg, "rect", { x: ax.sx(i * 2) + 0.5, y: ax.sy(0), width: ax.sx(2) - ax.sx(0) - 1, height: 0, fill: i >= 20 && i <= 30 && b > 10 ? "var(--warn)" : "var(--c1)" }));
+        const note = K.svg(svg, "text", { x: ax.sx(48), y: 80, "font-size": 13, fill: "var(--warn)", "font-weight": 700 }, "40–60 美元的小尖峰：机场一口价？");
+        note.style.opacity = 0;
+        ctx.tween(1400, (t) => rs.forEach((e, i) => { const h = (ax.sy(0) - ax.sy(bins[i])) * K.ease(t); K.set(e, { y: ax.sy(0) - h, height: h }); }))
+          .then((ok) => ok && ctx.tween(500, (t) => (note.style.opacity = t)));
+      },
+    },
+    {
+      title: "用测试集的范围定一个边界框", kicker: "第 16–20 格 · 地理过滤",
+      html: `<p>坐标里有一些离谱的点（比如经纬度是 0，落在非洲外海）。作者的办法很实用：看<b>测试集</b>上下车点的最小、最大经纬度，围一个长方形“边界框” <code>BB = (-74.5, -72.8, 40.5, 41.8)</code>，框外的训练数据统统删掉。</p><p>理由：模型只需要对测试集会出现的范围负责。这里用到测试集的只是坐标范围，没有用到答案，所以不算泄漏。</p>`,
+      cells: [19, 20], highlight: ["BB = (-74.5, -72.8, 40.5, 41.8)", "select_within_boundingbox"],
+      draw(svg, ctx) {
+        const P = proj({ x: 20, y: 15, w: 680, h: 310 }, BB);
+        drawLand(svg, P);
+        const r = K.rng(8), pts = simPickups(21, 160);
+        for (let i = 0; i < 18; i++) pts.push([-74.5 + r() * 1.4, 40.3 + r() * 0.8]);
+        const dots = pts.map((p) => K.svg(svg, "circle", { cx: K.clamp(P.x(p[0]), 4, 716), cy: K.clamp(P.y(p[1]), 4, 336), r: 2.6, fill: "var(--c6)", opacity: 0.7 }));
+        const bx = [-74.27, -73.72, 40.53, 40.9];
+        const rect = K.svg(svg, "rect", { x: P.x(bx[0]), y: P.y(bx[3]), width: 0, height: P.y(bx[2]) - P.y(bx[3]), fill: "none", stroke: "var(--accent)", "stroke-width": 2.5, "stroke-dasharray": "6 4" });
+        K.svg(svg, "text", { x: 28, y: 330, "font-size": 12, class: "muted" }, "手绘简化轮廓 · 红点为示意数据");
+        ctx.wait(500).then((ok) => ok && ctx.tween(900, (t) => rect.setAttribute("width", (P.x(bx[1]) - P.x(bx[0])) * t)))
+          .then((ok) => ok && ctx.tween(800, (t) => dots.forEach((d, i) => { const p = pts[i]; if (p[0] < bx[0] || p[0] > bx[1] || p[1] < bx[2] || p[1] > bx[3]) d.style.opacity = 0.7 * (1 - t); })));
+      },
+    },
+    {
+      title: "把点画到地图上", kicker: "第 21–27 格 · 散点地图",
+      html: `<p>作者从 OpenStreetMap 截了一张纽约地图当底图，把上车点、下车点画成小红点叠上去，再放大到市区。点的尺寸调到极小（0.01）时，<b>街道的形状自己就显现出来了</b>，因为出租车只能在路上停。</p><p>同时也一眼看出问题：有些点落在了<b>水里</b>。</p><p class="note">原 notebook 的底图是从网上下载的图片；本页离线可用，地图是手绘的简化轮廓。</p>`,
+      cells: [21, 26, 27],
+      draw(svg, ctx) {
+        const P = proj({ x: 20, y: 10, w: 680, h: 320 }, [-74.06, -73.86, 40.68, 40.83]);
+        drawLand(svg, P);
+        const r = K.rng(3), dots = [];
+        const ang = (29 * Math.PI) / 180;
+        for (let i = 0; i < 900; i++) {
+          // 沿着网格街道撒点：大道（偏北 29°）和横街（垂直方向）
+          const a = Math.floor(r() * 12), b = r();
+          const onAve = r() < 0.5;
+          const u = onAve ? (a - 6) * 0.0025 : (b - 0.5) * 0.03, v = onAve ? (b - 0.2) * 0.12 : (Math.floor(r() * 40) - 10) * 0.0028;
+          const lat = 40.74 + v * Math.cos(ang) - u * Math.sin(ang), lon = -73.99 + (v * Math.sin(ang) + u * Math.cos(ang)) / 0.76;
+          if (!onLand([lon, lat])) continue;
+          dots.push(K.svg(svg, "circle", { cx: P.x(lon), cy: P.y(lat), r: 0, fill: "var(--c6)", opacity: 0.6 }));
+        }
+        const water = [[-74.03, 40.71], [-73.96, 40.765], [-74.02, 40.77], [-73.955, 40.72]].map((p) => K.svg(svg, "circle", { cx: P.x(p[0]), cy: P.y(p[1]), r: 0, fill: "var(--c6)" }));
+        const ring = water.map((c) => K.svg(svg, "circle", { cx: c.getAttribute("cx"), cy: c.getAttribute("cy"), r: 0, fill: "none", stroke: "var(--warn)", "stroke-width": 2 }));
+        const lab = K.svg(svg, "text", { x: 30, y: 26, "font-size": 13, "font-weight": 700, fill: "var(--warn)" }, "");
+        K.svg(svg, "text", { x: 30, y: 326, "font-size": 12, class: "muted" }, "示意：小点沿街道排开，街道网格偏北约 29°");
+        ctx.tween(1600, (t) => dots.forEach((d, i) => d.setAttribute("r", K.clamp(t * dots.length - i, 0, 1) * 1.3)))
+          .then((ok) => ok && ctx.tween(500, (t) => water.forEach((w) => w.setAttribute("r", 3 * t))))
+          .then((ok) => { if (ok) lab.textContent = "黄圈：落在河里的点，明显是坏数据"; return ok && ctx.tween(600, (t) => ring.forEach((g) => g.setAttribute("r", 4 + 8 * t))); });
+      },
+    },
+    {
+      title: "陆地掩膜：去掉落在水里的点", kicker: "第 28–38 格 · 经纬度 → 像素",
+      html: `<p>作者在 Photoshop 里把地图的蓝色水面抠出来，做成一张黑白<b>掩膜图</b>：陆地是 True，水面是 False。</p><p>怎么知道一个经纬度落在哪个像素？用第 31 格的 <code>lonlat_to_xy</code>：经度按比例换成横坐标 x；纬度换成 y 时要<b>倒过来</b>，因为图片的 y 轴是从上往下数的。然后查 <code>nyc_mask[y, x]</code>，上车点或下车点有一个在水里，这趟就删掉。</p>`,
+      cells: [29, 31, 33, 35], highlight: ["dy - dy*(latitude - BB[2])/(BB[3]-BB[2])", "nyc_mask[pickup_y, pickup_x] & nyc_mask[dropoff_y, dropoff_x]"],
+      draw(svg, ctx) {
+        const G = 22, cell = 12, ox = 30, oy = 40;
+        const P = { x: (lon) => (lon - BB[0]) / (BB[1] - BB[0]), y: (lat) => (lat - BB[2]) / (BB[3] - BB[2]) };
+        K.svg(svg, "text", { x: ox, y: 28, "font-size": 13, class: "muted" }, "掩膜图（每格一个像素，示意 22×22）");
+        const grid = [];
+        for (let i = 0; i < G; i++) for (let j = 0; j < G; j++) {
+          const lon = BB[0] + ((j + 0.5) / G) * (BB[1] - BB[0]), lat = BB[3] - ((i + 0.5) / G) * (BB[3] - BB[2]);
+          const land = onLand([lon, lat]);
+          grid.push(K.svg(svg, "rect", { x: ox + j * cell, y: oy + i * cell, width: cell - 1, height: cell - 1, fill: land ? "var(--ink-3)" : "color-mix(in srgb, var(--c1) 30%, var(--panel))", opacity: 0 }));
+        }
+        const pt = [-73.96, 40.765]; // 东河里的一个点
+        const px = Math.floor(P.x(pt[0]) * G), py = Math.floor(G - P.y(pt[1]) * G);
+        const fx = 330;
+        const t1 = K.svg(svg, "text", { x: fx, y: 70, "font-size": 14, "font-family": "var(--mono)" }, "");
+        const t2 = K.svg(svg, "text", { x: fx, y: 100, "font-size": 14, "font-family": "var(--mono)" }, "");
+        const t3 = K.svg(svg, "text", { x: fx, y: 130, "font-size": 14, "font-family": "var(--mono)" }, "");
+        const t4 = K.svg(svg, "text", { x: fx, y: 175, "font-size": 15, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: fx, y: 230, "font-size": 12, class: "muted" }, "x = 宽 × (经度 − 最小经度) / 经度跨度");
+        K.svg(svg, "text", { x: fx, y: 250, "font-size": 12, class: "muted" }, "y = 高 − 高 × (纬度 − 最小纬度) / 纬度跨度");
+        K.svg(svg, "text", { x: fx, y: 270, "font-size": 12, class: "muted" }, "（图片 y 轴向下，所以要用“高 −”倒过来）");
+        const mark = K.svg(svg, "rect", { x: ox + px * cell - 2, y: oy + py * cell - 2, width: cell + 3, height: cell + 3, fill: "none", stroke: "var(--bad)", "stroke-width": 2.5, opacity: 0 });
+        ctx.tween(900, (t) => grid.forEach((g, k) => (g.style.opacity = K.clamp(t * 2 - k / grid.length, 0, 1))))
+          .then((ok) => { if (ok) t1.textContent = `点：(${pt[0]}, ${pt[1]})`; return ok && ctx.wait(500); })
+          .then((ok) => { if (ok) t2.textContent = `→ 像素 x = ${px}, y = ${py}`; return ok && ctx.wait(500); })
+          .then((ok) => { if (ok) { t3.textContent = `mask[${py}, ${px}] = ${onLand(pt) ? "True（陆地）" : "False（水面）"}`; mark.style.opacity = 1; } return ok && ctx.wait(500); })
+          .then((ok) => { if (ok) { t4.textContent = "→ 这趟行程删掉"; K.set(t4, { fill: "var(--bad)" }); } });
+      },
+    },
+    {
+      title: "每平方英里有多少个点：密度热力图", kicker: "第 39–42 格 · 网格计数（空间聚集）",
+      html: `<p>散点图上点叠在一起，看不出到底多密。作者把地图切成 200×200 的格子，用 <code>np.digitize</code> 算出每个点落在哪个格子，数一数每格有几个点，再<b>除以格子的面积（平方英里）</b>，得到“每平方英里多少个上车点”。</p><p>颜色用 <code>log(1 + 个数)</code>，否则曼哈顿太亮，别处全黑。结论：热点集中在曼哈顿和三个机场。<span data-cell="42">第 42 格</span></p><p>格子的宽和高用第 40 格的 <code>distance</code> 函数换算成英里，这个函数就是下面会讲的 Haversine 公式。</p>`,
+      cells: [40, 41], highlight: ["np.digitize", "/ dxdy", "np.log1p"],
+      draw(svg, ctx) {
+        const P = proj({ x: 20, y: 10, w: 680, h: 320 }, BB);
+        drawLand(svg, P);
+        const pts = simPickups(5, 2500).filter(onLand);
+        const n = 26, cnt = Array.from({ length: n }, () => new Array(n).fill(0));
+        pts.forEach((p) => { const i = Math.floor(((BB[3] - p[1]) / (BB[3] - BB[2])) * n), j = Math.floor(((p[0] - BB[0]) / (BB[1] - BB[0])) * n); if (i >= 0 && i < n && j >= 0 && j < n) cnt[i][j]++; });
+        const mx = Math.log1p(Math.max(...cnt.flat()));
+        const cw = P.w / n, ch = P.h / n, rects = [];
+        for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) if (cnt[i][j]) rects.push({ v: Math.log1p(cnt[i][j]) / mx, e: K.svg(svg, "rect", { x: P.ox + j * cw, y: P.oy + i * ch, width: cw, height: ch, fill: "var(--c6)", opacity: 0 }) });
+        const dots = pts.slice(0, 600).map((p) => K.svg(svg, "circle", { cx: P.x(p[0]), cy: P.y(p[1]), r: 1.2, fill: "var(--ink)", opacity: 0.5 }));
+        Object.entries(PLACES).forEach(([k, p]) => { if (k !== "NYC") K.svg(svg, "text", { x: P.x(p[0]) + 8, y: P.y(p[1]) + 4, "font-size": 12, "font-weight": 700 }, k); });
+        K.svg(svg, "text", { x: 26, y: 326, "font-size": 12, class: "muted" }, "示意数据 · 颜色深浅 = log(1 + 每格点数)");
+        ctx.wait(600).then((ok) => ok && ctx.tween(1400, (t) => { dots.forEach((d) => (d.style.opacity = 0.5 * (1 - t))); rects.forEach((r) => (r.e.style.opacity = 0.85 * r.v * t)); }));
+      },
+    },
+    {
+      title: "按小时看曼哈顿有多忙", kicker: "第 43–50 格 · 时间 × 空间",
+      html: `<p>把“空间网格计数”再加上时间维度：作者只看曼哈顿的一个小框，切成 30×30 格，按<b>年份 × 星期几 × 小时</b>分别数上车次数，排成 24 张小图。</p><p>作者的观察：周日凌晨 0–3 点（也就是周六晚上出去玩回家）比工作日同时段忙得多。<span data-cell="49">第 49 格</span> 越忙越堵，行程越久，车费也可能越高。</p>`,
+      cells: [45, 47, 48],
+      draw(svg, ctx) {
+        // 24 小格：示意的上车密度随小时变化（工作日 vs 周日）
+        const prof = (h, sun) => sun ? [0.9, 0.85, 0.75, 0.6, 0.3, 0.15, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.65, 0.65, 0.65, 0.6, 0.6, 0.6, 0.55, 0.5, 0.45, 0.4, 0.35, 0.3][h] : [0.25, 0.15, 0.1, 0.08, 0.08, 0.12, 0.35, 0.65, 0.8, 0.75, 0.65, 0.65, 0.7, 0.7, 0.7, 0.7, 0.65, 0.75, 0.9, 0.95, 0.85, 0.75, 0.6, 0.45][h];
+        const r = K.rng(2), seeds = [];
+        for (let k = 0; k < 60; k++) seeds.push([r(), r()]);
+        const lab = K.svg(svg, "text", { x: 20, y: 22, "font-size": 14, "font-weight": 700 }, "");
+        const tiles = [];
+        for (let h = 0; h < 24; h++) {
+          const x = 20 + (h % 8) * 87, y = 34 + Math.floor(h / 8) * 100;
+          K.svg(svg, "rect", { x, y, width: 80, height: 80, fill: "var(--panel-2)", stroke: "var(--line)" });
+          K.svg(svg, "text", { x: x + 4, y: y + 94, "font-size": 11, class: "muted" }, "h=" + h);
+          const dots = seeds.map((s) => K.svg(svg, "circle", { cx: x + 8 + s[0] * 64, cy: y + 8 + s[1] * 64, r: 3, fill: "var(--c6)", opacity: 0 }));
+          tiles.push(dots);
+        }
+        const show = (sun, t) => tiles.forEach((dots, h) => { const k = Math.round(prof(h, sun) * dots.length * t); dots.forEach((d, i) => (d.style.opacity = i < k ? 0.75 : 0)); });
+        (async () => {
+          for (let round = 0; round < 2; round++) {
+            for (const sun of [false, true]) {
+              lab.textContent = sun ? "周日（示意）：凌晨 0–3 点依然很忙" : "周一（示意）：早晚高峰，凌晨很空";
+              if (!(await ctx.tween(1200, (t) => show(sun, t)))) return;
+              if (!(await ctx.wait(1300))) return;
+            }
+          }
+        })();
+      },
+    },
+    {
+      title: "Haversine：在球面上量直线距离", kicker: "第 51–57 格 · 从坐标派生距离特征",
+      html: `<p>车费最直接取决于“走了多远”，可数据里没有距离这一列。作者用 Haversine 公式从两对经纬度算出<b>球面上的直线距离</b>，单位英里，存成新列 <code>distance_miles</code>。</p><p>为什么不能直接用勾股定理算经纬度的差？因为地球是球，在纽约的纬度上，经度差 1 度只有大约 53 英里，纬度差 1 度约 69 英里，两个方向的“度”不一样长。</p><p>作者还按乘客人数分组看平均距离和车费，算出整体平均每英里车费（第 57 格）。直方图显示大部分是短途，约 13 英里处有个小峰，可能是机场行程。<span data-cell="54">第 54 格</span></p>`,
+      cells: [53, 55, 57], highlight: ["distance("],
+      draw(svg, ctx) {
+        const cx = 190, cy = 180, R = 140;
+        K.svg(svg, "circle", { cx, cy, r: R, fill: "color-mix(in srgb, var(--c1) 10%, var(--panel))", stroke: "var(--ink-3)" });
+        for (let k = -2; k <= 2; k++) { const yy = cy - k * 40; const w = Math.sqrt(R * R - (k * 40) ** 2); K.svg(svg, "ellipse", { cx, cy: yy, rx: w, ry: w * 0.18, fill: "none", stroke: "var(--line)" }); }
+        [-60, -20, 20, 60].forEach((a) => K.svg(svg, "ellipse", { cx, cy, rx: Math.abs(R * Math.sin((a * Math.PI) / 180)), ry: R, fill: "none", stroke: "var(--line)" }));
+        const A = [cx - 70, cy - 60], B = [cx + 80, cy - 20];
+        const arc = K.svg(svg, "path", { d: `M${A[0]},${A[1]} Q${(A[0] + B[0]) / 2},${A[1] - 50} ${B[0]},${B[1]}`, fill: "none", stroke: "var(--c6)", "stroke-width": 3, "stroke-dasharray": "400", "stroke-dashoffset": "400" });
+        K.svg(svg, "circle", { cx: A[0], cy: A[1], r: 5, fill: "var(--c2)" });
+        K.svg(svg, "circle", { cx: B[0], cy: B[1], r: 5, fill: "var(--c3)" });
+        K.svg(svg, "text", { x: A[0] - 12, y: A[1] - 10, "font-size": 12, "text-anchor": "end" }, "上车");
+        K.svg(svg, "text", { x: B[0] + 8, y: B[1] + 4, "font-size": 12 }, "下车");
+        // 右侧：纬度 40.7° 处 1° 经度和 1° 纬度的实际长度（实时计算）
+        const lonMile = hav(40.7, -74, 40.7, -73), latMile = hav(40.2, -74, 41.2, -74);
+        K.svg(svg, "text", { x: 400, y: 60, "font-size": 14, "font-weight": 700 }, "在纽约（纬度约 40.7°）：");
+        const b1 = K.svg(svg, "rect", { x: 400, y: 80, width: 0, height: 22, fill: "var(--c1)", rx: 3 });
+        const b2 = K.svg(svg, "rect", { x: 400, y: 130, width: 0, height: 22, fill: "var(--c2)", rx: 3 });
+        K.svg(svg, "text", { x: 400, y: 118, "font-size": 12 }, `经度差 1° ≈ ${lonMile.toFixed(1)} 英里`);
+        K.svg(svg, "text", { x: 400, y: 168, "font-size": 12 }, `纬度差 1° ≈ ${latMile.toFixed(1)} 英里`);
+        K.svg(svg, "text", { x: 400, y: 220, "font-size": 13 }, "所以要用球面公式，不能直接用“度”算勾股");
+        K.svg(svg, "text", { x: 400, y: 250, "font-size": 12, class: "muted", "font-family": "var(--mono)" }, "d = 2R·asin(√a)，R ≈ 3959 英里");
+        K.svg(svg, "text", { x: 400, y: 300, "font-size": 12, class: "muted" }, "（右侧两个数字由作者的公式在浏览器里现算）");
+        ctx.tween(1200, (t) => arc.setAttribute("stroke-dashoffset", 400 * (1 - t)))
+          .then((ok) => ok && ctx.tween(900, (t) => { b1.setAttribute("width", lonMile * 3.6 * t); b2.setAttribute("width", latMile * 3.6 * t); }));
+      },
+    },
+    {
+      title: "距离越远越贵吗", kicker: "第 58–60 格 · 散点与清理",
+      html: `<p>画“距离 vs 车费”的散点图。作者列出几点发现 <span data-cell="59">第 59 格</span>：</p><ul class="tight"><li>有距离为 0 但车费不为 0 的行程（原地上下车？），很难预测；</li><li>有超过 50 英里但很便宜的行程；</li><li>右图有几条<b>水平线</b>，又像是机场一口价；</li><li>整体大致是一条直线，平均约 5 美元 / 英里。</li></ul><p>作者还查了纽约出租车的官方计价：起步 2.5 美元，每 1/5 英里 0.5 美元，夜间和高峰另加附加费。最后删掉距离小于 0.05 英里的行程。</p>`,
+      cells: [58, 60],
+      draw(svg, ctx) {
+        const r = K.rng(12), P = [];
+        for (let i = 0; i < 380; i++) { const d = Math.exp(K.randn(r) * 0.75 + 0.5); P.push([Math.min(d, 14.8), 2.5 + 2.5 * d * (1.15 + r() * 0.3) + K.randn(r) * 1.2, 0]); }
+        for (let i = 0; i < 40; i++) P.push([10 + r() * 6, 52, 1]);
+        for (let i = 0; i < 18; i++) P.push([0, 4 + r() * 20, 2]);
+        const ax = K.axes(svg, { x: 55, y: 20, w: 620, h: 270 }, [0, 16], [0, 70], { xlabel: "直线距离（英里，示意）", ylabel: "车费 $" });
+        const dots = P.map((p) => K.svg(svg, "circle", { cx: ax.sx(p[0]), cy: ax.sy(Math.min(p[1], 69)), r: 0, fill: p[2] === 1 ? "var(--warn)" : p[2] === 2 ? "var(--bad)" : "var(--c1)", opacity: 0.6 }));
+        const line = K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0), x2: ax.sx(0), y2: ax.sy(0), stroke: "var(--ink)", "stroke-width": 2, "stroke-dasharray": "6 4" });
+        const t1 = K.svg(svg, "text", { x: ax.sx(9.5), y: ax.sy(57), "font-size": 12, fill: "var(--warn)" }, "水平一条：一口价？"); t1.style.opacity = 0;
+        const t2 = K.svg(svg, "text", { x: ax.sx(0.3), y: ax.sy(30), "font-size": 12, fill: "var(--bad)" }, "距离 0 却收费"); t2.style.opacity = 0;
+        const t3 = K.svg(svg, "text", { x: ax.sx(11), y: ax.sy(14), "font-size": 12 }, "约 5 美元 / 英里（作者估计）"); t3.style.opacity = 0;
+        ctx.tween(1200, (t) => dots.forEach((d, i) => d.setAttribute("r", K.clamp(t * P.length - i, 0, 1) * 2.6)))
+          .then((ok) => ok && ctx.tween(800, (t) => { line.setAttribute("x2", ax.sx(13 * t)); line.setAttribute("y2", ax.sy(5 * 13 * t)); t3.style.opacity = t; }))
+          .then((ok) => ok && ctx.tween(600, (t) => { t1.style.opacity = t; t2.style.opacity = t; }))
+          .then((ok) => ok && ctx.wait(800))
+          .then((ok) => ok && ctx.tween(700, (t) => dots.forEach((d, i) => { if (P[i][2] === 2) d.style.opacity = 0.6 * (1 - t); })));
+      },
+    },
+    {
+      title: "机场：一口价藏在地图里", kicker: "第 61–64 格 · 到地标的距离",
+      html: `<p>验证“机场一口价”的猜测：作者在地图上取 JFK 机场的坐标，挑出上车点或下车点离机场 1.5 英里以内的行程，画车费直方图。果然出现了几个集中的价位。<span data-cell="63">第 63 格</span></p><p>再对纽瓦克（EWR）和拉瓜迪亚（LGA）机场做同样的事。这就是地理空间分析里最常用的一招：<b>算“到某个重要地点的距离”，当成新特征</b>。</p>`,
+      cells: [62, 64], highlight: ["jfk = (-73.7822222222, 40.6441666667)", "range=1.5"],
+      draw(svg, ctx) {
+        const P = proj({ x: 10, y: 10, w: 420, h: 320 }, BB);
+        drawLand(svg, P);
+        const j = PLACES.JFK, rad = 1.5 / 69; // 1.5 英里约等于多少度纬度
+        const circ = K.svg(svg, "ellipse", { cx: P.x(j[0]), cy: P.y(j[1]), rx: 0, ry: 0, fill: "color-mix(in srgb, var(--warn) 20%, transparent)", stroke: "var(--warn)", "stroke-width": 2 });
+        const pts = simPickups(9, 500);
+        const near = pts.filter((p) => hav(p[1], p[0], j[1], j[0]) < 1.5);
+        pts.forEach((p) => K.svg(svg, "circle", { cx: P.x(p[0]), cy: P.y(p[1]), r: 1.6, fill: "var(--c6)", opacity: 0.45 }));
+        K.svg(svg, "text", { x: P.x(j[0]) + 14, y: P.y(j[1]) + 22, "font-size": 12, "font-weight": 700 }, "JFK 1.5 英里内");
+        // 右侧：这些行程的车费直方图（示意：一口价 + 按表计价）
+        const ax = K.axes(svg, { x: 470, y: 40, w: 230, h: 220 }, [0, 80], [0, 1], { yticks: 0, xlabel: "车费 $（示意）" });
+        const r = K.rng(31), fares = [];
+        for (let i = 0; i < 120; i++) fares.push(r() < 0.55 ? 52 + K.randn(r) * 0.3 : 20 + r() * 50);
+        const bins = new Array(20).fill(0); fares.forEach((f) => bins[Math.min(19, Math.floor(f / 4))]++);
+        const mx = Math.max(...bins);
+        const bars = bins.map((b, i) => K.svg(svg, "rect", { x: ax.sx(i * 4) + 0.5, y: ax.sy(0), width: ax.sx(4) - ax.sx(0) - 1, height: 0, fill: i === 13 ? "var(--warn)" : "var(--c1)" }));
+        K.svg(svg, "text", { x: 470, y: 26, "font-size": 13, "font-weight": 700 }, `圈内行程：${near.length} 趟（示意）`);
+        ctx.tween(900, (t) => K.set(circ, { rx: (P.x(j[0] + rad / 0.76) - P.x(j[0])) * t, ry: (P.y(j[1] - rad) - P.y(j[1])) * t }))
+          .then((ok) => ok && ctx.tween(1100, (t) => bars.forEach((e, i) => { const h = (ax.sy(0) - ax.sy(bins[i] / mx)) * t; K.set(e, { y: ax.sy(0) - h, height: h }); })));
+      },
+    },
+    {
+      title: "白天和夜里，每英里价钱不一样", kicker: "第 65–75 格 · 时间特征",
+      html: `<p>作者把车费写成公式：车费 = 起步价 θ<sub>0</sub> + θ<sub>1</sub> × 距离 + θ<sub>2</sub> × 时长。两边除以距离，短途时“每英里车费”≈ θ<sub>0</sub>/距离 + 常数，所以它应该像 1/x 曲线一样随距离变小。第 68 格手调 θ = (16, 4.0) 画了一条参考线。</p><p>接着用透视表画“每英里车费 × 小时 × 年份”：价钱随年份上涨，也随小时变化。作者用谷歌地图查了两条路线在不同时段的行驶时间，形状相似，说明<b>堵车 → 时长变长 → 车费变高</b>。<span data-cell="72">第 72 格</span></p><p>第 75 格对每年、每个小时各拟合一条直线，看起步价和每英里价怎么变。</p>`,
+      cells: [66, 68, 71, 73, 75], highlight: ["theta = (16, 4.0)", "pivot_table"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 55, y: 20, w: 290, h: 260 }, [0, 3], [0, 40], { xlabel: "距离（英里）", ylabel: "每英里车费 $" });
+        const r = K.rng(5), dots = [];
+        for (let i = 0; i < 220; i++) { const d = 0.1 + r() * 2.9; const y = 16 / d + 4 + K.randn(r) * (6 / (d + 0.3)); if (y < 40 && y > 0) dots.push(K.svg(svg, "circle", { cx: ax.sx(d), cy: ax.sy(y), r: 2.2, fill: "var(--c1)", opacity: 0.5 })); }
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--bad)", "stroke-width": 2.5, "stroke-dasharray": "6 3" });
+        K.svg(svg, "text", { x: 150, y: 50, "font-size": 12, fill: "var(--bad)" }, "16/x + 4（作者手调）");
+        const ax2 = K.axes(svg, { x: 420, y: 20, w: 280, h: 260 }, [0, 23], [3, 9], { xlabel: "一天中的小时（示意）", xticks: 4, yticks: 3 });
+        const yrs = [[2009, "var(--c1)", 0], [2012, "var(--c3)", 0.8], [2015, "var(--c2)", 1.8]];
+        const curves = yrs.map(([y, c]) => K.svg(svg, "path", { d: "", fill: "none", stroke: c, "stroke-width": 2 }));
+        yrs.forEach(([y, c], i) => K.svg(svg, "text", { x: 640, y: 50 + i * 16, "font-size": 11, fill: c }, y + " 年"));
+        const f = (h, off) => 5 + off + 0.9 * Math.exp(-((h - 9) ** 2) / 8) + 1.1 * Math.exp(-((h - 15) ** 2) / 10) - 0.6 * Math.exp(-((h - 4) ** 2) / 4);
+        ctx.tween(1200, (t) => { let d = ""; for (let x = 0.1; x <= 0.1 + 2.9 * t; x += 0.03) d += (d ? "L" : "M") + ax.sx(x) + "," + ax.sy(Math.min(40, 16 / x + 4)); path.setAttribute("d", d); })
+          .then((ok) => ok && ctx.tween(1500, (t) => curves.forEach((c, i) => { let d = ""; for (let h = 0; h <= 23 * t; h += 0.5) d += (d ? "L" : "M") + ax2.sx(h) + "," + ax2.sy(f(h, yrs[i][2])); c.setAttribute("d", d); })));
+      },
+    },
+    {
+      title: "上车位置的影响：把机场行程拿掉再看", kicker: "第 76–88 格 · 到市中心的距离",
+      html: `<p>再派生一个特征：上车点到纽约市中心的距离。把“到市中心距离 × 行程距离”画成散点，用颜色表示车费。</p><p>一大片 50–60 美元的“绿点”出现在离中心约 13 英里处，像是 JFK 行程。把离 JFK 1 英里内的行程去掉后，剩下的黄点（80 美元以上）画到地图上，又集中在纽瓦克机场附近。三个机场都去掉后，图变得“线性”了：<b>车费主要取决于距离，而不是从哪儿上车</b>。<span data-cell="88">第 88 格</span></p>`,
+      cells: [77, 79, 81, 84, 86, 87], highlight: ["distance_to_center", "< 1"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 20, w: 600, h: 270 }, [0, 20], [0, 30], { xlabel: "上车点到市中心的距离（英里，示意）", ylabel: "行程距离" });
+        const r = K.rng(17), P = [];
+        for (let i = 0; i < 420; i++) { const c = Math.abs(K.randn(r) * 3); const d = Math.abs(K.randn(r) * 3) + 0.3; P.push({ c, d, f: 2.5 + 2.5 * d * 1.2, kind: 0 }); }
+        for (let i = 0; i < 70; i++) P.push({ c: 13 + K.randn(r) * 0.6, d: 13 + K.randn(r) * 1.5, f: 52, kind: 1 });
+        for (let i = 0; i < 70; i++) { const c = Math.abs(K.randn(r) * 2); P.push({ c, d: 13 + K.randn(r) * 1.2, f: 52, kind: 1 }); }
+        for (let i = 0; i < 40; i++) P.push({ c: Math.abs(K.randn(r) * 2), d: 16 + K.randn(r) * 1.5, f: 85, kind: 2 });
+        const col = (f) => f > 75 ? "var(--warn)" : f > 40 ? "var(--good)" : "var(--c1)";
+        const dots = P.map((p) => K.svg(svg, "circle", { cx: ax.sx(Math.min(p.c, 19.8)), cy: ax.sy(Math.min(p.d, 29.5)), r: 2.6, fill: col(p.f), opacity: 0.7 }));
+        const lab = K.svg(svg, "text", { x: 360, y: 40, "font-size": 13, "font-weight": 700 }, "全部行程");
+        K.svg(svg, "text", { x: 360, y: 60, "font-size": 12, class: "muted" }, "蓝 < $40　绿 $40–75　黄 > $75");
+        (async () => {
+          if (!(await ctx.wait(1000))) return;
+          lab.textContent = "去掉 JFK 1 英里内的行程";
+          if (!(await ctx.tween(800, (t) => dots.forEach((d, i) => { if (P[i].kind === 1) d.style.opacity = 0.7 * (1 - t); })))) return;
+          if (!(await ctx.wait(900))) return;
+          lab.textContent = "再去掉纽瓦克、拉瓜迪亚：剩下的接近一条“距离决定价钱”的规律";
+          await ctx.tween(800, (t) => dots.forEach((d, i) => { if (P[i].kind === 2) d.style.opacity = 0.7 * (1 - t); }));
+        })();
+      },
+    },
+    {
+      title: "行程方向：曼哈顿的街道是斜的", kicker: "第 89–95 格 · 方向特征",
+      html: `<p>同样的直线距离，往不同方向走，车费一样吗？作者算了经纬度差 Δlon、Δlat，再换成方向角（−180° 到 180°），按方向分组求平均车费。</p><p>结果：<b>方向确实有影响</b>。曼哈顿的街道网格是斜的（作者说和水平方向约成 60°），沿着大道走，直线距离就接近真实路程；斜着穿过街区，就得横一段竖一段地拐，实际路程更长，车费更高。所以 60° 和 −120° 方向的平均车费最低。<span data-cell="95">第 95 格</span></p><p class="note">细节：方向是直接用经纬度的“度数差”算的，没有乘 cos(纬度) 修正，所以算出的角度和真实的罗盘方向有偏差（真实的曼哈顿大道约偏北 29°，即与正东方向约成 61°）。</p>`,
+      cells: [90, 92, 94], highlight: ["calculate_direction", "arcsin"],
+      draw(svg, ctx) {
+        const cx = 190, cy = 175, ang = (61 * Math.PI) / 180;
+        const g = K.svg(svg, "g", { transform: `rotate(${-(61 - 90)} ${cx} ${cy})` });
+        for (let k = -6; k <= 6; k++) { K.svg(g, "line", { x1: cx + k * 22, y1: cy - 150, x2: cx + k * 22, y2: cy + 150, stroke: "var(--line)", "stroke-width": 3 }); K.svg(g, "line", { x1: cx - 150, y1: cy + k * 22, x2: cx + 150, y2: cy + k * 22, stroke: "var(--line)", "stroke-width": 1.5 }); }
+        K.svg(svg, "text", { x: 20, y: 24, "font-size": 12, class: "muted" }, "示意：旋转的街道网格（粗线 = 大道）");
+        const L = 120;
+        const arrow = K.svg(svg, "line", { x1: cx, y1: cy, x2: cx, y2: cy, stroke: "var(--c6)", "stroke-width": 3 });
+        const path = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--warn)", "stroke-width": 2.5, "stroke-dasharray": "5 3" });
+        const ax = K.axes(svg, { x: 420, y: 40, w: 270, h: 230 }, [-180, 180], [1, 1.5], { xlabel: "方向角（度）", xticks: 4, yticks: 2, yfmt: (v) => v.toFixed(2) });
+        K.svg(svg, "text", { x: 420, y: 28, "font-size": 12 }, "实际路程 / 直线距离");
+        const curve = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+        const cur = K.svg(svg, "circle", { cx: 0, cy: 0, r: 5, fill: "var(--c6)" });
+        const ratio = (th) => Math.abs(Math.cos(th - ang)) + Math.abs(Math.sin(th - ang));
+        ctx.tween(4000, (t) => {
+          const th = -Math.PI + 2 * Math.PI * t;
+          const ex = cx + L * Math.cos(th), ey = cy - L * Math.sin(th);
+          K.set(arrow, { x2: ex, y2: ey });
+          const a = L * Math.cos(th - ang), b = L * Math.sin(th - ang);
+          const mx = cx + a * Math.cos(ang), my = cy - a * Math.sin(ang);
+          path.setAttribute("d", `M${cx},${cy} L${mx},${my} L${ex},${ey}`);
+          let d = ""; for (let s = -Math.PI; s <= th; s += 0.03) d += (d ? "L" : "M") + ax.sx((s * 180) / Math.PI) + "," + ax.sy(ratio(s));
+          curve.setAttribute("d", d);
+          K.set(cur, { cx: ax.sx((th * 180) / Math.PI), cy: ax.sy(ratio(th)) });
+        });
+      },
+    },
+    {
+      title: "线性回归基线与提交", kicker: "第 96–112 格 · 建模",
+      html: `<p>根据前面的分析，作者先用最简单的模型：<b>车费 ~ 年份 + 小时 + 距离 + 乘客数</b>，只保留离市中心 15 英里以内、乘客数不为 0 的行程。</p><p>流水线：先 <code>StandardScaler</code> 把四个特征缩放到同样尺度，再做线性回归。第 106 格把“随机切分训练 / 测试集”重复 400 次，看 RMSE（均方根误差，可以理解为平均差几美元）稳不稳。</p><p>提交 Kaggle 后得分约 5。作者说下一步要让模型学会：小时的非线性影响、机场一口价这种不同的计价方式、以及比直线距离更准的路程。<span data-cell="112">第 112 格</span></p>`,
+      cells: [101, 105, 107, 110], highlight: ["features = ['year', 'hour', 'distance_miles', 'passenger_count']", "StandardScaler", "N=400"],
+      draw(svg, ctx) {
+        const feats = ["年份 year", "小时 hour", "距离 distance_miles", "乘客数 passenger_count"];
+        const nodes = feats.map((f, i) => { const n = K.node(svg, 30, 40 + i * 66, 190, 48, f); n.style.opacity = 0; return n; });
+        const sc = K.node(svg, 270, 120, 130, 70, "标准化\nStandardScaler", { fill: "var(--accent-soft)", stroke: "var(--accent)" });
+        const lr = K.node(svg, 440, 120, 130, 70, "线性回归\nΣ wᵢ·xᵢ + b");
+        const out = K.node(svg, 600, 125, 100, 60, "车费 $", { bold: true, fill: "color-mix(in srgb, var(--c2) 18%, var(--panel))", stroke: "var(--c2)" });
+        const arrows = feats.map((f, i) => K.arrow(svg, 222, 64 + i * 66, 268, 155));
+        const a2 = K.arrow(svg, 402, 155, 438, 155), a3 = K.arrow(svg, 572, 155, 598, 155);
+        [sc, lr, out, a2, a3, ...arrows].forEach((e) => (e.style.opacity = 0));
+        const tag = K.svg(svg, "text", { x: 440, y: 260, "font-size": 14, "font-weight": 700, fill: "var(--accent)" }, "Kaggle 得分约 5（作者原文）"); tag.style.opacity = 0;
+        (async () => {
+          for (let i = 0; i < 4; i++) if (!(await ctx.tween(260, (t) => (nodes[i].style.opacity = t)))) return;
+          if (!(await ctx.tween(400, (t) => { arrows.forEach((a) => (a.style.opacity = t)); sc.style.opacity = t; }))) return;
+          if (!(await ctx.tween(400, (t) => { a2.style.opacity = t; lr.style.opacity = t; }))) return;
+          if (!(await ctx.tween(400, (t) => { a3.style.opacity = t; out.style.opacity = t; }))) return;
+          await ctx.tween(500, (t) => (tag.style.opacity = t));
+        })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：掩膜 + 网格密度 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 400,
+    controls: [
+      { id: "n", label: "每边切成几个格子", min: 6, max: 60, step: 1, value: 24 },
+      { id: "water", label: "水面掩膜", value: "on", options: [["on", "去掉落在水里的点"], ["off", "保留全部点"]] },
+      { id: "scale", label: "颜色刻度", value: "log", options: [["log", "log(1 + 每平方英里点数)"], ["lin", "直接用每平方英里点数"]] },
+      { id: "seed", label: "重新生成一批点", button: true },
+    ],
+    note: "浏览器里现生成 3000 个模拟上车点，用多边形判断每个点在陆地还是水面（相当于作者的掩膜图），再按格子计数、除以每格面积（平方英里，用 Haversine 现算）。格子太少看不出热点在哪，太多则每格只有零星几个点。",
+    render(svg, v) {
+      const pts0 = simPickups(77 + v.seed * 13, 3000);
+      const pts = v.water === "on" ? pts0.filter(onLand) : pts0;
+      const P = proj({ x: 10, y: 10, w: 620, h: 380 }, BB);
+      drawLand(svg, P);
+      const n = v.n, cnt = Array.from({ length: n }, () => new Array(n).fill(0));
+      pts.forEach((p) => { const i = Math.floor(((BB[3] - p[1]) / (BB[3] - BB[2])) * n), j = Math.floor(((p[0] - BB[0]) / (BB[1] - BB[0])) * n); if (i >= 0 && i < n && j >= 0 && j < n) cnt[i][j]++; });
+      const wMile = hav(BB[2], BB[1], BB[2], BB[0]) / n, hMile = hav(BB[3], BB[0], BB[2], BB[0]) / n, area = wMile * hMile;
+      const dens = cnt.map((row) => row.map((c) => c / area));
+      const f = v.scale === "log" ? (x) => Math.log1p(x) : (x) => x;
+      const mx = f(Math.max(...dens.flat())) || 1;
+      const cw = P.w / n, ch = P.h / n;
+      let hot = [0, 0, 0];
+      for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+        if (dens[i][j] > hot[0]) hot = [dens[i][j], i, j];
+        if (cnt[i][j]) K.svg(svg, "rect", { x: P.ox + j * cw, y: P.oy + i * ch, width: cw, height: ch, fill: "var(--c6)", opacity: 0.08 + 0.85 * (f(dens[i][j]) / mx) });
+      }
+      if (v.water === "off") pts0.filter((p) => !onLand(p)).forEach((p) => K.svg(svg, "circle", { cx: P.x(p[0]), cy: P.y(p[1]), r: 2.2, fill: "none", stroke: "var(--c1)" }));
+      K.svg(svg, "rect", { x: P.ox + hot[2] * cw, y: P.oy + hot[1] * ch, width: cw, height: ch, fill: "none", stroke: "var(--ink)", "stroke-width": 2 });
+      ["JFK", "LGA", "EWR"].forEach((k) => K.svg(svg, "text", { x: P.x(PLACES[k][0]) + 6, y: P.y(PLACES[k][1]) + 14, "font-size": 11, "font-weight": 700 }, k));
+      K.svg(svg, "text", { x: 16, y: 394, "font-size": 11, class: "muted" }, "黑框 = 最密的格子；蓝圈 = 落在水里的点（保留时显示）；手绘轮廓，示意");
+      return { readout: [
+        { k: "参与计数的点", v: pts.length + " / " + pts0.length },
+        { k: "被掩膜去掉", v: String(pts0.length - pts.length), color: "var(--c1)" },
+        { k: "每格面积", v: area.toFixed(2) + " 平方英里" },
+        { k: "最密格子", v: Math.round(hot[0]) + " 点/平方英里", color: "var(--c6)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：方向与路程 ---------- */
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "dir", label: "行程方向（与正东方向的夹角）", min: -180, max: 180, step: 1, value: 0, fmt: (v) => v + "°" },
+      { id: "dist", label: "直线距离（英里）", min: 0.5, max: 5, step: 0.1, value: 1.6, fmt: (v) => v.toFixed(1) },
+      { id: "street", label: "街道网格的方向", min: 0, max: 89, step: 1, value: 61, fmt: (v) => v + "°" },
+    ],
+    note: "车只能沿两组互相垂直的街道走，路程 = 直线距离 × (|cos(方向−街道角)| + |sin(方向−街道角)|)，即旋转后的“曼哈顿距离”。车费按作者在第 59 格查到的计价：起步 2.5 美元 + 每 1/5 英里 0.5 美元（不含附加费和堵车，所以是简化的模拟）。",
+    render(svg, v) {
+      const th = (v.dir * Math.PI) / 180, sa = (v.street * Math.PI) / 180;
+      const ratio = (x) => Math.abs(Math.cos(x - sa)) + Math.abs(Math.sin(x - sa));
+      const road = v.dist * ratio(th), fare = (d) => 2.5 + 0.5 * (d / 0.2);
+      const cx = 160, cy = 180, S = 150 / 5;
+      const g = K.svg(svg, "g", { transform: `rotate(${-v.street} ${cx} ${cy})` });
+      for (let k = -7; k <= 7; k++) { K.svg(g, "line", { x1: cx - 160, y1: cy + k * 20, x2: cx + 160, y2: cy + k * 20, stroke: "var(--line)", "stroke-width": 3 }); K.svg(g, "line", { x1: cx + k * 20, y1: cy - 160, x2: cx + k * 20, y2: cy + 160, stroke: "var(--line)", "stroke-width": 1.2 }); }
+      const L = v.dist * S, ex = cx + L * Math.cos(th), ey = cy - L * Math.sin(th);
+      const a = L * Math.cos(th - sa), mx = cx + a * Math.cos(sa), my = cy - a * Math.sin(sa);
+      K.svg(svg, "path", { d: `M${cx},${cy} L${mx},${my} L${ex},${ey}`, fill: "none", stroke: "var(--warn)", "stroke-width": 3 });
+      K.svg(svg, "line", { x1: cx, y1: cy, x2: ex, y2: ey, stroke: "var(--c6)", "stroke-width": 2.5, "stroke-dasharray": "6 4" });
+      K.svg(svg, "circle", { cx, cy, r: 6, fill: "var(--c2)" });
+      K.svg(svg, "circle", { cx: ex, cy: ey, r: 6, fill: "var(--c3)" });
+      K.svg(svg, "rect", { x: 330, y: 0, width: 310, height: 360, fill: "var(--panel)" });
+      const ax = K.axes(svg, { x: 380, y: 30, w: 240, h: 260 }, [-180, 180], [fare(v.dist) * 0.95, fare(v.dist * 1.45)], { xlabel: "方向角（度）", xticks: 4, yticks: 4, yfmt: (y) => "$" + y.toFixed(1) });
+      let d = ""; for (let s = -180; s <= 180; s += 2) d += (d ? "L" : "M") + ax.sx(s) + "," + ax.sy(fare(v.dist * ratio((s * Math.PI) / 180)));
+      K.svg(svg, "path", { d, fill: "none", stroke: "var(--c1)", "stroke-width": 2 });
+      K.svg(svg, "circle", { cx: ax.sx(v.dir), cy: ax.sy(fare(road)), r: 6, fill: "var(--c6)" });
+      K.svg(svg, "text", { x: 380, y: 20, "font-size": 12 }, "同样直线距离时，各方向的模拟车费");
+      K.svg(svg, "text", { x: 16, y: 350, "font-size": 11, class: "muted" }, "红虚线 = 直线距离；黄线 = 沿街道实际要走的路");
+      return { readout: [
+        { k: "直线距离", v: v.dist.toFixed(1) + " 英里" },
+        { k: "沿街道的路程", v: road.toFixed(2) + " 英里", color: "var(--warn)" },
+        { k: "路程 / 直线", v: ratio(th).toFixed(2) + " 倍" },
+        { k: "模拟车费", v: "$" + fare(road).toFixed(2), color: "var(--c6)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：线性回归基线 ---------- */
+  function simTrips(seed, n) {
+    const r = K.rng(seed), rows = [];
+    for (let i = 0; i < n; i++) {
+      const hour = Math.floor(r() * 24), year = 2009 + Math.floor(r() * 7), pc = 1 + Math.floor(r() * 4);
+      const airport = r() < 0.07;
+      const dist = airport ? 12 + K.randn(r) * 1.5 : Math.max(0.1, Math.exp(K.randn(r) * 0.7 + 0.4));
+      const dir = r() * Math.PI * 2, ratio = Math.abs(Math.cos(dir - 1.06)) + Math.abs(Math.sin(dir - 1.06));
+      const rush = (hour >= 16 && hour < 20) ? 1 : 0, night = (hour >= 20 || hour < 6) ? 0.5 : 0;
+      const slow = 1 + 0.25 * Math.exp(-((hour - 9) ** 2) / 6) + 0.25 * Math.exp(-((hour - 17) ** 2) / 6);
+      let fare = airport ? 52 : 2.5 + 2.5 * dist * ratio * slow * (1 + (year - 2009) * 0.03) + rush + night + 0.8;
+      fare += K.randn(r) * 1.5;
+      rows.push({ year, hour, dist, pc, airport: airport ? 1 : 0, road: dist * ratio, rush, fare });
+    }
+    return rows;
+  }
+  function ols(X, y, lam) {
+    const p = X[0].length, A = Array.from({ length: p }, () => new Array(p).fill(0)), b = new Array(p).fill(0);
+    X.forEach((x, i) => { for (let a = 0; a < p; a++) { b[a] += x[a] * y[i]; for (let c = 0; c < p; c++) A[a][c] += x[a] * x[c]; } });
+    for (let a = 1; a < p; a++) A[a][a] += lam;
+    // 高斯消元
+    for (let c = 0; c < p; c++) {
+      let piv = c; for (let r = c + 1; r < p; r++) if (Math.abs(A[r][c]) > Math.abs(A[piv][c])) piv = r;
+      [A[c], A[piv]] = [A[piv], A[c]]; [b[c], b[piv]] = [b[piv], b[c]];
+      for (let r = 0; r < p; r++) if (r !== c) { const f = A[r][c] / A[c][c]; for (let k = c; k < p; k++) A[r][k] -= f * A[c][k]; b[r] -= f * b[c]; }
+    }
+    return b.map((v, i) => v / A[i][i]);
+  }
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 380,
+    controls: [
+      { id: "fs", label: "用哪些特征", value: "base", options: [["dist", "只用直线距离"], ["base", "作者的四个：年份、小时、距离、人数"], ["air", "四个 + 是否机场行程"], ["all", "四个 + 机场 + 晚高峰 + 沿街道的路程"]] },
+      { id: "n", label: "训练用的行程数", min: 50, max: 3000, step: 50, value: 1000 },
+      { id: "seed", label: "重新随机切分", button: true },
+    ],
+    note: "模拟数据：车费按“起步价 + 每英里价 × 沿街道路程 × 堵车系数 + 高峰/夜间附加”生成，7% 的行程是机场一口价。浏览器里用最小二乘现场拟合线性回归，在另外 1000 趟上算 RMSE。数字只说明趋势，不是作者的成绩。",
+    render(svg, v) {
+      const all = simTrips(500 + v.seed * 31, v.n + 1000);
+      const tr = all.slice(0, v.n), te = all.slice(v.n);
+      const feat = (r) => {
+        const f = [1];
+        if (v.fs === "dist") f.push(r.dist);
+        else { f.push(r.year - 2012, r.hour, r.dist, r.pc); if (v.fs !== "base") f.push(r.airport); if (v.fs === "all") f.push(r.rush, r.road); }
+        return f;
+      };
+      const w = ols(tr.map(feat), tr.map((r) => r.fare), 1e-6);
+      const pred = (r) => feat(r).reduce((s, x, i) => s + x * w[i], 0);
+      const rm = (rows) => Math.sqrt(rows.reduce((s, r) => s + (pred(r) - r.fare) ** 2, 0) / rows.length);
+      const ax = K.axes(svg, { x: 55, y: 20, w: 560, h: 310 }, [0, 70], [0, 70], { xlabel: "真实车费 $（模拟）", ylabel: "预测车费 $" });
+      K.svg(svg, "line", { x1: ax.sx(0), y1: ax.sy(0), x2: ax.sx(70), y2: ax.sy(70), stroke: "var(--ink-3)", "stroke-dasharray": "5 3" });
+      te.slice(0, 600).forEach((r) => K.svg(svg, "circle", { cx: ax.sx(K.clamp(r.fare, 0, 70)), cy: ax.sy(K.clamp(pred(r), 0, 70)), r: 2.4, fill: r.airport ? "var(--warn)" : "var(--c1)", opacity: 0.55 }));
+      K.svg(svg, "text", { x: 70, y: 40, "font-size": 12, class: "muted" }, "点越贴近虚线越准；黄点 = 机场一口价行程");
+      const sd = Math.sqrt(te.reduce((s, r) => s + r.fare * r.fare, 0) / te.length - (te.reduce((s, r) => s + r.fare, 0) / te.length) ** 2);
+      return { readout: [
+        { k: "训练集 RMSE", v: "$" + rm(tr).toFixed(2) },
+        { k: "测试集 RMSE", v: "$" + rm(te).toFixed(2), color: "var(--c6)" },
+        { k: "车费标准差（参照）", v: "$" + sd.toFixed(2), color: "var(--ink-3)" },
+        { k: "特征个数", v: String(w.length - 1) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

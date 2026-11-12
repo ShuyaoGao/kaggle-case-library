@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>铣床故障预测</title>
+<meta name="description" content="Kaggle 案例拆解：AI4I 2020 铣床预测性维护合成数据。清理矛盾标签、SMOTENC 补齐故障、PCA 找出温度/功率/刀具磨损三条主轴、F2 分数、五种模型的二分类与多分类。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">表格数据 · 二分类 + 多分类 · 预测性维护</div>
+  <h1>机床会不会坏、坏在哪：用传感器读数预测五种故障</h1>
+  <p class="en">Predictive Maintenance Final Project</p>
+  <div class="tags">
+    <span class="tag ml">机器学习</span>
+    <span class="tag method">标签清洗</span><span class="tag method">SMOTENC 过采样</span><span class="tag method">StandardScaler</span><span class="tag method">PCA</span>
+    <span class="tag method">F2 分数</span><span class="tag method">逻辑回归 / KNN / SVC</span><span class="tag method">随机森林 / XGBoost</span><span class="tag method">置换重要性</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Gerardo Cappa</b>（那不勒斯费德里克二世大学课程项目）</span>
+    <span>Kaggle 点赞 <b>370</b>（2026-11 抓取）</span>
+    <span>数据集 <b>shivamb/machine-predictive-maintenance-classification</b></span>
+    <span><a href="https://www.kaggle.com/code/gerardocappa/predictive-maintenance-final-project" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">1 万条铣床加工过程记录（合成数据）</div><p>每条记录：产品质量等级、气温、加工温度、转速、扭矩、刀具已用时间。真实的维护数据难以公开，所以 UCI 发布了这份“尽量贴近工业现实”的合成数据。<span data-cell="2">出处</span></p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">①会不会故障 ②是哪种故障</div><p>四种可预测的故障：刀具磨损 TWF、散热 HDF、功率 PWF、过载 OSF（另有不可预测的随机故障 RNF）。故障只占 3.31%。<span data-cell="25">出处</span></p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">清洗 → SMOTENC 补到 80:20 → 5 种模型</div><p>逻辑回归做基准，KNN、SVC、随机森林、XGBoost 用网格搜索调参，以 F2（更看重召回率）为评分标准。</p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">两项任务都是 XGBoost 最好、KNN 最差</div><p>作者结论：KNN 响应快、XGBoost 更准，按需求选；多分类里 XGBoost 只比 SVC/RFC 好约 1.5%，训练时间却是 4 倍多。<span data-cell="72">出处</span> <span data-cell="77">出处</span></p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>Machine Predictive Maintenance Classification</b>（来自 UCI AI4I 2020 Predictive Maintenance Dataset）。下面的规模和字段规则来自作者第 2 格的说明与数据集说明。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">记录条数</div><div class="v">10,000</div></div>
+        <div class="stat-tile"><div class="k">故障占比</div><div class="v" style="color:var(--c6)">3.31%</div></div>
+        <div class="stat-tile"><div class="k">删掉的矛盾记录</div><div class="v">18 + 9</div></div>
+        <div class="stat-tile"><div class="k">SMOTE 后 正常 : 故障</div><div class="v">80 : 20</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">1 万条见 <span data-cell="2">第 2 格</span>；3.31% 见 <span data-cell="25">第 25 格</span>；删掉 18 条“随机故障但没标故障”<span data-cell="14">第 14 格</span>、9 条“标了故障却没原因”<span data-cell="16">第 16 格</span>；80:20 见 <span data-cell="27">第 27 格</span>。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td><code>UDI</code>、<code>Product ID</code></td><td>流水号、产品编号（首字母即质量等级），作者删掉</td><td>编号</td></tr>
+        <tr><td><code>Type</code></td><td>产品质量等级 L / M / H（低 / 中 / 高）</td><td>类别</td></tr>
+        <tr><td><code>Air temperature [K]</code></td><td>车间气温，约 300 K（27 ℃）上下随机游走</td><td>数值</td></tr>
+        <tr><td><code>Process temperature [K]</code></td><td>加工区温度 ≈ 气温 + 10 K</td><td>数值</td></tr>
+        <tr><td><code>Rotational speed [rpm]</code></td><td>主轴转速（每分钟转数）</td><td>数值</td></tr>
+        <tr><td><code>Torque [Nm]</code></td><td>扭矩，“拧”的力度，均值约 40 N·m</td><td>数值</td></tr>
+        <tr><td><code>Tool wear [min]</code></td><td>刀具已用了多少分钟</td><td>数值</td></tr>
+        <tr><td><code>Target</code></td><td><b>答案 1</b>：是否故障（0/1）</td><td>二分类</td></tr>
+        <tr><td><code>Failure Type</code></td><td><b>答案 2</b>：故障类型。数据集说明特别提醒：两个答案不能互相当特征，否则泄漏</td><td>多分类</td></tr>
+      </table></div>
+    </div>
+  </div>
+  <div class="panel pad" style="margin-top:14px">
+    <h3 style="margin-top:0">五种故障的“出厂规则”（作者第 2 格转述的数据集说明 <span data-cell="2">出处</span>）</h3>
+    <div class="scroll-x"><table class="res">
+      <tr><th>故障</th><th>什么时候发生</th></tr>
+      <tr><td>刀具磨损 TWF</td><td>刀具用到 200–240 分钟之间的某个随机时刻，被更换或失效</td></tr>
+      <tr><td>散热 HDF</td><td>加工温度与气温之差 &lt; 8.6 K，且转速 &lt; 1380 rpm</td></tr>
+      <tr><td>功率 PWF</td><td>功率 = 扭矩 × 角速度，低于 3500 W 或高于 9000 W</td></tr>
+      <tr><td>过载 OSF</td><td>刀具磨损 × 扭矩 超过 11000（L）/ 12000（M）/ 13000（H）min·N·m</td></tr>
+      <tr><td>随机 RNF</td><td>每次加工都有 0.1% 的概率无缘无故失效</td></tr>
+    </table></div>
+    <p style="font-size:14px;color:var(--ink-2)">注意：作者第 2 格写 L/M/H 占 60%/30%/10%，Kaggle 数据集说明写的是 50%/30%/20%，两处不一致。</p>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="47">
+    <h3>动手试试 A · 阈值与 F2：漏报故障和白跑一趟，哪个更贵 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="54">
+    <h3>动手试试 B · 造一个“功率”特征：决策树一下子就看懂了 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者给出的结论</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>结论</th><th>出处</th></tr>
+        <tr><td>转速、扭矩的“离群值”其实是故障样本的自然分布，应保留</td><td><span data-cell="35">第 35 格</span></td></tr>
+        <tr><td>PCA 前三个主成分 ≈ 温度、功率（转速 × 扭矩）、刀具磨损</td><td><span data-cell="42">第 42 格</span></td></tr>
+        <tr><td>把两个温度、或转速与扭矩合成一个乘积特征，效果都不如原始特征，于是放弃特征选择</td><td><span data-cell="55">第 55 格</span></td></tr>
+        <tr><td>二分类：KNN 最差、XGBoost 最好，SVC 与随机森林接近；测试集上表现没有明显下降</td><td><span data-cell="62">第 62 格</span></td></tr>
+        <tr><td>多分类：XGBoost 比 SVC、随机森林只好约 1.5%，训练时间却多 4 倍以上</td><td><span data-cell="72">第 72 格</span></td></tr>
+        <tr><td>模型最看重扭矩、刀具磨损、转速；质量等级 Type 几乎不起作用</td><td><span data-cell="74">第 74 格</span></td></tr>
+        <tr><td>要快用 KNN，要准用 XGBoost，按企业需求选</td><td><span data-cell="77">第 77 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">各模型的准确率、AUC、F1、F2 数值和混淆矩阵都在运行输出里，源码不带，这里不列。</p>
+      <p class="callout">读代码发现的问题（原文未改）：<b>SMOTENC 在切分训练/验证/测试之前就对全部数据做了</b> <span data-cell="28">第 28 格</span> → <span data-cell="50">第 50 格</span>。合成的故障样本是用邻近的真实故障插值出来的，测试集里既有合成样本、又有“生出”它们的原样本的邻居，测试分数会偏高；缩放器也是在全部数据上拟合的 <span data-cell="37">第 37 格</span>。另外第 55 格试的是“温度乘积”，而 HDF 规则用的是“温度差”，换成差值可能结论不同。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>每次加工前后，根据转速、扭矩、温度和刀具使用时间，提示“这一刀可能出故障”并说明更可能是哪一类，提前换刀或降速。</li>
+        <li><b>同类问题：</b>数控机床、注塑机、冲压机、空压机、泵阀的故障预警；只要有“运行参数 + 故障记录”的设备。</li>
+        <li><b>可迁移的套路：</b>先读懂故障的物理规则 → 清理自相矛盾的标签 → 先切测试集、只在训练集上重采样 → 用 F2 这类偏向召回的指标 → 用置换重要性和决策路径检查模型是否抓到了物理规律。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>清洗：去掉 RNF 与“无原因故障” <span data-cell="15">第 15 格</span> <span data-cell="17">第 17 格</span></li>
+        <li>不平衡：SMOTENC（可处理类别列的 SMOTE），故障四类各补到相同数量 <span data-cell="28">第 28 格</span></li>
+        <li>编码与缩放：Type 有序编码 L=0/M=1/H=2，StandardScaler <span data-cell="37">第 37 格</span></li>
+        <li>PCA 三维可视化与载荷分析 <span data-cell="41">第 41 格</span></li>
+        <li>模型：逻辑回归基准 <span data-cell="57">第 57 格</span>；KNN、SVC、随机森林、XGBoost + GridSearchCV（5 折、F2）<span data-cell="60">第 60 格</span></li>
+        <li>解释：逻辑回归几率比、置换重要性 <span data-cell="63">第 63 格</span>、随机森林决策路径 <span data-cell="76">第 76 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>作者先对全部数据做 SMOTE，再切出测试集。为什么这会让测试分数偏高？正确的顺序是什么？（可以对照信用卡欺诈案例）</li>
+      <li>数据是按“已知规则”合成的，比如功率低于 3500 W 就算故障。用机器学习去“重新发现”这些规则有意义吗？真实工厂的数据会有什么不同？</li>
+      <li>作者用 F2 而不是 F1，理由是“机器坏了再修比提前多换零件贵得多”。你能举一个反过来、误报更贵的场景吗？</li>
+      <li>随机故障 RNF 被删掉了，因为“不可预测”。上线以后，这类故障怎么办？</li>
+      <li>KNN 快但差一点，XGBoost 准但慢。在机床旁边的小电脑上实时预警，你选哪个？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Gerardo Cappa（University of Naples Federico II 课程项目），版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：S. Matzka, AI4I 2020 Predictive Maintenance Dataset（UCI）；Kaggle 版本 shivamb/machine-predictive-maintenance-classification。
+</footer>
+</main>
+
+<script src="nb/ai4i-predictive-maintenance.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  const FC = { "正常": "var(--ink-3)", PWF: "var(--c1)", OSF: "var(--c2)", HDF: "var(--c6)", TWF: "var(--c3)" };
+
+  /* 按数据集说明的规则生成模拟加工记录 */
+  function sim(seed, n) {
+    const r = K.rng(seed), out = [];
+    for (let i = 0; i < n; i++) {
+      const air = 300 + 2 * K.randn(r), proc = air + 10 + 1 * K.randn(r);
+      const torque = Math.max(3, 40 + 10 * K.randn(r));
+      const rpm = Math.max(1150, 1540 - 18 * (torque - 40) + 90 * K.randn(r));
+      const wear = r() * 250, type = r() < 0.5 ? 0 : r() < 0.6 ? 1 : 2;
+      const P = torque * rpm * 2 * Math.PI / 60;
+      let f = "正常";
+      if (wear > 200 + 40 * r() && r() < 0.5) f = "TWF";
+      if (proc - air < 8.6 && rpm < 1380) f = "HDF";
+      if (P < 3500 || P > 9000) f = "PWF";
+      if (wear * torque > [11000, 12000, 13000][type]) f = "OSF";
+      out.push({ air, proc, torque, rpm, wear, type, P, f });
+    }
+    return out;
+  }
+
+  const steps = [
+    {
+      title: "工业 4.0 里的预测性维护", kicker: "第 0–1 格 · 背景", at: 0, cells: [0], highlight: ["generation 4.0", "much higher"],
+      html: `<p>这是意大利那不勒斯费德里克二世大学一门数据科学课的期末项目。作者的出发点：<b>整台机器坏了再修或更换，比换一个零件贵得多</b>，所以值得装传感器、提前预警。</p><p>项目做两件事：①判断机器<b>会不会</b>故障（二分类）；②判断<b>是哪种</b>故障（多分类），并比较不同模型的效果和可解释性。</p>`,
+      draw(svg, ctx) {
+        const items = [["坏了再修", "停机 + 换整台", 9, "var(--bad)"], ["定期换刀", "到时间就换，不管好坏", 5, "var(--warn)"], ["预测性维护", "看数据，快坏才换", 2.5, "var(--good)"]];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "维护成本对比（示意）");
+        const bs = items.map((d, i) => { K.svg(svg, "text", { x: 30, y: 90 + i * 80, "font-size": 15, "font-weight": 700, fill: d[3] }, d[0]); K.svg(svg, "text", { x: 30, y: 112 + i * 80, "font-size": 12, class: "muted" }, d[1]); return K.svg(svg, "rect", { x: 200, y: 74 + i * 80, width: 0, height: 32, rx: 4, fill: d[3] }); });
+        ctx.tween(1500, (t) => bs.forEach((b, i) => b.setAttribute("width", items[i][2] * 50 * t)));
+      },
+    },
+    {
+      title: "一万条铣床加工记录与五种故障", kicker: "第 2–6 格 · 读数据", cells: [2, 4, 5], highlight: ["predictive_maintenance.csv", "info()"],
+      html: `<p>数据是 <b>1 万条</b>合成的铣床加工记录。铣床就是用旋转的刀具在金属上切削出形状的机床。每条记录有气温、加工温度、转速、扭矩、刀具已用时间和产品质量等级。</p><p>故障按五条规则生成（见上面“数据”一节的表）。动画按这些规则现场模拟了一批记录，横轴转速、纵轴扭矩：功率故障 PWF 分布在两条“功率边界线”外面。</p><p>读入后检查：没有缺失值、没有重复记录。<span data-cell="5">出处</span></p>`,
+      draw(svg, ctx) {
+        const D = sim(3, 700), ax = K.axes(svg, { x: 60, y: 20, w: 460, h: 270 }, [1150, 2900], [0, 80], { xlabel: "转速 rpm", ylabel: "扭矩 N·m" });
+        const curve = (P) => { let d = ""; for (let rpm = 1150; rpm <= 2900; rpm += 20) { const tq = P / (rpm * 2 * Math.PI / 60); if (tq <= 80) d += (d ? "L" : "M") + ax.sx(rpm) + "," + ax.sy(tq); } return d; };
+        [3500, 9000].forEach((P) => K.svg(svg, "path", { d: curve(P), fill: "none", stroke: "var(--c1)", "stroke-dasharray": "5 3", "stroke-width": 1.5 }));
+        const dots = D.map((p) => { const c = K.svg(svg, "circle", { cx: ax.sx(Math.min(2900, p.rpm)), cy: ax.sy(Math.min(80, p.torque)), r: p.f === "正常" ? 2 : 3.5, fill: FC[p.f], opacity: 0 }); return c; });
+        Object.keys(FC).forEach((k, i) => K.svg(svg, "text", { x: 545, y: 60 + i * 24, "font-size": 13, "font-weight": 700, fill: FC[k] }, "● " + k));
+        K.svg(svg, "text", { x: 545, y: 200, "font-size": 12, fill: "var(--c1)" }, "虚线：功率 3500 W");
+        K.svg(svg, "text", { x: 545, y: 220, "font-size": 12, fill: "var(--c1)" }, "与 9000 W");
+        K.svg(svg, "text", { x: 545, y: 260, "font-size": 11, class: "muted" }, "按规则模拟，非原数据");
+        ctx.tween(1600, (t) => dots.forEach((d, i) => (d.style.opacity = i < t * dots.length ? (D[i].f === "正常" ? 0.35 : 0.9) : 0)));
+      },
+    },
+    {
+      title: "ID 列与产品质量等级", kicker: "第 7–11 格 · 去掉编号", cells: [7, 8, 9, 11], highlight: ["drop(columns=['UDI','Product ID']"],
+      html: `<p>两列编号要不要留？作者认为“机器会不会坏取决于它的编号”不现实，会误导模型。不过 <code>Product ID</code> 是“字母 + 五位数字”，作者还是检查了一下：字母就是质量等级 Type，数字只是按等级分成三段，<b>没有额外信息</b>，于是两列都删掉。</p><p>再用饼图看三种质量等级的占比。</p>`,
+      draw(svg, ctx) {
+        const cols = ["UDI", "Product ID", "Type", "Air", "Process", "rpm", "Torque", "Wear"];
+        const gs = cols.map((c, i) => { const g = K.node(svg, 20 + i * 86, 60, 80, 40, c, { fill: i < 2 ? "color-mix(in srgb, var(--bad) 18%, var(--panel))" : "var(--panel-2)" }); return g; });
+        K.svg(svg, "text", { x: 20, y: 40, "font-size": 13 }, "M14860 = 等级 M + 编号 14860 → 首字母已经在 Type 列里了");
+        const x = K.svg(svg, "text", { x: 100, y: 150, "font-size": 14, fill: "var(--bad)", "font-weight": 700 }, "");
+        ctx.wait(800).then((ok) => ok && ctx.tween(800, (t) => { gs[0].style.opacity = gs[1].style.opacity = 1 - 0.8 * t; gs.slice(2).forEach((g) => g.setAttribute("transform", `translate(${-172 * t},0)`)); x.textContent = "删掉 UDI、Product ID"; }));
+        const pie = [[0.5, "L", "var(--c1)"], [0.3, "M", "var(--c2)"], [0.2, "H", "var(--c3)"]]; let a0 = -Math.PI / 2;
+        pie.forEach(([p, l, c]) => { const a1 = a0 + p * Math.PI * 2, cx = 360, cy = 240, R = 70; K.svg(svg, "path", { d: `M${cx},${cy}L${cx + R * Math.cos(a0)},${cy + R * Math.sin(a0)}A${R},${R} 0 ${p > 0.5 ? 1 : 0} 1 ${cx + R * Math.cos(a1)},${cy + R * Math.sin(a1)}Z`, fill: c, opacity: 0.8 }); const am = (a0 + a1) / 2; K.svg(svg, "text", { x: cx + 40 * Math.cos(am), y: cy + 40 * Math.sin(am) + 4, "text-anchor": "middle", "font-size": 13, "font-weight": 700, fill: "#fff" }, l); a0 = a1; });
+        K.svg(svg, "text", { x: 450, y: 230, "font-size": 12, class: "muted" }, "L 低 / M 中 / H 高 质量等级");
+        K.svg(svg, "text", { x: 450, y: 250, "font-size": 12, class: "muted" }, "比例按数据集说明 50/30/20 画");
+      },
+    },
+    {
+      title: "清理矛盾标签：随机故障、和“有故障没原因”", kicker: "第 12–19 格 · 标签清洗", cells: [12, 13, 15, 17, 18], highlight: ["Random Failures", "idx_ambiguous", "drop(index="],
+      html: `<p>作者发现两种和数据说明对不上的记录：</p><ul class="tight"><li><b>随机故障 RNF</b> 发生了，但“是否故障”却是 0。这类故障只有 18 条，本身又是随机的、不可预测，<b>删掉</b>。<span data-cell="14">出处</span></li><li>“是否故障”是 1，但故障类型是“无故障”。一共 9 条，没法判断到底坏没坏，也<b>删掉</b>。<span data-cell="16">出处</span></li></ul><p>两类合计删掉不到 0.3%，作者认为对原数据影响很小。</p>`,
+      draw(svg, ctx) {
+        const rows = [["0", "No Failure", "ok"], ["1", "Power Failure", "ok"], ["0", "Random Failures", "bad1"], ["1", "No Failure", "bad2"], ["0", "No Failure", "ok"], ["1", "Tool Wear Failure", "ok"]];
+        K.svg(svg, "text", { x: 60, y: 36, "font-size": 13, "font-weight": 700 }, "Target"); K.svg(svg, "text", { x: 170, y: 36, "font-size": 13, "font-weight": 700 }, "Failure Type");
+        const gs = rows.map((r0, i) => { const g = K.svg(svg, "g"); K.svg(g, "rect", { x: 40, y: 48 + i * 42, width: 380, height: 36, rx: 4, fill: "var(--panel-2)", stroke: r0[2] === "ok" ? "var(--line)" : "var(--bad)" }); K.svg(g, "text", { x: 70, y: 71 + i * 42, "font-size": 14, "font-family": "var(--mono)" }, r0[0]); K.svg(g, "text", { x: 170, y: 71 + i * 42, "font-size": 14, "font-family": "var(--mono)" }, r0[1]); return g; });
+        K.svg(svg, "text", { x: 440, y: 160, "font-size": 12, fill: "var(--bad)" }, "← 坏了却标“没坏”（18 条）");
+        K.svg(svg, "text", { x: 440, y: 202, "font-size": 12, fill: "var(--bad)" }, "← 标“坏了”却说不出原因（9 条）");
+        ctx.wait(1000).then((ok) => ok && ctx.tween(900, (t) => [2, 3].forEach((i) => { gs[i].style.opacity = 1 - 0.85 * t; gs[i].setAttribute("transform", `translate(${-30 * t},0)`); })));
+      },
+    },
+    {
+      title: "离群值：先别急着删", kicker: "第 20–24 格 · 离群值", cells: [20, 21, 23, 24], highlight: ["describe()", "boxplot"],
+      html: `<p><code>describe()</code> 显示转速和扭矩的最大值远高于四分之三分位数，箱线图上有不少“离群点”。</p><p>作者没有直接删：扭矩是正态分布，用箱线图的 1.5 倍四分位距规则本来就会标出一些正常的尾部点，用“3 倍标准差”更合适；转速分布偏斜，高转速的机器<b>更容易出故障</b>，这些点可能恰恰是我们要找的。后面第 35 格证实了这个判断。</p>`,
+      draw(svg, ctx) {
+        const D = sim(7, 600), ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 230 }, [1150, 2900], [0, 1], { xlabel: "转速 rpm（模拟）", yticks: 0 });
+        const v = D.map((p) => p.rpm).sort((a, b) => a - b), q = (p) => v[Math.floor(p * (v.length - 1))], q1 = q(0.25), q3 = q(0.75), hi = q3 + 1.5 * (q3 - q1);
+        K.svg(svg, "rect", { x: ax.sx(q1), y: 120, width: ax.sx(q3) - ax.sx(q1), height: 50, fill: "var(--c1)", "fill-opacity": 0.2, stroke: "var(--c1)" });
+        K.svg(svg, "line", { x1: ax.sx(hi), x2: ax.sx(hi), y1: 100, y2: 190, stroke: "var(--warn)", "stroke-dasharray": "4 3" });
+        K.svg(svg, "text", { x: ax.sx(hi) + 4, y: 96, "font-size": 12, fill: "var(--warn)" }, "箱线图的“离群”线");
+        const dots = D.map((p, i) => K.svg(svg, "circle", { cx: ax.sx(Math.min(2900, p.rpm)), cy: 210 + (i % 7) * 6, r: 2.5, fill: p.f === "正常" ? "var(--ink-3)" : FC[p.f], opacity: p.f === "正常" ? 0.3 : 0 }));
+        K.svg(svg, "text", { x: 60, y: 320, "font-size": 12 }, "彩色点 = 故障记录：很多正好落在“离群”区域 → 不能删");
+        ctx.wait(800).then((ok) => ok && ctx.tween(900, (t) => dots.forEach((d, i) => { if (D[i].f !== "正常") d.style.opacity = t; })));
+      },
+    },
+    {
+      title: "SMOTENC：把故障样本补到 20%", kicker: "第 25–28 格 · 不平衡处理", cells: [25, 26, 27, 28], highlight: ["SMOTENC", "n_working/0.8", "spc = round"],
+      html: `<p>故障只占 <b>3.31%</b>，模型全猜“不会坏”也有约 97% 准确率。<span data-cell="27">出处</span> 作者用 <b>SMOTE</b> 造新的故障样本：挑一个故障样本，找它最近的几个同类邻居，在两点连线上随机取一点。</p><p>这里用的是 <b>SMOTENC</b>，能处理质量等级这种类别列。目标：正常 : 故障 = 80 : 20，而且四种故障<b>各补到一样多</b>。</p><p class="callout">关键问题：这一步在整份数据上做，<b>早于</b>第 50 格的训练/测试切分，测试集里会混进合成样本。</p>`,
+      draw(svg, ctx) {
+        const r = K.rng(31), real = []; for (let i = 0; i < 9; i++) real.push([300 + K.randn(r) * 90, 170 + K.randn(r) * 60]);
+        real.forEach((p) => K.svg(svg, "circle", { cx: p[0], cy: p[1], r: 6, fill: "var(--c6)" }));
+        K.svg(svg, "text", { x: 20, y: 28, "font-size": 12, class: "muted" }, "实心 = 真实故障，空心 = SMOTE 合成（示意）");
+        const bars = [["正常", 96.7, 80], ["故障", 3.3, 20]];
+        const bs = bars.map((b, i) => { K.svg(svg, "text", { x: 520, y: 100 + i * 60, "font-size": 13 }, b[0]); return [K.svg(svg, "rect", { x: 570, y: 86 + i * 60, width: b[1] * 1.3, height: 20, fill: i ? "var(--c6)" : "var(--ink-3)" }), K.svg(svg, "text", { x: 0, y: 101 + i * 60, "font-size": 12 }, b[1] + "%")]; });
+        bs.forEach(([rc, t], i) => t.setAttribute("x", 575 + bars[i][1] * 1.3));
+        (async () => {
+          for (let k = 0; k < 14; k++) {
+            const a = real[Math.floor(r() * 9)], b = real.filter((q) => q !== a).sort((p, q) => Math.hypot(p[0] - a[0], p[1] - a[1]) - Math.hypot(q[0] - a[0], q[1] - a[1]))[Math.floor(r() * 3)];
+            const ln = K.svg(svg, "line", { x1: a[0], y1: a[1], x2: b[0], y2: b[1], stroke: "var(--warn)", "stroke-dasharray": "3 3" });
+            const u = r(); K.svg(svg, "circle", { cx: K.lerp(a[0], b[0], u), cy: K.lerp(a[1], b[1], u), r: 5, fill: "none", stroke: "var(--c6)", "stroke-width": 2 });
+            if (!(await ctx.wait(160))) return; ln.style.opacity = 0.2;
+            const t = (k + 1) / 14; bs.forEach(([rc, tx], i) => { const v = K.lerp(bars[i][1], bars[i][2], t); rc.setAttribute("width", v * 1.3); tx.setAttribute("x", 575 + v * 1.3); tx.textContent = v.toFixed(1) + "%"; });
+          }
+        })();
+      },
+    },
+    {
+      title: "补完之后：分布有没有被扭曲", kicker: "第 29–35 格 · 重采样检查", cells: [29, 30, 31, 32, 34, 35], highlight: ["kdeplot", "hue="],
+      html: `<p>作者用饼图和密度曲线比较补样前后：</p><ul class="tight"><li>故障主要出在低质量 L 型产品上，补样后更明显；但按质量等级分开看，各特征分布差别不大，说明“L 型坏得多”主要是因为 L 型数量多 <span data-cell="31">出处</span></li><li>补样没有明显扭曲故障样本的分布 <span data-cell="35">出处</span></li><li>转速、扭矩、刀具磨损上，故障样本的密度峰正好在两端极值处，印证了“离群值是故障的自然表现” <span data-cell="35">出处</span></li></ul>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 250 }, [0, 80], [0, 0.06], { xlabel: "扭矩 N·m（示意）", yticks: 0 });
+        const g = (m, s) => (x) => Math.exp(-0.5 * ((x - m) / s) ** 2) / (s * Math.sqrt(2 * Math.PI));
+        const ok = g(40, 9.5), fail = (x) => 0.55 * g(62, 6)(x) + 0.45 * g(16, 6)(x);
+        const p1 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--ink-3)", "stroke-width": 2.5 }), p2 = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+        K.svg(svg, "text", { x: 280, y: 60, "font-size": 13, fill: "var(--ink-3)" }, "正常：中间一个峰");
+        K.svg(svg, "text", { x: 470, y: 120, "font-size": 13, fill: "var(--c6)" }, "故障：两端各一个峰");
+        ctx.tween(1600, (t) => { let a = "", b = ""; for (let x = 0; x <= 80 * t; x += 0.5) { a += (a ? "L" : "M") + ax.sx(x) + "," + ax.sy(ok(x)); b += (b ? "L" : "M") + ax.sx(x) + "," + ax.sy(fail(x)); } p1.setAttribute("d", a); p2.setAttribute("d", b); });
+      },
+    },
+    {
+      title: "编码、缩放、PCA：温度、功率、刀具磨损三条主轴", kicker: "第 36–46 格 · 特征分析", cells: [36, 37, 39, 41, 42, 43, 44, 45, 46], highlight: ["type_dict", "StandardScaler", "PCA(n_components=3)", "'Power'"],
+      html: `<p>先把质量等级编成 L=0、M=1、H=2，故障类型编成 0–4，再用 <b>StandardScaler</b> 把每列变成“均值 0、标准差 1”。</p><p>然后做 <b>PCA</b>：前三个主成分几乎就能解释全部变化。看载荷（每个主成分由哪些原始特征组成）：<b>PC1 ≈ 两个温度</b>，<b>PC2 ≈ 功率（转速 × 扭矩）</b>，<b>PC3 ≈ 刀具磨损</b>。<span data-cell="42">出处</span></p><p>在这三条轴的三维图里：TWF 几乎只沿“刀具磨损”轴分开；PWF 落在“功率”轴的两端；OSF 是高磨损、低功率；HDF 是高温、低功率。<span data-cell="44">出处</span></p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 20, w: 420, h: 280 }, [-3.5, 3.5], [-3, 3.5], { xlabel: "PC2 功率", ylabel: "PC3 刀具磨损" });
+        const r = K.rng(44), groups = [["正常", 0, 0, 0.9, 0.9, 120], ["PWF", -2.6, 0, 0.3, 0.8, 18], ["PWF", 2.6, 0, 0.3, 0.8, 18], ["OSF", -1, 2.2, 0.5, 0.4, 25], ["HDF", -1.2, 0.2, 0.4, 0.6, 25], ["TWF", 0, 2.6, 0.7, 0.25, 25]];
+        const pts = []; groups.forEach((g) => { for (let i = 0; i < g[5]; i++) pts.push({ f: g[0], x: g[1] + K.randn(r) * g[3], y: g[2] + K.randn(r) * g[4], x0: K.randn(r) * 1.4, y0: K.randn(r) * 1.4 }); });
+        const el = pts.map((p) => K.svg(svg, "circle", { cx: ax.sx(p.x0), cy: ax.sy(p.y0), r: p.f === "正常" ? 2.5 : 3.5, fill: FC[p.f], opacity: p.f === "正常" ? 0.35 : 0.85 }));
+        ["正常", "PWF", "OSF", "HDF", "TWF"].forEach((k, i) => K.svg(svg, "text", { x: 510, y: 60 + i * 24, "font-size": 13, "font-weight": 700, fill: FC[k] }, "● " + k));
+        K.svg(svg, "text", { x: 510, y: 200, "font-size": 12, class: "muted" }, "按作者第 44 格的文字");
+        K.svg(svg, "text", { x: 510, y: 218, "font-size": 12, class: "muted" }, "描述画的示意分布");
+        ctx.wait(500).then((ok) => ok && ctx.tween(1600, (t) => el.forEach((e, i) => { e.setAttribute("cx", ax.sx(K.lerp(pts[i].x0, pts[i].x, t))); e.setAttribute("cy", ax.sy(K.lerp(pts[i].y0, pts[i].y, t))); })));
+      },
+    },
+    {
+      title: "评价指标：为什么更看重 F2", kicker: "第 47 格 · 指标", cells: [47], highlight: ["\\beta = 2", "Recall"],
+      html: `<p>作者列了准确率、AUC、F1，并特别引入 <b>F<sub>β</sub></b>，取 β = 2：</p><ul class="tight"><li><b>召回率</b>：真要坏的机器里，提前报出了几成（漏报越少越高）</li><li><b>精确率</b>：报警的机器里，真要坏的占几成（白跑越少越高）</li><li><b>F2</b>：把召回率看得比精确率更重</li></ul><p>理由：多买几个备件的钱，远小于机器坏了再换的钱。<span data-cell="47">出处</span> 下面的实验可以亲手调阈值看看 F1、F2 和总成本怎么变。</p>`,
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 420, h: 260 }, [0, 1], [0, 1], { xlabel: "精确率", ylabel: "召回率" });
+        const fb = (p, r, b) => (1 + b * b) * p * r / (b * b * p + r || 1);
+        const cells = [];
+        for (let i = 0; i < 20; i++) for (let j = 0; j < 20; j++) { const p = (i + 0.5) / 20, rr = (j + 0.5) / 20; cells.push({ e: K.svg(svg, "rect", { x: ax.sx(i / 20), y: ax.sy((j + 1) / 20), width: 21.5, height: 13.5, fill: K.heat(0) }), p, rr }); }
+        const lab = K.svg(svg, "text", { x: 500, y: 60, "font-size": 15, "font-weight": 700 }, "");
+        K.svg(svg, "text", { x: 500, y: 90, "font-size": 12 }, "颜色越深 = 分数越高");
+        K.svg(svg, "text", { x: 500, y: 140, "font-size": 12 }, "F2 的深色区域偏向上方：");
+        K.svg(svg, "text", { x: 500, y: 160, "font-size": 12 }, "召回率高更重要");
+        (async () => { for (const b of [1, 2]) { lab.textContent = "F" + b; if (!(await ctx.tween(900, (t) => cells.forEach((c) => K.set(c.e, { fill: K.heat(fb(c.p, c.rr, b) * t) }))))) return; if (!(await ctx.wait(900))) return; } })();
+      },
+    },
+    {
+      title: "切分 80/10/10，写好工具函数", kicker: "第 48–52 格 · 准备建模", cells: [48, 49, 50, 52], highlight: ["test_size=0.1", "test_size=0.11", "GridSearchCV(clf", "cv=5, scoring=f2_scorer"],
+      html: `<p>作者先介绍五种分类器，然后切分：<b>训练 80%、验证 10%、测试 10%</b>（作者说试过 70/15/15、60/20/20，这个最好）。按故障类型分层，保证每份里各类比例一致。</p><p>工具函数 <code>tune_and_fit</code> 用 <b>5 折网格搜索</b>、以 F2 为评分挑超参数；另一个函数统一算混淆矩阵、准确率、AUC、F1、F2。</p><p class="callout">切分发生在 SMOTE <b>之后</b>，被切出去的测试集里已经混入了合成故障样本。</p>`,
+      draw(svg, ctx) {
+        const W = 620, segs = [[0.8, "训练 80%", "var(--c1)"], [0.1, "验证 10%", "var(--c2)"], [0.1, "测试 10%", "var(--c3)"]];
+        let x = 40; segs.forEach(([p, l, c]) => { const r0 = K.svg(svg, "rect", { x, y: 60, width: 0, height: 50, fill: c, opacity: 0.7 }); const xx = x; ctx.tween(900, (t) => r0.setAttribute("width", W * p * t)); K.svg(svg, "text", { x: xx + 8, y: 130, "font-size": 13 }, l); x += W * p; });
+        K.svg(svg, "text", { x: 40, y: 40, "font-size": 13 }, "SMOTE 之后的数据（正常 80% + 故障 20%，其中有合成样本）");
+        for (let i = 0; i < 26; i++) { const xx = 40 + (i * 23.7) % W; K.svg(svg, "circle", { cx: xx, cy: 85, r: 4, fill: "none", stroke: "var(--c6)", "stroke-width": 1.5 }); }
+        K.svg(svg, "text", { x: 40, y: 175, "font-size": 13, fill: "var(--bad)" }, "空心圈 = 合成故障样本：三份里都有，测试集不再是“纯真实数据”");
+        K.svg(svg, "text", { x: 40, y: 220, "font-size": 13 }, "更好的顺序：先切出测试集 → 只在训练集里做 SMOTE → 交叉验证时也在每折内部做");
+      },
+    },
+    {
+      title: "特征组合尝试：温度乘积、功率乘积", kicker: "第 53–55 格 · 特征工程", cells: [53, 54, 55], highlight: ["['Power'] = X_train['Rotational speed']*X_train['Torque']", "'Temperature'"],
+      html: `<p>既然两个温度高度相关、转速和扭矩负相关，作者试着把它们<b>两两合成一个新特征</b>：温度乘积、功率（转速 × 扭矩）、或两个都换，用未调参的五个模型比较。</p><p>作者的结论：<b>原始特征最好</b>，合成后效果都下降，所以放弃特征选择。<span data-cell="55">出处</span></p><p>不过，HDF 的规则看的是<b>温度差</b>（&lt; 8.6 K），作者试的却是<b>温度乘积</b>；而且转速、扭矩被换成功率后，散热故障需要的“转速 &lt; 1380”这条线索也丢了。下面的实验单独看功率特征对 PWF 有多大帮助。</p>`,
+      draw(svg, ctx) {
+        const t0 = [["rpm", "1551"], ["Torque", "42.8"]], t1 = [["Power", "≈ 6950 W"]];
+        t0.forEach((c, i) => { K.node(svg, 40, 60 + i * 70, 140, 50, c[0] + "\n" + c[1], {}); });
+        const ar = K.arrow(svg, 190, 120, 300, 120); K.svg(svg, "text", { x: 196, y: 108, "font-size": 12, class: "muted" }, "× 2π/60");
+        const n = K.node(svg, 310, 95, 170, 50, t1[0][0] + "\n" + t1[0][1], { bold: true, fill: "var(--accent-soft)", stroke: "var(--accent)" }); n.style.opacity = 0;
+        K.svg(svg, "text", { x: 40, y: 250, "font-size": 13 }, "物理含义：功率 = 扭矩 × 角速度；PWF 规则就是“功率 < 3500 W 或 > 9000 W”");
+        K.svg(svg, "text", { x: 40, y: 280, "font-size": 12, class: "muted" }, "（数值为示意）");
+        ctx.wait(600).then((ok) => ok && ctx.tween(700, (t) => (n.style.opacity = t)));
+      },
+    },
+    {
+      title: "二分类：逻辑回归基准 + 四个模型调参", kicker: "第 56–64 格 · 会不会坏", cells: [56, 57, 58, 60, 61, 62, 63, 64], highlight: ["LogisticRegression(random_state=0)", "rfc_params", "xgb_params", "permutation_importance"],
+      html: `<p><b>逻辑回归</b>做基准：给每个特征一个权重，加起来过线就判“会坏”。它的<b>几率比</b>显示转速和扭矩被赋予了“不现实的高重要性”，作者认为是故障样本里这两个特征方差特别大造成的。<span data-cell="58">出处</span></p><p>然后对 KNN、SVC、随机森林、XGBoost 做网格搜索（约 8 分钟）。作者结论：<b>XGBoost 最好、KNN 最差，SVC 与随机森林接近</b>；测试集上没有明显下降。<span data-cell="62">出处</span> 有意思的是，随机森林选了“树少而深”，XGBoost 选了“树多而浅”。</p><p><b>置换重要性</b>：把某一列随机打乱，看分数掉多少。除逻辑回归外，模型都很看重刀具磨损、扭矩、转速；Type 最不重要，但删掉它仍会让表现略降。<span data-cell="64">出处</span></p>`,
+      draw(svg, ctx) {
+        const feats = [["Tool wear", 0.9], ["Torque", 0.85], ["Rotational speed", 0.7], ["Air temperature", 0.35], ["Process temperature", 0.25], ["Type", 0.06]];
+        K.svg(svg, "text", { x: 30, y: 28, "font-size": 13, "font-weight": 700 }, "置换重要性：打乱一列，F2 掉多少？（示意，排序按作者文字）");
+        const bs = feats.map((f, i) => { K.svg(svg, "text", { x: 30, y: 70 + i * 42, "font-size": 13 }, f[0]); return K.svg(svg, "rect", { x: 200, y: 56 + i * 42, width: 0, height: 20, rx: 3, fill: "var(--c1)" }); });
+        const shuffle = K.svg(svg, "text", { x: 560, y: 70, "font-size": 22 }, "🔀");
+        (async () => { for (let i = 0; i < feats.length; i++) { shuffle.setAttribute("y", 74 + i * 42); if (!(await ctx.tween(350, (t) => bs[i].setAttribute("width", 340 * feats[i][1] * t)))) return; } })();
+      },
+    },
+    {
+      title: "多分类：判断是哪种故障", kicker: "第 65–74 格 · 坏在哪", cells: [65, 67, 68, 70, 71, 72, 73, 74], highlight: ["multi_class='ovr'", "average='weighted'", "1.5%"],
+      html: `<p>第二个任务：预测是 5 类中的哪一类（正常、PWF、OSF、HDF、TWF）。逻辑回归和 SVC 本来只会二选一，作者用<b>“一对其余”</b>：每类训练一个“是不是我”的分类器，谁最有把握听谁的。指标按类别样本数加权平均。</p><p>逻辑回归的几率比和 PCA 的发现一致：比如 PWF 最看重转速和扭矩，也就是功率。<span data-cell="68">出处</span></p><p>结果：KNN 最差，甚至略低于逻辑回归；SVC 与随机森林接近；<b>XGBoost 最好但只好约 1.5%</b>，训练时间是它们的 4 倍多。<span data-cell="72">出处</span> 去掉 Type 后，各模型几乎没变化。<span data-cell="74">出处</span></p>`,
+      draw(svg, ctx) {
+        const cls = ["正常", "PWF", "OSF", "HDF", "TWF"];
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, "font-weight": 700 }, "一对其余（OvR）：5 个“是不是我”的小分类器");
+        const sc = [0.08, 0.12, 0.81, 0.33, 0.2];
+        const gs = cls.map((c, i) => { const g = K.node(svg, 40, 50 + i * 54, 200, 42, `“是 ${c} 吗？”`, { stroke: FC[c] }); return g; });
+        const bars = cls.map((c, i) => K.svg(svg, "rect", { x: 270, y: 60 + i * 54, width: 0, height: 22, rx: 3, fill: FC[c] }));
+        const txt = cls.map((c, i) => K.svg(svg, "text", { x: 280, y: 76 + i * 54, "font-size": 12 }, ""));
+        const win = K.svg(svg, "text", { x: 560, y: 180, "font-size": 16, "font-weight": 700, fill: FC.OSF }, "");
+        ctx.tween(1300, (t) => bars.forEach((b, i) => { b.setAttribute("width", 260 * sc[i] * t); txt[i].setAttribute("x", 276 + 260 * sc[i] * t); txt[i].textContent = (sc[i] * t).toFixed(2); }))
+          .then((ok) => { if (ok) win.textContent = "→ 判为 OSF"; });
+        K.svg(svg, "text", { x: 30, y: 330, "font-size": 11, class: "muted" }, "分数为示意");
+      },
+    },
+    {
+      title: "随机森林的决策路径与结论", kicker: "第 75–77 格 · 解释与总结", cells: [75, 76, 77], highlight: ["estimators_[0]", "max_depth=4"],
+      html: `<p>作者画出随机森林里第一棵树前 4 层的决策路径（<b>决策树</b>：像“20 个问题”游戏，一个问题一个问题地把样本分开）。有些故障类型到第 4 层还没出现，说明树需要长得比较深。两棵树的第一个问题都是 Type，把低质量 L 型和其他分开。<span data-cell="75">出处</span></p><p>总结：两个任务里模型都表现很好，<b>XGBoost 最好、KNN 最差</b>；KNN 几乎即时响应，XGBoost 更准但更慢，按企业需求选。另外，温度组合、功率、刀具磨损是最重要的三类信息，质量等级对“会不会坏”影响不大。<span data-cell="77">出处</span></p>`,
+      draw(svg, ctx) {
+        const nodes = [[310, 30, "Type ≤ 0.5 ?\n(是否 L 型)"], [140, 120, "Torque > 1.9σ ?"], [480, 120, "Tool wear > 1.5σ ?"], [50, 210, "PWF / OSF"], [230, 210, "继续分…"], [390, 210, "继续分…"], [570, 210, "TWF / OSF"]];
+        const edges = [[0, 1], [0, 2], [1, 3], [1, 4], [2, 5], [2, 6]];
+        const gs = nodes.map((n, i) => { const g = K.node(svg, n[0], n[1], 140, 50, n[2], { bold: i === 0 }); g.style.opacity = 0; return g; });
+        const es = edges.map(([a, b]) => { const e = K.arrow(svg, nodes[a][0] + 70, nodes[a][1] + 50, nodes[b][0] + 70, nodes[b][1]); e.style.opacity = 0; return e; });
+        K.svg(svg, "text", { x: 30, y: 310, "font-size": 12, class: "muted" }, "示意：根节点按作者文字是 Type；其余节点和阈值为示意，不是原图");
+        (async () => { if (!(await ctx.tween(300, (t) => (gs[0].style.opacity = t)))) return; for (let k = 0; k < edges.length; k++) { if (!(await ctx.tween(260, (t) => { es[k].style.opacity = t; gs[edges[k][1]].style.opacity = t; }))) return; } })();
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), steps);
+
+  /* ---------- 实验 A：阈值、F1/F2 与成本 ---------- */
+  const Phi = (x) => 0.5 * (1 + erf(x / Math.SQRT2));
+  function erf(x) { const s = Math.sign(x); x = Math.abs(x); const t = 1 / (1 + 0.3275911 * x); return s * (1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x)); }
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 300,
+    controls: [
+      { id: "t", label: "报警阈值（模型分数超过就安排检修）", min: -1, max: 5, step: 0.05, value: 2, fmt: (v) => v.toFixed(2) },
+      { id: "d", label: "模型区分能力（故障与正常分数相距几个标准差）", min: 1, max: 5, step: 0.1, value: 3, fmt: (v) => v.toFixed(1) },
+      { id: "cfn", label: "漏报一次故障的损失 ÷ 一次白跑检修的损失", min: 1, max: 50, step: 1, value: 20 },
+    ],
+    note: "每 10 万次加工、故障率 3.31%（作者第 25 格）的期望结果：正常分数 ~ N(0,1)，故障分数 ~ N(d,1)。现场算精确率、召回率、F1、F2 和总成本（以一次白跑检修为 1）。找找：成本最低的阈值，和 F1 最高的阈值、F2 最高的阈值，哪个更接近？",
+    render(svg, v) {
+      const N = 100000, p = 0.0331, pos = N * p, neg = N - pos;
+      const st = (t) => { const TP = pos * (1 - Phi(t - v.d)), FP = neg * (1 - Phi(t)), FN = pos - TP; const P = TP + FP ? TP / (TP + FP) : 0, R = TP / pos; const f = (b) => (P + R ? (1 + b * b) * P * R / (b * b * P + R) : 0); return { TP, FP, FN, P, R, f1: f(1), f2: f(2), cost: FP + v.cfn * FN }; };
+      const ax = K.axes(svg, { x: 50, y: 20, w: 560, h: 220 }, [-1, 5], [0, 1], { xlabel: "阈值", yticks: 4 });
+      const curve = (fn, col) => { let d = ""; for (let t = -1; t <= 5.001; t += 0.05) d += (d ? "L" : "M") + ax.sx(t) + "," + ax.sy(fn(st(t))); K.svg(svg, "path", { d, fill: "none", stroke: col, "stroke-width": 2 }); };
+      let maxC = 0; for (let t = -1; t <= 5; t += 0.05) maxC = Math.max(maxC, st(t).cost);
+      curve((s) => s.f1, "var(--c1)"); curve((s) => s.f2, "var(--c3)"); curve((s) => s.cost / maxC, "var(--c6)");
+      let best = { c: 1e18, t: 0 }, b1 = { v: -1, t: 0 }, b2 = { v: -1, t: 0 };
+      for (let t = -1; t <= 5; t += 0.01) { const s = st(t); if (s.cost < best.c) best = { c: s.cost, t }; if (s.f1 > b1.v) b1 = { v: s.f1, t }; if (s.f2 > b2.v) b2 = { v: s.f2, t }; }
+      [[best.t, "var(--c6)"], [b1.t, "var(--c1)"], [b2.t, "var(--c3)"]].forEach(([t, c]) => K.svg(svg, "line", { x1: ax.sx(t), x2: ax.sx(t), y1: 240, y2: 246, stroke: c, "stroke-width": 3 }));
+      K.svg(svg, "line", { x1: ax.sx(v.t), x2: ax.sx(v.t), y1: 20, y2: 240, stroke: "var(--ink)", "stroke-dasharray": "5 3" });
+      K.svg(svg, "text", { x: 55, y: 290, "font-size": 12 }, "蓝 F1   绿 F2   红 总成本（相对值）   底部小竖线 = 各自的最佳阈值");
+      const s = st(v.t);
+      return { readout: [
+        { k: "召回率 / 精确率", v: `${(s.R * 100).toFixed(1)}% / ${(s.P * 100).toFixed(1)}%` },
+        { k: "F1 / F2", v: `${s.f1.toFixed(3)} / ${s.f2.toFixed(3)}` },
+        { k: "每 10 万次：漏报 / 白跑", v: `${Math.round(s.FN)} / ${Math.round(s.FP)}`, color: s.FN > 300 ? "var(--bad)" : "var(--ink)" },
+        { k: "总成本（白跑 = 1）", v: Math.round(s.cost).toLocaleString(), color: Math.abs(v.t - best.t) < 0.15 ? "var(--good)" : "var(--warn)" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：功率特征 + 决策树 ---------- */
+  function gini(a, b) { const n = a + b; return n ? 1 - (a / n) ** 2 - (b / n) ** 2 : 0; }
+  function buildTree(X, y, depth) {
+    const pos = y.reduce((s, v) => s + v, 0);
+    if (depth === 0 || pos === 0 || pos === y.length || y.length < 6) return { leaf: true, p: pos / y.length };
+    let best = null;
+    for (let f = 0; f < X[0].length; f++) {
+      const idx = X.map((_, i) => i).sort((a, b) => X[a][f] - X[b][f]);
+      let lp = 0, ln = 0; const tp = pos, tn = y.length - pos;
+      for (let k = 0; k < idx.length - 1; k++) {
+        if (y[idx[k]]) lp++; else ln++;
+        const v0 = X[idx[k]][f], v1 = X[idx[k + 1]][f]; if (v0 === v1) continue;
+        const nl = k + 1, nr = idx.length - nl, g = (nl * gini(lp, ln) + nr * gini(tp - lp, tn - ln)) / idx.length;
+        if (!best || g < best.g) best = { g, f, thr: (v0 + v1) / 2 };
+      }
+    }
+    if (!best) return { leaf: true, p: pos / y.length };
+    const L = [], R = []; X.forEach((x, i) => (x[best.f] <= best.thr ? L : R).push(i));
+    return { f: best.f, thr: best.thr, l: buildTree(L.map((i) => X[i]), L.map((i) => y[i]), depth - 1), r: buildTree(R.map((i) => X[i]), R.map((i) => y[i]), depth - 1) };
+  }
+  const pred = (t, x) => (t.leaf ? t.p : pred(x[t.f] <= t.thr ? t.l : t.r, x));
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "feat", label: "给决策树的特征", value: "raw", options: [["raw", "原始：转速、扭矩"], ["power", "加一列：功率 = 扭矩 × 角速度"]] },
+      { id: "depth", label: "树的最大深度", min: 1, max: 6, step: 1, value: 2 },
+      { id: "seed", label: "换一批数据", button: true },
+    ],
+    note: "按数据集的 PWF 规则（功率 < 3500 W 或 > 9000 W 即故障）现场模拟 600 条训练、2000 条测试记录，在浏览器里训练一棵基尼决策树，只预测“是不是功率故障”。背景色是树的判断（红 = 故障），虚线是真实的功率边界。原始特征下，树只能用横平竖直的“台阶”去逼近弯曲的边界；有了功率这一列，一两刀就切准了。",
+    render(svg, v) {
+      const mk = (seed, n) => { const r = K.rng(seed), D = []; for (let i = 0; i < n; i++) { const rpm = 1150 + r() * 1750, tq = 3 + r() * 77, P = tq * rpm * 2 * Math.PI / 60; D.push({ rpm, tq, P, y: P < 3500 || P > 9000 ? 1 : 0 }); } return D; };
+      const tr = mk(70 + v.seed * 13, 600), te = mk(9000 + v.seed, 2000);
+      const fx = (d) => (v.feat === "raw" ? [d.rpm, d.tq] : [d.rpm, d.tq, d.P]);
+      const tree = buildTree(tr.map(fx), tr.map((d) => d.y), v.depth);
+      const ax = K.axes(svg, { x: 55, y: 15, w: 560, h: 290 }, [1150, 2900], [3, 80], { xlabel: "转速 rpm", ylabel: "扭矩 N·m" });
+      for (let gx = 0; gx < 56; gx++) for (let gy = 0; gy < 29; gy++) {
+        const rpm = 1150 + (gx + 0.5) * 1750 / 56, tq = 3 + (gy + 0.5) * 77 / 29, P = tq * rpm * 2 * Math.PI / 60;
+        const p = pred(tree, v.feat === "raw" ? [rpm, tq] : [rpm, tq, P]);
+        K.svg(svg, "rect", { x: ax.sx(1150 + gx * 1750 / 56), y: ax.sy(3 + (gy + 1) * 77 / 29), width: 10.2, height: 10.2, fill: p > 0.5 ? "var(--c6)" : "var(--c1)", "fill-opacity": 0.1 + 0.25 * Math.abs(p - 0.5) * 2 });
+      }
+      tr.forEach((d) => K.svg(svg, "circle", { cx: ax.sx(d.rpm), cy: ax.sy(d.tq), r: 2.4, fill: d.y ? "var(--c6)" : "var(--ink-3)", opacity: d.y ? 0.9 : 0.4 }));
+      [3500, 9000].forEach((P) => { let d = ""; for (let rpm = 1150; rpm <= 2900; rpm += 20) { const tq = P / (rpm * 2 * Math.PI / 60); if (tq <= 80 && tq >= 3) d += (d ? "L" : "M") + ax.sx(rpm) + "," + ax.sy(tq); } K.svg(svg, "path", { d, fill: "none", stroke: "var(--ink)", "stroke-dasharray": "5 3", "stroke-width": 1.5 }); });
+      let TP = 0, FP = 0, FN = 0, TN = 0; te.forEach((d) => { const p = pred(tree, fx(d)) > 0.5 ? 1 : 0; if (p && d.y) TP++; else if (p) FP++; else if (d.y) FN++; else TN++; });
+      const R = TP / Math.max(1, TP + FN), Pr = TP / Math.max(1, TP + FP), F2 = Pr + R ? 5 * Pr * R / (4 * Pr + R) : 0;
+      K.svg(svg, "text", { x: 60, y: 350, "font-size": 12, class: "muted" }, "点 = 训练数据（均匀撒点，故障比例比真实数据高，便于观察）");
+      return { readout: [
+        { k: "测试准确率", v: (((TP + TN) / te.length) * 100).toFixed(1) + "%" },
+        { k: "召回率", v: (R * 100).toFixed(1) + "%", color: R > 0.9 ? "var(--good)" : "var(--bad)" },
+        { k: "F2", v: F2.toFixed(3) },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>

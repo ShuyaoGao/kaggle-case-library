@@ -1,0 +1,524 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>脑电情绪识别</title>
+<meta name="description" content="Kaggle 案例拆解：用头戴式脑电的频谱统计特征和 GRU 网络，区分观看悲伤、中性、愉快影片时的脑电，并讨论测试集泄漏与样本只有两个人的局限。">
+<link rel="stylesheet" href="../assets/case.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="crumb" href="../index.html">← Kaggle 案例库</a>
+  <nav><a href="#brief">一分钟看懂</a><a href="#data">数据</a><a href="#pipeline">逐章拆解</a><a href="#results">结果</a><a href="#discuss">讨论</a></nav>
+  <button class="btn ghost" data-theme-toggle title="切换深浅色">◐</button>
+</div></header>
+
+<main class="wrap">
+<section class="hero">
+  <div class="kicker">脑电信号特征 · 三分类 · 情绪与脑机接口</div>
+  <h1>看电影时的脑电，能看出情绪吗？频谱特征 + GRU</h1>
+  <p class="en">Detecting emotions using EEG waves</p>
+  <div class="tags">
+    <span class="tag dl">深度学习</span>
+    <span class="tag method">EEG 脑电</span><span class="tag method">FFT 频谱特征</span><span class="tag method">LabelEncoder / 独热编码</span>
+    <span class="tag method">GRU 循环网络</span><span class="tag method">EarlyStopping</span><span class="tag method">学习率指数衰减</span><span class="tag method">混淆矩阵</span>
+  </div>
+  <div class="metarow">
+    <span>作者 <b>Shreyas Reddy</b></span>
+    <span>Kaggle 点赞 <b>394</b>（2026-11 抓取）</span>
+    <span>数据集 <b>birdy654/eeg-brainwave-dataset-feeling-emotions</b></span>
+    <span><a href="https://www.kaggle.com/code/shreyaspj/detecting-emotions-using-eeg-waves" target="_blank" rel="noopener">在 Kaggle 打开原 notebook ↗</a></span>
+  </div>
+</section>
+
+<p class="callout warn"><b>先说清楚：</b>脑电属于非常私密的生理数据。这份数据只来自<b>两个人</b>，标签是“当时在看哪类影片”，并不是本人报告的感受；模型学到的是“脑电特征和影片类型的关联”，不等于读懂了内心，也不能推广到别人身上。这类模型<b>不能用于判断任何人的情绪或心理状态</b>，更不能用于测谎、招聘、考评等决定。</p>
+
+<section class="block" id="brief">
+  <h2><span class="num">01</span>一分钟看懂</h2>
+  <div class="brief">
+    <div class="card panel"><h3>数据是什么</h3><div class="big">头戴式脑电的统计特征</div><p>两位受试者戴着 4 个电极的 Muse 头环，分别观看悲伤、愉快的影片片段，另录了静息的中性状态；原始波形被切成小段，每段提取成一行统计特征（含 FFT 频谱值）。（数据集说明）</p></div>
+    <div class="card panel"><h3>要预测什么</h3><div class="big">NEGATIVE / NEUTRAL / POSITIVE</div><p>三分类：这一段脑电属于哪种状态。<span data-cell="12">出处</span> 标签来自“看的是哪类影片”。</p></div>
+    <div class="card panel"><h3>用了什么方法</h3><div class="big">把一行特征当成序列喂给 GRU</div><p>每行特征排成一条长“序列”，每一步 1 个数，交给 256 个单元的 GRU，展平后接 3 类 softmax。<span data-cell="17">出处</span></p></div>
+    <div class="card panel"><h3>做到了什么</h3><div class="big">分数在运行输出里</div><p>作者用测试准确率和混淆矩阵评估，<span data-cell="28">出处</span> 但具体数字只在运行输出里，源码不带，本页不列。另外测试集参与了训练过程中的选择，分数会偏乐观。</p></div>
+  </div>
+</section>
+
+<section class="block" id="data">
+  <h2><span class="num">02</span>数据长什么样</h2>
+  <p class="lead">数据集 <b>EEG Brainwave Dataset: Feeling Emotions</b>（J. J. Bird 等，英国阿斯顿大学）。以下信息来自数据集说明页和 notebook 代码；总行数、总列数在作者的运行输出里，源码不带输出，这里不写。</p>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">基本情况</h3>
+      <div class="brief" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="stat-tile"><div class="k">受试者</div><div class="v">2 人</div></div>
+        <div class="stat-tile"><div class="k">电极位置</div><div class="v" style="font-size:18px">TP9 · AF7 · AF8 · TP10</div></div>
+        <div class="stat-tile"><div class="k">每种状态录制</div><div class="v">约 3 分钟</div></div>
+        <div class="stat-tile"><div class="k">文件</div><div class="v" style="font-size:18px">emotions.csv · 约 51 MB</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--ink-2)">受试者（1 男 1 女）、Muse 头环的干电极位置、每种状态约 3 分钟，以及另录 6 分钟静息中性数据，均来自数据集说明；文件大小来自 Kaggle 文件列表；文件名见第 5 格 <span data-cell="5">出处</span>。</p>
+      <p style="font-size:14px;color:var(--ink-2)">影片刺激（数据集说明列出）：悲伤类是几部电影里的离别、葬礼片段；愉快类是歌舞开场、自然延时摄影、搞笑狗狗短片。</p>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">每一列是什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>列名</th><th>含义</th><th>类型</th></tr>
+        <tr><td style="white-space:nowrap"><code>fft_0_b</code> … <code>fft_749_b</code></td><td>一段脑电做傅里叶变换（FFT）后得到的频谱数值，作者第 8 格取的就是这一段 <span data-cell="8">出处</span></td><td>数值</td></tr>
+        <tr><td>其他列</td><td>均值、方差、相关等统计特征（数据集作者的“统计提取”方法），具体列名见运行输出</td><td>数值</td></tr>
+        <tr><td style="white-space:nowrap"><code>label</code></td><td><b>要预测的答案</b>：NEGATIVE / NEUTRAL / POSITIVE <span data-cell="12">出处</span></td><td>类别</td></tr>
+      </table></div>
+      <p style="font-size:14px;color:var(--ink-2)"><b>EEG（脑电图）</b>：贴在头皮上的电极记录到的微弱电压波动，反映大量脑细胞同时活动的节律。<b>FFT</b>：把一段波形拆成“各个频率各占多少”，就像把一段和弦拆成单个音符。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <h2><span class="num">03</span>逐章拆解：跟着作者的 notebook 往下走</h2>
+  <p class="lead"></p>
+  <div id="pipe"></div>
+  <div data-at="10">
+    <h3>实验 A · 从脑电波形到频谱 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab1"></div>
+  </div>
+  <div data-at="17">
+    <h3>实验 B · 一个 GRU 单元怎样“边读边记” <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab2"></div>
+  </div>
+  <div data-at="23">
+    <h3>实验 C · 反复偷看测试集，分数会虚高多少 <span class="sim-badge">浏览器内模拟</span></h3>
+    <div id="lab3"></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <h2><span class="num">04</span>结果与能做什么</h2>
+  <div class="cols2">
+    <div class="panel pad">
+      <h3 style="margin-top:0">作者做了什么、写了什么</h3>
+      <div class="scroll-x"><table class="res">
+        <tr><th>内容</th><th>出处</th></tr>
+        <tr><td>问题：根据看电影时的脑电，预测受试者的情绪状态</td><td><span data-cell="1">第 1 格</span></td></tr>
+        <tr><td>模型：GRU(256, 返回整条序列) → Flatten → Dense(3, softmax)</td><td><span data-cell="17">第 17 格</span></td></tr>
+        <tr><td>训练：Adam、交叉熵、EarlyStopping、ModelCheckpoint、学习率指数衰减</td><td><span data-cell="22">第 22 格</span></td></tr>
+        <tr><td>评估：测试准确率、混淆矩阵、分类报告</td><td><span data-cell="28">第 28 格</span> <span data-cell="30">第 30 格</span></td></tr>
+      </table></div>
+      <p class="callout warn">原 notebook 的具体分数写在运行输出里，Kaggle 下载的源码不带输出，作者的文字里也没写具体数值，所以这里不列分数。</p>
+      <h3>本页发现的问题</h3>
+      <ul class="tight">
+        <li><b>测试集参与了训练决策：</b>第 22 格 <code>validation_data=(x_test, y_test)</code>，早停看的是测试集损失，存档看的是测试集准确率。<span data-cell="22">第 22 格</span></li>
+        <li><b>存了最佳模型却没用：</b>函数里 <code>saved_model = load_model(...)</code>，返回的却是 <code>model</code>（最后一轮的权重）。<span data-cell="22">第 22 格</span></li>
+        <li><b>说明与代码不一致：</b>第 21 格写“训练 100 轮、batch_size=64”，代码实际是 40 轮、batch_size=32。<span data-cell="21">第 21 格</span> <span data-cell="23">第 23 格</span></li>
+        <li><b>随机切分：</b>只有两个人、连续录制，相邻小段可能分别进了训练集和测试集，分数不能代表对“新的人”的效果。<span data-cell="15">第 15 格</span></li>
+      </ul>
+    </div>
+    <div class="panel pad">
+      <h3 style="margin-top:0">这套方法能用在哪</h3>
+      <ul class="tight">
+        <li><b>能预测：</b>在同样设备、同样两个人、同样实验条件下，一段脑电特征更接近哪种观影状态。</li>
+        <li><b>同类问题：</b>专注 / 走神检测、疲劳驾驶预警、睡眠分期、脑机接口指令识别、可穿戴设备的生理信号分类。</li>
+        <li><b>可迁移的套路：</b>原始信号切窗 → 提取频谱与统计特征 → 分类模型；评估时<b>按人切分</b>（训练用一些人，测试用另一些人），并单独留验证集。</li>
+        <li><b>伦理底线：</b>脑电属于生物特征数据，采集要知情同意；结果只用于研究或本人自愿的辅助，不用于评判他人。</li>
+      </ul>
+      <h3>方法清单</h3>
+      <ul class="tight">
+        <li>读数据与查看频谱：<span data-cell="5">第 5 格</span> <span data-cell="10">第 10 格</span></li>
+        <li>标签编码 LabelEncoder（字母序：NEGATIVE=0，NEUTRAL=1，POSITIVE=2）<span data-cell="13">第 13 格</span></li>
+        <li>70/30 随机切分、reshape 成 (样本, 特征数, 1)、独热编码 <span data-cell="15">第 15 格</span></li>
+        <li>GRU 循环网络 <span data-cell="17">第 17 格</span></li>
+        <li>回调：EarlyStopping(patience=10)、ModelCheckpoint、LearningRateScheduler <span data-cell="22">第 22 格</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="discuss">
+  <h2><span class="num">05</span>课堂讨论</h2>
+  <div class="panel pad">
+    <ol class="qs">
+      <li>标签是“看的是哪类影片”，而不是受试者自己说的感受。这两者可能有什么差别？如果改成看完后让受试者打分，又会带来什么新的偏差？</li>
+      <li>整个数据集只有两个人。如果要说明模型对“没见过的人”也有效，应该怎样切分训练集和测试集？</li>
+      <li>作者把测试集当成验证集，又存了最佳模型却返回最后一轮的模型。请分别说明这两件事对报告的测试准确率有什么影响。</li>
+      <li>这些特征列是频谱值和统计量，并不是按时间排列的读数。把它们当成“序列”交给 GRU 合理吗？如果把列的顺序打乱，模型会受影响吗？（可以用实验 B 体会）</li>
+      <li>假如有公司宣称“戴上头环就能知道员工开不开心”，你会提出哪些科学上和伦理上的质疑？</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  原 notebook 作者 Shreyas Reddy，版权归原作者，Kaggle 公开 notebook 默认以 Apache 2.0 许可发布。本页为教学解读，动画与实验中的数据均为模拟示意。数据集：J. J. Bird, A. Ekart, C. D. Buckingham, D. R. Faria, EEG Brainwave Dataset: Feeling Emotions。
+</footer>
+</main>
+
+<script src="nb/eeg-emotion-gru.nb.js"></script>
+<script src="../assets/case.js"></script>
+<script>
+(function () {
+  const K = CaseKit;
+  K.initPage();
+  /* 自查开关：网址带 #qaN 时，动画直接跳到最后一帧，并隐藏第 N 章之前的内容（只用于截图自查） */
+  const QA = location.hash.match(/^#qa(\d+)/);
+  if (QA) { K.tween = (ms, fn) => { fn(1, 1); return Promise.resolve(true); }; }
+  const MONO = "font-family:var(--mono)";
+  const fadeIn = (ctx, els, ms) => ctx.tween(ms || 500, (t) => els.forEach((e) => (e.style.opacity = t)));
+  const hide = (els) => els.forEach((e) => (e.style.opacity = 0));
+  function autoKicker(steps) {
+    const N = (window.CASE_NB || { cells: [] }).cells.length;
+    const st = steps.map((s) => ({ s, a: s.at != null ? s.at : Math.min.apply(null, s.cells) })).sort((x, y) => x.a - y.a);
+    st.forEach((o, k) => {
+      const to = k + 1 < st.length ? st[k + 1].a - 1 : N - 1;
+      o.s.kicker = (to > o.a ? `第 ${o.a}–${to} 格` : `第 ${o.a} 格`) + (o.s.kicker ? " · " + o.s.kicker : "");
+    });
+    return steps;
+  }
+  /* 合成一段示意脑电：各频段正弦 + 噪声 */
+  function wave(T, fs, comps, noise, seed) {
+    const r = K.rng(seed), x = [];
+    for (let i = 0; i < T * fs; i++) { const t = i / fs; let v = 0; comps.forEach(([f, a, ph]) => (v += a * Math.sin(2 * Math.PI * f * t + (ph || 0)))); x.push(v + noise * K.randn(r)); }
+    return x;
+  }
+  function dftMag(x, fs, fmax) {
+    const N = x.length, out = [];
+    for (let k = 0; k <= Math.floor((fmax * N) / fs); k++) {
+      let re = 0, im = 0;
+      for (let n = 0; n < N; n++) { const a = (-2 * Math.PI * k * n) / N; re += x[n] * Math.cos(a); im += x[n] * Math.sin(a); }
+      out.push({ f: (k * fs) / N, m: (2 * Math.sqrt(re * re + im * im)) / N });
+    }
+    return out;
+  }
+  function linePath(pts, sx, sy) { return pts.map((p, i) => (i ? "L" : "M") + sx(p[0]).toFixed(1) + "," + sy(p[1]).toFixed(1)).join(""); }
+
+  const steps = [
+    {
+      at: 0, title: "问题：看电影时的脑电能看出情绪吗", kicker: "背景与导入",
+      html: `<p>作者在第 1 格写明任务：受试者看电影时记录脑电，预测他当时处于哪种情绪状态。第 3 格导入了大量工具包，其中 <code>pywt</code>（小波）、<code>loadmat</code>、随机森林、SVM、PCA 等在后面都没有用到，可能是从别的项目复制来的。</p><p>动画：Muse 头环的 4 个电极（耳后 TP9、TP10，前额 AF7、AF8）记录到波形；三种影片对应三种标签。注意<b>标签是由影片决定的</b>，不是受试者自己报告的感受。</p>`,
+      cells: [1, 3],
+      draw(svg, ctx) {
+        K.svg(svg, "ellipse", { cx: 150, cy: 175, rx: 95, ry: 115, fill: "var(--panel-2)", stroke: "var(--ink-3)" });
+        K.svg(svg, "path", { d: "M140,60 L150,45 L160,60", fill: "none", stroke: "var(--ink-3)" });
+        K.svg(svg, "text", { x: 150, y: 40, "text-anchor": "middle", "font-size": 11, class: "muted" }, "鼻尖方向（俯视示意）");
+        const el = [["AF7", 105, 100], ["AF8", 195, 100], ["TP9", 62, 220], ["TP10", 238, 220]];
+        const dots = el.map(([n, x, y]) => { K.svg(svg, "text", { x, y: y - 14, "text-anchor": "middle", "font-size": 12, "font-weight": 700 }, n); return K.svg(svg, "circle", { cx: x, cy: y, r: 8, fill: "var(--panel)", stroke: "var(--c4)", "stroke-width": 2 }); });
+        const films = [["悲伤影片片段", "NEGATIVE", "var(--c1)"], ["静息（无影片）", "NEUTRAL", "var(--ink-3)"], ["愉快影片片段", "POSITIVE", "var(--c3)"]];
+        const rows = films.map(([a, b, c], i) => { const y = 40 + i * 92; const g = K.svg(svg, "g"); K.node(g, 330, y, 130, 44, a, { fs: 12, stroke: c }); K.arrow(g, 460, y + 22, 530, y + 22); K.svg(g, "text", { x: 540, y: y + 27, "font-size": 14, "font-weight": 700, fill: c }, b); const p = K.svg(g, "path", { d: "", fill: "none", stroke: c, "stroke-width": 1.5 }); g.style.opacity = 0; return { g, p, y, i }; });
+        const note = K.svg(svg, "text", { x: 330, y: 330, "font-size": 12, fill: "var(--warn)" }, "标签 = 看的是哪类影片（不是本人报告的感受）");
+        note.style.opacity = 0;
+        (async () => {
+          if (!(await ctx.tween(700, (t) => dots.forEach((d) => (d.style.fill = `color-mix(in srgb, var(--c4) ${Math.round(t * 80)}%, var(--panel))`))))) return;
+          for (const r of rows) {
+            if (!(await ctx.tween(500, (t) => (r.g.style.opacity = t)))) return;
+            const f = [4, 10, 18][r.i];
+            await ctx.tween(500, (t) => { let d = ""; for (let x = 0; x <= 150 * t; x += 2) d += (d ? "L" : "M") + (330 + x * 0.87) + "," + (r.y + 62 + 8 * Math.sin(x / f) * Math.cos(x / 31)); r.p.setAttribute("d", d); });
+          }
+          await fadeIn(ctx, [note]);
+        })();
+      },
+    },
+    {
+      title: "读入数据：每行是一小段脑电的特征", kicker: "读数据",
+      html: `<p>第 5 格读入 <code>emotions.csv</code> 并用 <code>info()</code> 看列数和类型，第 6 格显示整张表。</p><p>数据集作者并没有直接给出原始波形，而是先把连续的录音切成一小段一小段（“滑动窗口”），每一段算出均值、方差、频谱等统计量，变成表格里的<b>一行</b>。动画演示的就是这个“切窗 → 变成一行数字”的过程。</p>`,
+      cells: [5, 6],
+      draw(svg, ctx) {
+        const x = wave(4, 60, [[2, 0.6], [9, 0.5], [17, 0.25]], 0.25, 3);
+        const ax = K.axes(svg, { x: 30, y: 30, w: 660, h: 110 }, [0, 4], [-2, 2], { xticks: 0, yticks: 0 });
+        K.svg(svg, "path", { d: linePath(x.map((v, i) => [i / 60, v]), ax.sx, ax.sy), fill: "none", stroke: "var(--c4)", "stroke-width": 1.3 });
+        K.svg(svg, "text", { x: 30, y: 22, "font-size": 12, class: "muted" }, "一位受试者的连续脑电（示意）");
+        const win = K.svg(svg, "rect", { x: ax.sx(0), y: 30, width: ax.sx(1) - ax.sx(0), height: 110, fill: "var(--accent)", "fill-opacity": 0.15, stroke: "var(--accent)" });
+        const hdr = ["mean", "std", "fft_0", "fft_1", "…", "label"];
+        hdr.forEach((h, j) => K.svg(svg, "text", { style: MONO, x: 70 + j * 105, y: 180, "font-size": 12, "font-weight": 700 }, h));
+        const r = K.rng(5);
+        (async () => {
+          for (let k = 0; k < 4; k++) {
+            if (!(await ctx.tween(600, (t) => win.setAttribute("x", ax.sx(k * 0.75 + 0.75 * t * (k < 3 ? 1 : 0)))))) return;
+            const seg = x.slice(Math.round(k * 0.75 * 60), Math.round((k * 0.75 + 1) * 60));
+            const m = seg.reduce((a, b) => a + b, 0) / seg.length, sd = Math.sqrt(seg.reduce((a, b) => a + (b - m) * (b - m), 0) / seg.length);
+            const vals = [m.toFixed(2), sd.toFixed(2), (r() * 9).toFixed(1), (r() * 9).toFixed(1), "…", "?"];
+            const row = K.svg(svg, "g"); row.style.opacity = 0;
+            vals.forEach((v, j) => K.svg(row, "text", { style: MONO, x: 70 + j * 105, y: 210 + k * 28, "font-size": 12, fill: j === 5 ? "var(--warn)" : "var(--ink)" }, v));
+            if (!(await fadeIn(ctx, [row], 400))) return;
+          }
+          K.svg(svg, "text", { x: 30, y: 332, "font-size": 12, class: "muted" }, "每个窗口 → 表格里的一行；数值为示意。相邻窗口可能重叠，内容很像。");
+        })();
+      },
+    },
+    {
+      title: "看一行 FFT 频谱特征", kicker: "查看特征",
+      html: `<p>第 8 格取出 <code>fft_0_b</code> 到 <code>fft_749_b</code> 这一段列，第 10 格把第一行画成折线。作者的小标题写的是“查看时间序列”，但这些列其实是 <b>FFT 频谱值</b>：横轴是“第几个频率”，不是时间。</p><p>动画演示 FFT 在做什么：一段看起来杂乱的波，其实是几个不同频率的正弦波叠加；FFT 把它们拆开，算出每个频率“占多少”。</p>`,
+      cells: [8, 10], highlight: ["'fft_0_b':'fft_749_b'"],
+      draw(svg, ctx) {
+        const comps = [[4, 0.7, "var(--c1)"], [10, 1, "var(--c3)"], [20, 0.45, "var(--c2)"]];
+        const fs = 100, T = 1;
+        const ax = K.axes(svg, { x: 40, y: 20, w: 330, h: 120 }, [0, 1], [-2.4, 2.4], { xticks: 0, yticks: 0 });
+        K.svg(svg, "text", { x: 40, y: 160, "font-size": 12, class: "muted" }, "叠加后的波形（示意 1 秒）");
+        const sum = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--ink)", "stroke-width": 1.6 });
+        const parts = comps.map(([f, a, c], i) => {
+          const y0 = 200 + i * 45;
+          const p = K.svg(svg, "path", { d: "", fill: "none", stroke: c, "stroke-width": 1.4 });
+          return { f, a, c, y0, p };
+        });
+        const axs = K.axes(svg, { x: 450, y: 30, w: 240, h: 250 }, [0, 30], [0, 1.1], { xticks: 3, yticks: 0, xlabel: "频率（Hz）" });
+        const bars = comps.map(([f, a, c]) => K.svg(svg, "rect", { x: axs.sx(f) - 6, y: axs.sy(0), width: 12, height: 0, fill: c }));
+        const N = fs * T;
+        const total = (t) => comps.reduce((s, [f, a]) => s + a * Math.sin(2 * Math.PI * f * t), 0);
+        let d = ""; for (let i = 0; i <= N; i++) d += (i ? "L" : "M") + ax.sx(i / N) + "," + ax.sy(total(i / N));
+        sum.setAttribute("d", d);
+        ctx.wait(500).then((ok) => ok && ctx.tween(1400, (t) => parts.forEach((q) => {
+          let dd = ""; for (let i = 0; i <= N; i++) dd += (i ? "L" : "M") + (40 + (i / N) * 330) + "," + (K.lerp(ax.sy(total(i / N)), q.y0 + 16 * Math.sin(2 * Math.PI * q.f * i / N) * q.a, t));
+          q.p.setAttribute("d", dd);
+        }))).then((ok) => ok && ctx.tween(900, (t) => bars.forEach((b, i) => { const h = (axs.sy(0) - axs.sy(comps[i][1])) * t; b.setAttribute("y", axs.sy(0) - h); b.setAttribute("height", h); })))
+          .then((ok) => ok && K.svg(svg, "text", { x: 450, y: 22, "font-size": 12, class: "muted" }, "FFT：每个频率的强度"));
+      },
+    },
+    {
+      title: "三类标签变成数字", kicker: "标签编码",
+      html: `<p>第 12 格说明有三种标签：NEGATIVE、NEUTRAL、POSITIVE。第 13 格用 <code>LabelEncoder</code> 把它们换成整数。LabelEncoder 按<b>字母顺序</b>编号，所以 NEGATIVE=0、NEUTRAL=1、POSITIVE=2，正好也是“从消极到积极”的顺序，但这只是巧合。</p><p>编号本身没有大小意义，后面第 15 格还会把它们变成独热编码。</p>`,
+      cells: [12, 13], highlight: ["LabelEncoder"],
+      draw(svg, ctx) {
+        const raw = ["POSITIVE", "NEGATIVE", "NEUTRAL", "POSITIVE", "NEUTRAL", "NEGATIVE"];
+        const order = ["NEGATIVE", "NEUTRAL", "POSITIVE"], col = { NEGATIVE: "var(--c1)", NEUTRAL: "var(--ink-3)", POSITIVE: "var(--c3)" };
+        K.svg(svg, "text", { x: 40, y: 34, "font-size": 13, class: "muted" }, "原始 label 列");
+        const els = raw.map((s, i) => K.node(svg, 40, 50 + i * 44, 140, 34, s, { stroke: col[s], fs: 12 }));
+        K.svg(svg, "text", { x: 260, y: 34, "font-size": 13, class: "muted" }, "① 按字母排序找出类别");
+        const cls = order.map((s, i) => K.node(svg, 260, 80 + i * 70, 150, 44, s, { stroke: col[s], fs: 13, bold: true }));
+        K.svg(svg, "text", { x: 470, y: 34, "font-size": 13, class: "muted" }, "② 发编号 → ③ 替换整列");
+        const ids = order.map((s, i) => K.svg(svg, "text", { style: MONO, x: 430, y: 108 + i * 70, "font-size": 20, "font-weight": 700, fill: col[s] }, "→ " + i));
+        const out = raw.map((s, i) => K.svg(svg, "text", { style: MONO, x: 600, y: 72 + i * 44, "font-size": 18, "font-weight": 700, fill: col[s] }, order.indexOf(s)));
+        hide([...cls, ...ids, ...out]);
+        fadeIn(ctx, cls, 700).then((ok) => ok && fadeIn(ctx, ids, 600)).then(async (ok) => { if (!ok) return; for (const o of out) { if (!(await fadeIn(ctx, [o], 200))) return; } });
+      },
+    },
+    {
+      title: "切分、变形、独热编码", kicker: "准备训练数据",
+      html: `<p>第 15 格做了三件事：</p><ul class="tight"><li><code>train_test_split(train_size=0.7)</code>：随机 70% 训练、30% 测试</li><li><code>reshape(样本数, 特征数, 1)</code>：把一行几千个特征竖起来，变成“一条很长的序列，每一步只有 1 个数”，这是 GRU 要求的输入形状</li><li><code>pd.get_dummies</code>：把 0/1/2 变成独热编码，例如 2 → [0, 0, 1]</li></ul><p>随机切分在这里有隐患：只有两个人、连续录制，相邻的小段很像，一段进训练集、隔壁一段进测试集，等于考到了“几乎见过的题”。</p>`,
+      cells: [15], highlight: ["reshape", "get_dummies"],
+      draw(svg, ctx) {
+        const n = 10;
+        K.svg(svg, "text", { x: 30, y: 30, "font-size": 13, class: "muted" }, "一行特征（示意 10 个）");
+        const cells = Array.from({ length: n }, (_, i) => K.svg(svg, "rect", { x: 30 + i * 34, y: 44, width: 30, height: 30, rx: 3, fill: K.heat((i * 37 % 10) / 10), stroke: "var(--line)" }));
+        const lab = K.svg(svg, "text", { x: 30, y: 110, "font-size": 13 }, "形状 (1, 10)");
+        K.svg(svg, "text", { x: 470, y: 30, "font-size": 13, class: "muted" }, "标签 2 的独热编码");
+        const oh = [0, 0, 1].map((v, i) => K.node(svg, 470 + i * 70, 44, 60, 40, String(v), { stroke: v ? "var(--c3)" : "var(--line)", bold: !!v }));
+        K.svg(svg, "text", { x: 470, y: 108, "font-size": 12, class: "muted" }, "NEGATIVE  NEUTRAL  POSITIVE");
+        hide(oh);
+        ctx.wait(500).then((ok) => ok && ctx.tween(1400, (t) => {
+          cells.forEach((c, i) => { c.setAttribute("x", K.lerp(30 + i * 34, 380, t)); c.setAttribute("y", K.lerp(44, 130 + i * 20, t)); c.setAttribute("height", K.lerp(30, 18, t)); });
+          lab.textContent = t > 0.5 ? "reshape 后：形状 (10, 1)，10 步，每步 1 个数" : "形状 (1, 10)";
+        })).then((ok) => ok && fadeIn(ctx, oh, 600));
+      },
+    },
+    {
+      title: "GRU：把特征当成一条长序列来读", kicker: "模型结构",
+      html: `<p>第 17 格搭模型：</p><ul class="tight"><li><code>GRU(256, return_sequences=True)</code>：从第一个特征读到最后一个，每读一步更新 256 个“记忆单元”，并把<b>每一步</b>的状态都输出</li><li><code>Flatten()</code>：把“步数 × 256”的结果摊成一个超长向量</li><li><code>Dense(3, softmax)</code>：输出三类的概率</li></ul><p>两点值得注意：① GRU 本来是为“有先后顺序”的数据设计的，而这里的特征列是频谱值和统计量，顺序是人为排的；② 序列有几千步时，Flatten 后的向量长度是“步数 × 256”，最后一层的参数量会非常大。第 19 格画出模型结构图。</p>`,
+      cells: [17, 19], highlight: ["GRU(256, return_sequences=True)", "Flatten()"],
+      draw(svg, ctx) {
+        const n = 5, xs = Array.from({ length: n }, (_, i) => 70 + i * 110);
+        const lbl = ["fft_0", "fft_1", "fft_2", "fft_3", "…"];
+        lbl.forEach((l, i) => { K.svg(svg, "text", { style: MONO, x: xs[i] + 30, y: 320, "text-anchor": "middle", "font-size": 12 }, l); K.svg(svg, "rect", { x: xs[i] + 18, y: 280, width: 24, height: 24, rx: 3, fill: K.heat(0.2 + (i * 0.17) % 0.8), stroke: "var(--line)" }); });
+        const cells = xs.map((x) => K.node(svg, x, 190, 60, 50, "GRU", { bold: true, stroke: "var(--c4)", fill: "color-mix(in srgb, var(--c4) 12%, var(--panel))" }));
+        const ups = xs.map((x) => K.arrow(svg, x + 30, 278, x + 30, 242, { color: "var(--ink-3)" }));
+        const hs = xs.slice(1).map((x, i) => K.arrow(svg, xs[i] + 60, 215, x, 215, { color: "var(--c4)" }));
+        const outs = xs.map((x) => K.svg(svg, "rect", { x: x + 5, y: 140, width: 50, height: 22, rx: 3, fill: "var(--panel-2)", stroke: "var(--line)" }));
+        const flat = K.svg(svg, "rect", { x: 70, y: 70, width: 0, height: 18, rx: 3, fill: "var(--c2)", "fill-opacity": 0.6 });
+        const ft = K.svg(svg, "text", { x: 70, y: 60, "font-size": 12 }, "Flatten：步数 × 256 个数排成一长条");
+        const dn = K.node(svg, 600, 20, 100, 40, "Dense(3)\nsoftmax", { fs: 12, bold: true });
+        hide([...hs, ft, dn]);
+        (async () => {
+          for (let i = 0; i < n; i++) {
+            if (i > 0 && !(await ctx.tween(250, (t) => (hs[i - 1].style.opacity = t)))) return;
+            if (!(await ctx.tween(300, (t) => (outs[i].style.fill = `color-mix(in srgb, var(--c4) ${Math.round(t * 60)}%, var(--panel-2))`)))) return;
+          }
+          if (!(await fadeIn(ctx, [ft], 300))) return;
+          if (!(await ctx.tween(900, (t) => flat.setAttribute("width", 500 * t)))) return;
+          await fadeIn(ctx, [dn], 400);
+        })();
+      },
+    },
+    {
+      title: "训练设置：Adam、早停、学习率衰减", kicker: "训练配置",
+      html: `<p>第 21 格的说明写“训练 100 轮，学习率 0.001，batch_size=64”。第 22 格的 <code>train_model</code> 函数里：</p><ul class="tight"><li>优化器 Adam，学习率 0.001；损失是分类交叉熵</li><li><b>EarlyStopping</b>：验证损失 10 轮不下降就停</li><li><b>ModelCheckpoint</b>：验证准确率创新高时把模型存成文件</li><li><b>LearningRateScheduler</b>：学习率按 0.001 × e<sup>−轮次/10</sup> 逐轮变小</li></ul><p>但实际代码里 <code>batch_size=32</code>，第 23 格调用时 <code>epoch=40</code>，和说明不一致。动画画出了这条学习率曲线：到第 40 轮时只剩起点的约 2%。</p>`,
+      cells: [21, 22], highlight: ["np.exp(-epoch / 10.)", "batch_size=32", "patience=10"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 70, y: 30, w: 600, h: 240 }, [0, 40], [0, 0.001], { xticks: 8, yticks: 5, xlabel: "轮次 epoch", yfmt: (v) => v.toFixed(4) });
+        const p = K.svg(svg, "path", { d: "", fill: "none", stroke: "var(--accent)", "stroke-width": 2.5 });
+        const dot = K.svg(svg, "circle", { cx: ax.sx(0), cy: ax.sy(0.001), r: 5, fill: "var(--accent)" });
+        const lab = K.svg(svg, "text", { x: 420, y: 60, "font-size": 14, "font-weight": 700 }, "");
+        ctx.tween(2200, (t) => {
+          const E = 40 * t; let d = "";
+          for (let e = 0; e <= E; e += 0.25) d += (d ? "L" : "M") + ax.sx(e) + "," + ax.sy(0.001 * Math.exp(-e / 10));
+          p.setAttribute("d", d); dot.setAttribute("cx", ax.sx(E)); dot.setAttribute("cy", ax.sy(0.001 * Math.exp(-E / 10)));
+          lab.textContent = `第 ${Math.round(E)} 轮：lr = ${(0.001 * Math.exp(-E / 10)).toExponential(1)}`;
+        });
+        K.svg(svg, "text", { x: 420, y: 90, "font-size": 12, class: "muted" }, "lr = 0.001 × e^(−epoch/10)");
+      },
+    },
+    {
+      title: "测试集同时当了验证集", kicker: "关键问题",
+      html: `<p>第 23 格调用 <code>train_model(model, X_train, y_train, X_test, y_test, ..., epoch=40)</code>，函数内部把 <code>(x_test, y_test)</code> 当作 <code>validation_data</code>。于是：</p><ul class="tight"><li>早停根据<b>测试集</b>损失决定什么时候停</li><li>存档根据<b>测试集</b>准确率挑“最佳模型”</li></ul><p>更奇怪的是，函数最后读回了最佳模型 <code>saved_model</code>，却 <code>return model</code>，返回的是最后一轮的权重，存档白存了。后面第 28 格评估用的是这个 <code>model</code>。</p>`,
+      cells: [23], highlight: ["X_test, y_test"],
+      draw(svg, ctx) {
+        const tr = K.node(svg, 20, 40, 140, 50, "训练集 70%", { stroke: "var(--c1)" });
+        const te = K.node(svg, 20, 230, 140, 50, "测试集 30%", { stroke: "var(--c3)", bold: true });
+        const fit = K.node(svg, 250, 40, 150, 50, "model.fit\n逐轮训练", {});
+        const es = K.node(svg, 250, 150, 150, 46, "EarlyStopping\n看 val_loss", { stroke: "var(--warn)" });
+        const mc = K.node(svg, 250, 230, 150, 46, "ModelCheckpoint\n看 val_accuracy", { stroke: "var(--warn)" });
+        const h5 = K.node(svg, 470, 230, 120, 46, "_best_model.h5\n→ saved_model", { fs: 12 });
+        const ret = K.node(svg, 470, 40, 120, 50, "return model\n（最后一轮）", { bold: true });
+        const ev = K.node(svg, 620, 40, 90, 50, "第 28 格\n评估", { fs: 12 });
+        const arr = [K.arrow(svg, 160, 65, 248, 65), K.arrow(svg, 160, 245, 248, 175, { color: "var(--warn)" }), K.arrow(svg, 160, 255, 248, 253, { color: "var(--warn)" }), K.arrow(svg, 325, 148, 325, 92, { color: "var(--warn)" }), K.arrow(svg, 400, 253, 468, 253), K.arrow(svg, 400, 65, 468, 65), K.arrow(svg, 590, 65, 618, 65)];
+        const x1 = K.svg(svg, "text", { x: 530, y: 310, "text-anchor": "middle", "font-size": 13, fill: "var(--bad)", "font-weight": 700 }, "✗ 读回来了，但没被返回");
+        const w = K.svg(svg, "text", { x: 20, y: 320, "font-size": 13, fill: "var(--warn)", "font-weight": 700 }, "测试集参与了“何时停止”");
+        const all = [fit, es, mc, h5, ret, ev, ...arr, x1, w];
+        hide(all);
+        (async () => { for (const e of all) { if (!(await fadeIn(ctx, [e], 260))) return; } })();
+      },
+    },
+    {
+      title: "学习曲线", kicker: "训练过程",
+      html: `<p>第 25 格画出每一轮的训练 / 测试准确率和损失。作者的图例写的就是 <code>['train', 'test']</code>，也说明了这里的“验证”其实是测试集。</p><p>看学习曲线主要看两件事：两条线是否都在变好；两条线之间的差距是否越拉越大（越拉越大说明模型开始死记训练数据，叫<b>过拟合</b>）。动画的曲线是示意，不是作者的结果。</p>`,
+      cells: [25], highlight: ["['train', 'test']"],
+      draw(svg, ctx) {
+        const ax = K.axes(svg, { x: 60, y: 30, w: 600, h: 240 }, [0, 40], [0.3, 1], { xticks: 8, xlabel: "轮次 epoch（示意曲线）", yfmt: (v) => v.toFixed(1) });
+        const tr = (e) => 1 - 0.65 * Math.exp(-e / 5), te = (e) => 0.92 - 0.6 * Math.exp(-e / 5) - 0.0008 * Math.max(0, e - 15) * 1.5;
+        const p1 = K.svg(svg, "path", { fill: "none", stroke: "var(--c1)", "stroke-width": 2 }), p2 = K.svg(svg, "path", { fill: "none", stroke: "var(--c3)", "stroke-width": 2 });
+        const gap = K.svg(svg, "path", { fill: "var(--warn)", "fill-opacity": 0.15 });
+        K.svg(svg, "text", { x: 480, y: 220, "font-size": 13, fill: "var(--c1)" }, "— train");
+        K.svg(svg, "text", { x: 480, y: 244, "font-size": 13, fill: "var(--c3)" }, "— test（被当作验证）");
+        ctx.tween(2200, (t) => {
+          const E = 40 * t; let a = "", b = "", g = "", gb = "";
+          for (let e = 0; e <= E; e += 0.5) { a += (a ? "L" : "M") + ax.sx(e) + "," + ax.sy(tr(e)); b += (b ? "L" : "M") + ax.sx(e) + "," + ax.sy(te(e)); }
+          for (let e = 0; e <= E; e += 0.5) g += (g ? "L" : "M") + ax.sx(e) + "," + ax.sy(tr(e));
+          for (let e = E; e >= 0; e -= 0.5) gb += "L" + ax.sx(e) + "," + ax.sy(te(e));
+          p1.setAttribute("d", a); p2.setAttribute("d", b); if (g) gap.setAttribute("d", g + gb + "Z");
+        }).then((ok) => ok && K.svg(svg, "text", { x: ax.sx(30), y: ax.sy(0.93), "font-size": 12, fill: "var(--warn)" }, "两线差距 = 过拟合的信号"));
+      },
+    },
+    {
+      title: "测试准确率与混淆矩阵", kicker: "评估",
+      html: `<p>第 28 格用 <code>model.evaluate</code> 在测试集上算准确率；第 30 格把预测概率取最大的那一类，和真实类别对照，画出 3×3 的<b>混淆矩阵</b>，并打印每一类的精确率、召回率、F1。</p><p>混淆矩阵对角线是“猜对的”，其他格子是“把 A 猜成了 B”。在情绪任务里，最值得看的是 NEUTRAL 和另外两类之间的混淆。动画里的颜色深浅只是示意。原 notebook 的具体分数在运行输出里，源码不带，这里不列。</p>`,
+      cells: [28, 30], highlight: ["confusion_matrix", "idxmax"],
+      draw(svg, ctx) {
+        const L = ["NEG", "NEU", "POS"], M = [[0.9, 0.06, 0.04], [0.05, 0.92, 0.03], [0.07, 0.05, 0.88]];
+        K.svg(svg, "text", { x: 200, y: 30, "text-anchor": "middle", "font-size": 13, class: "muted" }, "预测类别 →（示意）");
+        L.forEach((l, j) => K.svg(svg, "text", { x: 140 + j * 80, y: 55, "text-anchor": "middle", "font-size": 13, "font-weight": 700 }, l));
+        L.forEach((l, i) => K.svg(svg, "text", { x: 90, y: 100 + i * 80, "text-anchor": "end", "font-size": 13, "font-weight": 700 }, l));
+        const cells = [];
+        M.forEach((row, i) => row.forEach((v, j) => cells.push({ v, r: K.svg(svg, "rect", { x: 100 + j * 80, y: 65 + i * 80, width: 76, height: 76, rx: 6, fill: "var(--panel-2)", stroke: i === j ? "var(--good)" : "var(--line)" }) })));
+        K.svg(svg, "text", { x: 30, y: 190, "font-size": 13, class: "muted", transform: "rotate(-90 30 190)" }, "真实类别");
+        const notes = ["对角线 = 猜对", "非对角 = 混淆（如把 NEU 猜成 POS）", "只有 2 个人、随机切分：", "测试集里的片段和训练集“很像”", "→ 分数不代表对新的人的效果"].map((s, i) => K.svg(svg, "text", { x: 380, y: 90 + i * 30, "font-size": 13, fill: i >= 2 ? "var(--warn)" : "var(--ink)" }, s));
+        hide(notes);
+        ctx.tween(1200, (t) => cells.forEach((c) => (c.r.style.fill = K.heat(c.v * t))))
+          .then(async (ok) => { if (!ok) return; for (const n of notes) { if (!(await fadeIn(ctx, [n], 300))) return; } });
+      },
+    },
+  ];
+  K.pipeline(document.getElementById("pipe"), autoKicker(steps));
+  if (QA) {
+    const n = +QA[1];
+    document.querySelectorAll(".hero, #brief, #data, .walk-top, main > .callout").forEach((e) => (e.style.display = "none"));
+    document.querySelectorAll(".chapter").forEach((c, i) => { if (i + 1 < n) c.style.display = "none"; });
+    document.querySelectorAll("#pipe .cell, #pipe .cell-note").forEach((e) => (e.style.display = "none"));
+  }
+
+  /* ---------- 实验 A：波形 → 频谱 ---------- */
+  K.lab(document.getElementById("lab1"), {
+    width: 640, height: 400,
+    controls: [
+      { id: "th", label: "θ 波（6 Hz，常与困倦、走神相关）强度", min: 0, max: 1.5, step: 0.05, value: 0.3, fmt: (v) => v.toFixed(2) },
+      { id: "al", label: "α 波（10 Hz，闭眼放松时常见）强度", min: 0, max: 1.5, step: 0.05, value: 1, fmt: (v) => v.toFixed(2) },
+      { id: "be", label: "β 波（20 Hz，专注、紧张时常见）强度", min: 0, max: 1.5, step: 0.05, value: 0.4, fmt: (v) => v.toFixed(2) },
+      { id: "no", label: "噪声（眨眼、肌肉、接触不良）", min: 0, max: 1.5, step: 0.05, value: 0.4, fmt: (v) => v.toFixed(2) },
+      { id: "seed", label: "换一段噪声", button: true },
+    ],
+    note: "浏览器里合成 2 秒、每秒 100 个点的示意信号，现场做离散傅里叶变换。上图是时间域（横轴是时间），下图是频率域（横轴是频率），后者就是 fft_* 这类列描述的东西。频段与状态的对应只是常见说法，个体差异很大。",
+    render(svg, v) {
+      const fs = 100, T = 2;
+      const x = wave(T, fs, [[6, v.th, 0.3], [10, v.al, 1.1], [20, v.be, 2]], v.no, 11 + v.seed * 7);
+      const ax = K.axes(svg, { x: 50, y: 14, w: 570, h: 130 }, [0, T], [-4, 4], { xticks: 4, yticks: 2, xlabel: "时间（秒）" });
+      K.svg(svg, "path", { d: linePath(x.map((y, i) => [i / fs, K.clamp(y, -4, 4)]), ax.sx, ax.sy), fill: "none", stroke: "var(--c4)", "stroke-width": 1.2 });
+      const sp = dftMag(x, fs, 35);
+      const mx = Math.max(1.6, ...sp.map((d) => d.m));
+      const bx = K.axes(svg, { x: 50, y: 200, w: 570, h: 150 }, [0, 35], [0, mx], { xticks: 7, yticks: 2, xlabel: "频率（Hz）", yfmt: (v) => v.toFixed(1) });
+      [[4, 8, "θ", "var(--c1)"], [8, 13, "α", "var(--c3)"], [13, 30, "β", "var(--c2)"]].forEach(([a, b, n, c]) => {
+        K.svg(svg, "rect", { x: bx.sx(a), y: 200, width: bx.sx(b) - bx.sx(a), height: 150, fill: c, "fill-opacity": 0.08 });
+        K.svg(svg, "text", { x: (bx.sx(a) + bx.sx(b)) / 2, y: 196, "text-anchor": "middle", "font-size": 12, fill: c, "font-weight": 700 }, n);
+      });
+      const w = (bx.sx(0.5) - bx.sx(0)) * 0.8;
+      sp.forEach((d) => K.svg(svg, "rect", { x: bx.sx(d.f) - w / 2, y: bx.sy(d.m), width: w, height: bx.sy(0) - bx.sy(d.m), fill: "var(--accent)" }));
+      const band = (a, b) => sp.filter((d) => d.f >= a && d.f < b).reduce((s, d) => s + d.m * d.m, 0);
+      const pt = band(4, 8), pa = band(8, 13), pb = band(13, 30), tot = pt + pa + pb || 1;
+      return { readout: [
+        { k: "θ 频段能量占比", v: ((pt / tot) * 100).toFixed(0) + "%", color: "var(--c1)" },
+        { k: "α 频段能量占比", v: ((pa / tot) * 100).toFixed(0) + "%", color: "var(--c3)" },
+        { k: "β 频段能量占比", v: ((pb / tot) * 100).toFixed(0) + "%", color: "var(--c2)" },
+        { k: "α / β 比值", v: pb > 1e-9 ? (pa / pb).toFixed(2) : "—" },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 B：单个 GRU 单元 ---------- */
+  const SEQ = (() => { const r = K.rng(21), s = []; for (let i = 0; i < 30; i++) s.push(i >= 10 && i < 14 ? 1.6 + 0.3 * K.randn(r) : 0.25 * K.randn(r)); return s; })();
+  K.lab(document.getElementById("lab2"), {
+    width: 640, height: 410,
+    controls: [
+      { id: "bz", label: "更新门偏置 b_z（越大越愿意用新信息改写记忆）", min: -4, max: 4, step: 0.1, value: 0, fmt: (v) => v.toFixed(1) },
+      { id: "wh", label: "输入权重 w_h（新信息有多大分量）", min: 0, max: 3, step: 0.1, value: 1.5, fmt: (v) => v.toFixed(1) },
+      { id: "shuf", label: "特征顺序", value: "orig", options: [["orig", "原顺序（一段连续的强信号）"], ["shuf", "把列顺序随机打乱"]] },
+    ],
+    note: "一个只有 1 个记忆单元的 GRU（作者用了 256 个），权重是手设的示意值，计算公式和 Keras 的 GRU 相同：z = σ(w_z·x + u_z·h + b_z)，r = σ(w_r·x + u_r·h)，h̃ = tanh(w_h·x + u_h·(r·h))，h ← (1−z)·h + z·h̃。灰柱是输入特征，红线是记忆 h，虚线是更新门 z。",
+    render(svg, v) {
+      let seq = SEQ.slice();
+      if (v.shuf === "shuf") { const r = K.rng(5); for (let i = seq.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [seq[i], seq[j]] = [seq[j], seq[i]]; } }
+      const wz = 1.0, uz = 0.5, wr = 1.0, ur = 0.5, uh = 0.8;
+      let h = 0; const H = [], Z = [];
+      seq.forEach((x) => { const z = K.sigmoid(wz * x + uz * h + v.bz), r = K.sigmoid(wr * x + ur * h), hh = Math.tanh(v.wh * x + uh * r * h); h = (1 - z) * h + z * hh; H.push(h); Z.push(z); });
+      const ax = K.axes(svg, { x: 50, y: 20, w: 570, h: 290 }, [0, seq.length], [-1, 2.2], { xticks: 6, yticks: 4, xlabel: "第几个特征（被当成第几“步”）", yfmt: (x) => x.toFixed(1) });
+      const bw = (570 / seq.length) * 0.7;
+      seq.forEach((x, i) => K.svg(svg, "rect", { x: ax.sx(i + 0.5) - bw / 2, y: Math.min(ax.sy(x), ax.sy(0)), width: bw, height: Math.abs(ax.sy(x) - ax.sy(0)), fill: "var(--ink-3)", "fill-opacity": 0.35 }));
+      K.svg(svg, "path", { d: linePath(Z.map((z, i) => [i + 0.5, z]), ax.sx, ax.sy), fill: "none", stroke: "var(--c4)", "stroke-dasharray": "4 3", "stroke-width": 1.5 });
+      K.svg(svg, "path", { d: linePath(H.map((y, i) => [i + 0.5, y]), ax.sx, ax.sy), fill: "none", stroke: "var(--c6)", "stroke-width": 2.5 });
+      H.forEach((y, i) => K.svg(svg, "circle", { cx: ax.sx(i + 0.5), cy: ax.sy(y), r: 3, fill: "var(--c6)" }));
+      K.svg(svg, "text", { x: 60, y: 372, "font-size": 12, fill: "var(--c6)" }, "— 记忆 h");
+      K.svg(svg, "text", { x: 150, y: 372, "font-size": 12, fill: "var(--c4)" }, "--- 更新门 z（0 = 保留旧记忆，1 = 换成新信息）");
+      K.svg(svg, "text", { x: 60, y: 396, "font-size": 12, fill: "var(--ink-3)" }, "灰柱 = 输入的特征值（示意）");
+      const avgZ = Z.reduce((a, b) => a + b, 0) / Z.length;
+      return { readout: [
+        { k: "最后一步的记忆 h", v: H[H.length - 1].toFixed(3) },
+        { k: "记忆最高点", v: Math.max(...H).toFixed(2) },
+        { k: "更新门平均值", v: avgZ.toFixed(2) },
+      ] };
+    },
+  });
+
+  /* ---------- 实验 C：反复用测试集挑模型的乐观偏差 ---------- */
+  K.lab(document.getElementById("lab3"), {
+    width: 640, height: 360,
+    controls: [
+      { id: "n", label: "测试集样本数", min: 50, max: 2000, step: 50, value: 300 },
+      { id: "k", label: "在测试集上“看”了几次来挑最好的一轮", min: 1, max: 40, step: 1, value: 40 },
+      { id: "p", label: "模型真实准确率（假设每一轮都一样）", min: 0.6, max: 0.98, step: 0.01, value: 0.9, fmt: (v) => (v * 100).toFixed(0) + "%" },
+      { id: "seed", label: "重新模拟", button: true },
+    ],
+    note: "每次模拟：假设训练了 k 轮，每一轮的真实准确率都一样，但在有限的测试集上量出来的准确率有随机波动；挑测试分数最高的那一轮报告。重复 400 次，柱子是“报告的分数 − 真实准确率”的分布。k = 1 时（只看一次）偏差在 0 附近；k 越大，越偏向乐观。",
+    render(svg, v) {
+      const r = K.rng(77 + v.seed * 13), reps = 400, diffs = [];
+      const sd = Math.sqrt((v.p * (1 - v.p)) / v.n);
+      for (let t = 0; t < reps; t++) { let best = -1; for (let j = 0; j < v.k; j++) best = Math.max(best, v.p + sd * K.randn(r)); diffs.push(best - v.p); }
+      const lo = -0.08, hi = 0.12, nb = 40, bins = Array(nb).fill(0);
+      diffs.forEach((d) => { const b = Math.floor(((K.clamp(d, lo, hi - 1e-9) - lo) / (hi - lo)) * nb); bins[b]++; });
+      const mx = Math.max(...bins);
+      const ax = K.axes(svg, { x: 50, y: 20, w: 570, h: 270 }, [lo * 100, hi * 100], [0, mx], { xticks: 10, yticks: 0, xlabel: "报告分数 − 真实准确率（百分点）", xfmt: (x) => (x > 0 ? "+" : "") + x.toFixed(0) });
+      bins.forEach((c, i) => { const a = lo + (i * (hi - lo)) / nb; K.svg(svg, "rect", { x: ax.sx(a * 100) + 1, y: ax.sy(c), width: ax.sx((a + (hi - lo) / nb) * 100) - ax.sx(a * 100) - 2, height: ax.sy(0) - ax.sy(c), fill: a >= 0 ? "var(--warn)" : "var(--c1)" }); });
+      K.svg(svg, "line", { x1: ax.sx(0), x2: ax.sx(0), y1: 20, y2: 290, stroke: "var(--ink)", "stroke-dasharray": "5 3" });
+      const mean = diffs.reduce((a, b) => a + b, 0) / reps;
+      K.svg(svg, "line", { x1: ax.sx(mean * 100), x2: ax.sx(mean * 100), y1: 20, y2: 290, stroke: "var(--bad)", "stroke-width": 2 });
+      K.svg(svg, "text", { x: ax.sx(mean * 100) + 6, y: 36, "font-size": 12, fill: "var(--bad)" }, "平均偏差");
+      return { readout: [
+        { k: "平均虚高", v: (mean >= 0 ? "+" : "") + (mean * 100).toFixed(2) + " 个百分点", color: mean > 0.01 ? "var(--bad)" : "var(--good)" },
+        { k: "单次测量的波动（标准差）", v: (sd * 100).toFixed(2) + " 个百分点" },
+        { k: "报告分数高于真实的比例", v: ((diffs.filter((d) => d > 0).length / reps) * 100).toFixed(0) + "%" },
+      ] };
+    },
+  });
+})();
+</script>
+</body>
+</html>
